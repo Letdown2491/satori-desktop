@@ -1,12 +1,20 @@
 //! Satori — a quiet Nostr client (native GTK4/libadwaita).
 //!
-//! M0: sumi-e theme, shell chrome, login (bunker + nsec), session resume.
-//! The real following feed lands next (DESIGN.md §9).
+//! M0: sumi-e theme, login (bunker + nsec), session resume, following feed,
+//! threads, posting with the undo window (DESIGN.md §9).
 
+mod bridge;
+mod composer;
+mod content;
+mod ctx;
+mod feed;
 mod login;
+mod note_card;
 mod shell;
 mod theme;
+mod thread;
 
+use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -28,26 +36,28 @@ fn build_ui(app: &adw::Application) {
     theme::load_current();
     let core = Arc::new(Core::new());
 
-    let (main_page, avatar) = shell::build_main();
+    // The main shell: nav (feed → thread) under a toast overlay (the undo
+    // window surface), wrapped in the header bar.
+    let overlay = adw::ToastOverlay::new();
+    let nav = adw::NavigationView::new();
+    let ctx = ctx::Ctx { core: core.clone(), nav: nav.clone(), overlay: overlay.clone() };
+    let feed = feed::FeedView::new(&ctx);
+    nav.add(&feed.page);
+    overlay.set_child(Some(&nav));
+
+    let (main_shell, avatar) = shell::build_main(&ctx, Rc::clone(&feed), overlay.upcast());
 
     let stack = gtk::Stack::builder()
         .transition_type(gtk::StackTransitionType::Crossfade)
         .build();
-    stack.add_named(&main_page, Some("main"));
+    stack.add_named(&main_shell, Some("main"));
 
-    // Login page: on success, show the identity in the account avatar and
-    // crossfade into the main shell.
-    let login_page = login::LoginPage::new(
-        core.clone(),
-        {
-            let stack = stack.clone();
-            let avatar = avatar.clone();
-            move |pk| {
-                shell::update_avatar(&avatar, pk);
-                stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);
-            }
-        },
-    );
+    let login_page = login::LoginPage::new(core.clone(), {
+        let stack = stack.clone();
+        move |_pk| {
+            stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);
+        }
+    });
     stack.add_named(login_page.widget(), Some("login"));
 
     // Log out: wipe the session (secrets included) and return to the login page.

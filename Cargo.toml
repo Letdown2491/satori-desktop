@@ -13,11 +13,16 @@ nostr = "0.45"
 nostr-sdk = "0.45"
 nostr-connect = "0.45"
 nostr-lmdb = "0.45"
+nostr-database = "0.45"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 tokio-socks = "0.5"
 keyring = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+sha2 = "0.10"
+url = "2"
 
 [profile.release]
 lto = "thin"

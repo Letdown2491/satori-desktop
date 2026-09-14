@@ -15,3 +15,7 @@ RUN dnf -y install \
     && dnf -y clean all
 
 WORKDIR /srv
+
+# Persist the cargo registry/targets cache across container runs.
+ENV CARGO_HOME=/usr/local/cargo
+RUN mkdir -p /usr/local/cargo

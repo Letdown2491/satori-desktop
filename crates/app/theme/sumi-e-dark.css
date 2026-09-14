@@ -16,6 +16,7 @@ window {
     color: @ink;
 }
 
+/* Radius ladder: cards 12px (inputs 8 / media 10 / modals 14 / pills 999). */
 .note-card {
     background-color: @panel;
     border: 1px solid @hairline;
@@ -32,6 +33,8 @@ window {
     font-family: "Source Serif 4", "Palatino", "Georgia", serif;
 }
 
+/* Links are ink-colored and underlined, never accent-colored (ink discipline). */
+
 .empty-quote {
     font-size: 16px;
     font-style: italic;
@@ -42,6 +45,7 @@ window {
     font-size: 17px;
 }
 
+/* Login (styles.css:118 — centered 440px column handled by AdwClamp). */
 .wordmark {
     font-size: 34px;
     font-weight: 500;
@@ -57,8 +61,74 @@ window {
     font-size: 13px;
 }
 
+/* The vermilion seal: the one filled-accent button. */
 .seal-btn {
     background-color: @vermilion;
     color: @washi;
     border-radius: 8px;
+}
+
+/* Note cards (styles.css:1102 — notes bleed to the column edge). */
+.note-card {
+    padding: 18px 20px;
+    margin-bottom: 0;
+    transition: opacity 0.45s ease;
+}
+
+.note-card.focused {
+    border-left: 3px solid @vermilion;
+}
+
+.note-author {
+    font-size: 15px;
+}
+
+.time-link {
+    color: @muted;
+    font-size: 12px;
+}
+
+.act {
+    color: @muted;
+    padding: 4px;
+}
+
+.act:hover {
+    color: @ink;
+}
+
+.act.engaged {
+    color: @vermilion;
+}
+
+.pending {
+    opacity: 0.55;
+}
+
+.older-btn {
+    color: @muted;
+}
+
+.feed-list row {
+    background: none;
+}
+
+/* Avatar rounding (hue buckets land in M2). */
+.avatar-img {
+    border-radius: 999px;
+}
+
+/* Compose FAB: a 52px ink dot (styles.css:525). */
+.fab {
+    background-color: @ink;
+    color: @washi;
+    border-radius: 999px;
+    padding: 10px;
+}
+
+.compose-text {
+    background-color: @panel;
+    border: 1px solid @hairline;
+    border-radius: 8px;
+    padding: 10px;
 }

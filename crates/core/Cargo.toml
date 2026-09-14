@@ -11,8 +11,13 @@ nostr = { workspace = true }
 nostr-sdk = { workspace = true }
 nostr-connect = { workspace = true }
 nostr-lmdb = { workspace = true }
+nostr-database = { workspace = true }
 tokio = { workspace = true }
 tokio-socks = { workspace = true }
 keyring = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+reqwest = { workspace = true }
+image = { workspace = true }
+sha2 = { workspace = true }
+url = { workspace = true }

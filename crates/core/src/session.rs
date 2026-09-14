@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 
 use crate::config;
 use crate::error::{LoginError, Result};
@@ -54,9 +54,6 @@ pub fn save(session: &Session) -> Result<()> {
         .mode(0o600)
         .open(&path)
         .and_then(|mut f| f.write_all(body.as_bytes()))
-        .and_then(|()| {
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-        })
         .map_err(|e| LoginError::Store(e.to_string()))?;
     Ok(())
 }
@@ -74,6 +71,7 @@ pub fn clear() {
 mod tests {
     use super::*;
     use crate::secrets;
+    use std::os::unix::fs::PermissionsExt;
 
     /// One env-mutating test (XDG_DATA_HOME is process-global): covers the
     /// session roundtrip and the secret-store 0600-file fallback (the

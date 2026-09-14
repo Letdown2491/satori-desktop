@@ -67,3 +67,68 @@ window {
     color: @washi;
     border-radius: 8px;
 }
+
+/* Note cards (styles.css:1102 — notes bleed to the column edge). */
+.note-card {
+    padding: 18px 20px;
+    margin-bottom: 0;
+    transition: opacity 0.45s ease;
+}
+
+.note-card.focused {
+    border-left: 3px solid @vermilion;
+}
+
+.note-author {
+    font-size: 15px;
+}
+
+.time-link {
+    color: @muted;
+    font-size: 12px;
+}
+
+.act {
+    color: @muted;
+    padding: 4px;
+}
+
+.act:hover {
+    color: @ink;
+}
+
+.act.engaged {
+    color: @vermilion;
+}
+
+.pending {
+    opacity: 0.55;
+}
+
+.older-btn {
+    color: @muted;
+}
+
+.feed-list row {
+    background: none;
+}
+
+/* Avatar rounding (hue buckets land in M2). */
+.avatar-img {
+    border-radius: 999px;
+}
+
+/* Compose FAB: a 52px ink dot (styles.css:525). */
+.fab {
+    background-color: @ink;
+    color: @washi;
+    border-radius: 999px;
+    padding: 10px;
+}
+
+.compose-text {
+    background-color: @panel;
+    border: 1px solid @hairline;
+    border-radius: 8px;
+    padding: 10px;
+}
