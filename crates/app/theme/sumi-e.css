@@ -44,3 +44,26 @@ window {
 .switcher {
     font-size: 17px;
 }
+
+/* Login (styles.css:118 — centered 440px column handled by AdwClamp). */
+.wordmark {
+    font-size: 34px;
+    font-weight: 500;
+}
+
+.tagline {
+    color: @muted;
+    font-size: 13px;
+}
+
+.error-text {
+    color: @err;
+    font-size: 13px;
+}
+
+/* The vermilion seal: the one filled-accent button. */
+.seal-btn {
+    background-color: @vermilion;
+    color: @washi;
+    border-radius: 8px;
+}

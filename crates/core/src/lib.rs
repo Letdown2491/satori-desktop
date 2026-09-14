@@ -12,7 +12,12 @@
 #![allow(dead_code)]
 
 pub mod config;
+pub mod error;
+pub mod manager;
 pub mod privacy;
+pub mod secrets;
+pub mod session;
+pub mod signer;
 pub mod undo;
 
 pub mod dms;

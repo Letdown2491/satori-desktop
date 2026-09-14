@@ -11,6 +11,7 @@ pub const APP_ID: &str = "io.github.Letdown2491.Satori";
 /// App-state JSON files (0600, debounced flush, flush-on-exit — the port of
 /// `src/data/json-store.ts` conventions). Event cache is separate: LMDB.
 pub mod files {
+    pub const SESSION: &str = "session.json";
     pub const PREFS: &str = "prefs.json";
     pub const DRAFTS: &str = "drafts.json";
     pub const HOLDS: &str = "holds.json";

@@ -41,3 +41,24 @@ window {
 .switcher {
     font-size: 17px;
 }
+
+.wordmark {
+    font-size: 34px;
+    font-weight: 500;
+}
+
+.tagline {
+    color: @muted;
+    font-size: 13px;
+}
+
+.error-text {
+    color: @err;
+    font-size: 13px;
+}
+
+.seal-btn {
+    background-color: @vermilion;
+    color: @washi;
+    border-radius: 8px;
+}

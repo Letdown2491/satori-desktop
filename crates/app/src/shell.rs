@@ -4,8 +4,9 @@
 
 use gtk::gio;
 use gtk::prelude::*;
+use nostr::prelude::*;
 
-pub fn build_shell() -> gtk::Widget {
+pub fn build_main() -> (gtk::Widget, adw::Avatar) {
     let header = gtk::HeaderBar::new();
 
     let home = gtk::Button::builder()
@@ -34,10 +35,14 @@ pub fn build_shell() -> gtk::Widget {
         .css_classes(["flat"])
         .tooltip_text("Search")
         .build();
+
     let avatar = adw::Avatar::builder().size(28).show_initials(true).build();
+    let account_menu = gio::Menu::new();
+    account_menu.append(Some("Log out"), Some("app.logout"));
     let avatar_btn = gtk::MenuButton::builder()
         .child(&avatar)
         .css_classes(["flat"])
+        .menu_model(&account_menu)
         .build();
     header.pack_end(&search_btn);
     header.pack_end(&avatar_btn);
@@ -59,7 +64,14 @@ pub fn build_shell() -> gtk::Widget {
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&scroll));
-    toolbar.upcast()
+    (toolbar.upcast(), avatar)
+}
+
+/// The account avatar shows a short npub until profile cards land (M2's
+/// hue-bucket + profile cache takes over — render/util.ts:74).
+pub fn update_avatar(avatar: &adw::Avatar, pubkey: PublicKey) {
+    let npub = pubkey.to_bech32().unwrap_or_default();
+    avatar.set_text(Some(&npub[..7]));
 }
 
 fn placeholder_note() -> gtk::Box {
@@ -105,7 +117,7 @@ fn caught_up_clearing() -> gtk::Box {
     row
 }
 
-fn enso_path() -> std::path::PathBuf {
+pub(crate) fn enso_path() -> std::path::PathBuf {
     // Assets ship as GResources in packaging; dev-time path for now.
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/enso.svg")
 }
