@@ -12,6 +12,8 @@ mod ctx;
 mod feed;
 mod icons;
 mod login;
+mod markdown;
+mod motion;
 mod note_card;
 mod notifications;
 mod prefs;

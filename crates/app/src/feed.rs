@@ -94,7 +94,30 @@ impl FeedView {
             .margin_end(28)
             .build();
 
+        // Scroll-top circle (revealed past ~800px; instant scroll — the
+        // web app's scroll-top, minus the scroll-driven animation).
+        let top_btn = gtk::Button::builder()
+            .child(&crate::icons::icon_sized("up", 18))
+            .css_classes(["fab", "scroll-top"])
+            .width_request(44)
+            .height_request(44)
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::End)
+            .margin_bottom(96)
+            .margin_end(28)
+            .visible(false)
+            .build();
+        {
+            let adj = scroll.vadjustment();
+            let btn = top_btn.clone();
+            adj.connect_value_changed(move |a| {
+                btn.set_visible(a.value() > 800.0);
+            });
+            let adj2 = adj.clone();
+            top_btn.connect_clicked(move |_| adj2.set_value(0.0));
+        }
         let feed_overlay = gtk::Overlay::builder().child(&scroll).build();
+        feed_overlay.add_overlay(&top_btn);
         feed_overlay.add_overlay(&fab);
 
         let loading = gtk::Box::builder()
@@ -104,6 +127,7 @@ impl FeedView {
             .valign(gtk::Align::Center)
             .build();
         let enso_load = crate::icons::enso(120);
+        crate::motion::breathe(&enso_load);
         loading.append(&enso_load);
         loading.append(&gtk::Label::new(Some("Gathering the pond…")));
 
@@ -214,6 +238,23 @@ impl FeedView {
         if let Some(oldest) = page.notes.last().map(|e| e.created_at.as_secs()) {
             self.oldest_at.set(Some(oldest));
         }
+        // Empty landing: the quiet quote + still ensō (svg.ts quoteEmpty).
+        if page.notes.is_empty() && replace {
+            let empty = gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .spacing(8)
+                .halign(gtk::Align::Center)
+                .margin_top(48)
+                .margin_bottom(64)
+                .build();
+            let quote = gtk::Label::builder()
+                .css_classes(["serif", "empty-quote"])
+                .build();
+            quote.set_text("“Nothing exists; all is a beginning.”");
+            empty.append(&quote);
+            empty.append(&crate::icons::enso(90));
+            self.list.append(&empty);
+        }
     }
 
     fn on_older(&self, ev: FeedEvent) {
@@ -278,6 +319,7 @@ impl FeedView {
                 .build();
             slot.append(&waiting);
             wrap.append(&slot);
+            crate::motion::fade_in(&wrap);
             self.list.append(&wrap);
 
             // Target: e tag first, else the nostr: ref in content (NIP-18).
@@ -306,6 +348,7 @@ impl FeedView {
             return;
         }
         let card = card_for(&self.ctx, ev, profile.as_ref(), false);
+        crate::motion::fade_in(&card);
         self.list.append(&card);
     }
 

@@ -102,6 +102,26 @@ pub fn shell(
     }
 }
 
+    // Reply chip: "↩ in reply" opens the thread (note.ts replyContext,
+    // without the lazy embed fetch).
+    if event.tags.clone().event_ids().next().is_some() {
+        let chip = gtk::Button::builder()
+            .label("↩ in reply")
+            .css_classes(["flat", "reply-chip"])
+            .halign(gtk::Align::Start)
+            .build();
+        {
+            let ctx2 = ctx.clone();
+            let target = event.tags.clone().event_ids().next();
+            chip.connect_clicked(move |_| {
+                if let Some(id) = target {
+                    crate::thread::thread_page_by_id(&ctx2, id);
+                }
+            });
+        }
+        content.append(&chip);
+    }
+
     let (markup, images) = render_content(event.content.as_str(), &mention_resolver(ctx));
 
     // Content warning: hidden behind a reveal (content.ts cwWrap; the blur

@@ -492,19 +492,82 @@ fn article_reader(ctx: &Ctx, ev: &Event, data: &satori_core::nip::article::Artic
         column.append(&media_picture(ctx, &meta, 420));
     }
 
-    // TODO(port): markdown → rich text (nostr/markdown.ts) in the M4 pass.
-    for para in ev.content.split("\n\n") {
-        if para.trim().is_empty() {
-            continue;
+    // Markdown → blocks (nostr/markdown.ts port).
+    for block in crate::markdown::blocks(&ev.content) {
+        match block {
+            crate::markdown::Block::Para(text) => {
+                let p = gtk::Label::builder()
+                    .wrap(true)
+                    .wrap_mode(WrapMode::WordChar)
+                    .xalign(0.0)
+                    .valign(gtk::Align::Start)
+                    .css_classes(["article-para"])
+                    .build();
+                p.set_markup(&render_content(&text, &resolver(ctx)).0);
+                column.append(&p);
+            }
+            crate::markdown::Block::Heading(level, text) => {
+                let sizes = [28000, 23000, 19000];
+                let h = gtk::Label::builder()
+                    .wrap(true)
+                    .wrap_mode(WrapMode::WordChar)
+                    .xalign(0.0)
+                    .halign(gtk::Align::Start)
+                    .css_classes(["serif"])
+                    .build();
+                h.set_markup(&format!(
+                    "<span size=\"{}\" font_weight=\"500\">{}</span>",
+                    sizes[(level - 1).clamp(0, 2)],
+                    crate::markdown::inline(&text)
+                ));
+                column.append(&h);
+            }
+            crate::markdown::Block::Quote(text) => {
+                let q = gtk::Box::builder().css_classes(["hl-quote"]).build();
+                let p = gtk::Label::builder()
+                    .wrap(true)
+                    .wrap_mode(WrapMode::WordChar)
+                    .xalign(0.0)
+                    .css_classes(["serif", "hl-text"])
+                    .build();
+                p.set_markup(&crate::markdown::inline(&text));
+                q.append(&p);
+                column.append(&q);
+            }
+            crate::markdown::Block::List(items) => {
+                for item in items {
+                    let row = gtk::Box::builder()
+                        .orientation(gtk::Orientation::Horizontal)
+                        .spacing(8)
+                        .build();
+                    row.append(&gtk::Label::builder().label("·").build());
+                    let p = gtk::Label::builder()
+                        .wrap(true)
+                        .wrap_mode(WrapMode::WordChar)
+                        .xalign(0.0)
+                        .halign(gtk::Align::Start)
+                        .hexpand(true)
+                        .build();
+                    p.set_markup(&crate::markdown::inline(&item));
+                    row.append(&p);
+                    column.append(&row);
+                }
+            }
+            crate::markdown::Block::Code(text) => {
+                let code = gtk::Label::builder()
+                    .wrap(true)
+                    .wrap_mode(WrapMode::WordChar)
+                    .xalign(0.0)
+                    .halign(gtk::Align::Start)
+                    .css_classes(["mono", "code-block"])
+                    .build();
+                code.set_text(&text);
+                column.append(&code);
+            }
+            crate::markdown::Block::Rule => {
+                column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            }
         }
-        let p = gtk::Label::builder()
-            .wrap(true)
-            .wrap_mode(WrapMode::WordChar)
-            .xalign(0.0)
-            .valign(gtk::Align::Start)
-            .build();
-        p.set_markup(&render_content(para, &resolver(ctx)).0);
-        column.append(&p);
     }
 
     // Comments (NIP-22) — the addressable target survives edits (comments.ts).

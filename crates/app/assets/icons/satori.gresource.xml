@@ -33,5 +33,6 @@
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-thread-symbolic.svg</file>
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-trash-symbolic.svg</file>
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-zap-symbolic.svg</file>
+      <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-up-symbolic.svg</file>
   </gresource>
 </gresources>

@@ -202,8 +202,20 @@ pub fn profile_page(ctx: &Ctx, who: PublicKey) -> adw::NavigationPage {
                     list.append(&card);
                 }
                 if page.notes.is_empty() {
-                    status.set_text("No notes yet.");
-                    status.set_visible(true);
+                    let empty = gtk::Box::builder()
+                        .orientation(gtk::Orientation::Vertical)
+                        .spacing(8)
+                        .halign(gtk::Align::Center)
+                        .margin_top(32)
+                        .build();
+                    let quote = gtk::Label::builder()
+                        .css_classes(["serif", "empty-quote"])
+                        .build();
+                    quote.set_text("“This person has not yet spoken.”");
+                    empty.append(&quote);
+                    empty.append(&crate::icons::enso(90));
+                    status.set_visible(false);
+                    list.append(&empty);
                 }
             }
             FeedEvent::Failed(msg) => {

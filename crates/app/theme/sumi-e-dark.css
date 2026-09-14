@@ -243,3 +243,30 @@ window {
 .comment-reply {
     font-size: 12px;
 }
+
+/* Motion + polish (styles.css §motion port). */
+window {
+    transition: background-color 0.4s ease, color 0.4s ease;
+}
+
+.reply-chip {
+    color: @muted;
+    font-size: 12px;
+    padding: 0;
+}
+
+.scroll-top {
+    background-color: @panel;
+    border: 1px solid @hairline;
+}
+
+.article-para {
+    font-size: 16px;
+}
+
+.code-block {
+    background-color: @panel;
+    border: 1px solid @hairline;
+    border-radius: 8px;
+    padding: 10px;
+}
