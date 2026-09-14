@@ -5,6 +5,7 @@
 
 mod bridge;
 mod cards;
+mod comments;
 mod composer;
 mod content;
 mod ctx;

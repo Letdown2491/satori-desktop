@@ -227,3 +227,18 @@ window {
     border-radius: 8px;
     padding: 6px 10px;
 }
+
+/* Comments (NIP-22): threaded, left-border children (styles.css comment-*). */
+.comment-row {
+    padding: 8px 0 4px 0;
+}
+
+.comment-children {
+    border-left: 1px solid @hairline;
+    padding-left: 12px;
+    margin-top: 2px;
+}
+
+.comment-reply {
+    font-size: 12px;
+}

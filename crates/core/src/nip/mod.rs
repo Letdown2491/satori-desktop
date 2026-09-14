@@ -4,6 +4,7 @@
 //! | module | NIP |
 //! |---|---|
 //! | `article` | 23 — long-form metadata |
+//! | `comment` | 22 — generic comments (kind 1111) |
 //! | `imeta` | 68/71/92 — media metadata |
 //! | `poll` | 88 — poll options + tally |
 //! | `calendar` | 52 — calendar events + RSVP addressing |
@@ -18,6 +19,7 @@
 pub mod article;
 pub mod calendar;
 pub mod classified;
+pub mod comment;
 pub mod highlight;
 pub mod imeta;
 pub mod podcast;

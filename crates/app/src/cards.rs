@@ -507,6 +507,10 @@ fn article_reader(ctx: &Ctx, ev: &Event, data: &satori_core::nip::article::Artic
         column.append(&p);
     }
 
+    // Comments (NIP-22) — the addressable target survives edits (comments.ts).
+    let target = satori_core::nip::comment::CommentTarget::for_event(ev);
+    column.append(&crate::comments::comments_section(ctx, &target));
+
     let clamp = adw::Clamp::builder().maximum_size(660).child(&column).build();
     let scroll = gtk::ScrolledWindow::builder()
         .child(&clamp)
@@ -553,14 +557,26 @@ pub fn entity_page_by_naddr(
             use satori_core::manager::FeedEvent;
             match reply {
                 FeedEvent::One(Some(ev), profile) => {
-                    let content: gtk::Widget = if ev.kind == Kind::Custom(30023) {
-                        match satori_core::nip::article::parse(&ev) {
-                            Some(data) => article_reader(&ctx, &ev, &data).upcast(),
-                            None => card_for(&ctx, &ev, profile.as_ref(), true).upcast(),
-                        }
-                    } else {
-                        card_for(&ctx, &ev, profile.as_ref(), true).upcast()
-                    };
+                    let page_box = gtk::Box::builder()
+                        .orientation(gtk::Orientation::Vertical)
+                        .spacing(0)
+                        .margin_top(12)
+                        .build();
+                    let clamp_col = gtk::Box::builder()
+                        .orientation(gtk::Orientation::Vertical)
+                        .spacing(12)
+                        .build();
+                    clamp_col.append(&card_for(&ctx, &ev, profile.as_ref(), true));
+                    let target = satori_core::nip::comment::CommentTarget::for_event(&ev);
+                    clamp_col.append(&crate::comments::comments_section(&ctx, &target));
+                    let clamp = adw::Clamp::builder().maximum_size(660).child(&clamp_col).build();
+                    let scroll = gtk::ScrolledWindow::builder()
+                        .child(&clamp)
+                        .hexpand(true)
+                        .vexpand(true)
+                        .build();
+                    page_box.append(&scroll);
+                    let content: gtk::Widget = page_box.upcast();
                     stack.remove(&loading);
                     stack.add_child(&content);
                     stack.set_visible_child(&content);
@@ -1103,7 +1119,11 @@ fn nip19_pk(bech: &str) -> Option<nostr::key::PublicKey> {
     })
 }
 
-/// Context-bound resolver for render_content.
+/// Context-bound resolver for render_content (also used by comments).
+pub fn resolver_pub(ctx: &Ctx) -> impl Fn(&str) -> Option<String> + '_ {
+    resolver(ctx)
+}
+
 fn resolver(ctx: &Ctx) -> impl Fn(&str) -> Option<String> + '_ {
     move |b: &str| {
         nip19_pk(b)

@@ -63,6 +63,8 @@ pub enum FeedEvent {
     NothingNew,
     /// Poll tallies: (option id, count) over each voter's latest ballot.
     PollVotes(Vec<(String, u32)>),
+    /// Comments on a target, oldest first + profiles.
+    Comments(Vec<Event>, Vec<Profile>),
     BootstrapDone,
     Failed(String),
 }
@@ -800,6 +802,80 @@ impl Core {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         crate::read_state::advance(|s| s.notif = s.notif.max(now));
+    }
+
+    /// Comments on a target (NIP-22 kind:1111), oldest first.
+    pub fn comments(self: &Arc<Self>, target: crate::nip::comment::CommentTarget) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<(Vec<Event>, Vec<Profile>)> = async {
+                let active = this.active().await?;
+                let mut comments: Vec<Event> = Vec::new();
+                for filter in target.fetch_filters() {
+                    for ev in active.pool.get(filter).await.unwrap_or_default() {
+                        comments.push(ev);
+                    }
+                }
+                for ev in &comments {
+                    let _ = active.pool.store.save(ev).await;
+                }
+                // Dedup + oldest first.
+                let mut seen = std::collections::HashSet::new();
+                comments.retain(|ev| seen.insert(ev.id));
+                comments.sort_by_key(|e| e.created_at.as_secs());
+                let _authors: Vec<PublicKey> = comments.iter().map(|e| e.pubkey).collect();
+                let profiles = Self::profiles_for(&active, &comments).await;
+                this.absorb_profiles(&profiles);
+                // Include target-author profile (fetch may be empty).
+
+                Ok((comments, profiles))
+            }
+            .await;
+            match res {
+                Ok((comments, profiles)) => {
+                    let _ = tx.send(FeedEvent::Comments(comments, profiles));
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
+    /// Publish a comment (top-level when `parent` is None, else a reply).
+    pub fn comment(
+        self: &Arc<Self>,
+        content: String,
+        target: crate::nip::comment::CommentTarget,
+        parent: Option<Event>,
+    ) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                let mut tags = match &parent {
+                    Some(p) => crate::nip::comment::reply_tags(p, &target),
+                    None => target.root_tags(),
+                };
+                tags.push(Tag::custom("client", ["satori-desktop"]));
+                let unsigned =
+                    UnsignedEvent::new(active.me(), Timestamp::now(), Kind::Custom(1111), tags, content);
+                let signed = active.signer.sign_event(unsigned).await?;
+                Self::commit(&active, &signed, &tx).await?;
+                let _ = active.pool.store.save(&signed).await;
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
     }
 
     /// Tallies for a poll: kind:1018 ballots #e=poll id.
