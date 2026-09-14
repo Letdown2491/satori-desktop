@@ -20,11 +20,15 @@ static DARK: AtomicBool = AtomicBool::new(false);
 
 /// Register the icon set with the default icon theme. Call once at startup.
 pub fn install() {
-    gio::resources_register(&gio::Resource::from_data(
-        &glib::Bytes::from_static(ICON_RESOURCE),
-    ).expect("icon gresource"));
-    gtk::IconTheme::for_display(&gdk::Display::default().expect("no default display"))
-        .add_resource_path("/io/github/letdown2491/satori/icons");
+    gio::resources_register(
+        &gio::Resource::from_data(&glib::Bytes::from_static(ICON_RESOURCE))
+            .expect("icon gresource"),
+    );
+    let theme = gtk::IconTheme::for_display(&gdk::Display::default().expect("no default display"));
+    theme.add_resource_path("/io/github/letdown2491/satori/icons");
+    if !theme.has_icon("satori-home-symbolic") {
+        eprintln!("[icons] WARNING: icon theme registration failed — icons will be blank");
+    }
 }
 
 /// A line icon at the default 18px (note actions).
