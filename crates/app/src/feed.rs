@@ -29,6 +29,9 @@ pub struct FeedView {
     pending: std::cell::RefCell<HashMap<u64, gtk::Widget>>,
     profiles: std::cell::RefCell<HashMap<String, Profile>>,
     faces: std::cell::RefCell<HashMap<String, gtk::Box>>,
+    /// Prefetched older page (rendered instantly on View older).
+    prefetched: std::cell::RefCell<Option<(FeedPage, bool)>>,
+    prefetching: std::cell::Cell<bool>,
 }
 
 impl FeedView {
@@ -157,7 +160,21 @@ impl FeedView {
             pending: std::cell::RefCell::new(HashMap::new()),
             profiles: std::cell::RefCell::new(HashMap::new()),
             faces: std::cell::RefCell::new(HashMap::new()),
+            prefetched: std::cell::RefCell::new(None),
+            prefetching: std::cell::Cell::new(false),
         });
+
+        // Prefetch the next older page while scrolling (the web's
+        // h-prefetch: work begins before the click).
+        {
+            let view_pf = Rc::clone(&view);
+            let adj = scroll.vadjustment();
+            adj.connect_value_changed(move |a| {
+                if a.value() / a.upper().max(1.0) > 0.7 {
+                    view_pf.maybe_prefetch();
+                }
+            });
+        }
 
         // Compose.
         {
@@ -304,7 +321,30 @@ impl FeedView {
         }
     }
 
-    /// Batch hydration of reply-faces (routes/feed.ts getFaces).
+    /// Queue the next older page while the reader approaches the bottom
+    /// (the web's h-prefetch hover/intersect semantics, scroll edition).
+    fn maybe_prefetch(self: &Rc<Self>) {
+        if self.prefetching.get() || self.prefetched.borrow().is_some() {
+            return;
+        }
+        if !self.older_btn.get_visible() || !self.older_btn.get_sensitive() {
+            return;
+        }
+        self.prefetching.set(true);
+        let view = Rc::clone(self);
+        let ctx = self.ctx.clone();
+        let until = self.oldest_at.get().unwrap_or(0);
+        drain(ctx.core.older(until), move |reply| {
+            view.prefetching.set(false);
+            if let FeedEvent::Older(page, more) = reply
+                && !page.notes.is_empty() && more {
+                    *view.prefetched.borrow_mut() = Some((page, more));
+                }
+        });
+    }
+
+    /// Batch hydration of reply-faces (routes/feed.ts getFaces): the reply
+    /// authors, then their profiles reactively (avatars replace initials).
     fn hydrate_faces(&self) {
         let ids: Vec<EventId> = self
             .faces
@@ -319,10 +359,11 @@ impl FeedView {
         let faces_map = self.faces.clone();
         drain(ctx.core.reply_faces(ids), move |reply| {
             if let FeedEvent::Faces(per_note) = reply {
+                // Initial fill (hue discs).
                 let map = faces_map.borrow();
-                for (id, who) in per_note {
+                for (id, who) in &per_note {
                     if let Some(slot) = map.get(&id.to_string()) {
-                        crate::note_card::fill_faces(slot, &who);
+                        crate::note_card::fill_faces(slot, who);
                     }
                 }
             }

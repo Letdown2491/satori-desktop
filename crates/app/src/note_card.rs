@@ -23,6 +23,8 @@ pub struct Shell {
     pub root: gtk::Box,
     /// Kind-specific content slot (empty for plain notes with `with_text`).
     pub content: gtk::Box,
+    pub name_label: gtk::Label,
+    pub avatar_stack: gtk::Stack,
 }
 
 pub fn shell(
@@ -60,11 +62,7 @@ pub fn shell(
         .halign(gtk::Align::Start)
         .css_classes(["note-author", "serif"])
         .build();
-    author.set_markup(&format!(
-        "<a href=\"profile:{}\">{}</a>",
-        event.pubkey,
-        esc_markup(&name)
-    ));
+    author.set_markup(&name_markup(&name, &event.pubkey));
     {
         let ctx2 = ctx.clone();
         let who = event.pubkey;
@@ -121,7 +119,8 @@ pub fn shell(
     root.append(&faces_btn);
 
     if !with_text {
-        return Shell { root, content };
+        bind_profile(ctx, &Shell { root: root.clone(), content: content.clone(), name_label: author.clone(), avatar_stack: avatar.clone() }, event.pubkey, profile);
+        return Shell { root, content, name_label: author, avatar_stack: avatar };
     }
 
     fn mention_resolver(ctx: &Ctx) -> impl Fn(&str) -> Option<String> + '_ {
@@ -260,6 +259,27 @@ pub fn shell(
         content.append(&media);
     }
 
+    // Mention prefetch: mentioned npubs aren't page authors — resolve them
+    // reactively and re-render the body so names replace raw bech32.
+    {
+        let missing: Vec<PublicKey> = mention_pubkeys(event)
+            .into_iter()
+            .filter(|pk| ctx.core.profile_of(pk).is_none())
+            .collect();
+        if !missing.is_empty() {
+            let ctx2 = ctx.clone();
+            let body2 = body.clone();
+            let ev2 = event.clone();
+            drain(ctx2.core.ensure_profiles(missing), move |reply| {
+                if let satori_core::manager::FeedEvent::Profiles(_) = reply {
+                    body2.set_markup(
+                        &render_content(ev2.content.as_str(), &mention_resolver(&ctx2)).markup,
+                    );
+                }
+            });
+        }
+    }
+
     // Quote embeds: lazy compact previews of referenced notes (content.ts
     // embedCard — no actions, click opens the thread).
     for bech in rendered.refs.iter().take(3) {
@@ -288,7 +308,8 @@ pub fn shell(
         });
     }
 
-    Shell { root, content }
+    bind_profile(ctx, &Shell { root: root.clone(), content: content.clone(), name_label: author.clone(), avatar_stack: avatar.clone() }, event.pubkey, profile);
+    Shell { root, content, name_label: author, avatar_stack: avatar }
 }
 
 /// Compact embed card for quotes/references — border-left, name + time +
@@ -496,6 +517,47 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
     s.root
 }
 
+/// Reactive profile patching for a shell built with `profile: None`: when
+/// the profile arrives, the name label + avatar update in place.
+pub fn bind_profile(ctx: &Ctx, shell: &Shell, pk: PublicKey, profile: Option<&Profile>) {
+    if profile.is_some() {
+        return;
+    }
+    let ctx2 = ctx.clone();
+    let nl = shell.name_label.clone();
+    let st = shell.avatar_stack.clone();
+    drain(ctx.core.ensure_profiles(vec![pk]), move |reply| {
+        if let satori_core::manager::FeedEvent::Profiles(ps) = reply
+            && let Some(p) = ps.into_iter().find(|p| p.pubkey == pk.to_string()) {
+                let shown = if p.name.is_empty() {
+                    short_key(&pk)
+                } else {
+                    p.name.clone()
+                };
+                nl.set_markup(&name_markup(&shown, &pk));
+                if !p.picture.is_empty() {
+                    if let Some(tex) = crate::media_cache::mem_get(&p.picture) {
+                        let pic = avatar_picture(&tex);
+                        st.add_child(&pic);
+                        st.set_visible_child(&pic);
+                    } else {
+                        let core = ctx2.core.clone();
+                        let st2 = st.clone();
+                        let url = p.picture.clone();
+                        drain(core.fetch_image(url.clone()), move |img| {
+                            if let Some(decoded) = img {
+                                let tex = crate::media_cache::from_decoded(&url, &decoded);
+                                let pic = avatar_picture(&tex);
+                                st2.add_child(&pic);
+                                st2.set_visible_child(&pic);
+                            }
+                        });
+                    }
+                }
+            }
+    });
+}
+
 /// The card's faces slot (the inner Box of the faces button), for
 /// feed-level hydration.
 pub fn faces_slot(card: &gtk::Box) -> Option<gtk::Box> {
@@ -583,6 +645,10 @@ fn handle_link(ctx: &Ctx, uri: &str) {
     );
 }
 
+fn name_markup(name: &str, pk: &PublicKey) -> String {
+    format!("<a href=\"profile:{}\">{}</a>", pk, esc_markup(name))
+}
+
 fn esc_markup(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
@@ -648,6 +714,39 @@ thread_local! {
 }
 
 /// The hue-bucket CSS class for a pubkey (render/util.ts:74 — 36 buckets).
+/// The pubkeys mentioned in a note's content (npub/nprofile bech32s).
+pub fn mention_pubkeys(ev: &Event) -> Vec<PublicKey> {
+    use nostr::prelude::*;
+    let mut rest: &str = ev.content.as_str();
+    let mut out = Vec::new();
+    loop {
+        let at = rest.find("@npub1");
+        let nostr = rest.find("nostr:npub1").or(rest.find("nostr:nprofile1"));
+        let pos = [at, nostr].into_iter().flatten().min();
+        match pos {
+            None => return out,
+            Some(i) => {
+                rest = &rest[i..];
+                let start = if rest.starts_with('@') { 1 } else { "nostr:".len() };
+                let end = rest[start..]
+                    .find(|c: char| !c.is_ascii_alphanumeric())
+                    .map(|i| i + start)
+                    .unwrap_or(rest.len());
+                let bech = &rest[start..end];
+                if let Ok(Nip19::Pubkey(pk)) = Nip19::from_bech32(bech) {
+                    if !out.contains(&pk) {
+                        out.push(pk);
+                    }
+                } else if let Ok(Nip19::Profile(p)) = Nip19::from_bech32(bech)
+                    && !out.contains(&p.public_key) {
+                        out.push(p.public_key);
+                    }
+                rest = &rest[end..];
+            }
+        }
+    }
+}
+
 /// Display-name resolution for inline mentions (profile cache).
 pub fn mention_resolver(ctx: &Ctx) -> impl Fn(&str) -> Option<String> + '_ {
     use nostr::prelude::*;

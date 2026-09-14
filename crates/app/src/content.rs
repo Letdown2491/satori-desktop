@@ -54,7 +54,7 @@ pub fn clean_url(raw: &str) -> String {
     }
     let keep: Vec<(String, String)> = u
         .query_pairs()
-        .filter(|(k, v)| {
+        .filter(|(k, _v)| {
             let k = k.to_ascii_lowercase();
             if is_yt && (k == "si" || k == "feature" || k == "app") {
                 return false;

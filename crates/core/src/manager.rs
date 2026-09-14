@@ -67,6 +67,8 @@ pub enum FeedEvent {
     Comments(Vec<Event>, Vec<Profile>),
     /// Reply-presence faces: (note id, up to 3 replier pubkeys).
     Faces(Vec<(EventId, Vec<PublicKey>)>),
+    /// Profiles resolved reactively (cards patch themselves).
+    Profiles(Vec<Profile>),
     /// A backup export payload (raw signed events JSON).
     BackupJson(String),
     BootstrapDone,
@@ -96,6 +98,7 @@ struct Active {
     session: Session,
     signer: Signer,
     pool: Arc<Pool>,
+    profiles: Arc<crate::profiles::ProfileService>,
     undo: crate::undo::UndoWindow,
     /// Own NIP-65 write relays.
     write_relays: Vec<String>,
@@ -128,7 +131,7 @@ pub struct Profile {
 }
 
 impl Profile {
-    fn from_event(ev: &Event) -> Option<Self> {
+    pub fn from_event(ev: &Event) -> Option<Self> {
         #[derive(serde::Deserialize)]
         struct RawMeta {
             name: Option<String>,
@@ -425,6 +428,7 @@ impl Core {
     async fn build_active(&self, session: &Session) -> Result<Active> {
         let signer = self.build_signer(session).await?;
         let pool = Arc::new(Pool::open().await.map_err(|e| LoginError::Resume(e.to_string()))?);
+        let profiles = crate::profiles::ProfileService::new(Arc::clone(&pool));
         // Undo-window prefs live in prefs.json (theme.ts semantics); core
         // reads its slice at session build — TODO(M1): cleaner pref split.
         let mut undo = crate::undo::UndoWindow::default();
@@ -443,6 +447,7 @@ impl Core {
             session: session.clone(),
             signer,
             pool,
+            profiles,
             undo,
             write_relays: Vec::new(),
             read_relays: Vec::new(),
@@ -532,6 +537,11 @@ impl Core {
         if let Some(a) = self.active.lock().unwrap().as_mut() {
             a.follows = follows.clone();
         }
+        // Eager warm: every follow's profile before the first paint
+        // (profile-cache.ts warm semantics — the feed resolves names).
+        let mut warm_set = follows.clone();
+        warm_set.push(me);
+        active.profiles.warm_await(warm_set).await;
 
         // Deep feed fetch — skipped when warm (feed-cache.ts: the store
         // persists across runs; a recent bootstrap already filled depth).
@@ -716,6 +726,29 @@ impl Core {
         }
     }
 
+    /// Resolve profiles reactively: cards call this with whatever pks they
+    /// need; the service coalesces + fetches, the UI patches on arrival.
+    pub fn ensure_profiles(self: &Arc<Self>, pks: Vec<PublicKey>) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        match &*self.active.lock().unwrap() {
+            Some(active) => {
+                let service = Arc::clone(&active.profiles);
+                let service2 = Arc::clone(&active.profiles);
+                self.rt.spawn(async move {
+                    let mut inner = service.ensure_many(pks);
+                    while let Some(profs) = inner.recv().await {
+                        let _ = tx.send(FeedEvent::Profiles(profs));
+                    }
+                    let _ = service2;
+                });
+            }
+            None => {
+                let _ = tx.send(FeedEvent::Profiles(Vec::new()));
+            }
+        }
+        rx
+    }
+
     /// Display resolution for inline mentions (content.ts: @names from the
     /// profile cache; misses render as short npubs).
     pub fn profile_of(&self, pk: &PublicKey) -> Option<Profile> {
@@ -738,6 +771,9 @@ impl Core {
         }
         let profiles = Self::profiles_for(active, &notes).await;
         self.absorb_profiles(&profiles);
+        for p in &profiles {
+            active.profiles.absorb(p.clone());
+        }
         Ok(FeedPage { notes, profiles })
     }
 

@@ -1180,7 +1180,7 @@ fn meta_line(icon: &str, text: &str) -> gtk::Box {
 
 /// A play facade for direct audio/video links (blossom blobs, mp4s) —
 /// nothing fetched until play (content.ts video facade posture).
-pub fn av_facade(ctx: &Ctx, url: &str) -> gtk::Widget {
+pub fn av_facade(_ctx: &Ctx, url: &str) -> gtk::Widget {
     let audio = [".mp3", ".ogg", ".oga", ".wav", ".m4a", ".flac"]
         .iter()
         .any(|e| url.split(['?', '#']).next().unwrap_or("").ends_with(e));
@@ -1294,6 +1294,20 @@ pub fn link_preview_card(ctx: &Ctx, url: &str) -> gtk::Widget {
         format!("https://open.spotify.com/oembed?url={}", urlencoding_lite(url))
     };
     {
+        // Instant art: YouTube thumbs are deterministic (img.youtube.com);
+        // Spotify waits for oEmbed.
+        if is_yt
+            && let Some(id) = crate::content::youtube_id(url) {
+                let thumb2 = format!("https://img.youtube.com/vi/{id}/hqdefault.jpg");
+                let core2 = ctx.core.clone();
+                let art2 = art.clone();
+                drain(core2.fetch_image(thumb2.clone()), move |img| {
+                    if let Some(decoded) = img {
+                        let tex = crate::media_cache::from_decoded(&thumb2, &decoded);
+                        art2.set_paintable(Some(&tex));
+                    }
+                });
+            }
         let core = ctx.core.clone();
         let title = title.clone();
         let art = art.clone();
@@ -1302,17 +1316,18 @@ pub fn link_preview_card(ctx: &Ctx, url: &str) -> gtk::Widget {
                 if let Some(t) = v.get("title").and_then(|t| t.as_str()) {
                     title.set_text(t);
                 }
-                if let Some(thumb) = v.get("thumbnail_url").and_then(|t| t.as_str()) {
-                    let core2 = core.clone();
-                    let art = art.clone();
-                    let thumb2 = thumb.to_string();
-                    drain(core2.fetch_image(thumb2.clone()), move |img| {
-                        if let Some(decoded) = img {
-                            let tex = crate::media_cache::from_decoded(&thumb2, &decoded);
-                            art.set_paintable(Some(&tex));
-                        }
-                    });
-                }
+                if !is_yt
+                    && let Some(thumb) = v.get("thumbnail_url").and_then(|t| t.as_str()) {
+                        let core2 = core.clone();
+                        let art = art.clone();
+                        let thumb2 = thumb.to_string();
+                        drain(core2.fetch_image(thumb2.clone()), move |img| {
+                            if let Some(decoded) = img {
+                                let tex = crate::media_cache::from_decoded(&thumb2, &decoded);
+                                art.set_paintable(Some(&tex));
+                            }
+                        });
+                    }
             }
         });
     }
