@@ -22,8 +22,6 @@ pub struct Shell {
     pub root: gtk::Box,
     /// Kind-specific content slot (empty for plain notes with `with_text`).
     pub content: gtk::Box,
-    /// Reply-presence slot (feed-level hydration fills it).
-    pub faces: gtk::Box,
 }
 
 pub fn shell(
@@ -43,10 +41,10 @@ pub fn shell(
         })
         .build();
 
-    // --- head row -------------------------------------------------------------
+    // --- head row (styles.css .note: gap 13px) ---------------------------------
     let head = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
+        .spacing(13)
         .build();
 
     let avatar = avatar_widget(ctx, event.pubkey, profile);
@@ -55,12 +53,25 @@ pub fn shell(
     let name = profile
         .map(|p| p.display())
         .unwrap_or_else(|| short_key(&event.pubkey));
+    // The name is a profile link (content.ts: @mentions → /u/).
     let author = gtk::Label::builder()
-        .label(esc_markup(&name))
         .use_markup(true)
         .halign(gtk::Align::Start)
         .css_classes(["note-author", "serif"])
         .build();
+    author.set_markup(&format!(
+        "<a href=\"profile:{}\">{}</a>",
+        event.pubkey,
+        esc_markup(&name)
+    ));
+    {
+        let ctx2 = ctx.clone();
+        let who = event.pubkey;
+        author.connect_activate_link(move |_, _| {
+            crate::profile::open_profile(&ctx2, who);
+            glib::Propagation::Stop
+        });
+    }
     head.append(&author);
 
     let spacer = gtk::Label::new(None);
@@ -98,7 +109,7 @@ pub fn shell(
     root.append(&faces);
 
     if !with_text {
-        return Shell { root, content, faces };
+        return Shell { root, content };
     }
 
     fn mention_resolver(ctx: &Ctx) -> impl Fn(&str) -> Option<String> + '_ {
@@ -114,21 +125,32 @@ pub fn shell(
     }
 }
 
-    // Reply chip: "↩ in reply" opens the thread (note.ts replyContext,
-    // without the lazy embed fetch).
-    if event.tags.clone().event_ids().next().is_some() {
+    // Reply chip: "↩ Replying to <name>" opens the parent's thread
+    // (note.ts replyContext). The name resolves from the p tag via the
+    // profile cache when available.
+    if let Some(parent_id) = event.tags.clone().event_ids().next() {
+        let parent_name = event
+            .tags
+            .clone()
+            .public_keys()
+            .next()
+            .and_then(|pk| ctx.core.profile_of(&pk))
+            .map(|p| p.display());
+        let label = match &parent_name {
+            Some(n) => format!("\u{21a9} Replying to {}", esc_markup(n)),
+            None => "\u{21a9} Replying to an earlier note".to_string(),
+        };
         let chip = gtk::Button::builder()
-            .label("↩ in reply")
             .css_classes(["flat", "reply-chip"])
             .halign(gtk::Align::Start)
             .build();
+        let chip_label = gtk::Label::builder().build();
+        chip_label.set_markup(&label);
+        chip.set_child(Some(&chip_label));
         {
             let ctx2 = ctx.clone();
-            let target = event.tags.clone().event_ids().next();
             chip.connect_clicked(move |_| {
-                if let Some(id) = target {
-                    crate::thread::thread_page_by_id(&ctx2, id);
-                }
+                crate::thread::thread_page_by_id(&ctx2, parent_id);
             });
         }
         content.append(&chip);
@@ -245,7 +267,7 @@ pub fn shell(
         });
     }
 
-    Shell { root, content, faces }
+    Shell { root, content }
 }
 
 /// Compact embed card for quotes/references — border-left, name + time +

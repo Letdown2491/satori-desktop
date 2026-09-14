@@ -28,23 +28,23 @@ window {
 
 /* Timeline rows: flat on the washi, generous padding, hairline whisper
    between (styles.css .note: padding 22px 20px, ::after inset hairline). */
-.feed-list .note-card {
+.feed-row {
     background: none;
     border: none;
     border-radius: 0;
-    padding: 20px 20px 18px 20px;
+    padding: 22px 20px;
     margin: 0;
     border-bottom: 1px solid alpha(@hairline, 0.55);
 }
 
-.feed-list .note-card.focused {
+.feed-row.focused {
     background-color: alpha(@vermilion, 0.05);
     border-left: 3px solid @vermilion;
     padding-left: 17px;
 }
 
-.feed-list .repost-wrap {
-    border-bottom: 1px solid alpha(@hairline, 0.55);
+.feed-row .repost-wrap {
+    border-bottom: none;
     padding-bottom: 4px;
 }
 

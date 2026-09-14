@@ -391,6 +391,7 @@ impl FeedView {
                 .build();
             slot.append(&waiting);
             wrap.append(&slot);
+            wrap.add_css_class("feed-row");
             crate::motion::fade_in(&wrap);
             self.list.append(&wrap);
 
@@ -420,6 +421,7 @@ impl FeedView {
             return;
         }
         let card = card_for(&self.ctx, ev, profile.as_ref(), false);
+        card.add_css_class("feed-row");
         crate::motion::fade_in(&card);
         // Register the faces slot for batch hydration (kind 1 only).
         if ev.kind == Kind::TextNote
