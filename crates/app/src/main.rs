@@ -141,10 +141,18 @@ fn build_ui(app: &adw::Application) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Satori")
-        .default_width(880)
+        .default_width(1100)
         .default_height(760)
-        .content(&stack)
         .build();
+    // Slim CSD titlebar via the toolbar view: window controls without
+    // chrome (AdwApplicationWindow forbids set_titlebar).
+    let titlebar = gtk::HeaderBar::new();
+    titlebar.add_css_class("flat");
+    titlebar.add_css_class("slim-titlebar");
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&titlebar);
+    toolbar.set_content(Some(&stack));
+    window.set_content(Some(&toolbar));
     window.present();
 
     // Resume a persisted session, else first-run: the login page. Resume

@@ -72,9 +72,7 @@ pub fn enso(size: i32) -> gtk::Picture {
     let dir = std::env::temp_dir().join("satori-assets");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join(if dark { "enso-dark.svg" } else { "enso-light.svg" });
-    if !path.exists() {
-        let _ = std::fs::write(&path, bytes);
-    }
+    let _ = std::fs::write(&path, bytes); // always current content
     let pic = gtk::Picture::for_file(&gio::File::for_path(&path));
     pic.set_size_request(size, size);
     pic

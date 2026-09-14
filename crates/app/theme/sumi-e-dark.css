@@ -435,3 +435,10 @@ window {
     margin-top: 6px;
     color: @ink;
 }
+
+/* Slim CSD titlebar: window controls only. */
+.slim-titlebar {
+    min-height: 0;
+    background-color: @panel;
+    border: none;
+}
