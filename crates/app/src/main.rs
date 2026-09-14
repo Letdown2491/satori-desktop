@@ -4,6 +4,7 @@
 //! threads, notifications, posting with the undo window (DESIGN.md §9).
 
 mod bridge;
+mod cards;
 mod composer;
 mod content;
 mod ctx;

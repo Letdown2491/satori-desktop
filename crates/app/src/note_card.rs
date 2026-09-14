@@ -15,10 +15,22 @@ use crate::bridge::drain;
 use crate::content::{render_content, time_ago};
 use crate::ctx::Ctx;
 
-pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: bool) -> gtk::Box {
-    let me = ctx.core.pubkey();
-    let is_own = me.is_some_and(|m| m == event.pubkey);
+/// The shared card shell — port of note.ts cardShell(): avatar / author /
+/// time-thread-link head, then a content slot each kind fills. `with_text`
+/// adds the pre-wrap body + media runs + CW reveal (plain notes).
+pub struct Shell {
+    pub root: gtk::Box,
+    /// Kind-specific content slot (empty for plain notes with `with_text`).
+    pub content: gtk::Box,
+}
 
+pub fn shell(
+    ctx: &Ctx,
+    event: &Event,
+    profile: Option<&Profile>,
+    focused: bool,
+    with_text: bool,
+) -> Shell {
     let root = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(6)
@@ -66,7 +78,17 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
     head.append(&time);
     root.append(&head);
 
-    // --- body -----------------------------------------------------------------
+    // --- content slot ---------------------------------------------------------
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .build();
+    root.append(&content);
+
+    if !with_text {
+        return Shell { root, content };
+    }
+
     let (markup, images) = render_content(event.content.as_str());
 
     // Content warning: hidden behind a reveal (content.ts cwWrap; the blur
@@ -110,10 +132,10 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
                     reveal.set_label(if showing { "Hide" } else { "Show" });
                 }
             });
-            root.append(&reveal);
-            root.append(&revealed);
+            content.append(&reveal);
+            content.append(&revealed);
         }
-        None => root.append(&body),
+        None => content.append(&body),
     }
 
     // Media runs (content.ts: images render inline, aspect-capped).
@@ -146,15 +168,28 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
                 }
             });
         }
-        root.append(&media);
+        content.append(&media);
     }
 
-    // --- actions --------------------------------------------------------------
+    Shell { root, content }
+}
+
+/// The action row — reply / like / bookmark / repeat / trash (own), plus
+/// kind-specific widgets spliced in before the trash (note.ts NOTE_ACTIONS).
+pub fn actions_row(
+    ctx: &Ctx,
+    event: &Event,
+    card_root: &gtk::Box,
+    extra: &[gtk::Widget],
+) -> gtk::Box {
     let acts = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(4)
         .margin_top(2)
         .build();
+    let me = ctx.core.pubkey();
+    let is_own = me.is_some_and(|m| m == event.pubkey);
+    let card_root = card_root.clone();
 
     // Reply — opens the composer (the web app's #modal).
     let reply = crate::icons::action_button("reply", "Reply");
@@ -222,17 +257,21 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
         });
     }
 
+    for w in extra {
+        acts.append(w);
+    }
+
     // Delete — own events only (NIP-09).
     if is_own {
         let delete = crate::icons::action_button("trash", "Delete");
         {
             let ctx = ctx.clone();
             let event = event.clone();
-            let root = root.clone();
+            let _root = card_root.clone();
             delete.connect_clicked(move |_| {
                 // TODO(M1): two-step inline confirm (routes/delete.ts).
                 let ctx = ctx.clone();
-                let root = root.clone();
+                let root = card_root.clone();
                 drain(ctx.core.delete(&event), move |ev| match ev {
                     satori_core::manager::PublishEvent::Committed { .. } => {
                         root.set_visible(false);
@@ -247,12 +286,14 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
         }
         acts.append(&delete);
     }
+    acts
+}
 
-    root.append(&acts);
-
-    // Zap placeholder stays out until the wallet milestone (D6): a dead
-    // button is a lie.
-    root
+/// A plain note card (kind 1): text body + media runs + default actions.
+pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: bool) -> gtk::Box {
+    let s = shell(ctx, event, profile, focused, true);
+    s.root.append(&actions_row(ctx, event, &s.root, &[]));
+    s.root
 }
 
 fn open_thread(ctx: &Ctx) -> Rc<dyn Fn(&Event)> {

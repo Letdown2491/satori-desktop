@@ -9,7 +9,7 @@ use satori_core::manager::{FeedEvent, Profile};
 
 use crate::bridge::drain;
 use crate::ctx::Ctx;
-use crate::note_card::note_card;
+use crate::cards::card_for;
 
 pub fn notifications_page(ctx: &Ctx) -> adw::NavigationPage {
     let column = gtk::Box::builder()
@@ -63,7 +63,7 @@ pub fn notifications_page(ctx: &Ctx) -> adw::NavigationPage {
                 }
                 for n in &notifs {
                     let profile = map.get(&n.pubkey.to_string()).cloned();
-                    let card = note_card(&ctx, n, profile.as_ref(), false);
+                    let card = card_for(&ctx, n, profile.as_ref(), false);
                     list.append(&card);
                 }
             }

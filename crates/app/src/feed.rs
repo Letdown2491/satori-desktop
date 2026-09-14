@@ -13,7 +13,7 @@ use satori_core::manager::{FeedEvent, FeedPage, Profile};
 use crate::bridge::drain;
 use crate::content::esc;
 use crate::ctx::Ctx;
-use crate::note_card::note_card;
+use crate::cards::card_for;
 
 pub struct FeedView {
     ctx: Ctx,
@@ -293,7 +293,7 @@ impl FeedView {
                 drain(ctx.core.event_by_id(id), move |e| match e {
                     FeedEvent::One(Some(target_ev), target_profile) => {
                         waiting.set_visible(false);
-                        slot.append(&note_card(&ctx, &target_ev, target_profile.as_ref(), false));
+                        slot.append(&card_for(&ctx, &target_ev, target_profile.as_ref(), false));
                     }
                     FeedEvent::One(None, _) => {
                         waiting.set_text("Repost unavailable.");
@@ -305,12 +305,12 @@ impl FeedView {
             }
             return;
         }
-        let card = note_card(&self.ctx, ev, profile.as_ref(), false);
+        let card = card_for(&self.ctx, ev, profile.as_ref(), false);
         self.list.append(&card);
     }
 
     pub fn add_pending(&self, event: &Event, token: u64, _secs: u64) {
-        let card = note_card(&self.ctx, event, None, false);
+        let card = card_for(&self.ctx, event, None, false);
         card.add_css_class("pending");
         self.list.prepend(&card);
         self.pending.borrow_mut().insert(token, card.upcast());

@@ -26,6 +26,20 @@ const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const PAGE: usize = 40;
 const BOOTSTRAP_DEPTH: usize = 200;
 
+/// The content kinds the following feed carries (content-prefs.ts catalog's
+/// default surface). Per-user pref filtering lands with settings/content.
+const FEED_KINDS: [Kind; 9] = [
+    Kind::TextNote,      // 1
+    Kind::Repost,        // 6
+    Kind::Custom(20),    // picture (NIP-68)
+    Kind::Custom(21),    // video (NIP-71)
+    Kind::Custom(22),    // short video
+    Kind::Custom(1068),  // poll (NIP-88)
+    Kind::Custom(30023), // article (NIP-23)
+    Kind::Custom(31922), // calendar date (NIP-52)
+    Kind::Custom(31923), // calendar time
+];
+
 /// Progress events streamed back to the login UI.
 #[derive(Debug, Clone)]
 pub enum ConnectEvent {
@@ -59,6 +73,8 @@ pub enum FeedEvent {
     One(Option<Event>, Option<Profile>),
     /// Refresh found nothing newer — quiet feedback, no list churn.
     NothingNew,
+    /// Poll tallies: (option id, count) over each voter's latest ballot.
+    PollVotes(Vec<(String, u32)>),
     BootstrapDone,
     Failed(String),
 }
@@ -457,7 +473,7 @@ impl Core {
         // Deep feed fetch (deadline-capped).
         if !follows.is_empty() {
             let filter = Filter::new()
-                .kinds([Kind::TextNote, Kind::Repost])
+                .kinds(FEED_KINDS)
                 .authors(follows.clone())
                 .limit(BOOTSTRAP_DEPTH);
             for ev in active.pool.get(filter).await.unwrap_or_default() {
@@ -569,7 +585,7 @@ impl Core {
             .map(|e| e.created_at.as_secs())
             .unwrap_or(0);
         let filter = Filter::new()
-            .kinds([Kind::TextNote, Kind::Repost])
+            .kinds(FEED_KINDS)
             .authors(follows.clone())
             .since(Timestamp::from(since))
             .limit(100);
@@ -779,6 +795,107 @@ impl Core {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         crate::read_state::advance(|s| s.notif = s.notif.max(now));
+    }
+
+    /// Tallies for a poll: kind:1018 ballots #e=poll id.
+    pub fn poll_votes(self: &Arc<Self>, poll_id: EventId) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<Vec<(String, u32)>> = async {
+                let active = this.active().await?;
+                let filter = Filter::new()
+                    .kind(Kind::Custom(1018))
+                    .event(poll_id)
+                    .limit(1000);
+                let mut votes: Vec<Event> = Vec::new();
+                for ev in active.pool.get(filter).await.unwrap_or_default() {
+                    votes.push(ev);
+                }
+                for ev in &votes {
+                    let _ = active.pool.store.save(ev).await;
+                }
+                Ok(crate::nip::poll::tally(&votes))
+            }
+            .await;
+            match res {
+                Ok(t) => {
+                    let _ = tx.send(FeedEvent::PollVotes(t));
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
+    /// Vote in a poll (NIP-88 kind:1018; re-voting replaces your ballot).
+    pub fn poll_vote(self: &Arc<Self>, poll: &Event, option_ids: Vec<String>) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        let poll = poll.clone();
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                let mut tags = vec![Tag::event(poll.id), Tag::public_key(poll.pubkey)];
+                for opt in option_ids {
+                    tags.push(Tag::custom("response", [opt]));
+                }
+                let unsigned =
+                    UnsignedEvent::new(active.me(), Timestamp::now(), Kind::Custom(1018), tags, "");
+                let signed = active.signer.sign_event(unsigned).await?;
+                Self::commit(&active, &signed, &tx).await?;
+                let _ = active.pool.store.save(&signed).await;
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
+    }
+
+    /// RSVP to a calendar event (NIP-52 kind:31925).
+    pub fn rsvp(self: &Arc<Self>, calendar: &Event, status: &str) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        let calendar = calendar.clone();
+        let status = status.to_string();
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                let data = crate::nip::calendar::parse(&calendar)
+                    .ok_or_else(|| LoginError::Resume("bad calendar event".into()))?;
+                let a = crate::nip::calendar::a_tag(&data, &calendar.pubkey);
+                let unsigned = UnsignedEvent::new(
+                    active.me(),
+                    Timestamp::now(),
+                    Kind::Custom(31925),
+                    [
+                        Tag::custom("a", [a]),
+                        Tag::event(calendar.id),
+                        Tag::public_key(calendar.pubkey),
+                        Tag::custom("status", [status]),
+                    ],
+                    "",
+                );
+                let signed = active.signer.sign_event(unsigned).await?;
+                Self::commit(&active, &signed, &tx).await?;
+                let _ = active.pool.store.save(&signed).await;
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
     }
 
     /// Repost (NIP-18 kind:6).

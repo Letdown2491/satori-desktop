@@ -12,7 +12,7 @@ use satori_core::manager::{FeedEvent, Profile, PublishEvent};
 
 use crate::bridge::drain;
 use crate::ctx::Ctx;
-use crate::note_card::note_card;
+use crate::cards::card_for;
 
 pub fn profile_page(ctx: &Ctx, who: PublicKey) -> adw::NavigationPage {
     let column = gtk::Box::builder()
@@ -198,7 +198,7 @@ pub fn profile_page(ctx: &Ctx, who: PublicKey) -> adw::NavigationPage {
                     page.profiles.iter().cloned().map(|p| (p.pubkey.clone(), p)).collect();
                 for n in &page.notes {
                     let profile = map.get(&n.pubkey.to_string()).cloned();
-                    let card = note_card(&ctx, n, profile.as_ref(), false);
+                    let card = card_for(&ctx, n, profile.as_ref(), false);
                     list.append(&card);
                 }
                 if page.notes.is_empty() {
