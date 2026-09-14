@@ -24,6 +24,9 @@ podman run --rm -v "$PWD:/srv:Z" -w /srv satori-dev cargo clippy --workspace
 ## Gates
 
 - `cargo check --workspace` clean before any commit.
+- Before asking anyone to test UI behavior: **`cargo build -p satori`** —
+  clippy/test do NOT produce `target/debug/satori`; a stale binary has caused
+  a phantom "fixed but still broken" round-trip before.
 - Don't touch the frozen reference code (`src/` + `public/`) unless explicitly asked;
   its own gates (`npm run typecheck`) apply only there.
 
