@@ -38,7 +38,8 @@ pub fn build_main(
 ) -> (gtk::Widget, ShellHandles) {
     let header = gtk::HeaderBar::new();
 
-    // Home: back to the feed + fetch new since the newest known note.
+    // Home: back to the feed (pop the whole nav stack — routes/pages.ts
+    // home = navigate to /) + fetch new since the newest known note.
     let home = gtk::Button::builder()
         .icon_name("home-symbolic")
         .css_classes(["flat"])
@@ -46,7 +47,11 @@ pub fn build_main(
         .build();
     {
         let feed = Rc::clone(&feed);
-        home.connect_clicked(move |_| feed.refresh());
+        let nav = ctx.nav.clone();
+        home.connect_clicked(move |_| {
+            nav.pop_to_page(&feed.page);
+            feed.refresh();
+        });
     }
     header.pack_start(&home);
 

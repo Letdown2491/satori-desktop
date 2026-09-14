@@ -57,6 +57,8 @@ pub enum FeedEvent {
     Search(Vec<Event>, Vec<Profile>),
     /// One event by id (repost target resolution), + author profile.
     One(Option<Event>, Option<Profile>),
+    /// Refresh found nothing newer — quiet feedback, no list churn.
+    NothingNew,
     BootstrapDone,
     Failed(String),
 }
@@ -571,7 +573,12 @@ impl Core {
             .authors(follows.clone())
             .since(Timestamp::from(since))
             .limit(100);
-        for ev in active.pool.get(filter).await.unwrap_or_default() {
+        let fetched = active.pool.get(filter).await.unwrap_or_default();
+        if fetched.is_empty() {
+            let _ = tx.send(FeedEvent::NothingNew);
+            return Ok(());
+        }
+        for ev in fetched {
             let _ = active.pool.store.save(&ev).await;
         }
         let page = self.page_from_store(&active, None).await?;

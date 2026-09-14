@@ -199,6 +199,7 @@ impl FeedView {
         let ctx = self.ctx.clone();
         drain(ctx.core.refresh(), move |ev| match ev {
             FeedEvent::Loaded(page) => view.on_loaded(&page, true),
+            FeedEvent::NothingNew => view.ctx.toast("You're caught up"),
             FeedEvent::Failed(msg) => eprintln!("[feed] refresh: {msg}"),
             _ => {}
         });
