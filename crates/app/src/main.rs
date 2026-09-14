@@ -11,6 +11,8 @@ mod feed;
 mod login;
 mod note_card;
 mod notifications;
+mod profile;
+mod search;
 mod shell;
 mod theme;
 mod thread;

@@ -74,10 +74,13 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
         .valign(gtk::Align::Start)
         .build();
     body.set_markup(&render_content(event.content.as_str()));
-    body.connect_activate_link(|_, uri| {
-        handle_link(uri);
-        glib::Propagation::Stop
-    });
+    {
+        let ctx_link = ctx.clone();
+        body.connect_activate_link(move |_, uri| {
+            handle_link(&ctx_link, uri);
+            glib::Propagation::Stop
+        });
+    }
     root.append(&body);
 
     // --- actions --------------------------------------------------------------
@@ -207,9 +210,15 @@ fn open_thread(ctx: &Ctx) -> Rc<dyn Fn(&Event)> {
 }
 
 /// `nostr:` / `https:` dispatch (thread links are buttons, not hrefs).
-fn handle_link(uri: &str) {
-    // npub links: profile view lands in M2 — inert for now.
-    if uri.starts_with("nostr:") {
+fn handle_link(ctx: &Ctx, uri: &str) {
+    // nostr:npub → profile; other nostr refs are inert until thread-shell
+    // fetching lands (M2).
+    if let Some(bech) = uri.strip_prefix("nostr:") {
+        if bech.starts_with("npub1") {
+            if let Ok(pk) = PublicKey::from_bech32(bech) {
+                crate::profile::open_profile(ctx, pk);
+            }
+        }
         return;
     }
     gtk::UriLauncher::new(uri).launch(

@@ -111,8 +111,14 @@ pub fn build_main(
         .icon_name("edit-find-symbolic")
         .css_classes(["flat"])
         .tooltip_text("Search")
-        .sensitive(false) // M2 (NIP-50)
         .build();
+    {
+        let ctx = ctx.clone();
+        search_btn.connect_clicked(move |_| {
+            let page = crate::search::search_page(&ctx);
+            ctx.nav.push(&page);
+        });
+    }
     header.pack_end(&search_btn);
 
     let avatar = adw::Avatar::builder().size(28).show_initials(true).build();

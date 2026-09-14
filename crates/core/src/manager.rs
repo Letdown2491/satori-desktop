@@ -52,6 +52,8 @@ pub enum FeedEvent {
     Notifications(Vec<Event>, Vec<Profile>),
     /// Whether the bell should light (unread past high-water).
     NotifDot(bool),
+    /// NIP-50 search results (notes).
+    Search(Vec<Event>, Vec<Profile>),
     BootstrapDone,
     Failed(String),
 }
@@ -676,6 +678,83 @@ impl Core {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         crate::read_state::advance(|s| s.notif = s.notif.max(now));
+    }
+
+    // --- search (NIP-50) ----------------------------------------------------------
+
+    /// Note search across the read set. TODO(port): NIP-11 capability gating
+    /// (only ask relays that say they can search — relay-info.ts:126).
+    pub fn search(self: &Arc<Self>, query: String) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<FeedPage> = async {
+                let active = this.active().await?;
+                let filter = Filter::new()
+                    .kind(Kind::TextNote)
+                    .search(&query)
+                    .limit(50);
+                let mut results: Vec<Event> = Vec::new();
+                for ev in active.pool.get(filter).await.unwrap_or_default() {
+                    results.push(ev);
+                }
+                for ev in &results {
+                    let _ = active.pool.store.save(ev).await;
+                }
+                results.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
+                let profiles = Self::profiles_for(&active, &results).await;
+                Ok(FeedPage { notes: results, profiles })
+            }
+            .await;
+            match res {
+                Ok(page) => {
+                    let _ = tx.send(FeedEvent::Search(page.notes, page.profiles));
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
+    // --- profiles ---------------------------------------------------------------
+
+    /// A profile page's projection: their recent notes + their metadata.
+    pub fn profile(self: &Arc<Self>, who: PublicKey) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<FeedPage> = async {
+                let active = this.active().await?;
+                // Their notes: relay fetch into the store, then project.
+                let filter = Filter::new()
+                    .kind(Kind::TextNote)
+                    .author(who)
+                    .limit(50);
+                for ev in active.pool.get(filter).await.unwrap_or_default() {
+                    let _ = active.pool.store.save(&ev).await;
+                }
+                let notes = active
+                    .pool
+                    .store
+                    .feed_page(&[who], None, PAGE)
+                    .await
+                    .unwrap_or_default();
+                let profiles = Self::profiles_for(&active, &notes).await;
+                Ok(FeedPage { notes, profiles })
+            }
+            .await;
+            match res {
+                Ok(page) => {
+                    let _ = tx.send(FeedEvent::Loaded(page));
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
     }
 
     // --- threads ----------------------------------------------------------------
