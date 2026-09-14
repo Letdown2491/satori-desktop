@@ -109,7 +109,9 @@ impl Store {
             filter = filter.until(Timestamp::from(ts));
         }
         let mut events: Vec<Event> = self.query(filter).await?.into_iter().collect();
-        // BTreeSet orders by id; the feed needs created_at order.
+        // BTreeSet orders by id; the feed needs created_at order. Machine
+        // notes drop here — every feed path crosses this chokepoint.
+        events.retain(|e| !is_machine_note(&e.content));
         events.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
         Ok(events)
     }
@@ -118,6 +120,7 @@ impl Store {
     pub async fn replies(&self, id: EventId) -> NostrResult<Vec<Event>> {
         let filter = Filter::new().kind(Kind::TextNote).event(id);
         let mut events: Vec<Event> = self.query(filter).await?.into_iter().collect();
+        events.retain(|e| !is_machine_note(&e.content));
         events.sort_by_key(|e| e.created_at.as_secs());
         Ok(events)
     }
@@ -157,6 +160,22 @@ impl Store {
     async fn query(&self, filter: Filter) -> NostrResult<BTreeSet<Event>> {
         self.db.query(filter).await
     }
+}
+
+/// Machine notes (filters.ts:104-109): JSON-as-content events are bot
+/// droppings, not human speech — dropped at the chokepoint like tombstones.
+pub fn is_machine_note(content: &str) -> bool {
+    let t = content.trim_start();
+    t.starts_with("{\"content\"")
+        || serde_json::from_str::<serde_json::Value>(t)
+            .ok()
+            .map(|v| {
+                v.is_object()
+                    && v.get("content").map(|c| c.is_string()).unwrap_or(false)
+                    && v.get("kind").is_some()
+                    && v.get("tags").is_some()
+            })
+            .unwrap_or(false)
 }
 
 pub fn parse_key(hex: &str) -> Option<PublicKey> {

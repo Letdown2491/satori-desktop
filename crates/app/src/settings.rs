@@ -247,7 +247,7 @@ fn backup_page(ctx: &Ctx) -> adw::PreferencesPage {
     group.add(&export_row);
 
     let import_row = adw::ActionRow::builder()
-        .title("Import & restore")
+        .title("Import &amp; restore")
         .subtitle("Re-signs and publishes each list event")
         .build();
     let import_btn = gtk::Button::builder()

@@ -167,7 +167,9 @@ fn render_content_inner(
                     rest = &rest[end..];
                 } else if rest.starts_with("https://") {
                     let end = rest
-                        .find(|c: char| c.is_whitespace() || c == ')' || c == '<')
+                        .find(|c: char| {
+                            c.is_whitespace() || c == ')' || c == '<' || c == '"'
+                        })
                         .unwrap_or(rest.len());
                     let url = clean_url(&rest[..end]);
                     rest = &rest[end..];
