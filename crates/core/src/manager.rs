@@ -342,9 +342,11 @@ impl Core {
                 let secret = secrets::load(secrets::BUNKER_CLIENT_SECRET)?
                     .ok_or_else(|| LoginError::Resume("transport secret missing".into()))?;
                 let client_keys = signer::client_keys_from_secret(&secret)?;
+                // Repeated relays join with & (query params, not extra ?s).
                 let mut uri = format!("bunker://{remote}");
-                for r in relays {
-                    uri.push_str(&format!("?relay={r}"));
+                if !relays.is_empty() {
+                    uri.push_str("?relay=");
+                    uri.push_str(&relays.join("&relay="));
                 }
                 let parsed = NostrConnectUri::parse(&uri)
                     .map_err(|e| LoginError::Resume(e.to_string()))?;

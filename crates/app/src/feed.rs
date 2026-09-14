@@ -165,27 +165,31 @@ impl FeedView {
             });
         }
 
-        // Bootstrap.
-        {
-            let view_boot = Rc::clone(&view);
-            let ctx_boot = ctx.clone();
-            drain(ctx_boot.core.bootstrap(), move |ev| match ev {
-                FeedEvent::Loaded(page) => view_boot.on_loaded(&page, true),
-                FeedEvent::BootstrapDone => {
-                    view_boot.state.set_visible_child_name("feed");
-                    view_boot.older_btn.set_visible(true);
-                    view_boot.older_btn.set_sensitive(true);
-                }
-                FeedEvent::Failed(msg) => {
-                    view_boot.error.set_text(&msg);
-                    view_boot.error.set_visible(true);
-                    view_boot.state.set_visible_child_name("error");
-                }
-                _ => {}
-            });
-        }
-
         view
+    }
+
+    /// Bootstrap once a session exists (after login or resume). The feed is a
+    /// projection of core state — without a session there is nothing to
+    /// project, so construction never fetches.
+    pub fn bootstrap(self: &Rc<Self>) {
+        let view = Rc::clone(self);
+        view.error.set_visible(false);
+        view.state.set_visible_child_name("loading");
+        let ctx = view.ctx.clone();
+        drain(ctx.core.bootstrap(), move |ev| match ev {
+            FeedEvent::Loaded(page) => view.on_loaded(&page, true),
+            FeedEvent::BootstrapDone => {
+                view.state.set_visible_child_name("feed");
+                view.older_btn.set_visible(true);
+                view.older_btn.set_sensitive(true);
+            }
+            FeedEvent::Failed(msg) => {
+                view.error.set_text(&msg);
+                view.error.set_visible(true);
+                view.state.set_visible_child_name("error");
+            }
+            _ => {}
+        });
     }
 
     /// Home button: fetch new since the newest known note.

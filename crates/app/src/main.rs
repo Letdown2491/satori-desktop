@@ -59,7 +59,9 @@ fn build_ui(app: &adw::Application) {
         let stack = stack.clone();
         let handles = handles.clone();
         let ctx = ctx.clone();
+        let feed_login = Rc::clone(&feed);
         move |_pk| {
+            feed_login.bootstrap();
             shell::poll_notif(&ctx, &handles.bell_dot);
             stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);
         }
@@ -95,6 +97,7 @@ fn build_ui(app: &adw::Application) {
             if let Ok(pk) = PublicKey::from_str(&session.pubkey) {
                 shell::update_avatar(&handles.avatar, pk);
             }
+            feed.bootstrap();
             shell::poll_notif(&ctx, &handles.bell_dot);
             stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);
         }
