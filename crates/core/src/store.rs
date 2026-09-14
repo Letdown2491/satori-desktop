@@ -17,8 +17,44 @@ use crate::config;
 
 type NostrResult<T> = Result<T, DbError>;
 
+/// The content-kind catalog (content-prefs.ts:40-55): label + the kinds it
+/// groups. All default visible; prefs.json `content_hidden` hides.
+pub const CATALOG: [(&str, &[u16]); 12] = [
+    ("Notes", &[1]),
+    ("Reposts", &[6]),
+    ("Pictures", &[20]),
+    ("Videos", &[21, 22]),
+    ("Podcasts", &[54]),
+    ("Polls", &[1068]),
+    ("Articles", &[30023]),
+    ("Listings", &[30402]),
+    ("Repos", &[30617]),
+    ("Wikis", &[30818]),
+    ("Calendar", &[31922, 31923]),
+    ("Highlights", &[9802]),
+];
+
+/// The kinds currently visible (prefs.json `content_hidden: [kind]`).
+pub fn visible_kinds() -> Vec<Kind> {
+    let hidden: Vec<u16> = std::fs::read_to_string(super::config::state_file(
+        super::config::files::PREFS,
+    ))
+    .ok()
+    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    .and_then(|v| {
+        v.get("content_hidden")
+            .and_then(|h| serde_json::from_value(h.clone()).ok())
+    })
+    .unwrap_or_default();
+    FEED_KINDS
+        .iter()
+        .filter(|k| !hidden.contains(&u16::from(**k)))
+        .copied()
+        .collect()
+}
+
 /// The content kinds the following feed carries (content-prefs.ts catalog's
-/// default surface). Per-user pref filtering lands with settings/content.
+/// default surface).
 pub const FEED_KINDS: [Kind; 14] = [
     Kind::TextNote,       // 1
     Kind::Repost,         // 6

@@ -67,6 +67,8 @@ pub enum FeedEvent {
     Comments(Vec<Event>, Vec<Profile>),
     /// Reply-presence faces: (note id, up to 3 replier pubkeys).
     Faces(Vec<(EventId, Vec<PublicKey>)>),
+    /// A backup export payload (raw signed events JSON).
+    BackupJson(String),
     BootstrapDone,
     Failed(String),
 }
@@ -82,6 +84,8 @@ pub enum PublishEvent {
     Undone { token: u64 },
     /// Published (or hold expired — the backstop committed).
     Committed { token: u64 },
+    /// A restore finished: n events re-signed + published.
+    Restored(u32),
     Failed { token: u64, error: String },
 }
 
@@ -525,7 +529,7 @@ impl Core {
         }
         if !follows.is_empty() && !warm {
             let filter = Filter::new()
-                .kinds(crate::store::FEED_KINDS)
+                .kinds(crate::store::visible_kinds())
                 .authors(follows.clone())
                 .limit(BOOTSTRAP_DEPTH);
             for ev in active.pool.get(filter).await.unwrap_or_default() {
@@ -640,7 +644,7 @@ impl Core {
             .map(|e| e.created_at.as_secs())
             .unwrap_or(0);
         let filter = Filter::new()
-            .kinds(crate::store::FEED_KINDS)
+            .kinds(crate::store::visible_kinds())
             .authors(follows.clone())
             .since(Timestamp::from(since))
             .limit(100);
@@ -958,6 +962,88 @@ impl Core {
     /// Home opened: the feed is seen up to now (monotonic).
     pub fn mark_feed_seen(self: &Arc<Self>) {
         crate::read_state::advance(|s| s.feed_seen = s.feed_seen.max(now_secs()));
+    }
+
+    /// Export the user's list events (kinds 3/10000/10002/10003) as raw
+    /// signed JSON — the list-backup.ts export.
+    pub fn export_lists(self: &Arc<Self>) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<String> = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let filter = Filter::new().author(me).kinds([
+                    Kind::ContactList,
+                    Kind::Custom(10000),
+                    Kind::Custom(10002),
+                    Kind::Custom(10003),
+                ]);
+                let raw = active.pool.get(filter).await.unwrap_or_default();
+                // Keep the newest per kind.
+                let mut by_kind: std::collections::HashMap<u16, Event> =
+                    std::collections::HashMap::new();
+                for ev in raw {
+                    by_kind.insert(u16::from(ev.kind), ev);
+                }
+                let events: Vec<&Event> = by_kind.values().collect();
+                serde_json::to_string_pretty(&events)
+                    .map_err(|e| LoginError::Resume(e.to_string()))
+            }
+            .await;
+            match res {
+                Ok(json) => {
+                    let _ = tx.send(FeedEvent::BackupJson(json));
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
+    /// Restore from a backup: re-sign each event fresh (list-backup.ts:
+    /// replace = same tags/content, new created_at) and publish.
+    pub fn import_lists(self: &Arc<Self>, json: String) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<u32> = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let events: Vec<Event> = serde_json::from_str(&json)
+                    .map_err(|e| LoginError::Resume(format!("bad backup: {e}")))?;
+                let mut n = 0;
+                for ev in events {
+                    if ev.pubkey != me {
+                        continue; // only restore own lists
+                    }
+                    let unsigned = UnsignedEvent::new(
+                        me,
+                        Timestamp::now(),
+                        ev.kind,
+                        ev.tags.clone().to_vec(),
+                        ev.content.clone(),
+                    );
+                    let signed = active.signer.sign_event(unsigned).await?;
+                    Self::commit(&active, &signed, &tx).await?;
+                    let _ = active.pool.store.save(&signed).await;
+                    n += 1;
+                }
+                Ok(n)
+            }
+            .await;
+            match res {
+                Ok(n) => {
+                    let _ = tx.send(PublishEvent::Restored(n));
+                }
+                Err(e) => {
+                    let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                }
+            }
+        });
+        rx
     }
 
     /// Comments on a target (NIP-22 kind:1111), oldest first.
@@ -1361,7 +1447,7 @@ impl Core {
                 let active = this.active().await?;
                 // Their notes: relay fetch into the store, then project.
                 let filter = Filter::new()
-                    .kinds(crate::store::FEED_KINDS)
+                    .kinds(crate::store::visible_kinds())
                     .author(who)
                     .limit(50);
                 for ev in active.pool.get(filter).await.unwrap_or_default() {

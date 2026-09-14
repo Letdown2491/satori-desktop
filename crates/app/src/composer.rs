@@ -143,6 +143,7 @@ pub fn compose(ctx: &Ctx, reply_to: Option<Event>, hooks: Option<WriteHooks>) {
                     ctx.toast("Publish failed");
                     eprintln!("[post] {error}");
                 }
+                _ => {}
             });
             dialog.close();
         });

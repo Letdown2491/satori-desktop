@@ -180,11 +180,19 @@ fn poll_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool) ->
         return note_card(ctx, ev, profile, focused);
     };
 
+    // Closed poll (poll-end passed): results only, no ballot (poll.ts).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let closed = data.ends_at.map(|end| end < now).unwrap_or(false);
+
     // Ballot: radios (single) or checks (multiple) + vote button.
     let ballot = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(6)
         .margin_top(4)
+        .visible(!closed)
         .build();
     let group = gtk::CheckButton::new();
     let mut checks: Vec<(String, gtk::CheckButton)> = Vec::new();
@@ -206,16 +214,20 @@ fn poll_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool) ->
         .label("Vote")
         .css_classes(["seal-btn", "pill"])
         .halign(gtk::Align::Start)
+        .visible(!closed)
         .build();
     s.content.append(&vote_btn);
 
-    // Results rows, revealed after voting (poll.ts results view).
+    // Results rows: revealed after voting, or immediately when closed.
     let results = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
-        .visible(false)
+        .visible(closed)
         .build();
     s.content.append(&results);
+    if closed {
+        show_tallies(ctx, ev, &results);
+    }
 
     {
         let ctx = ctx.clone();
