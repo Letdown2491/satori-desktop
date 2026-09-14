@@ -23,7 +23,7 @@ pub fn open_settings(ctx: &Ctx) {
         .default_height(660)
         .build();
     if let Some(parent) = ctx
-        .nav
+        .nav()
         .root()
         .map(|r| r.upcast::<gtk::Widget>())
         .and_downcast::<adw::ApplicationWindow>()
@@ -308,7 +308,7 @@ fn backup_page(ctx: &Ctx) -> adw::PreferencesPage {
                         .initial_name("satori-backup.json")
                         .build();
                     let win = ctx2
-                        .nav
+                        .nav()
                         .root()
                         .map(|r| r.upcast::<gtk::Widget>())
                         .and_downcast::<adw::ApplicationWindow>();
@@ -350,7 +350,7 @@ fn backup_page(ctx: &Ctx) -> adw::PreferencesPage {
                 .title("Choose backup")
                 .build();
             let win = ctx
-                .nav
+                .nav()
                 .root()
                 .map(|r| r.upcast::<gtk::Widget>())
                 .and_downcast::<adw::ApplicationWindow>();

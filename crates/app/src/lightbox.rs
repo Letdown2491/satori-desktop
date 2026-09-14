@@ -24,7 +24,7 @@ pub fn open(ctx: &Ctx, urls: Vec<String>, start: usize) {
         .css_classes(["lightbox"])
         .build();
     if let Some(parent) = ctx
-        .nav
+        .nav()
         .root()
         .map(|r| r.upcast::<gtk::Widget>())
         .and_downcast::<adw::ApplicationWindow>()

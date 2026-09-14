@@ -165,6 +165,6 @@ pub fn compose(ctx: &Ctx, reply_to: Option<Event>, hooks: Option<WriteHooks>) {
         });
         view.add_controller(key);
     }
-    dialog.present(ctx.nav.root().as_ref());
+    dialog.present(ctx.nav().root().as_ref());
     view.grab_focus();
 }

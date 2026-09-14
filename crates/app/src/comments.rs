@@ -305,7 +305,7 @@ fn comment_row(
                 });
                 dialog2.force_close();
             });
-            dialog.present(Some(&ctx.nav));
+            dialog.present(ctx.nav().root().as_ref());
         });
     }
     acts.append(&reply_btn);

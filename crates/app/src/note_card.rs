@@ -593,7 +593,7 @@ fn open_thread(ctx: &Ctx) -> Rc<dyn Fn(&Event)> {
     let ctx = ctx.clone();
     Rc::new(move |event| {
         let page = crate::thread::thread_page(&ctx, event);
-        ctx.nav.push(&page);
+        ctx.nav().push(&page);
     })
 }
 

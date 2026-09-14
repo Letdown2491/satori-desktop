@@ -80,16 +80,12 @@ fn build_ui(app: &adw::Application) {
     icons::install();
     let core = Arc::new(Core::new());
 
-    // The main shell: nav (feed → thread → notifications) under a toast
-    // overlay (the undo window surface), wrapped in the header bar.
+    // The main shell: a sidebar + section stack (DESIGN: the sidebar IS the
+    // chrome); toasts overlay the whole main area.
     let overlay = adw::ToastOverlay::new();
-    let nav = adw::NavigationView::new();
-    let ctx = ctx::Ctx { core: core.clone(), nav: nav.clone(), overlay: overlay.clone() };
+    let ctx = ctx::Ctx::new(core.clone(), overlay.clone());
     let feed = feed::FeedView::new(&ctx);
-    nav.add(&feed.page);
-    overlay.set_child(Some(&nav));
-
-    let (main_shell, handles) = shell::build_main(&ctx, Rc::clone(&feed), overlay.upcast());
+    let (main_shell, handles) = shell::build_main(&ctx, Rc::clone(&feed));
 
     let stack = gtk::Stack::builder()
         .transition_type(gtk::StackTransitionType::Crossfade)
@@ -98,13 +94,18 @@ fn build_ui(app: &adw::Application) {
 
     let login_page = login::LoginPage::new(core.clone(), {
         let stack = stack.clone();
-        let handles = handles.clone();
+        let handles2 = shell::ShellHandles {
+            home_dot: handles.home_dot.clone(),
+            notif_dot: handles.notif_dot.clone(),
+            avatar: handles.avatar.clone(),
+            account_label: handles.account_label.clone(),
+        };
         let ctx = ctx.clone();
         let feed_login = Rc::clone(&feed);
         move |_pk| {
             feed_login.bootstrap();
-            shell::poll_notif(&ctx, &handles.bell_dot);
-            shell::poll_feed_dot(&ctx, &handles.home_dot);
+            shell::poll_notif(&ctx, &handles2.notif_dot);
+            shell::poll_feed_dot(&ctx, &handles2.home_dot);
             crate::shell::poll_time_ticks();
             stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);
         }
@@ -152,10 +153,10 @@ fn build_ui(app: &adw::Application) {
     match resumed {
         Some(session) => {
             if let Ok(pk) = PublicKey::from_str(&session.pubkey) {
-                shell::update_avatar(&handles.avatar, pk);
+                shell::update_identity(&handles, &ctx, pk);
             }
             feed.bootstrap();
-            shell::poll_notif(&ctx, &handles.bell_dot);
+            shell::poll_notif(&ctx, &handles.notif_dot);
             shell::poll_feed_dot(&ctx, &handles.home_dot);
             crate::shell::poll_time_ticks();
             stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);

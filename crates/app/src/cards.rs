@@ -475,7 +475,7 @@ fn article_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool)
         let data = data.clone();
         read.connect_clicked(move |_| {
             let page = article_reader(&ctx, &ev, &data);
-            ctx.nav.push(&page);
+            ctx.nav().push(&page);
         });
     }
     s.content.append(&read);

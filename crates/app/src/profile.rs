@@ -259,5 +259,5 @@ fn style_follow(btn: &gtk::Button, following: bool) {
 /// Entry from anywhere a pubkey is known.
 pub fn open_profile(ctx: &Ctx, who: PublicKey) {
     let page = profile_page(ctx, who);
-    ctx.nav.push(&page);
+    ctx.nav().push(&page);
 }

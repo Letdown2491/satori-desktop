@@ -401,3 +401,36 @@ window {
     padding: 4px 12px;
     font-size: 12px;
 }
+
+/* --- The sidebar (the chrome) ------------------------------------------------ */
+.sidebar {
+    background-color: @panel;
+    transition: background-color 0.4s ease;
+}
+
+.side-title {
+    font-size: 19px;
+}
+
+.side-row {
+    padding: 9px 12px;
+    border-radius: 10px;
+    color: @muted;
+}
+
+.side-row:hover {
+    color: @ink;
+    background-color: alpha(@ink, 0.045);
+}
+
+.side-row.side-active {
+    color: @ink;
+    background-color: alpha(@vermilion, 0.085);
+    border-left: 3px solid @vermilion;
+    padding-left: 9px;
+}
+
+.side-account {
+    margin-top: 6px;
+    color: @ink;
+}
