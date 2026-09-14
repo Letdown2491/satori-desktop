@@ -36,8 +36,39 @@ use nostr::prelude::*;
 use satori_core::manager::Core;
 
 fn main() -> glib::ExitCode {
+    // GL renderer: the Vulkan swapchain on tiling compositors (niri) spams
+    // VK_SUBOPTIMAL_KHR resize warnings — harmless, but we want a clean log.
+    // Safe: main runs before any thread spawn.
+    unsafe { std::env::set_var("GSK_RENDERER", "gl") };
+    // One targeted suppression: GTK's gsettings portal maps
+    // color-scheme=prefer-dark onto gtk-application-prefer-dark-theme and
+    // libadwaita warns on every notify of it. We never use that property
+    // (AdwStyleManager::color-scheme is the supported path), so the warning
+    // is pure noise from the host theme — drop exactly that message.
+    glib::log_set_writer_func(|level, fields| {
+        let msg = fields
+            .iter()
+            .find(|f| f.key() == "MESSAGE")
+            .and_then(|f| f.value_str())
+            .unwrap_or_default();
+        let domain = fields
+            .iter()
+            .find(|f| f.key() == "GLIB_DOMAIN")
+            .and_then(|f| f.value_str())
+            .unwrap_or_default();
+        if domain == "Adwaita" && msg.contains("gtk-application-prefer-dark-theme") {
+            return glib::LogWriterOutput::Handled;
+        }
+        glib::log_writer_default(level, fields);
+        glib::LogWriterOutput::Handled
+    });
+
     let app = adw::Application::builder()
         .application_id(satori_core::config::APP_ID)
+        // NON_UNIQUE while in development: a relaunch must run the NEW
+        // binary, not remote-activate a stale process (the classic "my fix
+        // doesn't work" trap). Single-instance focus behavior returns in M5.
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     app.connect_activate(build_ui);
     app.run()

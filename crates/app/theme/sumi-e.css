@@ -306,8 +306,6 @@ window {
 /* Hue-bucket avatar circles (render/util.ts:74). */
 .avatar-circle {
     border-radius: 999px;
-    align-items: center;
-    justify-content: center;
 }
 
 .avatar-initial {

@@ -509,6 +509,8 @@ pub fn fill_faces(slot: &gtk::Box, who: &[PublicKey]) {
             .unwrap_or_else(|| "?".into());
         disc.append(&gtk::Label::builder()
             .label(&initial)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
             .css_classes(["face-initial"])
             .build());
         slot.append(&disc);
