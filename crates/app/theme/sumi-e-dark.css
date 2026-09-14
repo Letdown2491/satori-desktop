@@ -1,0 +1,43 @@
+/* sumi-e-dark — ink on night washi. Port of public/styles.css tokens (DESIGN.md §5.1). */
+
+@define-color washi #15140f;
+@define-color panel #1e1c16;
+@define-color hairline #322e25;
+@define-color ink #e9e3d6;
+@define-color muted #8b8275;
+@define-color vermilion #df6a4f;
+@define-color ok #8a9a7b;
+@define-color warn #cfa14e;
+@define-color err #d9543a;
+@define-color live #4caf6a;
+
+window {
+    background-color: @washi;
+    color: @ink;
+}
+
+.note-card {
+    background-color: @panel;
+    border: 1px solid @hairline;
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+}
+
+.note-author {
+    font-weight: 500;
+}
+
+.serif {
+    font-family: "Source Serif 4", "Palatino", "Georgia", serif;
+}
+
+.empty-quote {
+    font-size: 16px;
+    font-style: italic;
+    color: @muted;
+}
+
+.switcher {
+    font-size: 17px;
+}

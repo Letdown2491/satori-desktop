@@ -1,0 +1,17 @@
+# Dev image — the host is bootc (Fedora atomic) and has no GTK dev headers.
+# Build:  podman build -t satori-dev -f Containerfile.dev
+# Check:  podman run --rm -v "$PWD:/srv:Z" -w /srv satori-dev cargo check --workspace
+# (:Z relabels the mount for SELinux on atomic hosts.)
+
+FROM registry.fedoraproject.org/fedora:44
+
+RUN dnf -y install \
+        rust cargo \
+        clippy \
+        gtk4-devel \
+        libadwaita-devel \
+        pkgconf-pkg-config \
+        git \
+    && dnf -y clean all
+
+WORKDIR /srv

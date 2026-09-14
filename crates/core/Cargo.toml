@@ -1,0 +1,18 @@
+[package]
+name = "satori-core"
+description = "Satori's Nostr domain layer: relay routing, signing, storage, NIPs. No UI dependencies."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+nostr = { workspace = true }
+nostr-sdk = { workspace = true }
+nostr-connect = { workspace = true }
+nostr-lmdb = { workspace = true }
+tokio = { workspace = true }
+tokio-socks = { workspace = true }
+keyring = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

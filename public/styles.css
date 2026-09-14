@@ -1,0 +1,2305 @@
+/* Satori - Sumi-e (ink on washi). Ported verbatim from the Satori SPA's
+   index.html <style> block for 1:1 look & feel. Two themes via html[data-theme].
+   The server sets data-theme from a cookie (no-flash SSR). */
+        /* Sumi-e - ink on washi (default, light). A monochrome ink field; the 朱
+           vermilion stays a rare seal (verified, your own actions, the ensō). */
+        :root {
+            --bg: #e3dac4;
+            --panel: #d9cfb5;
+            --border: #c9bd9f;
+            --text: #191714;
+            --muted: #6e695f;
+            --accent: #b23a26;
+            --ok: #6f7d5e;
+            --warn: #9a7320;
+            --err: #9e2b1c;
+            --good: #4caf6a; /* vivid green - connected dot + high relay score (theme-independent) */
+            --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+        }
+        /* Sumi-e Dark - ink at night, same discipline. */
+        html[data-theme="sumi-e-dark"] {
+            --bg: #15140f;
+            --panel: #1e1c16;
+            --border: #322e25;
+            --text: #e9e3d6;
+            --muted: #8b8275;
+            --accent: #df6a4f;
+            --ok: #8a9a7b;
+            --warn: #cfa14e;
+            --err: #d9543a;
+        }
+        /* Ink discipline (both themes): the always-on vermilion recedes to ink, so
+           color stays a rare seal. */
+        html[data-theme^="sumi-e"] .author,
+        html[data-theme^="sumi-e"] .mention { color: var(--text); }
+        html[data-theme^="sumi-e"] .content a:not(.article-embed),
+        html[data-theme^="sumi-e"] .quote-text a,
+        html[data-theme^="sumi-e"] .article-body a { color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
+        /* NIP-54 wikilinks [[topic]]: stay ink (the vermilion seal stays rare) but take a DOTTED underline,
+           so an internal wiki-topic link reads distinctly from a solid-underlined external link. Links are
+           BEST-EFFORT - they point at the same author's topic, which may not exist yet (a wiki red-link);
+           the muted span is only the fallback when there is no author to resolve against at all. */
+        html[data-theme^="sumi-e"] .article-body a.wikilink { text-decoration-style: dotted; text-underline-offset: 3px; }
+        .article-body span.wikilink { color: var(--muted); }
+        /* NIP-34 repo detail: a git glyph by the title, a quiet primary Browse action, and labeled
+           clone/web/maintainer rows. Clone urls are copyable monospace, one per line + horizontal scroll
+           (git/ssh aren't clickable), so long ngit urls don't wrap into a wall. Ink-disciplined: the accent
+           only appears on Browse hover (a rare seal), everything else stays ink + panel. */
+        .repo-title .icon { width: 0.72em; height: 0.72em; color: var(--muted); margin-right: 0.35em; vertical-align: baseline; }
+        .repo-desc { margin: 0 0 16px; }
+        .repo-browse { display: inline-flex; align-items: center; gap: 6px; margin: 4px 0; padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-weight: 500; text-decoration: none; }
+        .repo-browse:hover { border-color: var(--accent); color: var(--accent); }
+        .repo-browse .icon { width: 16px; height: 16px; }
+        /* Generic labeled metadata row (label + inline items) - shared by repo web/maintainer/relay rows and
+           reusable by future addressable kinds (issue/patch status, labels, ...). */
+        .meta-row { margin: 12px 0; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; }
+        .meta-label { color: var(--muted); font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.04em; }
+        .repo-clones { margin: 12px 0; }
+        .repo-clones .meta-label { display: block; margin-bottom: 5px; }
+        .repo-clone { display: block; font-family: ui-monospace, monospace; font-size: 0.85em; background: var(--panel); padding: 5px 9px; border-radius: 5px; margin-top: 5px; user-select: all; white-space: nowrap; overflow-x: auto; }
+        .repo-relay { color: var(--muted); font-family: ui-monospace, monospace; font-size: 0.85em; }
+        .repo-topics { margin: 12px 0; display: flex; flex-wrap: wrap; gap: 6px; }
+        /* Picture composer (NIP-68) title field - sits above the caption textarea in the compose box. */
+        .picture-title { width: 100%; padding: 8px 10px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 1.05em; font-weight: 600; }
+        .picture-title:focus { outline: none; border-color: var(--accent); }
+        /* NIP-68 picture: image + caption as ONE card. The figure clips the image's own corners (overflow)
+           so it sits flush; the caption is a footer on a quiet panel below, sharing the rounded card - so the
+           caption reads as part of the image, not stray text. Restrained (ink discipline): the panel does the
+           work, not colour. Used by the real kind-20 card AND the compose preview (WYSIWYG). */
+        .picture-figure { margin: 8px 0 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+        .picture-figure .media { margin: 0; border: none; border-radius: 0; }
+        .picture-caption { display: block; padding: 8px 12px; background: var(--panel); }
+        .picture-caption .picture-loc { display: block; margin: 0 0 3px; }
+        html[data-theme^="sumi-e"] .quote { border-left-color: var(--border); }
+        /* The compose FAB as a sumi ink-dot - present without vermilion, distinct
+           from the pale jump-to-top circle. */
+        html[data-theme^="sumi-e"] .fab { background: var(--text); color: var(--bg); border: none; }
+        /* box-sizing + a quiet, theme-coloured scrollbar everywhere - a faint ink line,
+           not the chunky OS bar. (scrollbar-* for Firefox; ::-webkit-* for Chrome/Safari.) */
+        * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+        ::-webkit-scrollbar-track { background: transparent; }
+        /* Scrolls are INSTANT (the default). We deliberately do NOT set
+           scroll-behavior: smooth: helmjs's h-scroll="top" uses scrollTo({behavior:"auto"}),
+           which inherits this property, so a global "smooth" turns every nav-to-top into an
+           animated glide. Over a long distance (e.g. Home from a deeply-scrolled feed) that
+           glide gets cancelled mid-flight by the incoming page's avatar loads / dot poll
+           reflow, leaving you stranded mid-page. Instant jumps are reliable and expected for
+           a "go to top" nav. (Trade-off: the jump-to-top #app button no longer glides.) */
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font: 15px/1.6 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+            transition: background 0.4s ease, color 0.4s ease;
+        }
+        /* Bottom gutter clears the fixed FAB (56px at bottom:28px) so the last row's
+           right-side control (Unmute, action bars, editor ✕) is never hidden under it. */
+        #app { max-width: 720px; margin: 0 auto; padding: 0 20px 96px; }
+        /* A11y utilities. .sr-only = visible only to assistive tech; .skip-link sits
+           off-screen until focused, then drops in as the first tab stop so keyboard
+           users can jump past the bar straight to <main>. */
+        .sr-only {
+            position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+            overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+        }
+        .skip-link {
+            position: fixed; left: 12px; top: -56px; z-index: 100;
+            background: var(--panel); color: var(--text); border: 1px solid var(--border);
+            padding: 8px 14px; border-radius: 8px; text-decoration: none;
+            transition: top 0.16s ease;
+        }
+        .skip-link:focus { top: 12px; }
+        #viewport:focus { outline: none; } /* skip-target focus is programmatic, not a visible ring */
+        /* The feed/settings bars are sticky top:0 - flush to the top from load.
+           Views without a bar (sign-in) get their own top breathing room. */
+        .signin {
+            max-width: 440px; margin: 0 auto; min-height: 100vh;
+            display: flex; flex-direction: column; justify-content: center;
+        }
+        /* Prose left-aligned; the wordmark (flex-centered) and the "or" divider stay centered. */
+        .signin-intro { font-family: var(--serif); font-size: 16px; line-height: 1.65; color: var(--text); margin: 10px 0 18px; }
+        .signin form .ghost { padding: 10px 16px; } /* outline Connect, matched to the input height */
+        .ext-signin { display: block; width: 100%; margin: 4px 0 0; }
+        .signin-or { color: var(--muted); font-size: 13px; text-align: center; margin: 14px 0; }
+        .signin-help { color: var(--muted); font-size: 13px; margin: 22px 0 0; line-height: 1.7; }
+        .signin-help a { color: var(--accent); text-decoration: none; }
+        .signin-help a:hover { text-decoration: underline; }
+        h1 { font-family: var(--serif); font-weight: 500; font-size: 38px; letter-spacing: 0.02em; margin: 0 0 6px; }
+        .accent { color: var(--accent); }
+        .sub { color: var(--muted); margin: 0 0 24px; }
+        code { background: var(--panel); padding: 1px 6px; border-radius: 5px; font-size: 13px; }
+        form { display: flex; gap: 8px; }
+        /* Scoped to text fields only - must not style checkboxes/colour/number. */
+        input[type="text"] {
+            flex: 1; padding: 10px 12px; border-radius: 8px;
+            border: 1px solid var(--border); background: var(--panel); color: var(--text);
+            font-size: 14px;
+        }
+        input[type="text"]:focus { outline: none; border-color: var(--accent); }
+        button {
+            padding: 10px 16px; border-radius: 8px; border: 1px solid var(--accent);
+            background: var(--accent); color: #fff; font-weight: 600; cursor: pointer;
+        }
+        button:disabled { opacity: 0.5; cursor: default; }
+        /* Submit buttons that swap to a breathing busy label while their POST is in
+           flight. helmjs disables a form's submit button for the request's duration;
+           since these buttons are always enabled at rest, :disabled is an unambiguous
+           "working" signal. (Don't put .busy-btn on a disabled-until-valid button like
+           compose's Post, where :disabled also means "not ready".) */
+        .busy-btn .btn-busy { display: none; }
+        .busy-btn:disabled { opacity: 1; cursor: default; } /* keep the busy label legible (override the .5 dim) */
+        .busy-btn:disabled .btn-label { display: none; }
+        .busy-btn:disabled .btn-busy { display: inline-block; animation: enso-breath 1.4s ease-in-out infinite; }
+        @media (prefers-reduced-motion: reduce) { .busy-btn:disabled .btn-busy { animation: none; } }
+        /* Saved-confirmation phase: after an in-place save, the freshly-swapped-in button carries
+           .saved and flashes "Saved ✓" over the label for ~1s, then fades back to the normal label.
+           Pure CSS, runs once on element insertion - no app JS, no timer, no extra on-screen status. */
+        .busy-btn { position: relative; }
+        .busy-btn .btn-done {
+            position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+            background: inherit; border-radius: inherit; opacity: 0; pointer-events: none;
+        }
+        .busy-btn.saved .btn-done { animation: btn-saved 2s ease-out both; } /* ~1.5s hold, then a ~0.5s fade */
+        @keyframes btn-saved { 0%, 75% { opacity: 1; } 100% { opacity: 0; } }
+        @media (prefers-reduced-motion: reduce) { .busy-btn.saved .btn-done { animation: btn-saved 1.7s steps(1, end) both; } }
+        /* The sign-in Connect button uses the label-swap but not the breathing animation. */
+        .connect-btn.busy-btn:disabled .btn-busy { animation: none; }
+
+        /* Top bar: tabs (left) + avatar menu (right) */
+        .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--muted); }
+        .dot.on { background: var(--ok); }
+        .dot.off { background: var(--err); }
+        .menu-wrap { position: relative; justify-self: end; display: flex; align-items: center; }
+        .avatar-btn { position: relative; display: inline-flex; align-items: center; padding: 0; border: none; background: none; cursor: pointer; line-height: 0; }
+        /* Avatar connection ring: green when relays are connected, warning when offline. */
+        .avatar-ring { display: inline-flex; border-radius: 50%; box-shadow: 0 0 0 1.5px var(--good); transition: box-shadow .2s; }
+        .avatar-ring.offline { box-shadow: 0 0 0 1.5px var(--warn); }
+        /* The bar avatar sits as a peer to the 22px bar icons (search etc.): a 20px
+           circle + 1.5px ring ≈ 23px outer. Scoped here, not the .avatar-sm used in
+           menus/bylines/results. */
+        .avatar-btn .avatar { width: 28px; height: 28px; }
+        /* Notification bell - beside home, present only when you have unread, with a
+           small accent dot. A quiet sibling of the home glyph. */
+        .notif-bell {
+            position: relative; display: inline-flex; align-items: center;
+            background: none; border: none; padding: 0; cursor: pointer; color: var(--muted); line-height: 0;
+        }
+        .notif-bell .icon { width: 22px; height: 22px; }
+        .notif-bell:hover { color: var(--text); }
+        /* Quiet by default: the bell only appears when there are new notifications.
+           The element still renders (it hosts the 90s poller, which keeps firing while
+           display:none), so it lights itself up when something arrives; otherwise reach
+           notifications from the account menu. */
+        .notif-bell:not(.has-new) { display: none; }
+        .notif-bell[hidden] { display: none; }
+        .notif-dot {
+            position: absolute; top: -1px; right: -2px; width: 7px; height: 7px;
+            border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg);
+        }
+        /* Persistent header: home (+bell) left · contextual center · account hub right. */
+        .bar-left { justify-self: start; display: inline-flex; align-items: center; gap: 10px; }
+        /* Notes button - left slot on timelines. Disabled (quiet) until enough new
+           posts gather, then enabled with an accent dot. Consult it when you choose. */
+        .notes-mark {
+            position: relative; display: inline-flex; align-items: center;
+            background: none; border: none; padding: 0; cursor: pointer; color: var(--text); line-height: 0;
+        }
+        .notes-mark .icon { width: 22px; height: 22px; }
+        .notes-mark:hover:not(:disabled) { color: var(--accent); }
+        .notes-mark:disabled { color: var(--muted); cursor: default; }
+        .notes-mark[hidden] { display: none; }
+        .header-center { display: flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; }
+        .header-back {
+            display: inline-flex; align-items: center; background: transparent; border: none;
+            color: var(--text); padding: 0; cursor: pointer; line-height: 0;
+        }
+        .header-back .icon { width: 20px; height: 20px; }
+        .header-back:hover { color: var(--accent); }
+        .notif-row { display: flex; align-items: flex-start; gap: 10px; padding: 14px 4px; border-bottom: 1px solid var(--border); }
+        .notif-row.clickable { cursor: pointer; }
+        .notif-text { font-size: 14px; color: var(--muted); padding-top: 3px; }
+        /* A private reply notification quotes the reply text under the "replied privately" line,
+           set off by a quiet accent rule so it reads as a confidential aside. */
+        .notif-private .private-mark { vertical-align: -1px; }
+        .notif-quote { margin-top: 5px; padding: 4px 0 4px 10px; border-left: 2px solid var(--accent); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; opacity: 0.85; }
+        /* Bookmarks: flag only the exceptions - public (visible) saves. A small
+           muted globe (= visible to others) before the time; private stay clean. */
+        .bm-public { width: 13px; height: 13px; color: var(--muted); align-self: center; }
+        .poll-link { color: var(--accent); }
+        .notif-row.clickable:hover .poll-link { text-decoration: underline; }
+        .menu {
+            position: absolute; left: 0; top: calc(100% + 8px); z-index: 20;
+            width: 280px; max-width: 80vw; background: var(--panel);
+            border: 1px solid var(--border); border-radius: 12px; padding: 6px;
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+        }
+        .menu[hidden] { display: none; }
+        .menu-right { left: auto; right: 0; }
+        /* Centered feed switcher (dropdown) */
+        .feed-switch { position: relative; justify-self: center; }
+        .feed-toggle {
+            display: inline-flex; align-items: center; gap: 6px;
+            background: transparent; border: none; color: var(--text);
+            font-family: var(--serif); font-size: 17px; font-weight: 500; cursor: pointer; padding: 4px 10px;
+        }
+        .feed-toggle .chevron { color: var(--muted); font-size: 11px; font-family: system-ui; }
+        .feed-menu {
+            position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+            z-index: 20; min-width: 170px; background: var(--panel);
+            border: 1px solid var(--border); border-radius: 10px; padding: 6px;
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+        }
+        .feed-menu[hidden] { display: none; }
+        .feed-item {
+            display: block; width: 100%; text-align: center; background: none; border: none;
+            color: var(--text); padding: 9px 12px; border-radius: 7px; cursor: pointer; font-size: 14px;
+        }
+        .feed-item:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+        .feed-item.active { color: var(--accent); font-weight: 600; }
+        /* On a non-timeline page the current page shows as a dim, non-clickable context row above the
+           timelines (a divider sets it off), so the menu reads "you are here / jump to a feed". */
+        .feed-current { display: block; text-align: center; color: var(--muted); font-size: 13px; padding: 4px 12px 8px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+        /* "Browse a relay…" - opens the relay picker modal; a quiet divider sets it off from the feeds. */
+        .feed-item-add { margin-top: 4px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+        /* Relay timeline bar: the relay you're browsing + a favorite star. Sits above the feed list. */
+        .relay-bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+        .relay-bar-name { display: inline-flex; align-items: center; gap: 7px; flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .relay-bar-name .icon { flex: none; color: var(--muted); }
+        .relay-fav { flex: none; background: none; border: none; cursor: pointer; font-size: 18px; line-height: 1; color: var(--muted); padding: 2px 4px; }
+        .relay-fav.on { color: var(--accent); }
+        /* Relay picker modal (Browse a relay): a URL box, then favorites + your own relays as quick picks. */
+        .modal-title { font-family: var(--serif); font-weight: 500; font-size: 16px; }
+        .relay-pick-go { display: flex; gap: 8px; margin: 12px 0; }
+        .relay-pick-go input[type=text] { flex: 1; min-width: 0; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
+        .relay-pick-go input[type=text]:focus { outline: none; border-color: var(--accent); }
+        .relay-pick-head { padding: 8px 2px 4px; font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
+        .relay-pick-list { list-style: none; margin: 0; padding: 0; }
+        .relay-pick-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+        .relay-pick-name { display: inline-flex; align-items: center; gap: 7px; flex: 1; min-width: 0; padding: 7px 4px; color: var(--text); text-decoration: none; border-radius: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .relay-pick-name .icon { flex: none; color: var(--muted); }
+        .relay-pick-name:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+        .relay-fav-mini { flex: none; background: none; border: none; cursor: pointer; font-size: 15px; line-height: 1; color: var(--muted); padding: 4px 6px; }
+        .relay-fav-mini.on { color: var(--accent); }
+        .relay-pick-empty { color: var(--muted); font-size: 13px; padding: 8px 2px; }
+        .menu-head { display: flex; align-items: center; gap: 10px; padding: 8px; color: var(--text); text-decoration: none; border-radius: 8px 8px 0 0; }
+        .menu-head:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+        .menu-head:hover .me-name { color: var(--accent); }
+        .menu-id { min-width: 0; }
+        .menu-id .me-name { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .copy-npub {
+            margin-top: 2px; padding: 0; border: none; background: none;
+            color: var(--muted); font-size: 12px; font-weight: 500; cursor: pointer;
+        }
+        .copy-npub:hover { color: var(--accent); }
+        .menu-section { border-top: 1px solid var(--border); padding: 8px; }
+        .menu-label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+        .menu-label .count { color: var(--text); font-weight: 700; }
+        .relay-list { list-style: none; margin: 0; padding: 0; max-height: 200px; overflow-y: auto; }
+        .relay-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px; }
+        .relay-row .relay-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .relay-row.off { color: var(--muted); }
+        .relay-empty { color: var(--muted); font-size: 12px; }
+        .menu-item {
+            width: 100%; text-align: left; margin-top: 4px; padding: 10px 8px;
+            border: none; border-top: 1px solid var(--border); border-radius: 0 0 8px 8px;
+            background: none; color: var(--err); font-weight: 600;
+            /* The Log out item is a <button>, which (unlike the <a> items) doesn't inherit the
+               page font, so it rendered at the UA default size. Inherit so they match. */
+            font-family: inherit; font-size: inherit;
+        }
+        .menu-item:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+        .menu-item.neutral { color: var(--text); border-top: 1px solid var(--border); border-radius: 0; }
+        .menu-item.notif-item { display: flex; align-items: center; }
+        .menu-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-left: auto; flex: none; }
+        .menu-dot[hidden] { display: none; }
+
+        /* Settings page */
+        .page-bar {
+            display: flex; align-items: center; gap: 12px;
+            position: sticky; top: 0; z-index: 10; background: var(--bg);
+            padding: 12px 20px; margin: 0 -20px 8px; border-bottom: 1px solid var(--border);
+        }
+        .back-btn { background: transparent; border: none; color: var(--text); font-size: 20px; padding: 2px 8px; cursor: pointer; }
+        .back-btn:hover { color: var(--accent); }
+        .home-btn { background: transparent; border: none; color: var(--muted); padding: 2px 6px; cursor: pointer; line-height: 0; display: inline-flex; align-items: center; }
+        .home-btn:hover { color: var(--accent); }
+        .page-title { font-size: 17px; color: var(--text); margin: 0; } /* match the feed switcher's title styling */
+        .title-count { font-size: 15px; color: var(--muted); } /* the "· N" count chip after a page title (e.g. Bookmarks) */
+        .title-count:empty { display: none; } /* no chip (and no stray gap) when the count is zero/absent */
+        .page-bar-action { margin-left: auto; display: inline-flex; align-items: center; }
+        .settings-page section { padding: 16px 0; border-top: 1px solid var(--border); }
+        .settings-page section:first-child { border-top: none; }
+        /* The save/action buttons across the settings tabs match the composer's compact Publish button
+           (base buttons are 10px 16px; the Backup Export/Restore + the busy-btn Saves take the smaller 6px 10px). */
+        .settings-page .busy-btn, .settings-page .backup-form button { padding: 6px 10px; }
+        .settings-page h3 { font-size: 14px; margin: 0 0 10px; font-weight: 700; }
+        .settings-page h3 .hint { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
+        /* The network editors (relays / media servers) stack vertically - overriding
+           the global `form{display:flex}` (which is for the inline signin/compose rows).
+           The `.row` pref forms keep the global flex (label left, control right). */
+        .settings-page section > form:not(.row) { flex-direction: column; align-items: stretch; }
+        .row-controls { display: inline-flex; align-items: center; gap: 8px; flex: none; }
+        .toggle { display: flex; align-items: center; gap: 9px; padding: 7px 0; font-size: 14px; cursor: pointer; }
+        .toggle input { width: 16px; height: 16px; accent-color: var(--accent); flex: none; }
+        .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0; font-size: 14px; }
+        .row input[type=number] { width: 70px; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+        .row input[type=color] { width: 44px; height: 30px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); cursor: pointer; }
+        /* On/off switch (a checkbox restyled as a toggle) */
+        .switch {
+            appearance: none; flex: none; cursor: pointer;
+            width: 38px; height: 22px; border-radius: 11px; background: var(--border);
+            position: relative; transition: background .15s;
+        }
+        .switch:checked { background: var(--accent); }
+        .switch::after {
+            content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+            border-radius: 50%; background: #fff; transition: transform .15s;
+        }
+        .switch:checked::after { transform: translateX(16px); }
+        .switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+        /* A submit button styled as the switch slider. Zero-JS friendly: clicking it
+           IS the form submit (a bare `.switch` checkbox can't auto-save without JS,
+           and an unchecked checkbox submits nothing); helmjs swaps it to the flipped
+           state in place. Visually identical to `.switch`. */
+        .switch-btn {
+            appearance: none; flex: none; cursor: pointer; padding: 0;
+            width: 38px; height: 22px; border-radius: 11px; background: var(--border);
+            border: none; position: relative; transition: background .15s;
+        }
+        .switch-btn.on { background: var(--accent); }
+        .switch-btn::after {
+            content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+            border-radius: 50%; background: #fff; transition: transform .15s;
+        }
+        .switch-btn.on::after { transform: translateX(16px); }
+        .switch-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+        /* Segmented control (Theme): connected option buttons in a `.row`. */
+        .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; flex: none; }
+        .seg .seg-btn {
+            padding: 6px 16px; background: transparent; color: var(--muted); border: none;
+            border-radius: 0; font-size: 13px; font-weight: 600; cursor: pointer;
+        }
+        .seg .seg-btn + .seg-btn { border-left: 1px solid var(--border); }
+        .seg .seg-btn.active { background: var(--accent); color: #fff; }
+        /* A long field: label above a full-width input */
+        .field { display: flex; flex-direction: column; gap: 6px; padding: 7px 0; font-size: 14px; }
+        .field-label { color: var(--text); }
+        .field-input {
+            width: 100%; box-sizing: border-box; padding: 9px 11px; border-radius: 8px;
+            border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px;
+        }
+        .field-input:focus { outline: none; border-color: var(--accent); }
+        /* Read/write toggle chips for relay rows */
+        .rw-group { display: inline-flex; gap: 6px; flex: none; }
+        .rw-chip {
+            padding: 3px 11px; border-radius: 12px; border: 1px solid var(--border);
+            background: transparent; color: var(--muted); font-size: 12px; cursor: pointer;
+            display: inline-flex; align-items: center; user-select: none;
+        }
+        /* HATEOAS: the chip is a label over a hidden native checkbox (zero-JS;
+           the state submits with the form), active via :has() instead of a class. */
+        .rw-chip input { position: absolute; opacity: 0; pointer-events: none; }
+        .rw-chip.active, .rw-chip:has(input:checked) { border-color: var(--accent); color: var(--accent); }
+        /* Content filters */
+        .filter-box {
+            width: 100%; box-sizing: border-box; resize: vertical; min-height: 84px;
+            padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+            background: var(--panel); color: var(--text); font-family: monospace; font-size: 13px; line-height: 1.5;
+            margin-bottom: 18px;
+        }
+        .filter-box:focus { outline: none; border-color: var(--accent); }
+        .filter-subhead { margin-top: 24px; }
+        /* Divider between the show-allowlist (compose) and the content-filtering (suppress) halves. */
+        .filter-divide { margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--border); }
+        /* The 1fr label pushes the Feed/Profile columns to the right edge - right-aligned + symmetric,
+           and both grids' columns line up there. */
+        .filter-grid { display: grid; grid-template-columns: 1fr auto auto; gap: 12px 24px; align-items: center; margin: 6px 0 4px; }
+        /* + the "Own timeline" column. FIXED checkbox-column widths so the default (core) grid and the
+           "Show more" tail grid line up - the tail grid has no header row, so `auto` columns would drift. */
+        .filter-grid.show-kinds { grid-template-columns: 1fr 64px 64px 100px; }
+        .show-kinds .filter-cell { justify-self: center; } /* centre each checkbox under its fixed-width header */
+        /* "Show more" / "Show less" disclosure for the niche types (native <details>, zero-JS). */
+        .more-types { margin: 2px 0 0; }
+        .more-types .more-toggle { list-style: none; cursor: pointer; color: var(--accent); font-weight: 600; font-size: 13px; padding: 6px 0; width: max-content; }
+        .more-types .more-toggle::marker, .more-types .more-toggle::-webkit-details-marker { display: none; }
+        .more-types .more-toggle::after { content: 'Show more'; }
+        .more-types[open] .more-toggle::after { content: 'Show less'; }
+        .more-types .more-toggle:hover { text-decoration: underline; }
+        /* The auto-save tick beside the "Content types" heading: appears then fades (the types grid saves on
+           every toggle, so this is the quiet confirmation that a change was persisted). */
+        .content-saved { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 8px; }
+        .content-saved.show { animation: contentSaved 2s ease forwards; }
+        @keyframes contentSaved { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
+        .filter-col-head { color: var(--muted); font-size: 12px; text-align: center; }
+        .filter-head-left { color: var(--muted); font-size: 12px; } /* the post-type column header, left-aligned */
+        .filter-grid-label { font-size: 14px; }
+        .filter-cell { display: flex; justify-content: center; margin: 0; }
+        /* Themed checkbox (the native white box reads harsh on the dark panel): bordered panel
+           when off, accent fill + checkmark when on. */
+        .filter-cell input {
+            appearance: none; -webkit-appearance: none; width: 18px; height: 18px; margin: 0;
+            border: 1px solid var(--border); border-radius: 5px; background: var(--panel);
+            cursor: pointer; position: relative; flex: none;
+        }
+        .filter-cell input:hover { border-color: var(--accent); }
+        .filter-cell input:checked { background: var(--accent); border-color: var(--accent); }
+        .filter-cell input:checked::after {
+            content: ''; position: absolute; left: 6px; top: 2px; width: 4px; height: 9px;
+            border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg);
+        }
+        .filter-cell input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+        .filter-help { color: var(--muted); font-size: 12px; margin: 0 0 10px; }
+        .relay-editor { list-style: none; margin: 0 0 10px; padding: 0; }
+        .relay-edit-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; }
+        .relay-edit-row .relay-url { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        /* Leading score chip - fixed width so scores form a scannable column.
+           Number uses the page text colour; the tier colour lives in a tint of
+           the page bg + a coloured border, so it reads in both themes. */
+        .relay-score {
+            flex: none; width: 34px; height: 20px; cursor: default;
+            display: inline-flex; align-items: center; justify-content: center;
+            border-radius: 6px; font-size: 11px; font-weight: 700;
+            border: 1px solid transparent; color: var(--text);
+        }
+        .score-high { background: color-mix(in srgb, var(--good) 28%, var(--bg)); border-color: color-mix(in srgb, var(--good) 55%, transparent); }
+        .score-mid { background: color-mix(in srgb, #d99e2e 28%, var(--bg)); border-color: color-mix(in srgb, #d99e2e 55%, transparent); }
+        .score-low { background: color-mix(in srgb, #d9543a 28%, var(--bg)); border-color: color-mix(in srgb, #d9543a 55%, transparent); }
+        .score-unknown { background: transparent; color: var(--muted); border-color: var(--border); font-weight: 600; }
+        .rw { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
+        .rw input { accent-color: var(--accent); }
+        .ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 6px 10px; }
+        .ghost:hover { border-color: var(--accent); color: var(--text); }
+        a.ghost { text-decoration: none; border-radius: 8px; display: inline-flex; align-items: center; }
+        .view-head { display: flex; align-items: center; justify-content: flex-end; margin-bottom: 14px; }
+        .remove-relay { padding: 2px 8px; }
+        .add-relay { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+        .add-relay input[type=text] {
+            flex: 1; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+            background: var(--bg); color: var(--text); font-size: 13px; min-width: 0;
+        }
+        .add-relay input[type=text]:focus { outline: none; border-color: var(--accent); }
+        .relay-save { display: flex; align-items: center; gap: 10px; }
+        .lr-fm-hint { margin-top: 6px; }
+        /* Live connection indicator: a coloured dot beside the URL, verdict in its tooltip (probed on load +
+           on save). Colours - green serving, amber connected-but-empty, red unreachable, muted off/checking. */
+        .lr-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; cursor: default; }
+        .lr-dot-checking { animation: lr-pulse 1s ease-in-out infinite; }
+        .lr-dot-good { background: #2ea043; box-shadow: 0 0 0 3px color-mix(in srgb, #2ea043 22%, transparent); }
+        .lr-dot-wait { background: #d29922; box-shadow: 0 0 0 3px color-mix(in srgb, #d29922 22%, transparent); }
+        .lr-dot-err { background: #e5534b; box-shadow: 0 0 0 3px color-mix(in srgb, #e5534b 22%, transparent); }
+        .lr-dot-off { background: var(--muted); }
+        @keyframes lr-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+        /* The routing block - grouped under the master Use toggle. */
+        .lr-use-row { display: inline-flex; align-items: center; gap: 10px; }
+        .lr-routing-config { margin-top: 14px; }
+        .local-relay-dirs { margin-bottom: 4px; }
+        .luse-rw { display: flex; flex-wrap: wrap; gap: 12px 30px; }
+        .luse-row { display: inline-flex; align-items: center; gap: 10px; }
+        .luse-label { font-size: 13px; color: var(--muted); min-width: 42px; }
+        /* Use Off -> the routing controls don't apply; collapse them so only the URL + Use remain. */
+        form:has(input[name="use"][value="off"]:checked) .lr-routing-config { display: none; }
+        /* Fetch-missing only applies in Only read mode (Add already resolves via the outbox); hide otherwise. */
+        .lr-fetch-missing-row { margin-top: 16px; }
+        .lr-fetch-missing-row .filter-help { margin-top: 6px; }
+        form:not(:has(input[name="read"][value="only"]:checked)) .lr-fetch-missing-row { display: none; }
+        /* Local-relay NIP-42 auth row (nip07): status + Authenticate button + help. */
+        .local-relay-auth { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+        .local-relay-auth > form { display: inline; }
+        .local-relay-auth .luse-label { margin-right: 10px; }
+        .local-relay-auth .filter-help { margin-top: 8px; }
+        /* Muted-list name link (the row + layout live with the unmute animation below). */
+        .mute-name { flex: 1; min-width: 0; font-weight: 600; color: var(--text); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .mute-name:hover { color: var(--accent); }
+        .settings-status { color: var(--muted); font-size: 12px; }
+        .settings-status.err { color: var(--err); }
+        .toast-action {
+            margin-left: 12px; padding: 4px 10px; border: 1px solid var(--accent);
+            background: transparent; color: var(--accent); border-radius: 7px; font-size: 13px; font-weight: 600;
+        }
+
+        /* Floating compose button + its fan (Note / Poll) + modal */
+        .fab-wrap[hidden] { display: none; }
+        .fab-wrap {
+            /* Hang in the right gutter, ~24px PAST the 720px column's edge (50vw-360-56-24), so it clears
+               the timeline on wide screens; the 24px min snaps it back to the corner when the gutter is
+               too narrow to fit it beside the content. */
+            position: fixed; right: max(24px, calc(50vw - 440px)); bottom: 28px; z-index: 15;
+            display: flex; flex-direction: column; align-items: flex-end; gap: 12px;
+            pointer-events: none; /* the wrap spans the (hidden) options area - don't let it
+                                     swallow clicks meant for the jump-to-top button behind it */
+        }
+        .fab {
+            pointer-events: auto;
+            width: 56px; height: 56px; border-radius: 50%; padding: 0; align-self: flex-end;
+            font-size: 28px; line-height: 1; font-weight: 400;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+            transition: transform 0.22s ease;
+        }
+        /* Compose type selector - Note · Poll · Article (segmented, in the modal head). */
+        .compose-types { display: inline-flex; gap: 6px; }
+        .compose-types[hidden] { display: none; }
+        /* On the full /compose page the pills are a direct child of .view-pad and would sit flush against the
+           first input; give them the same breathing room the modal has (its .modal-head has margin-bottom). */
+        .view-pad > .compose-types { margin-bottom: 10px; }
+        .compose-type {
+            padding: 4px 13px; border-radius: 14px; border: 1px solid var(--border);
+            background: transparent; color: var(--muted); font-size: 13px; font-weight: 600; cursor: pointer;
+        }
+        .compose-type.active { border-color: var(--accent); color: var(--accent); }
+        .compose-type:disabled { opacity: 0.4; cursor: not-allowed; }
+        /* Jump-to-top: smaller, centered above the FAB, fades in past a scroll. The
+           href="#app" jump glides via scroll-behavior:smooth (helm skips boosting
+           hash links, so no request fires). Default state is fully shown, so where
+           scroll-driven animations aren't supported the button stays usable. */
+        .scroll-top {
+            /* Same gutter anchor as the FAB, +8px so the two stay CENTER-aligned (40px vs 56px wide). */
+            position: fixed; right: max(32px, calc(50vw - 432px)); bottom: 96px; z-index: 15;
+            width: 40px; height: 40px; border-radius: 50%; padding: 0;
+            display: inline-flex; align-items: center; justify-content: center; text-decoration: none;
+            font-size: 18px; line-height: 1; font-weight: 700;
+            background: var(--panel); color: var(--text); border: 1px solid var(--border);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+            opacity: 1; pointer-events: auto; transform: translateY(0);
+            transition: opacity 0.2s, transform 0.2s;
+        }
+        .scroll-top:hover { border-color: var(--accent); color: var(--accent); }
+        /* Zero-JS replacement for Satori's scrollY>800 `.show` toggle: a scroll-driven
+           animation reveals the button only after ~800px of scroll. Hidden at the top,
+           held visible once past the band. (Where unsupported, the base rule above
+           keeps it shown.) Keyframes live at top level so no parser drops them. */
+        @keyframes scroll-top-reveal {
+            from { opacity: 0; transform: translateY(8px); pointer-events: none; }
+            to   { opacity: 1; transform: translateY(0);  pointer-events: auto; }
+        }
+        @supports (animation-timeline: scroll()) {
+            .scroll-top {
+                opacity: 0; pointer-events: none; transform: translateY(8px);
+                animation: scroll-top-reveal both;
+                animation-timeline: scroll(root);
+                animation-range: 700px 820px;
+            }
+        }
+        /* --- Global loading affordances, driven by helmjs `data-h-busy` on <html>
+           (set while ≥1 FOREGROUND request is in flight; background polling /
+           lazy-loads are excluded by helm, so these never flash on the notif/dot
+           pollers or lazy embeds). Two complementary cues - a top progress bar and
+           a soft ink-blur of the outgoing content - both with a short ENTER delay so
+           quick requests show nothing and only genuinely slow ones surface; EXIT is
+           immediate. -------------------------------------------------------------- */
+        #nav-progress {
+            position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 100;
+            overflow: hidden; pointer-events: none;
+            opacity: 0; transition: opacity 0.25s ease; /* exit: fade straight out */
+        }
+        #nav-progress::before {
+            content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 38%;
+            background: var(--accent); box-shadow: 0 0 8px 1px var(--accent);
+        }
+        html[data-h-busy] #nav-progress { opacity: 1; transition: opacity 0.2s ease 0.15s; } /* enter: 150ms delay → no flash on fast requests */
+        html[data-h-busy] #nav-progress::before { animation: nav-progress-slide 1s ease-in-out infinite; }
+        @keyframes nav-progress-slide { 0% { left: -40%; } 100% { left: 100%; } }
+        /* Ink-blur: the outgoing content softens while loading; the new content (and
+           the sticky header / FAB, which sit outside #viewport) stay crisp. */
+        #viewport { transition: filter 0.3s ease, opacity 0.3s ease; } /* exit: clear at once */
+        html[data-h-busy] #viewport {
+            filter: blur(1.5px); opacity: 0.72;
+            transition: filter 0.3s ease 0.15s, opacity 0.3s ease 0.15s; /* enter: 150ms delay */
+        }
+        @media (prefers-reduced-motion: reduce) {
+            html[data-h-busy] #nav-progress::before { animation: none; left: 0; width: 100%; opacity: 0.6; }
+            html[data-h-busy] #viewport { filter: none; } /* keep the gentle dim, drop the blur */
+            /* helm.js h-transition swaps (e.g. the mute-and-fade) run via the View Transitions API;
+               make them instant under reduced motion - the card just leaves, no cross-fade. */
+            ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
+        }
+        .modal-overlay {
+            position: fixed; inset: 0; z-index: 30; display: flex;
+            align-items: flex-start; justify-content: center; padding: 12vh 16px 16px;
+            background: rgba(0, 0, 0, 0.55);
+        }
+        .modal-overlay[hidden] { display: none; }
+        .modal {
+            width: 100%; max-width: 520px; background: var(--panel);
+            border: 1px solid var(--border); border-radius: 14px; padding: 16px;
+        }
+        .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; font-weight: 600; }
+        .modal-close { padding: 4px 8px; border: none; background: none; color: var(--muted); font-size: 16px; cursor: pointer; }
+        .modal-close:hover { color: var(--text); }
+        .modal textarea {
+            width: 100%; min-height: 120px; resize: vertical; padding: 10px 12px;
+            border-radius: 8px; border: 1px solid var(--border); background: var(--bg);
+            color: var(--text); font: inherit; font-size: 15px; display: block;
+        }
+        .modal textarea:focus { outline: none; border-color: var(--accent); }
+        .modal .reply-to { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+        /* Poll composer fields */
+        .poll-fields { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+        .poll-fields[hidden] { display: none; } /* explicit display beats the [hidden] UA rule */
+        .poll-opts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+        .poll-opt-row { display: flex; align-items: center; gap: 8px; }
+        .poll-opt {
+            flex: 1; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border);
+            background: var(--bg); color: var(--text); font: inherit; font-size: 14px;
+        }
+        .poll-opt:focus { outline: none; border-color: var(--accent); }
+        .rm-opt { padding: 6px 10px; }
+        .add-opt { align-self: flex-start; }
+        /* The poll's "+ Add option" + settings grouped in a panel card, matching the schedule/relay sections
+           (and the same in the modal + on the page). */
+        .poll-controls { display: flex; flex-direction: column; gap: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+        .poll-controls .add-opt { align-self: flex-start; }
+        .poll-settings { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+        .poll-settings .toggle { margin: 0; }
+        .modal-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; }
+        /* Zap modal */
+        .zap-head { align-items: flex-start; }
+        .zap-recipient { display: flex; align-items: center; gap: 10px; min-width: 0; }
+        .zap-recipient-id { display: flex; flex-direction: column; min-width: 0; }
+        .zap-recipient-name { font-weight: 600; }
+        .zap-recipient-addr { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .zap-hero-row { display: flex; align-items: baseline; justify-content: center; gap: 8px; margin: 18px 0 14px; }
+        .zap-hero {
+            width: 4.5em; max-width: 60%; text-align: right; border: none; background: transparent;
+            color: var(--accent); font: inherit; font-size: 44px; font-weight: 700; letter-spacing: -1px; padding: 0;
+            appearance: textfield;
+        }
+        .zap-hero::-webkit-outer-spin-button, .zap-hero::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        .zap-hero:focus { outline: none; }
+        .zap-hero-row .zap-unit { font-size: 18px; }
+        .zap-presets { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+        .zap-preset {
+            padding: 6px 14px; border-radius: 18px; border: 1px solid var(--border);
+            background: var(--panel); color: var(--text); font-weight: 600; cursor: pointer;
+        }
+        .zap-preset.active { border-color: var(--accent); color: var(--accent); }
+        .zap-unit { color: var(--muted); font-size: 13px; }
+        .zap-comment { width: 100%; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 14px; }
+        .zap-privacy { display: flex; gap: 6px; margin-top: 12px; }
+        .zap-priv {
+            flex: 1; padding: 7px 0; border-radius: 8px; border: 1px solid var(--border);
+            background: var(--panel); color: var(--muted); font-size: 13px; cursor: pointer;
+        }
+        .zap-priv.active { border-color: var(--accent); color: var(--accent); }
+        .zap-priv-hint { display: block; color: var(--muted); font-size: 12px; margin-top: 6px; }
+        .zap-confirm { background: var(--warn); }
+        /* Wallet page */
+        .wallet { padding: 24px 0 60px; }
+        .wallet-connect, .wallet-dash, .wallet-form { display: flex; flex-direction: column; gap: 14px; }
+        .wallet-connect { align-items: center; text-align: center; max-width: 340px; margin: 0 auto; min-height: calc(100vh - 200px); justify-content: center; }
+        .wallet-connect .enso { margin-bottom: 6px; }
+        .wallet-connect-title { font-size: 22px; font-weight: 600; margin: 0; }
+        .wallet-connect .wallet-input, .wallet-connect button { width: 100%; }
+        .wallet-privacy { color: var(--muted); font-size: 12px; margin: 2px 0 0; }
+        .wallet-hint { color: var(--muted); font-size: 14px; line-height: 1.55; margin: 0; }
+        .wallet-input { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; font-size: 14px; }
+        .wallet-toolbar { display: flex; justify-content: flex-end; }
+        .wallet-gear { background: none; border: none; color: var(--muted); padding: 4px; cursor: pointer; line-height: 0; }
+        .wallet-gear:hover { color: var(--accent); }
+        .wallet-balance-box { text-align: center; padding: 4px 16px 24px; }
+        .wallet-balance { font-size: 32px; font-weight: 700; letter-spacing: -0.5px; }
+        .wallet-addr { color: var(--muted); font-size: 14px; margin-top: 8px; word-break: break-all; }
+        .wallet-actions { display: flex; gap: 10px; }
+        .wallet-actions button { flex: 1; }
+        .wallet-disconnect { align-self: center; background: transparent; border: none; color: var(--muted); font-size: 13px; padding: 4px; }
+        .wallet-disconnect:hover { color: var(--warn); }
+        .wallet-back { align-self: flex-start; background: transparent; border: none; color: var(--muted); padding: 0; font-size: 14px; }
+        .wallet-back:hover { color: var(--text); }
+        .wallet-invoice { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }
+        .wallet-invoice[hidden] { display: none; }
+        .wallet-invoice-text { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); }
+        .wallet-activity { display: flex; flex-direction: column; }
+        .wallet-empty { color: var(--muted); font-size: 14px; text-align: center; padding: 22px 12px; }
+        .wallet-day { font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); margin: 16px 0 2px; }
+        .wallet-day:first-child { margin-top: 2px; }
+        .wallet-tx { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-bottom: 1px solid var(--border); }
+        .wallet-tx:last-child { border-bottom: none; }
+        .wallet-tx > .avatar { flex: none; }
+        .wallet-tx-name { color: var(--text); }
+        .wallet-tx-dir { flex: none; width: 20px; text-align: center; font-size: 13px; }
+        .wallet-tx-dir.in { color: var(--good); }
+        .wallet-tx-dir.out { color: var(--muted); }
+        .wallet-tx-label { flex: 1; min-width: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .wallet-tx-time { color: var(--muted); }
+        .wallet-tx-amt { flex: none; font-variant-numeric: tabular-nums; font-weight: 600; font-size: 14px; }
+        .wallet-tx-amt.in { color: var(--good); }
+        .wallet-tx-amt.out { color: var(--text); }
+        .compose-status { color: var(--muted); font-size: 13px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .attach-btn { display: inline-flex; align-items: center; justify-content: center; padding: 8px; line-height: 0; }
+        .attach-btn[hidden] { display: none; }
+        .cw-btn.active { color: var(--warn); border-color: var(--warn); }
+        .cw-row { margin-top: 8px; }
+        .cw-row[hidden] { display: none; }
+        .cw-reason-input { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--warn); background: var(--bg); color: var(--text); font: inherit; font-size: 14px; }
+        .cw-badge { color: var(--warn); font-size: 13px; margin-bottom: 10px; }
+        /* Live note preview in the composer - timeline-style, no actions. */
+        .compose-preview { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 16px; }
+        .compose-preview[hidden], .compose-preview:empty { display: none; } /* hidden until the server swaps a preview in */
+        .preview-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
+        .preview-note { margin: 0; padding: 0; border: none; content-visibility: visible; animation: none; }
+        .preview-note .media, .preview-note .gallery-media { max-height: 32vh; } /* preview-sized, not the main event */
+        /* @mention autocomplete in the composer */
+        .mention-box { margin-top: 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); max-height: 240px; overflow-y: auto; }
+        .mention-box[hidden] { display: none; }
+        .mention-opt { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: none; border: none; padding: 8px 10px; color: var(--text); font-size: 14px; cursor: pointer; }
+        .mention-opt.active, .mention-opt:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+        .mention-opt-name { font-weight: 600; }
+        .mention-opt-nip05 { color: var(--muted); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .emoji-glyph { font-size: 18px; width: 22px; text-align: center; flex: none; line-height: 1; }
+        .emoji-box .mention-opt-name { color: var(--muted); font-weight: 400; }
+        .upload-server { width: 230px; max-width: 60%; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
+        .compose-status.err { color: var(--err); }
+        .toast {
+            position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(8px);
+            background: var(--panel); border: 1px solid var(--border); color: var(--text);
+            padding: 10px 16px; border-radius: 10px; font-size: 14px; z-index: 40; max-width: 90vw;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45); opacity: 0; pointer-events: none;
+            transition: opacity 0.2s, transform 0.2s;
+        }
+        .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+        .toast.err { border-color: var(--err); color: var(--err); }
+        /* Undo-window toast: needs clicks (the base toast is pointer-events:none). */
+        .undo-toast { display: flex; align-items: center; gap: 14px; pointer-events: auto; }
+        /* Zap-success toast: shows, holds, then fades itself out (no dismiss button). It
+           lingers invisible in #modal until the next modal action swaps it away. */
+        .toast.zap-toast { animation: zap-toast-life 3.4s ease forwards; }
+        @keyframes zap-toast-life {
+            0% { opacity: 0; transform: translateX(-50%) translateY(8px); }
+            7% { opacity: 1; transform: translateX(-50%) translateY(0); }
+            85% { opacity: 1; transform: translateX(-50%) translateY(0); }
+            100% { opacity: 0; transform: translateX(-50%) translateY(8px); visibility: hidden; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .toast.zap-toast { animation-name: zap-toast-fade; }
+            @keyframes zap-toast-fade { 0%, 85% { opacity: 1; } 100% { opacity: 0; visibility: hidden; } }
+        }
+        /* An optimistic (not-yet-published) reply in a thread: gently quieted in its
+           natural thread position, while its "Posting in Ns… Undo" pill floats fixed
+           at the viewport so it's reachable even when the card is scrolled off-screen.
+           `content-visibility: visible` overrides the .note default (`auto`) so the
+           off-screen card still renders AND so it stops containing its fixed child
+           (`auto` implies paint containment = a containing block that would trap it).
+           `animation: none` stops the 1s self-poll re-render from replaying inkfade. */
+        .note.pending { opacity: 0.72; content-visibility: visible; animation: none; }
+        .post-pending {
+            position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+            z-index: 40; pointer-events: auto; margin: 0; max-width: 90vw;
+            display: flex; align-items: center; gap: 14px;
+            background: var(--panel); border: 1px solid var(--border); color: var(--text);
+            padding: 10px 16px; border-radius: 10px; font-size: 14px;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+        }
+        .status { color: var(--muted); font-size: 13px; margin: 10px 0; }
+        .tabs { display: flex; gap: 4px; margin: 0; }
+        .tab {
+            padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border);
+            background: transparent; color: var(--muted); font-weight: 600; cursor: pointer; font-size: 14px;
+        }
+        .tab.active { color: var(--text); border-color: var(--accent); background: var(--panel); }
+        /* Note actions - six quiet ink glyphs spread across the row; accent on
+           hover/active. No counts (a network, not a scoreboard). */
+        .icon { display: block; }
+        .note-actions {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; margin-top: 12px;
+        }
+        /* The action buttons cluster (left), tightened to ~340px; reply faces sit to its right. */
+        .note-acts { display: flex; align-items: center; justify-content: space-between; flex: 0 1 340px; }
+        /* "Who's talking": overlapping replier avatars (follows-first) + a numberless "+", linking
+           into the conversation. People, not a count. */
+        .reply-faces { display: inline-flex; align-items: center; flex: none; text-decoration: none; }
+        .reply-faces .avatar { margin-left: -8px; box-shadow: 0 0 0 2px var(--bg); }
+        .reply-faces .avatar:first-child { margin-left: 0; }
+        .reply-faces-more { margin-left: 4px; font-size: 13px; color: var(--muted); line-height: 1; }
+        /* Empty face placeholder (carries the stable id for the lazy hydrate to OOB-swap) + the one-shot
+           hydrate trigger <li> - both take no space until/unless filled. */
+        .reply-faces-slot, .faces-hydrate { display: none; }
+        .note-act {
+            background: none; border: none; padding: 0; cursor: pointer;
+            color: var(--muted); line-height: 0; transition: color 0.15s ease, transform 0.1s ease;
+        }
+        .note-act:hover { color: var(--text); }
+        .note-act:active { transform: scale(0.88); }
+        .note-act.like:hover, .note-act.like.active,
+        .note-act.pin:hover, .note-act.pin.active,
+        .note-act.bookmark:hover, .note-act.bookmark.active { color: var(--accent); }
+        .note-act.mute:hover, .note-act.mute.active { color: var(--accent); }
+        /* NIP-11 relay identity: the relay's self-declared name + auth/paid capability chips on
+           settings rows, and a truncated description beside the relay-timeline bar's name. */
+        .relay-inf { font-size: 0.82em; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
+        .relay-badge { font-size: 0.72em; color: var(--muted); border: 1px solid var(--border, currentColor); border-radius: 8px; padding: 0 6px; line-height: 1.5; white-space: nowrap; }
+        .relay-badge.warn { color: var(--danger, #c0392b); border-color: currentColor; }
+        .relay-bar-desc { font-size: 0.85em; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; margin: 0 8px; }
+        /* The real host stays visible beside a relay's self-declared NIP-11 name (anti-spoofing). */
+        .relay-bar-host, .relay-pick-host { font-size: 0.8em; color: var(--muted); white-space: nowrap; }
+        /* NIP-09 delete (own posts): quiet glyph; armed confirm shows delete + keep side by side.
+           `deleted` is the inert post-delete state - the card itself drops on the next load. */
+        .note-act.delete:hover, .note-act.delete.active { color: var(--danger, #c0392b); }
+        .del-confirm { display: inline-flex; align-items: center; gap: 7px; }
+        .note-act.delete.deleted { color: var(--muted); cursor: default; }
+        /* Emoji reactions (opt-in): a one-click heart + a small smiley that reveals a curated palette
+           popover (hidden-checkbox toggle, zero-JS - same idiom as the compose toggles). No counts. */
+        .act-form.react { position: relative; display: inline-flex; align-items: center; gap: 7px; }
+        .react-toggle { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+        .react-toggle:checked ~ .react-more { color: var(--accent); }
+        /* The reveal checkbox is invisible but still a keyboard tab-stop; show focus on its visible label. */
+        .react-toggle:focus-visible ~ .react-more { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+        .react-emoji { font-size: 15px; line-height: 1; }
+        .react-palette {
+            display: none; position: absolute; bottom: calc(100% + 6px); left: -6px; z-index: 6;
+            gap: 2px; padding: 4px 6px; background: var(--bg);
+            border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.16);
+        }
+        .react-toggle:checked ~ .react-palette { display: inline-flex; }
+        .react-opt {
+            background: none; border: none; cursor: pointer; font-size: 18px; line-height: 1;
+            padding: 4px 6px; border-radius: 8px; transition: background 0.12s ease, transform 0.1s ease;
+        }
+        .react-opt:hover { background: var(--border); }
+        .react-opt:active { transform: scale(0.9); }
+        /* Custom (NIP-30) emoji in the picker + on the reacted button: sized to sit with the unicode set. */
+        .react-opt .emoji { width: 20px; height: 20px; vertical-align: middle; }
+        /* width:max-content keeps the popover sized to its content (a horizontal row) - WITHOUT it, an
+           absolutely-positioned flex container with flex-wrap collapses to the narrow parent's width and
+           wraps every emoji onto its own line (vertical). max-width then caps it so a big custom set wraps
+           into a tidy grid instead of one endless row. */
+        .react-palette { flex-direction: row; flex-wrap: wrap; width: max-content; max-width: 240px; }
+        .note-act.like .emoji { width: 17px; height: 17px; vertical-align: middle; }
+        /* Optimistic reaction feedback (h-optimistic adds .reacting on submit, before the relay round-trip).
+           Pick: collapse the picker + seal the smiley with the accent. Retract: empty the heart at once.
+           The response swap replaces the whole form with the real state; an h:error reverts .reacting. */
+        .act-form.react.reacting .react-palette { display: none; }
+        .act-form.react.reacting .react-more { color: var(--accent); }
+        .act-form.react.reacting .note-act.like.active { color: var(--muted); }
+        /* Reply/quote you've already engaged with: a filled glyph in text color -
+           visible (not muted) but quieter than the accent of like/bookmark/pin. The
+           icon ships filled (icon(name, true)); this lifts it out of the muted gray. */
+        .note-act.reply.engaged, .note-act.quote-act.engaged { color: var(--text); }
+        /* Reply-presence dot at the reply glyph's corner = "this note has a conversation". No count.
+           `.convo-net` (a follow is in it) is the accent. Composes with .engaged + the right-side faces. */
+        .note-act.reply.convo { position: relative; }
+        .note-act.reply.convo::after {
+            content: ""; position: absolute; top: -1px; right: -3px;
+            width: 6px; height: 6px; border-radius: 50%;
+            background: var(--muted); pointer-events: none;
+        }
+        .note-act.reply.convo-net::after { background: var(--accent); }
+        /* Active fills the glyph via CSS (not just the server-rendered fill attr),
+           so an optimistic `.active` toggle flips outline→filled instantly. */
+        .note-act.active .icon { fill: currentColor; }
+        /* Optimistic action buttons stay solid while their request is in flight -
+           the optimistic flip IS the feedback, so the default in-flight disable
+           (button:disabled{opacity:.5}) shouldn't dim them. Disable still blocks
+           double-clicks; nip07's "Signing…" toast covers the slower pending case. */
+        .act-form button:disabled { opacity: 1; }
+        .note-act.zap:hover, .note-act.zap.active { color: var(--warn); }
+        /* Recipient has no lightning address - a quiet, non-inviting button. */
+        .note-act.zap.unavailable { opacity: 0.3; cursor: default; }
+        .note-act.zap.unavailable:hover { color: var(--muted); }
+        .note-act.zap.unavailable:active { transform: none; }
+        /* Polls (NIP-88) - a ballot until you vote/it ends, then result bars.
+           Results are gated behind participation (no passive scoreboard). */
+        .poll { display: flex; flex-direction: column; gap: 6px; max-width: 460px; margin: 12px 0 4px; }
+        .poll-option {
+            display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+            background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
+            padding: 10px 12px; color: var(--text); font-size: 14px; font-weight: 400; cursor: pointer;
+            transition: border-color 0.15s ease;
+        }
+        .poll-option:hover, .poll-option.selected { border-color: var(--accent); }
+        .poll-mark { color: var(--muted); line-height: 1; }
+        .poll-option.selected .poll-mark { color: var(--accent); }
+        .poll-vote { align-self: flex-start; margin-top: 2px; padding: 8px 18px; font-size: 14px; }
+        .poll-result {
+            position: relative; display: flex; align-items: center; gap: 8px; overflow: hidden;
+            padding: 9px 12px; border-radius: 9px; border: 1px solid var(--border); font-size: 14px;
+        }
+        .poll-bar-fill {
+            position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+            background: color-mix(in srgb, var(--accent) 16%, transparent); transition: width 0.5s ease;
+        }
+        .poll-result.mine .poll-bar-fill { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+        .poll-result-label { position: relative; flex: 1; }
+        .poll-result.mine .poll-result-label { font-weight: 600; }
+        .poll-pct { position: relative; color: var(--muted); font-variant-numeric: tabular-nums; }
+        .poll-meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+        /* Optimistic vote: clicking flips `.voting` on the poll box → hide the ballot
+           forms, show a "tallying…" pending line, until the server swaps in results
+           (which carry neither forms nor pending, so the stuck class is harmless).
+           An h:error (failed/rejected vote) reverts `.voting` → the ballot returns. */
+        .poll-pending { display: none; color: var(--muted); font-size: 14px; padding: 10px 2px; }
+        .poll.voting .poll-opt-form, .poll.voting .poll-multi { display: none; }
+        .poll.voting .poll-pending { display: block; }
+        .err { color: var(--err); }
+        /* Media gallery - a horizontal scroll-snap carousel for 2+ media items.
+           Uniform cropped tiles with the next peeking; tap → full-screen viewer. */
+        .gallery-wrap { position: relative; margin: 10px 0 4px; }
+        .gallery {
+            display: flex; gap: 8px; overflow-x: auto; scroll-snap-type: x mandatory;
+            border-radius: 12px; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+        }
+        .gallery::-webkit-scrollbar { display: none; }
+        .gallery-tile {
+            position: relative; flex: 0 0 82%; aspect-ratio: 4 / 5;
+            scroll-snap-align: start; border-radius: 12px; overflow: hidden;
+            background: var(--panel); cursor: pointer;
+        }
+        .gallery-media { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .gallery-play {
+            position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+            color: #fff; pointer-events: none;
+        }
+        .gallery-play .icon { width: 30px; height: 30px; padding: 13px; border-radius: 50%; background: rgba(0,0,0,0.55); box-sizing: content-box; }
+        .gallery-count {
+            position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.6); color: #fff; font-size: 12px;
+            padding: 3px 9px; border-radius: 9px; pointer-events: none;
+        }
+        .gallery-nav {
+            position: absolute; top: 50%; transform: translateY(-50%); z-index: 2;
+            width: 34px; height: 34px; border-radius: 50%; border: none; padding: 0; cursor: pointer;
+            background: rgba(0,0,0,0.55); color: #fff; font-size: 22px; line-height: 1;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .gallery-nav[hidden] { display: none; } /* explicit display beats the [hidden] UA rule */
+        .gallery-nav:hover { background: rgba(0,0,0,0.75); }
+        .gallery-nav.prev { left: 8px; }
+        .gallery-nav.next { right: 8px; }
+        /* Full-screen media viewer. Zero-JS: opened via `:target` on a slide
+           (the tile is an `#id` link); the overlay shows while any of its slides
+           is targeted (`:has(:target)`), and the browser scroll-snaps to it -
+           native swipe + the per-slide ‹ › links page between items. No app JS. */
+        /* The <li> that hosts a note's hoisted lightbox overlays - display:contents so it
+           generates no box (no layout/containment), keeping the fixed overlay behaving as
+           if a direct child of the feed, while the markup stays valid (<li> under <ul>). */
+        .lightbox-host { display: contents; }
+        .lightbox { position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,0.93); display: none; }
+        .lightbox:has(.lightbox-slide:target) { display: flex; }
+        .lightbox-strip { flex: 1; display: flex; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+        .lightbox-strip::-webkit-scrollbar { display: none; }
+        .lightbox-slide { position: relative; flex: 0 0 100%; scroll-snap-align: center; display: flex; align-items: center; justify-content: center; padding: 24px; }
+        .lightbox-backdrop { position: absolute; inset: 0; z-index: 0; cursor: zoom-out; }
+        .lightbox-media { position: relative; z-index: 1; max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; }
+        .lightbox-nav {
+            position: absolute; top: 50%; transform: translateY(-50%); z-index: 2;
+            width: 44px; height: 44px; display: flex; align-items: center; justify-content: center;
+            border-radius: 50%; background: rgba(0,0,0,0.5); color: #fff; font-size: 26px; text-decoration: none;
+        }
+        .lightbox-nav.prev { left: 14px; } .lightbox-nav.next { right: 14px; }
+        .lightbox-count {
+            position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+            color: #fff; background: rgba(0,0,0,0.5); padding: 4px 11px; border-radius: 10px; font-size: 13px; pointer-events: none;
+        }
+        .lightbox-close {
+            position: fixed; top: 14px; right: 16px; z-index: 51; width: 40px; height: 40px;
+            border-radius: 50%; border: none; background: rgba(0,0,0,0.5); color: #fff; font-size: 18px; cursor: pointer;
+            display: flex; align-items: center; justify-content: center; text-decoration: none;
+        }
+        .bar {
+            display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px;
+            position: sticky; top: 0; z-index: 10; background: var(--bg);
+            padding: 9px 20px; margin: 0 -20px;
+        }
+        .bar-right { display: flex; align-items: center; gap: 8px; justify-self: end; }
+        .avatar {
+            width: 38px; height: 38px; border-radius: 50%; object-fit: cover;
+            flex: none; border: 1px solid var(--border);
+        }
+        .avatar-sm { width: 30px; height: 30px; }
+        .avatar-lg { width: 64px; height: 64px; }
+        .avatar-blank { display: inline-block; }
+        .clickable { cursor: pointer; }
+        .note.focused { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+        /* Threaded replies: indent (inline margin-left) + a left thread line. */
+        .note.reply-nested { border-left: 2px solid var(--border); }
+        .continue-thread { list-style: none; padding: 12px 0; color: var(--accent); font-size: 13px; cursor: pointer; }
+        .continue-thread:hover { text-decoration: underline; }
+        .profile-header { padding: 20px 0 22px; border-bottom: 1px solid var(--border); }
+        /* NIP-24 wide banner above the profile (proxied via /media). */
+        .profile-banner { width: 100%; height: 140px; object-fit: cover; display: block; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); margin-bottom: 16px; }
+        /* With a banner, overlap the avatar so its vertical center sits on the banner's
+           bottom edge (avatar-lg is 84px → pull up half = 42px); the row shrinks, so
+           everything below rises with it. A bg-colored ring separates it from the image. */
+        .profile-header.has-banner .profile-banner { margin-bottom: 0; }
+        .profile-header.has-banner .avatar-lg { margin-top: -42px; border: 4px solid var(--bg); background: var(--bg); }
+        .profile-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+        .profile-header .avatar-lg { width: 84px; height: 84px; }
+        /* The profile subject's name is primary text (not an accent "link"). */
+        .profile-name { margin-top: 14px; }
+        .profile-name .author { color: var(--text); font-size: 23px; font-weight: 600; cursor: default; }
+        .profile-name .badge { vertical-align: middle; }
+        .profile-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; margin-top: 5px; }
+        .profile-nip05 { color: var(--muted); font-size: 14px; }
+        .profile-nip05:empty { display: none; }
+        .profile-meta .copy-npub { margin: 0; }
+        /* NIP-24 bot self-declaration + website link. */
+        .profile-website { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px; color: var(--accent); font-size: 14px; text-decoration: none; word-break: break-all; }
+        .profile-website:hover { text-decoration: underline; }
+        .profile-website .icon { width: 14px; height: 14px; flex: none; opacity: 0.8; }
+        .profile-about { margin-top: 14px; white-space: pre-wrap; word-break: break-word; color: var(--text); line-height: 1.55; }
+        .profile-actions { display: flex; gap: 10px; flex: none; }
+        .edit-profile-btn {
+            display: inline-block; text-decoration: none;
+            padding: 8px 20px; background: transparent; color: var(--text);
+            border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font-weight: 600;
+        }
+        .edit-profile-btn:hover { border-color: var(--accent); }
+        /* Edit-profile modal */
+        /* Stack body above the foot - overriding the global `form{display:flex}`
+           (which would put the Save button beside the fields). */
+        .profile-edit-form { flex-direction: column; align-items: stretch; }
+        .profile-edit-body { display: flex; flex-direction: column; gap: 12px; padding: 2px 6px 2px 2px; max-height: 68vh; overflow-y: auto; }
+        .profile-edit-avatar { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-bottom: 4px; }
+        .profile-edit-avatar .avatar-lg { border: 1px solid var(--border); background: var(--panel); }
+        .bio-input { resize: vertical; min-height: 62px; font-family: inherit; line-height: 1.5; }
+        .follow-btn { padding: 8px 22px; }
+        .follow-btn.following { background: transparent; color: var(--text); border-color: var(--border); }
+        .follow-btn.following:hover { border-color: var(--err); color: var(--err); } /* hints "unfollow" */
+        .mute-btn { padding: 8px 16px; }
+        .mute-btn.muted { border-color: var(--accent); color: var(--accent); }
+        /* Dual labels: show the off-label by default, the on-label when the state
+           class is set - so an optimistic class toggle flips the text instantly. */
+        .follow-btn .label-on, .mute-btn .label-on { display: none; }
+        .follow-btn.following .label-off, .mute-btn.muted .label-off { display: none; }
+        .follow-btn.following .label-on, .mute-btn.muted .label-on { display: inline; }
+        /* Muted-list rows: avatar + name, unmute pushed right. */
+        .mute-row { display: flex; align-items: center; gap: 10px; padding: 12px 4px; border-bottom: 1px solid var(--border); overflow: hidden; max-height: 140px; transition: max-height .28s ease, opacity .18s ease, padding .28s ease, border-color .28s ease; }
+        .mute-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+        .mute-row .mute-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .mute-nip05 { font-size: 12px; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        /* Muted page: the state button reads "Unmute" (clear action, red) while muted;
+           after you unmute it reverts to the normal "Mute" toggle. Scoped to .mute-row. */
+        .mute-row .mute-btn { position: relative; min-width: 78px; text-align: center; }
+        .mute-row .mute-btn.muted .label-on { visibility: hidden; }
+        .mute-row .mute-btn.muted::after { content: 'Unmute'; position: absolute; inset: 0; display: grid; place-items: center; color: var(--err); }
+        /* Optimistic unmute: clicking "Unmute" toggles the .muted class off (h-optimistic),
+           so the row collapses on the spot; the server's reconcile swap keeps the button
+           un-muted, and an h:error springs the class (and the row) back. No JS, no route change. */
+        .mute-row:has(.mute-btn:not(.muted)) { max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0; border-bottom-color: transparent; pointer-events: none; }
+        /* The muted count lives in the header bar (chrome titleCount, OOB-refreshed on unmute), not
+           an in-list row; rows still collapse via the :has() rule above. */
+        .mute-list { display: flex; flex-direction: column; }
+        /* Bookmarks page: the same optimistic-collapse idea as mutes, but for the shared (variable-height)
+           note/article card. Un-bookmarking flips the glyph's .active off (h-optimistic); the reconcile
+           swap keeps it un-filled. We collapse via grid-template-rows 1fr->0fr (smooth at ANY height,
+           unlike max-height) by treating the card's own <li> as a 2-col grid (avatar | body) with one
+           collapsing row. Scoped to #list-10003 so feed/thread cards keep their flex layout untouched. */
+        #list-10003 > li.note { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 13px; grid-template-rows: 1fr; transition: grid-template-rows .32s ease, opacity .22s ease, padding .32s ease; }
+        #list-10003 > li.note > * { min-width: 0; overflow: hidden; }
+        #list-10003 > li.note:has(.note-act.bookmark:not(.active)) { grid-template-rows: 0fr; opacity: 0; padding-top: 0; padding-bottom: 0; pointer-events: none; }
+        #list-10003 > li.note:has(.note-act.bookmark:not(.active)) > * { min-height: 0; }
+        .feed { list-style: none; padding: 0; margin: 0; }
+        /* The clearing's top border is a DIVIDER between notes and the clearing. When the clearing stands
+           alone (caught up, no notes above), that line is a redundant rule right under the header - drop it. */
+        .feed > .caught-up:only-child { border-top: none; }
+        /* Ensō "clear the timeline" - a sumi-e ink-wash dispersal: the notes soften
+           and lighten as if ink dissolving into water. */
+        .feed.clearing { opacity: 0; filter: blur(12px); transition: opacity 0.8s ease, filter 0.8s ease; }
+        .note {
+            position: relative;
+            display: flex; gap: 13px; padding: 22px 20px; margin: 0 -20px;
+            /* Separator is a soft, inset whisper (below) rather than a full-bleed rule. */
+            /* Skip render/layout/paint for off-screen notes - buttery scroll as
+               the timeline grows. `auto` remembers each note's real height. */
+            content-visibility: auto;
+            contain-intrinsic-size: auto 150px;
+            animation: inkfade 0.45s ease both; /* gentle ink-wash entrance */
+        }
+        /* A faint hairline, inset to the content edges (not full-bleed) - present
+           enough to divide posts, quiet enough to stay calm. */
+        .note::after {
+            content: ''; position: absolute; left: 20px; right: 20px; bottom: 0; height: 1px;
+            background: color-mix(in srgb, var(--border) 55%, transparent);
+        }
+        @keyframes inkfade { from { opacity: 0; } to { opacity: 1; } }
+        @media (prefers-reduced-motion: reduce) { .note { animation: none; } }
+        .sentinel { height: 1px; }
+        .note:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+        .note-body { flex: 1; min-width: 0; }
+        .note-head { display: flex; align-items: baseline; gap: 8px; font-size: 12px; margin-bottom: 4px; }
+        .note-head .author { margin-right: auto; } /* author takes the slack; time pushes right */
+        .author { color: var(--accent); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .badge {
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 14px; height: 14px; margin-left: 5px; border-radius: 50%;
+            background: var(--accent); color: var(--bg); font-size: 9px; font-weight: 800;
+            vertical-align: middle; line-height: 1; cursor: default;
+        }
+        .time { color: var(--muted); white-space: nowrap; flex: none; }
+        /* A gift-wrapped private reply: a quiet lock right after the author's name (ties the privacy to
+           the identity). Accent-tinted so it reads as "only you and the author see this", not a warning.
+           In a note-head the lock takes the auto slack (instead of .author), so name+lock sit together
+           on the left and the timestamp still pushes right. */
+        .private-mark { display: inline-flex; align-items: center; flex: none; color: var(--accent); opacity: 0.7; }
+        .private-mark .icon { width: 13px; height: 13px; }
+        .note-head .author:has(+ .private-mark) { margin-right: 0; }
+        .note-head .private-mark { margin-right: auto; align-self: center; }
+        /* Timestamp doubles as the "open thread" affordance: a muted conversation
+           glyph rides after the time; the whole thing is one link to /t/<nevent>. */
+        .time-thread { display: inline-flex; align-items: center; gap: 5px; text-decoration: none; }
+        .time-thread .icon { width: 14px; height: 14px; opacity: 0.5; transition: opacity 0.15s ease; }
+        .time-thread:hover { color: var(--text); }
+        .time-thread:hover .icon, .time-thread:focus-visible .icon { opacity: 1; }
+        /* Search page: the form reuses the global row flex (input + button). */
+        /* Top gap matches the feed's first-note offset (note padding-top: 22px) so the
+           header→search spacing equals the header→first-post spacing on a timeline. */
+        .search-form { margin: 22px 0 18px; }
+        .search-input { flex: 1; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font-size: 15px; }
+        .search-go { flex: none; padding: 0 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--muted); cursor: pointer; display: flex; align-items: center; }
+        .search-go:hover { color: var(--text); }
+        .search-hint { text-align: center; padding: 24px 0; }
+        .search-empty { padding: 40px 16px; }
+        .search-quote { font-size: 15px; font-style: italic; color: var(--text); margin: 0 auto; line-height: 1.5; }
+        /* Quote marks (like the feed's .empty line) so it reads as a quotation; .search-quote is only ever a quote. */
+        .search-quote::before { content: '\201C'; }
+        .search-quote::after { content: '\201D'; }
+        .search-noresults { font-size: 13px; color: var(--muted); margin-top: 12px; }
+        .search-ops { font-size: 12px; color: var(--muted); margin-top: 18px; opacity: 0.8; } /* operator hint on the seek state */
+        /* Shared CSS-only tabs (radio hack): radios are off-screen but focusable
+           (native arrow-key nav), labels are the visible tabs, :checked drives the
+           panels. Visual is generic (.tab*); each instance adds id-specific show /
+           active rules below (panels must be later siblings of the radios). */
+        /* (namespaced .tabset-* - a generic .tabs/.tab already exists elsewhere) */
+        .tabset { position: relative; }
+        .tabset-radio { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+        .tabset-list { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 14px; flex-wrap: wrap; }
+        .tabset-tab { padding: 9px 14px; margin-bottom: -1px; cursor: pointer; color: var(--muted); font-weight: 600; font-size: 14px; text-decoration: none; border-bottom: 2px solid transparent; display: inline-flex; align-items: center; gap: 6px; }
+        .tabset-count { font-size: 12px; color: var(--muted); background: color-mix(in srgb, var(--text) 8%, transparent); border-radius: 9px; padding: 1px 7px; }
+        .tabset-panel { display: none; }
+        /* Search tabs instance */
+        #stab-people:checked ~ .panel-people,
+        #stab-notes:checked ~ .panel-notes { display: block; }
+        #stab-people:checked ~ .tabset-list label[for="stab-people"],
+        #stab-notes:checked ~ .tabset-list label[for="stab-notes"] { color: var(--text); border-bottom-color: var(--accent); }
+        #stab-people:focus-visible ~ .tabset-list label[for="stab-people"],
+        #stab-notes:focus-visible ~ .tabset-list label[for="stab-notes"] { outline: 2px solid var(--accent); outline-offset: 2px; }
+        /* Settings tabs instance: one URL per tab (link-driven, not radio-driven). Only the active
+           tab's panel is rendered server-side, so it just needs to show; the active tab is the
+           <a class="tabset-tab active">, the tab links are real anchors so :focus-visible is theirs. */
+        .settings-page .tabset-panel { display: block; }
+        .settings-page .tabset-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+        .settings-page .tabset-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+        /* Relays tab: a left sub-nav (four relay purposes) + the active pane. Stacks on narrow screens. */
+        .relays-two-pane { display: grid; grid-template-columns: 136px 1fr; gap: 22px; align-items: start; }
+        .relay-nav { display: flex; flex-direction: column; gap: 2px; position: sticky; top: 12px; }
+        .relay-nav-item { padding: 8px 12px; border-radius: 8px; font-size: 14px; color: var(--muted); text-decoration: none; }
+        .relay-nav-item:hover { background: var(--panel); color: var(--text); }
+        .relay-nav-item.active { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font-weight: 600; }
+        .relay-nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+        .relay-pane { min-width: 0; }
+        .relay-pane > section:first-child { margin-top: 0; }
+        @media (max-width: 640px) {
+          .relays-two-pane { grid-template-columns: 1fr; gap: 12px; }
+          .relay-nav { flex-direction: row; flex-wrap: wrap; position: static; gap: 6px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+        }
+        .search-people { list-style: none; padding: 0; margin: 0; }
+        .search-person { border-bottom: 1px solid var(--border); }
+        .search-person-link { display: flex; gap: 12px; align-items: flex-start; padding: 12px 2px; text-decoration: none; color: inherit; }
+        .search-person-link:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+        .search-person-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+        .search-person-name { font-weight: 600; color: var(--text); }
+        .search-person-nip05 { font-size: 13px; color: var(--accent); }
+        .search-person-about { font-size: 13px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .content { white-space: pre-wrap; word-break: break-word; }
+        /* NIP-30 custom emoji: inline :shortcode: images sized to the line, in note/
+           comment bodies and profile names/about. Proxied via /media like all images. */
+        .emoji { height: 1.25em; width: auto; vertical-align: -0.2em; display: inline-block; margin: 0 1px; object-fit: contain; }
+        /* Collapse long (text-heavy) notes: clamp height + fade + Show more/less.
+           Zero-JS via a hidden checkbox whose label is the toggle (no pixel
+           measuring - the server clamps notes it estimates are tall by text). */
+        .clamp { position: relative; }
+        .clamp-toggle { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+        .clamp-inner { position: relative; overflow: hidden; }
+        .clamp:not(:has(.clamp-toggle:checked)) .clamp-inner { max-height: 340px; }
+        .clamp:not(:has(.clamp-toggle:checked)) .clamp-inner::after {
+            content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 60px;
+            background: linear-gradient(transparent, var(--bg)); pointer-events: none;
+        }
+        .show-more { display: block; color: var(--accent); font-size: 13px; cursor: pointer; padding: 8px 0 0; }
+        .show-more:hover { text-decoration: underline; }
+        .show-more::before { content: 'Show more'; }
+        .clamp-toggle:checked ~ .show-more::before { content: 'Show less'; }
+        /* Full collapse (collapse()): toggle on top, content hidden until checked. Reuses .show-more
+           styling for the label; the content reveals BELOW the toggle so the button stays anchored to
+           whatever precedes it (e.g. a podcast player). */
+        .collapse-toggle { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+        .collapse-inner { display: none; }
+        .collapse-toggle:checked ~ .collapse-inner { display: block; }
+        .collapse-toggle:checked ~ .collapse-label::before { content: 'Show less'; }
+        .content a, .quote-text a { color: var(--accent); text-decoration: none; word-break: break-all; }
+        .content a:hover, .quote-text a:hover { text-decoration: underline; }
+        .media {
+            display: block; width: 100%; height: auto; max-height: 65vh; margin-top: 8px;
+            border-radius: 10px; border: 1px solid var(--border);
+            object-fit: contain; background: var(--panel);
+        }
+        /* Podcast audio: native control bar, NOT .media - .media's height:auto + object-fit
+           are for img/video and collapse an <audio> widget's UA-default bar height to nothing.
+           Let the native bar keep its own height; we only set width + a calm margin. */
+        .audio-player { display: block; width: 100%; margin-top: 8px; margin-bottom: 12px; }
+        /* NIP-68 picture location: a quiet dateline under the image, never a scoreboard. */
+        .picture-loc { color: var(--muted); font-size: 0.85em; margin-top: 6px; }
+        /* NIP-99 classified listing: price-forward meta, a sold badge, an image strip, a contact CTA. */
+        .listing-meta { margin-top: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+        .listing-price { font-size: 1.15em; font-weight: 600; color: var(--accent); }
+        .listing-loc { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 0.95em; }
+        .listing-loc .icon { width: 15px; height: 15px; }
+        .listing-sold { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--err); border: 1px solid var(--err); border-radius: 999px; padding: 2px 9px; }
+        .listing-contact { display: inline-block; margin: 2px 0 16px; padding: 8px 16px; border-radius: 999px; background: var(--accent); color: var(--bg); text-decoration: none; font-size: 14px; font-weight: 500; }
+        .listing-contact:hover { opacity: 0.9; }
+        /* Declarative engine: generic label:value field lines (calendar's meta, generalized). */
+        .field-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+        .field { display: flex; gap: 8px; font-size: 0.95em; }
+        .field-label { color: var(--muted); flex-shrink: 0; }
+        .field-value { color: var(--text); min-width: 0; word-break: break-word; }
+        /* NIP-84 highlight card: the quoted passage leads (a serif blockquote with the vermilion rule),
+           then a small muted source citation. The passage IS the content, so it sits first, not under a label. */
+        .hl-quote { margin: 0; padding: 2px 0 2px 16px; border-left: 3px solid var(--accent); font-family: var(--serif); font-size: 1.12em; line-height: 1.5; white-space: pre-wrap; color: var(--text); }
+        .hl-mark { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--text); padding: 0 2px; border-radius: 2px; }
+        /* NIP-84 `comment`: the highlighter's words above the quoted passage (quote-repost shape). */
+        .hl-comment { margin-bottom: 8px; white-space: pre-wrap; }
+        .hl-cite { margin-top: 8px; font-size: 0.85em; color: var(--muted); }
+        .hl-cite a { color: var(--muted); }
+        .hl-cite a:hover { color: var(--accent); }
+        /* NIP-52 calendar event when/where: icon + text lines, sitting under the title as the payload. */
+        .cal-meta { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; }
+        .cal-line { display: flex; align-items: flex-start; gap: 8px; font-size: 0.95em; }
+        .cal-line .icon { flex-shrink: 0; margin-top: 1px; color: var(--muted); }
+        /* Calendar actions: RSVP (Going/Maybe/Can't go) + an Add-to-calendar link. Calm, not a scoreboard. */
+        .cal-actions { margin-top: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+        .rsvp-buttons { display: flex; gap: 6px; }
+        .rsvp-form { display: contents; }
+        .rsvp-btn {
+            cursor: pointer; padding: 6px 14px; border-radius: 999px; font: inherit; font-size: 13px;
+            background: var(--panel); border: 1px solid var(--border); color: var(--text);
+        }
+        .rsvp-btn:hover { border-color: var(--accent); }
+        .rsvp-btn.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+        .rsvp-count { font-variant-numeric: tabular-nums; opacity: 0.65; }
+        .rsvp-count::before { content: '·'; margin: 0 5px; opacity: 0.6; }
+        .rsvp-accepted.active { border-color: var(--ok, var(--accent)); background: color-mix(in srgb, var(--ok, var(--accent)) 16%, transparent); color: var(--ok, var(--accent)); }
+        .cal-ics { color: var(--muted); font-size: 13px; text-decoration: none; border-bottom: 1px dotted var(--border); }
+        .cal-ics:hover { color: var(--accent); border-color: var(--accent); }
+        /* Poster-less video play facade: a calm ink panel + play glyph that swaps in the
+           <video> on click (no fetch until then). Aspect class reserves rough orientation. */
+        .video-facade {
+            display: flex; align-items: center; justify-content: center;
+            width: 100%; max-height: 65vh; margin-top: 8px; box-sizing: border-box;
+            border-radius: 10px; border: 1px solid var(--border); background: var(--panel);
+            cursor: pointer; overflow: hidden;
+        }
+        .video-facade:hover { border-color: var(--accent); }
+        .video-facade-play { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; color: var(--muted); text-decoration: none; }
+        .video-facade:hover .video-facade-play { color: var(--accent); }
+        .video-facade-play .icon { width: 56px; height: 56px; }
+        /* Strict Privacy Mode: the whole facade is one link (play glyph + caption), opening the raw file in
+           a new tab. The "opens outside Tor" caption is the honest warning that clicking leaves the circuit. */
+        .video-facade.strict { flex-direction: column; gap: 8px; text-decoration: none; color: var(--muted); }
+        .video-facade.strict:hover { color: var(--accent); }
+        .video-facade.strict .icon { width: 48px; height: 48px; }
+        .video-strict-note { font-size: 12px; color: var(--muted); }
+        .video-facade.landscape { aspect-ratio: 16 / 9; }
+        .video-facade.portrait { aspect-ratio: 9 / 16; }
+        .video-facade.square { aspect-ratio: 1 / 1; }
+        /* Portrait/square videos AND their facades render as a centered constrained card (not a
+           full-width letterboxed box) - and the facade matches the player, so no jump on play. */
+        .media.portrait, .video-facade.portrait { max-width: 340px; margin-left: auto; margin-right: auto; }
+        .media.square, .video-facade.square { max-width: 480px; margin-left: auto; margin-right: auto; }
+        .video-ph { background: var(--panel); } /* gallery video tile placeholder (sized by .gallery-media) */
+        .media-link { display: block; cursor: pointer; }
+        /* NIP-36 content warning - blur behind a tap-to-reveal overlay. Zero-JS via
+           a hidden checkbox (its label is the overlay): checking it lifts the blur
+           and hides the overlay, and it stays revealed independently per note (no
+           `:target`, so the media lightbox can't steal it back). */
+        .cw { position: relative; min-height: 64px; border-radius: 10px; margin-top: 4px; overflow: hidden; }
+        /* While hidden, cap the box so a tall NSFW image doesn't sprawl as a giant blurred void;
+           revealing (checkbox checked) drops the cap and the media shows at full height. */
+        .cw:has(.cw-toggle:not(:checked)) { max-height: 360px; }
+        .cw-toggle { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+        .cw-toggle:not(:checked) ~ :not(.cw-overlay) { filter: blur(40px); transform: scale(1.05); pointer-events: none; user-select: none; }
+        .cw-toggle:checked ~ .cw-overlay { display: none; }
+        .cw-overlay {
+            position: absolute; inset: 0; z-index: 1; cursor: pointer; text-decoration: none;
+            display: flex; flex-direction: column; gap: 4px; align-items: center; justify-content: center;
+            background: color-mix(in srgb, var(--bg) 86%, transparent);
+            border: 1px dashed var(--border); border-radius: 10px; color: var(--text);
+        }
+        .cw-reason { font-weight: 600; font-size: 14px; }
+        .cw-tap { color: var(--muted); font-size: 12px; }
+        /* The re-hide pill: only present once revealed (checkbox checked); a tap unchecks → re-blurs. */
+        .cw-hide {
+            position: absolute; top: 8px; right: 8px; z-index: 2; cursor: pointer;
+            padding: 3px 11px; border-radius: 999px; font-size: 12px; line-height: 1.5;
+            background: color-mix(in srgb, var(--bg) 70%, transparent);
+            border: 1px solid var(--border); color: var(--muted); text-decoration: none;
+        }
+        .cw-hide:hover { color: var(--text); border-color: var(--accent); }
+        .cw-toggle:not(:checked) ~ .cw-hide { display: none; }
+        /* NIP-23 article preview cards (naddr refs, profile strip, bookmarks) */
+        .article-card {
+            display: flex; flex-direction: column; margin: 10px 0 4px;
+            border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+            background: var(--panel); cursor: pointer;
+        }
+        .article-card:hover { border-color: var(--accent); }
+        .article-card-cover { width: 100%; height: 150px; object-fit: cover; display: block; }
+        /* Broken cover → a quiet ensō placeholder (shared by card + reader). */
+        .cover-missing { display: flex; align-items: center; justify-content: center; background: var(--panel); min-height: 150px; }
+        .cover-missing .enso { opacity: 0.4; }
+        .article-card-body { padding: 12px 14px; }
+        .article-card-kicker { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+        .article-card-title { font-family: var(--serif); font-size: 17px; font-weight: 600; margin-top: 4px; line-height: 1.25; }
+        .article-card-summary {
+            color: var(--muted); font-size: 13px; margin-top: 6px; line-height: 1.5;
+            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+        }
+        .article-card-meta { color: var(--muted); font-size: 12px; margin-top: 10px; display: flex; align-items: center; gap: 4px; }
+        .article-card-meta .author { font-size: 12px; }
+        /* Articles strip on profiles */
+        .article-strip-wrap { padding: 14px 0; border-bottom: 1px solid var(--border); }
+        .article-strip-wrap[hidden] { display: none; }
+        .strip-label { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+        .pinned-wrap { padding-top: 8px; border-bottom: 1px solid var(--border); }
+        .pinned-wrap[hidden] { display: none; }
+        .article-strip-scroll { position: relative; }
+        .article-strip { display: flex; align-items: flex-start; gap: 12px; overflow-x: auto; scrollbar-width: none; scroll-behavior: smooth; }
+        .article-strip::-webkit-scrollbar { display: none; }
+        .article-strip .article-card { flex: 0 0 280px; margin: 0; }
+        /* Article reader */
+        .article { padding: 8px 0 0; }
+        .article-cover { width: 100%; max-height: 320px; object-fit: cover; border-radius: 12px; margin-bottom: 18px; }
+        .article-title { font-family: var(--serif); font-size: 30px; font-weight: 600; line-height: 1.2; margin: 0 0 14px; }
+        .article-byline { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; margin-bottom: 22px; }
+        .article-edit { margin-left: auto; padding: 4px 12px; background: transparent; color: var(--text); border: 1px solid var(--border); border-radius: 7px; font-size: 13px; font-weight: 600; cursor: pointer; }
+        .article-edit:hover { border-color: var(--accent); }
+        /* Custom NIP (kind:30817) - the "defines kind N" chips, on the card + reader */
+        .nip-kinds { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
+        .article .nip-kinds { margin: -8px 0 22px; }
+        .nip-kind-chip { font-size: 11px; color: var(--muted); background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; white-space: nowrap; }
+        /* NIP-23 article topics (t tags) under the byline - reuse the chip look; each links to a hashtag search */
+        .article-topics { display: flex; flex-wrap: wrap; gap: 6px; margin: -14px 0 30px; }
+        .article-topics .nip-kind-chip { text-decoration: none; }
+        .article-topics .nip-kind-chip:hover { border-color: var(--accent); color: var(--text); }
+        /* Long-form composer */
+        .article-compose { display: flex; flex-direction: column; gap: 10px; padding: 8px 0 24px; min-height: calc(100vh - 64px); }
+        /* Only the writing surface fills the leftover height; everything else stays natural. */
+        .article-compose > :not(.ac-body):not(.ac-preview) { flex: 0 0 auto; }
+        .ac-title { width: 100%; font-family: var(--serif); font-size: 27px; font-weight: 600; padding: 8px 2px; border: none; background: none; color: var(--text); }
+        .ac-title::placeholder { color: var(--muted); opacity: 0.6; }
+        .ac-title:focus { outline: none; }
+        .ac-input { width: 100%; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font-size: 14px; }
+        .ac-input:focus { outline: none; border-color: var(--accent); }
+        .ac-cover-row { display: flex; gap: 8px; }
+        .ac-cover-row[hidden] { display: none; }
+        .ac-cover-row .ac-input { flex: 1; }
+        .ac-cover-row .ghost { flex: none; }
+        .ac-editor-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
+        .ac-head-actions { display: flex; align-items: center; gap: 8px; }
+        .ac-toolbar { display: flex; gap: 4px; flex-wrap: wrap; }
+        .ac-toolbar[hidden] { display: none; }
+        .ac-tool {
+            min-width: 34px; padding: 6px 9px; line-height: 1; font-size: 14px;
+            background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 6px; cursor: pointer;
+        }
+        .ac-tool:hover { border-color: var(--accent); }
+        .ac-tool .icon { width: 16px; height: 16px; display: block; }
+        .ac-body {
+            width: 100%; flex: 1; min-height: 320px; resize: vertical; padding: 12px 14px;
+            border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--text);
+            font: 16px/1.7 var(--serif);
+        }
+        .ac-body:focus { outline: none; border-color: var(--accent); }
+        .ac-preview { flex: 1; min-height: 320px; padding: 4px 2px; }
+        /* Carded action bar, matching the note/picture/poll .compose-foot (panel + border). Standalone here
+           (not contiguous with the textarea like the note foot), so it's a fully-bordered rounded bar. */
+        .ac-foot { display: flex; align-items: center; gap: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+        /* Publish article matches Save draft's size (the default button's 10px/16px made it chunkier); the
+           accent fill already marks it as primary, so it doesn't also need to be bigger. */
+        .ac-foot button { padding: 6px 10px; }
+        /* Drafts list */
+        .draft-row { display: flex; align-items: flex-start; gap: 10px; padding: 14px 4px; border-bottom: 1px solid var(--border); cursor: pointer; }
+        .draft-row:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+        .draft-main { flex: 1; min-width: 0; }
+        .draft-title { font-family: var(--serif); font-size: 17px; font-weight: 600; }
+        .draft-snippet { color: var(--muted); font-size: 14px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .draft-meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+        /* Delete = a native <details> two-tap (no ugly system confirm(), works with JS off): the ✕
+           summary reveals a "Delete" button; clicking ✕ again cancels. Delete then h-post's + collapses
+           the row (h-optimistic). Marker hidden like the other dropdowns (.feed-switch/.menu-wrap). */
+        .draft-del { flex: none; display: flex; align-items: center; gap: 6px; }
+        /* Both controls are small pill buttons. Closed: a subtle ✕ (borderless). Open: the ✕ becomes a
+           neutral "cancel" pill and a red "Delete" pill sits beside it - two little buttons, not plain text. */
+        .draft-del > summary { list-style: none; cursor: pointer; color: var(--muted); border: 1px solid transparent; border-radius: 999px; padding: 3px 9px; font-size: 13px; line-height: 1; transition: color .15s ease, border-color .15s ease; }
+        .draft-del > summary::-webkit-details-marker { display: none; }
+        .draft-del > summary::marker { content: ''; }
+        .draft-del > summary:hover { color: var(--err); }
+        .draft-del[open] > summary { color: var(--muted); border-color: var(--border); }
+        .draft-del[open] > summary:hover { color: var(--text); border-color: var(--text); }
+        .draft-del .del-confirm { cursor: pointer; color: var(--err); background: none; border: 1px solid var(--err); border-radius: 999px; padding: 3px 10px; font-size: 13px; line-height: 1; margin-right: 5px; transition: background .15s ease; }
+        .draft-del .del-confirm:hover { background: color-mix(in srgb, var(--err) 14%, transparent); }
+        /* Delete = collapse-in-place, matching the mutes page: the ✕ form's h-optimistic adds `.deleting`
+           to the row on click, and (draft rows being small + uniform) a max-height transition slides it
+           out; the server keeps the row (H-Reswap:none) so it lingers at 0 height. Scoped to #drafts-view. */
+        #drafts-view .draft-row { overflow: hidden; max-height: 160px; transition: max-height .28s ease, opacity .18s ease, padding .28s ease; }
+        #drafts-view .draft-row.deleting { max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0; border-bottom-color: transparent; pointer-events: none; }
+        .article-body { font-size: 17px; line-height: 1.7; overflow-wrap: anywhere; }
+        .article-body p { margin: 0 0 18px; }
+        .article-body h2 { font-family: var(--serif); font-size: 24px; margin: 28px 0 12px; }
+        .article-body h3 { font-family: var(--serif); font-size: 20px; margin: 24px 0 10px; }
+        .article-body h4, .article-body h5, .article-body h6 { font-size: 17px; margin: 20px 0 8px; }
+        .article-body ul, .article-body ol { margin: 0 0 18px; padding-left: 24px; }
+        .article-body li { margin: 4px 0; }
+        .article-body blockquote { margin: 0 0 18px; padding: 4px 0 4px 16px; border-left: 3px solid var(--accent); color: var(--muted); }
+        .article-body pre.md-pre { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; overflow-x: auto; margin: 0 0 18px; }
+        .article-body pre.md-pre code { font-size: 13px; white-space: pre; background: none; padding: 0; }
+        .article-body code.md-code { background: var(--panel); border-radius: 5px; padding: 1px 5px; font-size: 0.9em; }
+        .article-body hr { border: none; border-top: 1px solid var(--border); margin: 28px 0; }
+        .article-body a { color: var(--accent); }
+        /* A little extra breathing room above the action bar in the reader (end of a long
+           article); no rule. In a list row it's just a normal note bar. */
+        .article .article-actions { margin-top: 28px; }
+        .article-row .article-card { margin-top: 2px; } /* snug under the head */
+        /* Article discussion (NIP-22 comments), threaded */
+        .discussion { padding-bottom: 60px; }
+        .discussion-label { margin: 22px 0 8px; }
+        .comment { padding: 12px 0; border-top: 1px solid var(--border); }
+        .comment-head { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 6px; }
+        .comment-head .author { font-size: 13px; }
+        .comment .content { font-size: 15px; line-height: 1.6; }
+        .comment-actions { justify-content: flex-start; gap: 30px; margin-top: 8px; }
+        .comment-children { margin-left: 16px; padding-left: 12px; border-left: 1px solid var(--border); }
+        .mention { color: var(--accent); text-decoration: none; cursor: pointer; }
+        .mention:hover { text-decoration: underline; }
+        /* An unsupported/secret nostr: entity (nsec, unknown type) rendered inert - muted, no link, no key leak. */
+        .mention-inert { color: var(--muted); word-break: break-all; }
+        .quote {
+            display: block; margin: 10px 0; padding: 9px 12px;
+            border: 1px solid var(--border); border-left: 3px solid var(--accent);
+            border-radius: 8px; background: color-mix(in srgb, var(--text) 4%, transparent); font-size: 14px;
+            /* The embed card renders INSIDE the parent note's .content (white-space: pre-wrap,
+               inherited), which would otherwise preserve the card's own template indentation /
+               newlines as visible vertical gaps (between head and body, around the clamp). Reset
+               to normal here; the quoted note's actual TEXT sits in an inner .content that
+               re-establishes pre-wrap, so real line breaks survive while the structure collapses. */
+            white-space: normal;
+        }
+        .quote-label {
+            display: block; color: var(--muted); font-size: 11px; margin-bottom: 6px;
+            text-transform: uppercase; letter-spacing: 0.04em;
+        }
+        /* The conversation glyph riding after an embed card's header link (same
+           "open thread" affordance as the timestamp glyph). */
+        .quote-label .icon { display: inline-block; width: 12px; height: 12px; opacity: 0.5; margin-left: 5px; vertical-align: -2px; } /* override global .icon{display:block} so the glyph rides inline next to the label */
+        .quote-label:hover .icon, .quote-label:focus-visible .icon { opacity: 1; }
+        .quote-head { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
+        .avatar-xs { width: 20px; height: 20px; border-width: 0; }
+        .quote-author { font-size: 13px; }
+        .quote-time { color: var(--muted); font-size: 12px; }
+        .quote-text {
+            display: block; white-space: pre-wrap; word-break: break-word; color: var(--text);
+        }
+        .quote-missing { color: var(--muted); font-size: 13px; }
+
+        /* Unknown-kind (NIP-89 fallback) card: honest, not a note. A muted "kind" label, an
+           optional raw-content preview, and "open in an app" chips - all quiet. */
+        .event-kind {
+            color: var(--muted); font-size: 12px; letter-spacing: 0.02em;
+            text-transform: uppercase; margin: 1px 0 6px;
+        }
+        .event-raw {
+            white-space: pre-wrap; word-break: break-word; color: var(--muted);
+            font-size: 13px; margin-bottom: 4px;
+        }
+        /* Soft fade-out when the preview is clamped, so the cut reads as intentional, not abrupt. */
+        .event-raw.clamped {
+            max-height: 7.5em; overflow: hidden;
+            -webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent);
+            mask-image: linear-gradient(to bottom, #000 62%, transparent);
+        }
+        .event-open { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 12px; }
+        .event-open-lead { color: var(--muted); font-size: 12px; }
+        .event-open-apps { display: contents; } /* chips flow as flex items of .event-open beside the lead */
+        .event-chip {
+            display: inline-flex; align-items: center; white-space: nowrap;
+            padding: 3px 11px; font-size: 12px; line-height: 1.5; color: var(--text);
+            border: 1px solid var(--border); border-radius: 999px; text-decoration: none;
+            transition: color .15s ease, border-color .15s ease, background .15s ease;
+        }
+        .event-chip::after { content: "↗"; margin-left: 4px; font-size: 10px; opacity: 0.5; }
+        .event-chip:hover, .event-chip:focus-visible {
+            color: var(--accent); text-decoration: none;
+            border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+            background: color-mix(in srgb, var(--accent) 8%, transparent);
+        }
+        .event-unsupported { color: var(--muted); font-size: 13px; }
+
+        /* Quiet empty/loading states - a still line, centered, with an ensō. */
+        .empty {
+            color: color-mix(in srgb, var(--text) 80%, transparent); padding: 56px 20px; text-align: center;
+            font-family: var(--serif); font-size: 16px; font-style: italic;
+            display: flex; flex-direction: column; align-items: center; gap: 16px;
+        }
+        /* A quiet functional caption under an empty-state quote (e.g. "You're all
+           caught up." beneath the contemplative line) - smaller, upright, muted. */
+        .empty-sub { font-size: 13px; font-style: normal; color: var(--muted); margin-top: -8px; }
+        /* The "caught up" clearing - a deliberate end to the feed; older notes are
+           opt-in past the line (design for exit, not endless scroll). */
+        .caught-up { padding: 48px 20px; border-top: 1px solid var(--border); }
+        .see-earlier {
+            background: none; border: none; padding: 4px 8px; cursor: pointer;
+            color: var(--accent); font-family: var(--serif); font-style: italic;
+            font-size: 14px; letter-spacing: 0.02em;
+        }
+        .see-earlier:hover:not(:disabled) { text-decoration: underline; }
+        /* The "View older posts" invite is an accent .see-earlier text link - explicit + discoverable. */
+        /* Caught-up backlog: pull "View older …" up close under the contemplative line (the default 16px
+           gap reads as too loose here), with the smaller closing ensō snug below it. Feed + notifications. */
+        .view-older { margin-top: -11px; }
+        .view-older + .enso { margin-top: -11px; }
+        /* In-flight: swap "look back" → "Loading…" while the older page is fetched. */
+        .see-earlier:disabled { color: transparent; cursor: default; position: relative; }
+        .see-earlier:disabled::after { content: 'Loading…'; color: var(--muted); font-style: italic; position: absolute; left: 8px; top: 4px; }
+        /* Notifications clearing sits right above its pager - keep them as tight as
+           the timeline clearing (line → action = 16px), not two stacked blocks. */
+        .empty.notif-clearing { padding: 48px 20px 16px; }
+        .page-title { font-family: var(--serif); font-weight: 500; }
+        .theme-select {
+            padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border);
+            background: var(--bg); color: var(--text); font-size: 13px;
+        }
+
+        /* Ensō - the one-stroke Zen circle. Used as the loading mark; the
+           dasharray leaves the brush's open gap, and it draws itself in. */
+        .enso { display: block; color: var(--accent); transform-origin: center; animation: enso-breath 3.4s ease-in-out infinite; }
+        .enso path { fill: currentColor; }
+        /* Loading: a slow, meditative breath rather than a spinner. */
+        @keyframes enso-breath {
+            0%, 100% { opacity: 0.4; transform: scale(0.97); }
+            50%      { opacity: 1;   transform: scale(1); }
+        }
+        @media (prefers-reduced-motion: reduce) { .enso { animation: none; } }
+        .enso.still { animation: none; opacity: 0.7; transform: none; } /* enough that the vermilion reads */
+        .wordmark { display: inline-flex; align-items: center; gap: 12px; }
+        .signin .wordmark { display: flex; flex-direction: column; align-items: center; gap: 8px; } /* stacked + centered on sign-in */
+        .wordmark .enso { animation: none; opacity: 1; transform: none; }
+    
+/* ── Phase 0 HATEOAS chrome adjustments ──────────────────────────────────────
+   The SPA toggled dropdowns via [hidden] + JS; this port uses native <details>
+   for a zero-JS dropdown, and renders menu items as <a>/<form> not <button>. */
+.feed-switch summary, .menu-wrap summary { list-style: none; cursor: pointer; }
+.feed-switch summary::-webkit-details-marker, .menu-wrap summary::-webkit-details-marker { display: none; }
+.feed-switch summary::marker, .menu-wrap summary::marker { content: ''; }
+/* <details> natively hides the menu when closed; keep its dropdown styling/position. */
+.feed-switch[open] > summary .chevron { transform: rotate(180deg); }
+/* Selecting an item fires a (full boosted) navigation, but native <details> doesn't
+   close on an inner link click - it lingers open until the swap re-renders the bar,
+   so the choice looks like it didn't register. Collapse the open menu the instant the
+   request starts (helmjs sets data-h-busy on <html>), giving immediate feedback; the
+   swap then lands a fresh, closed bar. Background pollers are excluded from data-h-busy,
+   so an open menu never collapses from a stray background fetch. */
+html[data-h-busy] .feed-switch[open] > .feed-menu,
+html[data-h-busy] .menu-wrap[open] > .menu { display: none; }
+html[data-h-busy] .feed-switch[open] > summary .chevron { transform: none; }
+a.menu-item, a.feed-item { display: block; text-decoration: none; }
+a.menu-item.neutral { color: var(--text); }
+.menu .logout-form { display: block; margin: 0; }
+.menu .logout-form .menu-item { width: 100%; }
+.copy-npub { display: block; }
+/* FAB is an <a> here, not a <button>: keep it a centered ink disc. */
+a.fab { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+
+/* ── Phase 0: utility classes used by server-rendered forms/notices ──────────
+   (Satori's SPA expressed these inline / in JS; named here, on Satori tokens.) */
+.notice { padding: 11px 14px; border-radius: 9px; font-size: 14px; margin: 12px 0; line-height: 1.5; }
+.notice.error { background: color-mix(in srgb, var(--err) 12%, var(--bg)); color: var(--err); border: 1px solid color-mix(in srgb, var(--err) 35%, transparent); }
+.notice.info { background: var(--panel); color: var(--muted); border: 1px solid var(--border); }
+.faint { color: var(--muted); font-size: 13px; }
+.pager { padding: 22px 0; text-align: center; }
+.pager a { color: var(--muted); font-size: 14px; }
+/* While the next page loads, swap "older →" for a quiet breathing line. The sentinel
+   fires on `intersect` (a background trigger excluded from data-h-busy), so the global
+   bar stays silent here - this is the only cue for auto-loading more. helmjs adds
+   .h-loading to #more (h-indicator) for the duration of the fetch, then outer-swaps it. */
+.pager-loading { display: none; }
+.pager.h-loading .pager-label { display: none; }
+.pager.h-loading .pager-loading { display: inline-block; color: var(--muted); animation: enso-breath 1.8s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .pager.h-loading .pager-loading { animation: none; } }
+.discussion-label { color: var(--muted); font-size: 13px; margin: 18px 0 4px; }
+/* Dedicated compose page (the SPA used a modal; zero-JS needs a real page). */
+.compose-box { display: block; }
+.compose-box textarea {
+  width: 100%; min-height: 160px; resize: vertical; padding: 12px 14px; display: block;
+  border-radius: 10px; border: 1px solid var(--border); background: var(--panel);
+  color: var(--text); font: inherit; font-size: 15px; line-height: 1.6;
+}
+.compose-box textarea:focus { outline: none; border-color: var(--accent); }
+/* Compose modal: cap height + scroll the body, with the foot pinned to the bottom so
+   Publish stays reachable however tall the preview gets. The negative margins span the
+   foot edge-to-edge over the modal's 16px padding. */
+#compose-modal .modal { max-height: 85vh; overflow: hidden auto; } /* cap height + scroll the body; the foot stays reachable via position:sticky */
+/* Carded action bar, matching the article foot (.ac-foot). position:sticky keeps Publish reachable when a
+   long preview grows the modal body; the card is inset (no edge bleed) so it reads the same on the page. */
+.compose-foot {
+    display: flex; align-items: center; gap: 10px;
+    position: sticky; bottom: 0; z-index: 1;
+    background: var(--panel);
+    margin-top: 12px; padding: 12px 14px;
+    border: 1px solid var(--border); border-radius: 10px;
+}
+/* Publish (note/poll) matches Save draft's size (the default button's 10px/16px made it chunkier); the
+   accent fill already marks it as primary, so it doesn't also need to be bigger. (Same as .ac-foot.) */
+.compose-foot .publish-btn { padding: 6px 10px; }
+.view-pad { padding: 18px 0 0; } /* bottom clearance now lives on #app (FAB safe-area) */
+.view-empty { text-align: center; color: var(--muted); padding: 48px 16px; }
+.view-empty .enso { margin: 0 auto 14px; }
+
+/* ── Sign-in fidelity ────────────────────────────────────────────────────── */
+/* The extension sign-in block is JS+extension-only: hidden until hext.js detects window.nostr and sets
+   html[data-nip07]. Without an extension (or with JS off) the bunker form below is the zero-JS baseline,
+   so we never show a dead "Sign in with extension" button. (Mirrors the data-webln / data-nwc reveals.) */
+[data-nip07-only] { display: none; }
+html[data-nip07] [data-nip07-only] { display: block; }
+.signin .ext-form { display: block; }
+.signin .status { font-size: 13px; margin: 10px 0 0; text-align: center; }
+.signin .status .err { color: var(--err); }
+/* When an extension is present, the bunker Connect is the secondary path (ghost),
+   matching Satori. Without one (incl. zero-JS), Connect stays the primary accent. */
+html[data-nip07] .signin .connect-btn {
+  background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 10px 16px;
+}
+html[data-nip07] .signin .connect-btn:hover { border-color: var(--accent); color: var(--text); }
+
+/* ── HATEOAS link normalization ──────────────────────────────────────────────
+   Satori has NO base `a {}` rule: its links are scoped (.content a, .article-body
+   a, .signin-help a) and everything else clickable (author, mention, time, quote
+   card, article card) is a JS-onClick <span>/<div>. A HATEOAS app must use real
+   <a href> for those navigations, which would otherwise inherit the browser's
+   default link chrome (underline + blue). Neutralize it so a structural link looks
+   exactly like Satori's clickable span (color from its class, no underline); the
+   scoped rules above still underline genuine content/article URLs. */
+a { color: inherit; text-decoration: none; }
+/* Mentions / entity chips are navigations rendered as <a class="mention"> inside
+   .content - Satori never underlines them (only true URL <a> get the underline). */
+html[data-theme^="sumi-e"] .content a.mention,
+html[data-theme^="sumi-e"] .article-body a.mention { text-decoration: none; }
+
+/* ── Phase 1: stateful action forms sit inline in their rows ─────────────────
+   (the global `form{display:flex}` would otherwise break each onto its own line) */
+.act-form { display: inline-flex; margin: 0; padding: 0; gap: 0; }
+.note-act.active { color: var(--accent); }
+
+/* ── Phase 2: bar "notes" mark (new-notes affordance) ────────────────────────
+   Reuses Satori's .notes-mark / .notif-dot. As an <a>/<span> here (not a <button>),
+   the quiet (no-new) state needs explicit muting; the hidden poll span re-arms it. */
+.notes-mark.quiet { color: var(--muted); cursor: default; }
+.notes-mark.has-new { color: var(--text); }
+.notes-mark.has-new:hover { color: var(--accent); }
+.notes-poll { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+/* ── Phase 3a: compose page reply/quote/CW (Satori scoped .reply-to to .modal) ─*/
+.view-pad .reply-to { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+/* CW is a foot icon toggle driven by a hidden checkbox (zero-JS): the reason row
+   reveals on :checked, and the .cw-btn icon lights warn. */
+.cw-check { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+.compose-box .cw-row { margin-top: 10px; display: none; }
+#cw-toggle:checked ~ .cw-row { display: block; }
+#cw-toggle:checked ~ .compose-foot .cw-btn { color: var(--warn); }
+.compose-box .field-input { margin-top: 8px; }
+
+/* Reply privately: same hidden-checkbox pattern as CW. When on, the lock button turns accent and the
+   caption reveals - the one explicit signal that this reply is gift-wrapped, not public. */
+.private-check { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+.compose-box .private-row { margin-top: 10px; display: none; align-items: center; gap: 7px; font-size: 13px; color: var(--accent); }
+.compose-box .private-row .icon { width: 14px; height: 14px; flex: none; }
+#private-toggle:checked ~ .private-row { display: flex; }
+#private-toggle:checked ~ .compose-foot .private-btn { color: var(--accent); }
+
+/* ── Phase 3b: poll vote forms (keep options stacked, not flexed by `form{}`) ──*/
+.poll-opt-form { display: block; margin: 0; }
+.poll-opt-form .poll-option { width: 100%; }
+.poll-multi { display: flex; flex-direction: column; gap: 8px; margin: 0; }
+.poll-multi .poll-option { cursor: pointer; }
+
+/* ── Phase 3b fix: multiple-choice mark = Satori's ☐/☑ glyph over a hidden
+   native checkbox (zero-JS form semantics + 1:1 look). */
+.poll-check { position: absolute; opacity: 0; width: 0; height: 0; }
+.poll-multi .poll-mark::before { content: '☐'; }
+.poll-multi .poll-check:checked ~ .poll-mark::before { content: '☑'; }
+.poll-multi .poll-check:focus-visible ~ .poll-mark { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── In-flight indicators (CSS-only; driven by hateoas-extensions' busy flags on
+   <html>: data-nostr-busy = signing, data-webln-busy = WebLN payment). Reuses
+   Satori's .toast look. No app JS - the lib sets the flag while the extension
+   prompt + sign/pay-and-resubmit are in flight. */
+.signing-toast, .paying-toast { display: none; }
+html[data-nostr-busy] .signing-toast,
+html[data-webln-busy] .paying-toast {
+  display: block; opacity: 1; transform: translateX(-50%) translateY(0);
+}
+/* Two-phase signing copy: show "Waiting for your signer…" by default; flip to "Finishing up…"
+   once hext.js reports the signer responded (data-nostr-busy="resubmitting"). */
+.signing-toast .sign-work { display: none; }
+html[data-nostr-busy="resubmitting"] .signing-toast .sign-await { display: none; }
+html[data-nostr-busy="resubmitting"] .signing-toast .sign-work { display: inline; }
+/* WebLN: "Approve the payment in your wallet…" → "Sending payment…" once confirmed. */
+.paying-toast .pay-work { display: none; }
+html[data-webln-busy="paying"] .paying-toast .pay-await { display: none; }
+html[data-webln-busy="paying"] .paying-toast .pay-work { display: inline; }
+
+/* WebLN one-tap zap confirmation. */
+.zap-done { text-align: center; margin: 18px 0; font-size: 15px; }
+
+/* ── Compose modal: the #modal mount is empty until a compose fragment loads. */
+#modal:empty { display: none; }
+
+/* Placeholder actions (like/zap until Phase 4): visibly inactive - no false
+   affordance (they're inert <span aria-disabled> with no form/link). */
+.note-act[aria-disabled="true"] { opacity: 0.38; cursor: default; }
+.note-act[aria-disabled="true"]:hover { color: inherit; }
+
+/* Phase 3c - media upload in compose. Uploaded items are thumbnails carrying
+   hidden inputs (name=media / name=imeta) submitted with the note; the attach
+   control is a sibling form (no nested forms) that auto-uploads on file-select. */
+.compose-media { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; }
+.compose-media:empty { display: none; margin: 0; }
+.media-item { position: relative; width: 92px; height: 92px; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); background: var(--panel); }
+.media-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* Strict Privacy Mode: a non-loading video placeholder (no <video src> fetch) in the compose strip. */
+.media-thumb-vid { display: flex; align-items: center; justify-content: center; background: var(--panel); color: var(--muted); }
+.media-thumb-vid .icon { width: 28px; height: 28px; }
+.media-remove {
+    position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; padding: 0;
+    border-radius: 50%; border: none; background: rgba(0,0,0,.62); color: #fff;
+    cursor: pointer; line-height: 22px; font-size: 12px; text-align: center;
+}
+.media-remove:hover { background: var(--err); }
+/* Compose toolbar: "Add media" on the left (a file <input> hidden behind a
+   labelled button), then the secondary Attach + primary Publish on the right. */
+.compose-box .attach-btn,
+.ac-foot .attach-btn {
+    display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+    color: var(--muted); padding: 8px; border-radius: 8px; line-height: 0;
+}
+.compose-box .attach-btn:hover,
+.ac-foot .attach-btn:hover { color: var(--accent); background: var(--panel); }
+.compose-box .attach-btn input[type="file"] { display: none; }
+.attach-go { background: transparent; color: var(--accent); }
+.attach-go:hover { background: var(--panel); }
+.media-error { margin: 8px 0; }
+
+/* Phase 3d - @-mention + :emoji typeahead (Satori's .mention-box). Server-rendered
+   options carry helmjs h-insert; the active item is .h-active (helmjs h-combobox
+   keyboard nav) or :hover. Hidden when empty (#suggest:empty). */
+.mention-box { margin-top: 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); max-height: 240px; overflow-y: auto; }
+.mention-box:empty { display: none; }
+.mention-opt { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: none; border: none; padding: 8px 10px; color: var(--text); font-size: 14px; cursor: pointer; }
+.mention-opt.h-active, .mention-opt:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.mention-opt-name { font-weight: 600; }
+.mention-opt-nip05 { color: var(--muted); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.emoji-opt .mention-opt-name { color: var(--muted); font-weight: 400; }
+.emoji-opt .emoji-char { font-size: 18px; line-height: 1; }
+
+/* Phase 4b - zap invoice view (no wallet on the server; pay externally). */
+.zap-go { width: 100%; }
+.zap-pay-link {
+    display: block; text-align: center; margin: 8px 0; padding: 11px 16px; border-radius: 8px;
+    background: var(--accent); color: #fff; font-weight: 600; border: 1px solid var(--accent);
+}
+.zap-invoice {
+    width: 100%; margin-top: 10px; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px;
+    word-break: break-all; resize: none;
+}
+.zap-invoice-help { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+
+/* Phase 4c - wallet page. No server-side spending key: WebLN one-tap status
+   (revealed by hateoas-extensions' data-webln flag, like the sign-in button uses
+   data-nip07) + zap-preset prefs. */
+.wallet-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; border: 1px solid var(--border); }
+.wallet-chip.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.wallet-chip.off { color: var(--muted); }
+/* (Wallet payment status is driven entirely by the .pay-state system below - data-webln / data-nwc /
+   data-pay-method - so the old standalone .webln-on/.webln-off reveals are gone, one source of truth.) */
+/* NWC progressive disclosure, mirroring data-webln. hext.js sets html[data-nwc] when an NWC connection string
+   is stored, flipping the connect form (.nwc-off) for the connection detail (.nwc-detail). */
+html[data-nwc] .nwc-off { display: none; } /* connect form hidden once connected */
+/* Match .wallet-presets (Zap amounts) exactly so the Connect button sizes like its Save button:
+   align-items:center keeps the button at its natural height instead of stretching to the input. */
+.nwc-connect { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+.nwc-connect .wallet-input { flex: 1; width: auto; }
+/* NWC connection detail (balance + manage), shown when connected and split from the selectable head by a
+   divider so it reads as connection info, not part of the pay-with choice. WebLN has no equivalent: it's an
+   ambient browser capability - nothing for Satori to connect, disconnect, or read a balance from. */
+.nwc-detail { display: none; }
+html[data-nwc] .nwc-detail { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.nwc-balance { display: flex; flex-direction: column; gap: 2px; }
+.nwc-balance-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.nwc-balance-amt { font-size: 18px; font-weight: 600; }
+.nwc-actions { display: flex; gap: 8px; }
+.nwc-actions button { font-size: 13px; padding: 5px 11px; }
+.nwc-actions [data-nwc-clear]:hover { color: var(--err); border-color: color-mix(in srgb, var(--err) 40%, var(--border)); }
+/* Payment-method card: WebLN + NWC as peer rows under one heading (replaces the old floating status pill). */
+.pay-status { margin-bottom: 6px; }
+.pay-method { padding: 12px 0; border-top: 1px solid var(--border); }
+.pay-method-head { display: flex; align-items: center; gap: 10px; }
+.pay-method-text { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+.pay-radio { display: none; } /* shown only when both wallets are present (a choice exists) */
+/* Both wallets connected: each method becomes a selectable card; the chosen one (data-pay-method) gets the
+   accent ring. Radios + the card chrome appear only here - with one wallet there's nothing to choose. */
+html[data-webln][data-nwc] .pay-method { border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-top: 10px; }
+html[data-webln][data-nwc] .pay-method-head { cursor: pointer; }
+html[data-webln][data-nwc] .pay-radio { display: inline-block; flex: none; accent-color: var(--accent); }
+html[data-webln][data-nwc][data-pay-method="webln"] .pmo-webln,
+html[data-webln][data-nwc][data-pay-method="nwc"] .pmo-nwc { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.pay-method-title { font-weight: 600; }
+.pay-method-sub { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.pay-method-sub a { color: var(--accent); text-decoration: none; }
+.pay-badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--border); white-space: nowrap; }
+.pay-badge.ok { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.pay-badge.muted { color: var(--muted); }
+.webln-yes, .nwc-yes { display: none; }
+html[data-webln] .webln-yes { display: inline-block; }
+/* No WebLN extension → hide the whole WebLN method, rather than a dead "Not detected" option; revealed when
+   hext.js detects window.webln (html[data-webln]). Capability-based, not mobile-based, so the rare mobile
+   browser that DOES have WebLN (Kiwi/Firefox + Alby, a wallet's in-app browser) still shows it. Mirrors the
+   data-nip07 sign-in-button reveal (we don't show dead controls). */
+.pmo-webln { display: none; }
+html[data-webln] .pmo-webln { display: block; }
+html[data-nwc] .nwc-yes { display: inline-block; }
+/* Wallet status: exactly ONE chip shows. By availability (data-webln/data-nwc); when BOTH are connected,
+   by whether a method was chosen (html[data-pay-method], set by hext.js - persists across helmjs swaps,
+   unlike a radio's checked state). No silent default: both-but-unchosen shows the "choose" prompt. */
+.wallet-chip.warn { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+/* "Chosen" is hext.js's html[data-pay-method] marker (the active method; absent when both wallets are
+   connected but unchosen). It's set on <html>, so it survives helmjs swaps - the wallet stays correct after
+   in-app navigation, no reliance on a radio's checked state. */
+.pay-state { display: none; }
+html:not([data-webln]):not([data-nwc]) .pay-none { display: inline-flex; }
+html[data-webln]:not([data-nwc]) .pay-webln-only { display: inline-flex; }
+html[data-nwc]:not([data-webln]) .pay-nwc-only { display: inline-flex; }
+html[data-webln][data-nwc][data-pay-method] .pay-active { display: inline-flex; }
+html[data-webln][data-nwc]:not([data-pay-method]) .pay-pick { display: inline-flex; }
+.pays-w, .pays-n { display: none; }
+html[data-pay-method="webln"] .pays-w { display: inline; }
+html[data-pay-method="nwc"] .pays-n { display: inline; }
+/* (The separate chooser is gone - the [data-pay-method] radios now live in the method cards above, and the
+   accent-ring selected state is handled by the .pmo-webln/.pmo-nwc rules in the card block.) */
+/* Subtle cards group the wallet's blocks without breaking the Sumi-e calm. */
+.wallet-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; margin-bottom: 14px; }
+.wallet-card h3 { margin: 0 0 10px; font-size: 14px; }
+/* The lightning address is the page's hero - the one actionable thing (receive). */
+.wallet-addr-hero { display: flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 600; color: var(--text); margin: 0 0 6px; word-break: break-all; }
+.wallet-addr-hero .bolt { color: var(--accent); flex: none; }
+.wallet-presets { display: flex; gap: 8px; align-items: center; }
+.wallet-presets .wallet-input { flex: 1; width: auto; }
+.wallet section h3 { margin: 0 0 8px; }
+.wallet-addr { margin: 4px 0; }
+
+.notif-who { font-weight: 600; }
+
+.reply-link { display: block; color: inherit; }
+.reply-context .quote-head { margin-top: 6px; }
+/* Separate the "in reply to" card from the note's own commentary below it (the
+   .quote rule only adds margin above the card, so the text would butt right up). */
+.reply-context { margin-bottom: 10px; }
+
+.ac-form { display: flex; flex-direction: column; gap: 10px; }
+/* The schedule/relay rows carry a margin-top for the block-layout .compose-box; inside .ac-form's flex-gap
+   that would DOUBLE the spacing, so zero it here (the gap already spaces them) - keeps the article's section
+   spacing the same as the other tabs. */
+.ac-form .schedule-row, .ac-form .relays-row { margin-top: 0; }
+
+/* Phase 6c - drafts list */
+.draft-list { list-style: none; padding: 0; margin: 0; }
+/* Drafts page sections: "Scheduled" (when queued) above "Drafts". The heading only shows when
+   both are present, so its top spacing lives on the section gap, not the heading itself. */
+.draft-head { font-family: var(--serif); font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin: 0 0 2px; }
+.draft-section + #drafts-view { margin-top: 26px; }
+.draft-empty { color: var(--muted); font-size: 14px; padding: 8px 0 0; }
+.draft-row { display: flex; align-items: center; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.draft-open { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.draft-title { font-weight: 600; }
+.draft-meta { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.draft-del button:hover { color: var(--err); }
+/* Schedule: a clock icon (.schedule-btn) toggles #schedule-toggle; the row reveals on :checked,
+   the icon lights accent - mirrors the content-warning pattern. Pure CSS, no app JS. Shared by the
+   note and article composers, so the row/accent selectors are NOT scoped to .compose-box/.compose-foot
+   (that scoping is why the article composer showed the row un-toggled). */
+.sched-check { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+/* Revealed schedule + relay sections carry their OWN panel background + border so they read the same on the
+   page (dark bg) and in the modal (panel bg) - without a fixed bg they'd show the container and differ. */
+.schedule-row { margin-top: 10px; display: none; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+#schedule-toggle:checked ~ .schedule-row { display: flex; }
+#schedule-toggle:checked ~ .compose-foot .schedule-btn,
+#schedule-toggle:checked ~ .ac-foot .schedule-btn { color: var(--accent); }
+.schedule-label { font-size: 13px; color: var(--muted); white-space: nowrap; }
+/* Relays: a globe (.relays-btn) toggles #relays-toggle; the row reveals on :checked (like Schedule). The
+   write relays start checked - uncheck to post to a subset, or add a one-off. Resets every open. */
+.relays-check { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+.compose-box .relays-row,
+.ac-form .relays-row { display: none; flex-direction: column; gap: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.compose-box .relays-row { margin-top: 10px; } /* block layout needs the gap; .ac-form's flex gap already spaces it */
+#relays-toggle:checked ~ .relays-row { display: flex; }
+#relays-toggle:checked ~ .compose-foot .relays-btn,
+#relays-toggle:checked ~ .ac-foot .relays-btn { color: var(--accent); }
+.relays-row-head { font-size: 12px; color: var(--muted); }
+/* Relays as toggle chips, in the house pill idiom (same as .rw-chip / .compose-type.active): accent OUTLINE
+   + accent text = posting there; muted outline = dropped. No solid fill - all-on shouldn't be a wall of
+   vermilion. The native checkbox is hidden; the label is the chip, styled via :has(:checked). */
+.relay-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.relay-chip { display: inline-flex; align-items: center; padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 13px; cursor: pointer; user-select: none; transition: border-color 0.15s, color 0.15s; }
+.relay-chip input { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
+.relay-chip:hover { border-color: var(--accent); }
+.relay-chip:has(input:checked) { border-color: var(--accent); color: var(--accent); }
+.relay-custom-input { padding: 7px 9px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
+.relay-custom-input:focus { outline: none; border-color: var(--accent); }
+/* Local-relay notice inside the compose picker (only-mode override / add-mode mirror line). */
+.relay-local-note { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.45; }
+.relay-local-note b { color: var(--text); font-weight: 600; }
+.relay-local-note a { color: var(--accent); text-decoration: none; }
+.schedule-input { font: inherit; font-size: 13px; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; min-width: 0; }
+.schedule-input:focus { outline: none; border-color: var(--accent); }
+/* The native datetime picker icon is near-invisible on the dark panel - lift it so it reads. */
+.schedule-input::-webkit-calendar-picker-indicator { filter: invert(0.7); opacity: 0.7; cursor: pointer; }
+.schedule-input::-webkit-calendar-picker-indicator:hover { opacity: 1; }
+/* The Schedule button is the row's primary action: accent OUTLINE (distinct from the solid Publish
+   button) that fills on hover. Rides on .ghost for sizing. */
+.schedule-go { border-color: var(--accent); color: var(--accent); }
+.schedule-go:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* Phase 6b - NIP-22 article comments */
+.comments { margin-top: 28px; border-top: 1px solid var(--border); padding-top: 18px; }
+.comments-title { margin: 0 0 14px; font-size: 16px; }
+.comment-form textarea { width: 100%; min-height: 70px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font: inherit; resize: vertical; }
+.comment-foot { display: flex; justify-content: flex-end; margin-top: 8px; }
+.comment-list { list-style: none; padding: 0; margin: 16px 0 0; }
+.comment-children { list-style: none; margin: 8px 0 0 16px; padding-left: 14px; border-left: 1px solid var(--border); }
+.comment { padding: 10px 0; }
+.comment-head { display: flex; align-items: center; gap: 7px; }
+.comment-author { font-weight: 600; font-size: 14px; }
+.comment-body { margin: 6px 0; font-size: 15px; }
+.comment-reply-btn { background: none; border: none; color: var(--muted); font-size: 13px; cursor: pointer; padding: 0; }
+.comment-reply-btn:hover { color: var(--accent); }
+.comment-reply-slot:not(:empty) { margin-top: 8px; }
+
+/* Settings - Backup tab (lists export/import). */
+.backup-form { margin: 6px 0 18px; }
+.backup-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 16px; margin: 10px 0 14px; }
+.backup-item { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.backup-file { display: block; margin: 6px 0 4px; font-size: 13px; color: var(--muted); max-width: 100%; }
+.backup-file::file-selector-button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; margin-right: 10px; cursor: pointer; }
+.backup-file::file-selector-button:hover { border-color: var(--muted); }
+
+.quote-body { font-size: 14px; line-height: 1.45; }
+
+/* Phase 8 (early) - embedded cards: quoted note / reply preview / article. */
+.quote .content { font-size: 14px; }
+/* Embed (in-reply-to / quoted) previews render media like a normal note - full
+   width, natural aspect - but collapse to a SHORTER clamp than a full note (the
+   .quote scope overrides the 340px default), so a tall image shows a preview + Show
+   more rather than an awkward squished thumbnail. Expanded, it's note-sized. */
+.quote .clamp:not(:has(.clamp-toggle:checked)) .clamp-inner { max-height: 240px; }
+.quote-author-link { display: inline-flex; align-items: center; gap: 7px; color: inherit; min-width: 0; }
+/* Flex column + white-space:normal: the card is one <a> rendered INSIDE the parent
+   note's .content (white-space: pre-wrap, inherited), so without this reset its template
+   newlines render as real vertical gaps and the whitespace text nodes get underlined.
+   Flex collapses that whitespace; text-decoration:none kills the stray link underlines. */
+.article-embed { display: flex; flex-direction: column; gap: 5px; white-space: normal; text-decoration: none; }
+.article-embed > * { text-decoration: none; }
+.article-embed-cover { width: 100%; max-height: 170px; object-fit: cover; border-radius: 6px; margin: 2px 0; display: block; }
+.article-embed-title { font-weight: 600; font-size: 15px; color: var(--text); }
+.article-embed:hover .article-embed-title { text-decoration: underline; }
+.article-embed-by { color: var(--muted); font-size: 12px; }
+.article-embed-summary { color: var(--muted); font-size: 13px; line-height: 1.45; }
+
+/* YouTube privacy facade. Before hydration (and with JS off): a clean external link.
+   After: a 16/9 poster (proxied thumbnail) with a play button; clicking swaps in the
+   nocookie iframe. aspect-ratio reserves the slot so there's no layout shift. */
+/* One unified card: thumbnail flush at the top (corners clipped by the card's
+   overflow), title in a padded footer below it - so the title reads as part of the
+   card, not a floating caption. */
+/* white-space:normal resets the .content pre-wrap inherited here, so the literal
+   newline+indent between the frame and title in the /yt/card fragment collapses
+   instead of rendering as a blank line above the title. */
+.yt-card { margin: 10px 0; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: color-mix(in srgb, var(--text) 3%, transparent); white-space: normal; }
+.yt-fallback { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); text-decoration: none; font-size: 14px; padding: 11px 13px; }
+.yt-fallback:hover { text-decoration: underline; }
+.yt-frame { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; background: #000; display: block; }
+.yt-poster { position: absolute; inset: 0; display: block; cursor: pointer; }
+.yt-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+.yt-thumb-blank { background: color-mix(in srgb, var(--text) 8%, transparent); } /* playlist with no oEmbed thumb */
+.yt-playbtn { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 68px; height: 48px; border-radius: 14px; background: rgba(18, 18, 18, 0.78); transition: background 0.15s ease, transform 0.15s ease; }
+.yt-playbtn::after { content: ''; position: absolute; left: 50%; top: 50%; transform: translate(-35%, -50%); border-style: solid; border-width: 9px 0 9px 16px; border-color: transparent transparent transparent #fff; }
+.yt-poster:hover .yt-playbtn, .yt-poster:focus-visible .yt-playbtn { background: #cc0000; transform: translate(-50%, -50%) scale(1.06); }
+.yt-logo { position: absolute; left: 10px; bottom: 10px; font-size: 11px; font-weight: 600; color: #fff; background: rgba(0, 0, 0, 0.65); padding: 3px 7px; border-radius: 5px; letter-spacing: 0.02em; pointer-events: none; }
+.yt-title { font-size: 14px; color: var(--text); padding: 9px 13px 11px; line-height: 1.35; font-weight: 500; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.yt-iframe { width: 100%; aspect-ratio: 16 / 9; border: 0; display: block; }
+
+/* Privacy Mode: when Tor is on the avatar BECOMES the shield (no extra bar icon) -
+   accent shield in the 20px avatar slot, with the ring tinted accent. Plus the menu's
+   "Privacy · <mode>" row, and the per-level legend (all three shown, current one
+   highlighted) so the choice is informed before selecting. */
+.avatar-shield { display: grid; place-items: center; width: 22px; height: 22px; color: var(--accent); }
+.avatar-shield .icon { width: 22px; height: 22px; } /* match the search icon size */
+.avatar-ring.tor { box-shadow: none; } /* shield stands alone, no enclosing ring */
+.privacy-legend { margin: 12px 0 0; display: flex; flex-direction: column; gap: 8px; }
+.privacy-opt { padding: 8px 11px; border-radius: 9px; border: 1px solid transparent; }
+.privacy-opt dt { font-weight: 600; font-size: 13px; color: var(--text); }
+.privacy-opt dd { margin: 3px 0 0; font-size: 13px; color: var(--muted); line-height: 1.42; }
+.privacy-opt.active { border-color: var(--border); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.privacy-opt.active dt { color: var(--accent); }
+.privacy-cur { font-weight: 500; color: var(--accent); font-size: 12px; }
+/* Warming indicator: a real connected/total bar (width grows as relays connect, with
+   a smooth transition so it advances rather than sweeps). Empty = hidden (no-JS). */
+/* App-wide re-auth prompt (nip07 private local relay). Accent-tinted, sits under the bar. */
+.local-auth-banner { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; max-width: 640px; margin: 10px auto 0; padding: 10px 14px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border)); background: color-mix(in srgb, var(--accent) 10%, transparent); font-size: 13px; }
+.local-auth-banner span { flex: 1; min-width: 200px; color: var(--text); }
+.local-auth-banner form { margin: 0; }
+.privacy-warming { margin: 10px 0 2px; }
+.privacy-warming:empty { display: none; }
+.warm-row { display: flex; align-items: baseline; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+/* A continuous sweeping bar (same motion as the page-load #nav-progress): a 38% accent
+   segment slides across an empty track. Rendered once + never redrawn while warming
+   (the poller answers H-Reswap:none), so the sweep stays smooth. */
+.warm-bar { position: relative; display: block; height: 6px; border-radius: 999px; background: color-mix(in srgb, var(--text) 12%, transparent); overflow: hidden; }
+.warm-bar.sweep::before { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 38%; background: var(--accent); border-radius: 999px; animation: warm-sweep 1s ease-in-out infinite; }
+@keyframes warm-sweep { 0% { left: -40%; } 100% { left: 100%; } }
+@media (prefers-reduced-motion: reduce) { .warm-bar.sweep::before { animation: none; left: 0; width: 100%; opacity: 0.6; } }
+.warm-poll { display: none; }
+.warm-ok { font-size: 13px; color: var(--accent); font-weight: 600; }
+
+/* Override the global `form { display:flex }` (which is row): the zap modal +
+   comment forms must stack vertically. */
+.zap-form { display: flex; flex-direction: column; gap: 0; }
+.comment-form { display: block; }
+
+/* --- Class forms of former inline styles, so style-src can drop 'unsafe-inline' --- */
+/* Avatar placeholder hue buckets (deterministic per-pubkey tint), 10° steps. */
+.avatar-h0 { background-color: hsl(0, 45%, 32%); }
+.avatar-h1 { background-color: hsl(10, 45%, 32%); }
+.avatar-h2 { background-color: hsl(20, 45%, 32%); }
+.avatar-h3 { background-color: hsl(30, 45%, 32%); }
+.avatar-h4 { background-color: hsl(40, 45%, 32%); }
+.avatar-h5 { background-color: hsl(50, 45%, 32%); }
+.avatar-h6 { background-color: hsl(60, 45%, 32%); }
+.avatar-h7 { background-color: hsl(70, 45%, 32%); }
+.avatar-h8 { background-color: hsl(80, 45%, 32%); }
+.avatar-h9 { background-color: hsl(90, 45%, 32%); }
+.avatar-h10 { background-color: hsl(100, 45%, 32%); }
+.avatar-h11 { background-color: hsl(110, 45%, 32%); }
+.avatar-h12 { background-color: hsl(120, 45%, 32%); }
+.avatar-h13 { background-color: hsl(130, 45%, 32%); }
+.avatar-h14 { background-color: hsl(140, 45%, 32%); }
+.avatar-h15 { background-color: hsl(150, 45%, 32%); }
+.avatar-h16 { background-color: hsl(160, 45%, 32%); }
+.avatar-h17 { background-color: hsl(170, 45%, 32%); }
+.avatar-h18 { background-color: hsl(180, 45%, 32%); }
+.avatar-h19 { background-color: hsl(190, 45%, 32%); }
+.avatar-h20 { background-color: hsl(200, 45%, 32%); }
+.avatar-h21 { background-color: hsl(210, 45%, 32%); }
+.avatar-h22 { background-color: hsl(220, 45%, 32%); }
+.avatar-h23 { background-color: hsl(230, 45%, 32%); }
+.avatar-h24 { background-color: hsl(240, 45%, 32%); }
+.avatar-h25 { background-color: hsl(250, 45%, 32%); }
+.avatar-h26 { background-color: hsl(260, 45%, 32%); }
+.avatar-h27 { background-color: hsl(270, 45%, 32%); }
+.avatar-h28 { background-color: hsl(280, 45%, 32%); }
+.avatar-h29 { background-color: hsl(290, 45%, 32%); }
+.avatar-h30 { background-color: hsl(300, 45%, 32%); }
+.avatar-h31 { background-color: hsl(310, 45%, 32%); }
+.avatar-h32 { background-color: hsl(320, 45%, 32%); }
+.avatar-h33 { background-color: hsl(330, 45%, 32%); }
+.avatar-h34 { background-color: hsl(340, 45%, 32%); }
+.avatar-h35 { background-color: hsl(350, 45%, 32%); }
+/* Thread / reply indent depth (capped at 4). */
+.depth-1 { margin-left: 16px; } .depth-2 { margin-left: 32px; } .depth-3 { margin-left: 48px; } .depth-4 { margin-left: 64px; }
+/* ensō SVG filter-defs holder (kept off-canvas). */
+.enso-defs { position: absolute; }
+/* Poll bar fill widths 0-100% (exact match to the % label). */
+.pw-0 { width: 0%; }
+.pw-1 { width: 1%; }
+.pw-2 { width: 2%; }
+.pw-3 { width: 3%; }
+.pw-4 { width: 4%; }
+.pw-5 { width: 5%; }
+.pw-6 { width: 6%; }
+.pw-7 { width: 7%; }
+.pw-8 { width: 8%; }
+.pw-9 { width: 9%; }
+.pw-10 { width: 10%; }
+.pw-11 { width: 11%; }
+.pw-12 { width: 12%; }
+.pw-13 { width: 13%; }
+.pw-14 { width: 14%; }
+.pw-15 { width: 15%; }
+.pw-16 { width: 16%; }
+.pw-17 { width: 17%; }
+.pw-18 { width: 18%; }
+.pw-19 { width: 19%; }
+.pw-20 { width: 20%; }
+.pw-21 { width: 21%; }
+.pw-22 { width: 22%; }
+.pw-23 { width: 23%; }
+.pw-24 { width: 24%; }
+.pw-25 { width: 25%; }
+.pw-26 { width: 26%; }
+.pw-27 { width: 27%; }
+.pw-28 { width: 28%; }
+.pw-29 { width: 29%; }
+.pw-30 { width: 30%; }
+.pw-31 { width: 31%; }
+.pw-32 { width: 32%; }
+.pw-33 { width: 33%; }
+.pw-34 { width: 34%; }
+.pw-35 { width: 35%; }
+.pw-36 { width: 36%; }
+.pw-37 { width: 37%; }
+.pw-38 { width: 38%; }
+.pw-39 { width: 39%; }
+.pw-40 { width: 40%; }
+.pw-41 { width: 41%; }
+.pw-42 { width: 42%; }
+.pw-43 { width: 43%; }
+.pw-44 { width: 44%; }
+.pw-45 { width: 45%; }
+.pw-46 { width: 46%; }
+.pw-47 { width: 47%; }
+.pw-48 { width: 48%; }
+.pw-49 { width: 49%; }
+.pw-50 { width: 50%; }
+.pw-51 { width: 51%; }
+.pw-52 { width: 52%; }
+.pw-53 { width: 53%; }
+.pw-54 { width: 54%; }
+.pw-55 { width: 55%; }
+.pw-56 { width: 56%; }
+.pw-57 { width: 57%; }
+.pw-58 { width: 58%; }
+.pw-59 { width: 59%; }
+.pw-60 { width: 60%; }
+.pw-61 { width: 61%; }
+.pw-62 { width: 62%; }
+.pw-63 { width: 63%; }
+.pw-64 { width: 64%; }
+.pw-65 { width: 65%; }
+.pw-66 { width: 66%; }
+.pw-67 { width: 67%; }
+.pw-68 { width: 68%; }
+.pw-69 { width: 69%; }
+.pw-70 { width: 70%; }
+.pw-71 { width: 71%; }
+.pw-72 { width: 72%; }
+.pw-73 { width: 73%; }
+.pw-74 { width: 74%; }
+.pw-75 { width: 75%; }
+.pw-76 { width: 76%; }
+.pw-77 { width: 77%; }
+.pw-78 { width: 78%; }
+.pw-79 { width: 79%; }
+.pw-80 { width: 80%; }
+.pw-81 { width: 81%; }
+.pw-82 { width: 82%; }
+.pw-83 { width: 83%; }
+.pw-84 { width: 84%; }
+.pw-85 { width: 85%; }
+.pw-86 { width: 86%; }
+.pw-87 { width: 87%; }
+.pw-88 { width: 88%; }
+.pw-89 { width: 89%; }
+.pw-90 { width: 90%; }
+.pw-91 { width: 91%; }
+.pw-92 { width: 92%; }
+.pw-93 { width: 93%; }
+.pw-94 { width: 94%; }
+.pw-95 { width: 95%; }
+.pw-96 { width: 96%; }
+.pw-97 { width: 97%; }
+.pw-98 { width: 98%; }
+.pw-99 { width: 99%; }
+.pw-100 { width: 100%; }
+
+/* --- NIP-17 Messages (DMs) --- */
+.page-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.dm-conv-list { margin: 0; }
+.dm-conv-link { display: flex; align-items: center; gap: 12px; padding: 12px 4px; color: inherit; text-decoration: none; border-bottom: 1px solid var(--border); }
+.dm-conv-link:hover { background: color-mix(in srgb, var(--text) 3%, transparent); }
+.dm-conv-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.dm-conv-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.dm-conv-name { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-conv-preview { color: var(--muted); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-requests .dm-requests-glyph { width: 38px; height: 38px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--panel); border: 1px solid var(--border); flex: none; }
+.dm-requests .dm-requests-glyph .icon { width: 18px; height: 18px; opacity: 0.7; }
+.dm-requests .dm-conv-link { position: relative; }
+.dm-requests .notif-dot { margin-left: auto; flex: none; }
+.dm-nudge { font-size: 13px; color: var(--muted); background: color-mix(in srgb, var(--text) 4%, transparent); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; margin-bottom: 14px; }
+.dm-nudge a { color: var(--accent); text-decoration: none; }
+.dm-gate { gap: 12px; }
+.dm-gate-title { font-family: var(--serif); font-size: 18px; }
+/* thread */
+.dm-thread-head .dm-peer { display: inline-flex; align-items: center; gap: 9px; color: inherit; text-decoration: none; }
+.dm-peer-name { font-family: var(--serif); font-size: 17px; }
+.dm-back { display: inline-flex; color: var(--muted); text-decoration: none; }
+.dm-back:hover { color: var(--accent); }
+.dm-back .icon { width: 20px; height: 20px; }
+.dm-messages { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.dm-msg { display: flex; flex-direction: column; align-items: flex-start; max-width: 72%; }
+.dm-msg.mine { align-self: flex-end; align-items: flex-end; }
+.dm-bubble { display: inline-block; padding: 8px 12px; border-radius: 14px; background: var(--panel); border: 1px solid var(--border); white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
+.dm-msg.mine .dm-bubble { background: color-mix(in srgb, var(--accent) 18%, var(--bg)); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+.dm-msg-time { font-size: 11px; color: var(--muted); margin: 2px 6px 0; }
+.dm-empty { align-self: center; }
+/* top-of-thread "load older" sentinel: centered loader; overflow-anchor:none keeps the
+   browser from anchoring scroll to this moving element, so the viewport stays put as
+   older bubbles prepend above. */
+.dm-older { align-self: center; padding: 8px 0; opacity: 0.6; overflow-anchor: none; }
+.dm-compose { display: flex; gap: 8px; align-items: flex-end; position: sticky; bottom: 0; background: var(--bg); padding: 10px 0; border-top: 1px solid var(--border); }
+.dm-compose textarea { flex: 1; resize: none; min-height: 40px; max-height: 160px; padding: 9px 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font: inherit; }
+.dm-send { flex: none; align-self: stretch; padding: 0 16px; border-radius: 12px; border: none; background: var(--accent); color: var(--bg); font-weight: 600; cursor: pointer; }
+/* the quiet unread dot on the account avatar */
+.avatar-btn { position: relative; }
+.dm-dot { position: absolute; top: -1px; right: -1px; pointer-events: none; }
+.dm-dot .dm-dot-mark { display: block; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); border: 2px solid var(--bg); }
+.dm-legacy-tag { font-size: 10px; font-weight: 600; letter-spacing: 0.03em; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-left: 7px; vertical-align: middle; }
+.dm-bubble.legacy { border-style: dashed; }
+
+/* --- Messages: single-column "reading column" --- */
+/* Move through it one view at a time (like feed -> thread), full width, no width jump. Its own
+   New-message button replaces the global note-FAB here, so hide that (keep the scroll-top). */
+body:has(.dm-page) .fab-wrap { display: none; }
+/* list head: the Messages/Requests dropdown + actions, sticky under the bar */
+.dm-list-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0 8px; position: sticky; top: 46px; background: var(--bg); z-index: 2; }
+.dm-head-actions { display: inline-flex; align-items: center; gap: 10px; }
+.dm-switch .feed-toggle, .dm-switch.feed-switch > summary { font-weight: 600; }
+.dm-switch .notif-dot { margin-left: 2px; }
+.dm-readall { display: inline-flex; }
+.dm-readall button { background: none; border: none; color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; padding: 2px; }
+.dm-readall button:hover { color: var(--accent); }
+.dm-new { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 50%; color: var(--muted); background: transparent; border: 1px solid var(--border); flex: none; }
+.dm-new .icon { width: 17px; height: 17px; }
+.dm-new:hover { color: var(--text); border-color: var(--text); background: color-mix(in srgb, var(--text) 5%, transparent); }
+/* quiet per-conversation unread cue: a dot + a brighter, bolder row, no count */
+.dm-unread { flex: none; align-self: center; margin-left: 4px; }
+.dm-conv.unread .dm-conv-preview { color: var(--text); }
+.dm-conv.unread .dm-conv-name { font-weight: 700; }
+/* the NIP-17 lock after a name */
+.dm-secure { display: inline-flex; vertical-align: middle; margin-left: 5px; color: color-mix(in srgb, var(--accent) 65%, var(--muted)); }
+.dm-secure .icon { width: 13px; height: 13px; }
+/* empty inbox + the decrypting placeholder: calm, centered */
+.dm-list-empty, .dm-decrypting { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; color: var(--muted); padding: 12vh 0; }
+.dm-empty-new, .empty-cta { display: inline-flex; align-items: center; gap: 7px; margin-top: 4px; padding: 8px 16px; border-radius: 999px; border: 1px solid var(--border); color: var(--text); text-decoration: none; font-weight: 600; font-size: 14px; }
+.dm-empty-new:hover, .empty-cta:hover { border-color: var(--accent); color: var(--accent); }
+/* the thread head sticks under the bar; the compose box (base rule) is pinned at the bottom */
+.dm-thread-head { display: flex; align-items: center; gap: 10px; padding: 6px 0 12px; margin-bottom: 8px; position: sticky; top: 46px; background: var(--bg); border-bottom: 1px solid var(--border); z-index: 2; }
+/* quiet centered day divider in the thread (time as structure, not a stamp per bubble) */
+.dm-daydiv { align-self: center; margin: 16px 0 8px; }
+.dm-daydiv span { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+/* New-message modal */
+.dm-new-modal .dm-search-form { margin: 4px 0 10px; }
+#dm-search-input { width: 100%; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; }
+.dm-pick-list { list-style: none; margin: 0; padding: 0; max-height: 52vh; overflow-y: auto; }
+.dm-pick-link { display: flex; align-items: center; gap: 10px; padding: 9px 4px; color: inherit; text-decoration: none; border-radius: 8px; }
+.dm-pick-link:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+.dm-pick-name { font-weight: 600; }
+.dm-pick-hint { color: var(--muted); padding: 12px 4px; }

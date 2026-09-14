@@ -1,0 +1,13 @@
+node_modules/
+*.log
+.DS_Store
+.data/
+/target/
+
+# graphify knowledge-graph output: generated artifact, large, and the .graphify_* files
+# carry machine-specific absolute paths. Regenerated locally with `graphify update .`.
+graphify-out/
+
+# Claude Code local config + AI-workflow docs (not part of the published project)
+.claude/
+CLAUDE.md

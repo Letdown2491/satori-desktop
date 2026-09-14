@@ -1,0 +1,46 @@
+/* sumi-e — ink on washi. Port of public/styles.css tokens (DESIGN.md §5.1). */
+
+@define-color washi #e3dac4;
+@define-color panel #d9cfb5;
+@define-color hairline #c9bd9f;
+@define-color ink #191714;
+@define-color muted #6e695f;
+@define-color vermilion #b23a26;
+@define-color ok #6f7d5e;
+@define-color warn #9a7320;
+@define-color err #9e2b1c;
+@define-color live #4caf6a;
+
+window {
+    background-color: @washi;
+    color: @ink;
+}
+
+/* Radius ladder: cards 12px (inputs 8 / media 10 / modals 14 / pills 999). */
+.note-card {
+    background-color: @panel;
+    border: 1px solid @hairline;
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+}
+
+.note-author {
+    font-weight: 500;
+}
+
+.serif {
+    font-family: "Source Serif 4", "Palatino", "Georgia", serif;
+}
+
+/* Links are ink-colored and underlined, never accent-colored (ink discipline). */
+
+.empty-quote {
+    font-size: 16px;
+    font-style: italic;
+    color: @muted;
+}
+
+.switcher {
+    font-size: 17px;
+}
