@@ -1178,6 +1178,172 @@ fn meta_line(icon: &str, text: &str) -> gtk::Box {
     row
 }
 
+/// A play facade for direct audio/video links (blossom blobs, mp4s) —
+/// nothing fetched until play (content.ts video facade posture).
+pub fn av_facade(ctx: &Ctx, url: &str) -> gtk::Widget {
+    let audio = [".mp3", ".ogg", ".oga", ".wav", ".m4a", ".flac"]
+        .iter()
+        .any(|e| url.split(['?', '#']).next().unwrap_or("").ends_with(e));
+    let stack = gtk::Stack::builder().build();
+
+    let facade = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(10)
+        .css_classes(["av-facade"])
+        .build();
+    let play = gtk::Button::builder()
+        .child(&crate::icons::icon_sized("play", 26))
+        .css_classes(["flat", "pill", "podcast-play"])
+        .valign(gtk::Align::Center)
+        .build();
+    facade.append(&play);
+    let label = gtk::Label::builder()
+        .label(if audio { "Play audio" } else { "Play video" })
+        .css_classes(["tagline"])
+        .valign(gtk::Align::Center)
+        .build();
+    facade.append(&label);
+
+    stack.add_named(&facade, Some("facade"));
+    {
+        let stack = stack.clone();
+        let url = url.to_string();
+        play.connect_clicked(move |_| {
+            let file = gtk::gio::File::for_uri(&url);
+            let media = gtk::MediaFile::for_file(&file);
+            if audio {
+                let controls = gtk::MediaControls::new(Some(&media));
+                controls.add_css_class("podcast-controls");
+                stack.remove(&stack.first_child().expect("facade"));
+                stack.add_child(&controls);
+                stack.set_visible_child(&controls);
+            } else {
+                let video = gtk::Video::builder()
+                    .autoplay(true)
+                    .hexpand(true)
+                    .build();
+                video.set_property("media-file", &media);
+                stack.remove(&stack.first_child().expect("facade"));
+                stack.add_child(&video);
+                stack.set_visible_child(&video);
+            }
+        });
+    }
+    stack.set_visible_child_name("facade");
+    stack.upcast()
+}
+
+/// A rich preview card for YouTube/Spotify links: oEmbed title + art,
+/// opens externally on click (no webviews — DESIGN.md §10).
+pub fn link_preview_card(ctx: &Ctx, url: &str) -> gtk::Widget {
+    let is_yt = crate::content::is_youtube(url);
+
+    let card = gtk::Button::builder()
+        .css_classes(["embed-card", "preview-card"])
+        .build();
+    let holder = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(10)
+        .build();
+
+    let art = gtk::Picture::builder()
+        .content_fit(gtk::ContentFit::Cover)
+        .width_request(96)
+        .height_request(72)
+        .halign(gtk::Align::Start)
+        .css_classes(["note-media", "embed-thumb"])
+        .build();
+    holder.append(&art);
+
+    let text_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(3)
+        .valign(gtk::Align::Center)
+        .build();
+    let title = gtk::Label::builder()
+        .wrap(true)
+        .wrap_mode(WrapMode::WordChar)
+        .lines(2)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .xalign(0.0)
+        .css_classes(["note-author", "serif"])
+        .build();
+    title.set_text(if is_yt { "YouTube" } else { "Spotify" });
+    text_box.append(&title);
+    let host = gtk::Label::builder()
+        .css_classes(["tagline"])
+        .halign(gtk::Align::Start)
+        .build();
+    let glyph = if is_yt { "▶ Play" } else { "♫ Listen" };
+    host.set_markup(&format!(
+        "{} · <span foreground=\"#8b8275\">{}</span>",
+        glyph,
+        esc(&crate::content::clean_url(url))
+    ));
+    text_box.append(&host);
+    holder.append(&text_box);
+    card.set_child(Some(&holder));
+
+    // oEmbed fill.
+    let oembed = if is_yt {
+        format!(
+            "https://www.youtube.com/oembed?url={}&format=json",
+            urlencoding_lite(url)
+        )
+    } else {
+        format!("https://open.spotify.com/oembed?url={}", urlencoding_lite(url))
+    };
+    {
+        let core = ctx.core.clone();
+        let title = title.clone();
+        let art = art.clone();
+        drain(core.fetch_json(oembed), move |reply| {
+            if let Some(v) = reply {
+                if let Some(t) = v.get("title").and_then(|t| t.as_str()) {
+                    title.set_text(t);
+                }
+                if let Some(thumb) = v.get("thumbnail_url").and_then(|t| t.as_str()) {
+                    let core2 = core.clone();
+                    let art = art.clone();
+                    let thumb2 = thumb.to_string();
+                    drain(core2.fetch_image(thumb2.clone()), move |img| {
+                        if let Some(decoded) = img {
+                            let tex = crate::media_cache::from_decoded(&thumb2, &decoded);
+                            art.set_paintable(Some(&tex));
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    {
+        let url = url.to_string();
+        card.connect_clicked(move |_| {
+            gtk::UriLauncher::new(&url).launch(
+                None::<&adw::ApplicationWindow>,
+                gtk::gio::Cancellable::NONE,
+                |_| {},
+            );
+        });
+    }
+    card.upcast()
+}
+
+/// Minimal percent-encoding for oEmbed query values.
+fn urlencoding_lite(url: &str) -> String {
+    let mut out = String::new();
+    for b in url.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// A small square thumbnail (embed cards).
 pub fn thumb_picture(ctx: &Ctx, url: &str) -> gtk::Picture {
     let pic = gtk::Picture::builder()

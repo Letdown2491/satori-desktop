@@ -263,6 +263,19 @@ impl Core {
         self.own_bookmarked.lock().unwrap().contains(&event_id.to_string())
     }
 
+    /// Fetch a JSON document (oEmbed previews) through the guarded pipeline.
+    pub fn fetch_json(
+        self: &Arc<Self>,
+        url: String,
+    ) -> mpsc::UnboundedReceiver<Option<serde_json::Value>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.rt.spawn(async move {
+            let res = crate::media::fetch_json(&url).await.ok();
+            let _ = tx.send(res);
+        });
+        rx
+    }
+
     /// Fetch (and cache) an image — SSRF-guarded, sha256-keyed (media.rs).
     /// Resolves with raw RGBA8 pixels + dimensions, or None on failure.
     pub fn fetch_image(

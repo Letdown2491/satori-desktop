@@ -16,6 +16,11 @@ pub struct Rendered {
     pub markup: String,
     /// Image URLs extracted from the text (media runs).
     pub images: Vec<String>,
+    /// Audio/video URLs extracted from the text (play facades — blossom
+    /// blobs and any direct media link).
+    pub facades: Vec<String>,
+    /// YouTube/Spotify URLs (rich preview cards via oEmbed).
+    pub previews: Vec<String>,
     /// note1/nevent1 bech32 references (quote/embed candidates).
     pub refs: Vec<String>,
 }
@@ -23,8 +28,89 @@ pub struct Rendered {
 pub fn render_content(content: &str, resolve: NameResolver) -> Rendered {
     let mut images = Vec::new();
     let mut refs = Vec::new();
-    let markup = render_content_inner(content, &mut images, &mut refs, resolve);
-    Rendered { markup, images, refs }
+    let mut facades = Vec::new();
+    let mut previews = Vec::new();
+    let markup = render_content_inner(content, &mut images, &mut refs, &mut facades, &mut previews, resolve);
+    Rendered { markup, images, facades, previews, refs }
+}
+
+/// Tracking-param strip (content.ts:75-94): utm_*, click ids, referrers,
+/// youtube si/feature (v= survives on watch links).
+pub fn clean_url(raw: &str) -> String {
+    use url::Url;
+    let Ok(mut u) = Url::parse(raw) else {
+        return raw.to_string();
+    };
+    let host = u.host_str().unwrap_or_default().replace("www.", "");
+    let is_yt = host == "youtube.com" || host == "youtu.be" || host == "m.youtube.com";
+    let trackers = [
+        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+        "fbclid", "gclid", "dclid", "msclkid", "ref_src", "ref_url", "ref",
+        "mc_cid", "mc_eid", "iga_", "spm", "scid", "si", "feature", "app",
+    ];
+    // No query: don't touch it (query_pairs_mut would append a bare '?').
+    if u.query().is_none() {
+        return u.to_string();
+    }
+    let keep: Vec<(String, String)> = u
+        .query_pairs()
+        .filter(|(k, v)| {
+            let k = k.to_ascii_lowercase();
+            if is_yt && (k == "si" || k == "feature" || k == "app") {
+                return false;
+            }
+            !trackers.iter().any(|t| k == *t || k.starts_with("utm_") || k.starts_with("iga_"))
+        })
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    u.query_pairs_mut().clear();
+    if !keep.is_empty() {
+        u.query_pairs_mut().extend_pairs(keep.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    }
+    u.to_string()
+}
+
+pub fn is_youtube(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.replace("www.", "")))
+        .map(|h| h == "youtube.com" || h == "youtu.be" || h == "m.youtube.com" || h == "music.youtube.com")
+        .unwrap_or(false)
+}
+
+pub fn is_spotify(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.replace("www.", "").replace("open.", "")))
+        .map(|h| h == "spotify.com")
+        .unwrap_or(false)
+}
+
+/// Direct audio/video link (blossom blobs and friends) — play facade.
+pub fn is_av_url(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or("");
+    [".mov", ".mp4", ".webm", ".mkv", ".mp3", ".ogg", ".oga", ".wav", ".m4a", ".flac"]
+        .iter()
+        .any(|ext| path.ends_with(ext))
+}
+
+/// YouTube video id (watch?v=, youtu.be/, shorts/, embed/).
+pub fn youtube_id(url: &str) -> Option<String> {
+    let u = url::Url::parse(url).ok()?;
+    let host = u.host_str()?.replace("www.", "");
+    if host == "youtu.be" {
+        return u.path().strip_prefix('/')?.split('/').next().map(|s| s.to_string());
+    }
+    if host.ends_with("youtube.com") {
+        if let Some(v) = u.query_pairs().find(|(k, _)| k == "v").map(|(_, v)| v.to_string()) {
+            return (!v.is_empty()).then_some(v);
+        }
+        let segs: Vec<&str> = u.path().split('/').filter(|s| !s.is_empty()).collect();
+        if segs.len() >= 2 && (segs[0] == "shorts" || segs[0] == "embed" || segs[0] == "live") {
+            return Some(segs[1].to_string());
+        }
+    }
+    None
 }
 
 fn mention_markup(bech32: &str, resolve: NameResolver) -> String {
@@ -47,7 +133,14 @@ fn is_image_url(url: &str) -> bool {
         || path.ends_with(".gif")
 }
 
-fn render_content_inner(content: &str, images: &mut Vec<String>, refs: &mut Vec<String>, resolve: NameResolver) -> String {
+fn render_content_inner(
+    content: &str,
+    images: &mut Vec<String>,
+    refs: &mut Vec<String>,
+    facades: &mut Vec<String>,
+    previews: &mut Vec<String>,
+    resolve: NameResolver,
+) -> String {
     let mut out = String::with_capacity(content.len() + 64);
     let mut rest = content;
     loop {
@@ -76,19 +169,28 @@ fn render_content_inner(content: &str, images: &mut Vec<String>, refs: &mut Vec<
                     let end = rest
                         .find(|c: char| c.is_whitespace() || c == ')' || c == '<')
                         .unwrap_or(rest.len());
-                    let url = &rest[..end];
-                    if is_image_url(url) {
-                        if !images.contains(&url.to_string()) {
-                            images.push(url.to_string());
+                    let url = clean_url(&rest[..end]);
+                    rest = &rest[end..];
+                    if is_youtube(&url) || is_spotify(&url) {
+                        // Rich preview card replaces the plain link.
+                        if !previews.contains(&url) {
+                            previews.push(url);
+                        }
+                    } else if is_image_url(&url) {
+                        if !images.contains(&url) {
+                            images.push(url);
+                        }
+                    } else if is_av_url(&url) {
+                        if !facades.contains(&url) {
+                            facades.push(url);
                         }
                     } else {
                         out.push_str(&format!(
                             r#"<a href="{}">{}</a>"#,
-                            esc(url),
-                            esc(&display_url(url))
+                            esc(&url),
+                            esc(&display_url(&url))
                         ));
                     }
-                    rest = &rest[end..];
                 } else {
                     // nostr:<bech32> — skip the scheme, then take bech32 chars.
                     let body_start = "nostr:".len();
@@ -199,6 +301,25 @@ mod tests {
         let (m, imgs) = (r.markup, r.images);
         assert!(!m.contains(r#"<a href="https://x.test/pic.png">"#));
         assert_eq!(imgs, vec!["https://x.test/pic.png".to_string()]);
+    }
+
+    #[test]
+    fn tracking_params_stripped() {
+        assert_eq!(
+            clean_url("https://x.test/post?utm_source=rss&id=7"),
+            "https://x.test/post?id=7"
+        );
+        assert_eq!(
+            clean_url("https://youtube.com/watch?v=abc&si=trackme"),
+            "https://youtube.com/watch?v=abc"
+        );
+    }
+
+    #[test]
+    fn youtube_ids() {
+        assert_eq!(youtube_id("https://youtube.com/watch?v=abc123").as_deref(), Some("abc123"));
+        assert_eq!(youtube_id("https://youtu.be/abc123").as_deref(), Some("abc123"));
+        assert_eq!(youtube_id("https://youtube.com/shorts/abc123").as_deref(), Some("abc123"));
     }
 
     #[test]

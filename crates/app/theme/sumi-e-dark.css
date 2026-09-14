@@ -349,3 +349,19 @@ window {
     border-radius: 12px;
     margin-bottom: 8px;
 }
+
+/* AV facades + preview cards. */
+.av-facade {
+    background-color: @panel;
+    border: 1px solid @hairline;
+    border-radius: 10px;
+    padding: 10px 14px;
+}
+
+.preview-card {
+    background-color: @panel;
+    border: 1px solid @hairline;
+    border-left: 2px solid @vermilion;
+    border-radius: 10px;
+    padding: 8px 10px;
+}

@@ -171,6 +171,15 @@ pub fn shell(
     let rendered = render_content(event.content.as_str(), &mention_resolver(ctx));
     let (markup, images) = (rendered.markup, rendered.images);
 
+    // Rich link previews (YouTube/Spotify) + play facades for direct
+    // audio/video links (content.ts / youtube.ts / blossom).
+    for url in rendered.previews.iter().take(2) {
+        content.append(&crate::cards::link_preview_card(ctx, url));
+    }
+    for url in rendered.facades.iter().take(3) {
+        content.append(&crate::cards::av_facade(ctx, url));
+    }
+
     // Content warning: hidden behind a reveal (content.ts cwWrap; the blur
     // node lands in M4).
     let cw_reason = event.tags.iter().find_map(|t| {

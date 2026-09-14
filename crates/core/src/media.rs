@@ -24,6 +24,37 @@ pub struct DecodedImage {
     pub rgba: Vec<u8>,
 }
 
+/// Fetch a JSON document (oEmbed etc.) through the same guarded, cached
+/// path. Cache read-through keeps repeat previews instant.
+pub async fn fetch_json(url: &str) -> Result<serde_json::Value, String> {
+    if !is_safe_media_url(url) {
+        return Err("unsafe URL".into());
+    }
+    let path = cache_path(&cache_key(url));
+    let bytes = if let Ok(cached) = std::fs::read(&path) {
+        cached
+    } else {
+        let res = reqwest::get(url)
+            .await
+            .map_err(|e| e.to_string())?
+            .error_for_status()
+            .map_err(|e| e.to_string())?;
+        let body = res.bytes().await.map_err(|e| e.to_string())?.to_vec();
+        std::fs::create_dir_all(config::media_cache_dir())
+            .map_err(|e| e.to_string())?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut f| f.write_all(&body))
+            .map_err(|e| e.to_string())?;
+        body
+    };
+    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+}
+
 pub async fn fetch_image(url: &str) -> Result<DecodedImage, String> {
     if !is_safe_media_url(url) {
         return Err("unsafe media URL".into());
