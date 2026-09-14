@@ -167,6 +167,18 @@ fn content_page() -> adw::PreferencesPage {
     })
     .unwrap_or_default();
 
+    let machine_row = adw::SwitchRow::builder()
+        .title("Hide machine notes")
+        .subtitle("Kind-1 events whose entire content is JSON — app data transports, not speech")
+        .active(satori_core::store::machine_notes_hidden())
+        .build();
+    {
+        machine_row.connect_active_notify(move |r| {
+            set_pref_bool("machine_notes_hidden", r.is_active());
+        });
+    }
+    group.add(&machine_row);
+
     for (label, kinds) in satori_core::store::CATALOG {
         let on = !kinds.iter().any(|k| hidden.contains(k));
         let row = adw::SwitchRow::builder().title(label).active(on).build();
@@ -180,6 +192,32 @@ fn content_page() -> adw::PreferencesPage {
     }
     page.add(&group);
     page
+}
+
+/// Set a top-level bool pref in prefs.json (read-modify-write).
+fn set_pref_bool(key: &str, on: bool) {
+    let path = satori_core::config::state_file(satori_core::config::files::PREFS);
+    let mut value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(key.into(), on.into());
+    }
+    if let Ok(body) = serde_json::to_string_pretty(&value) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Some(parent) = satori_core::config::data_dir_parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut f| f.write_all(body.as_bytes()));
+    }
 }
 
 /// Flip a catalog kind's visibility in prefs.json (`content_hidden`).

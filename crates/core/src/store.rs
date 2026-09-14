@@ -111,7 +111,8 @@ impl Store {
         let mut events: Vec<Event> = self.query(filter).await?.into_iter().collect();
         // BTreeSet orders by id; the feed needs created_at order. Machine
         // notes drop here — every feed path crosses this chokepoint.
-        events.retain(|e| !is_machine_note(&e.content));
+        let drop_machines = machine_notes_hidden();
+        events.retain(|e| !(drop_machines && is_machine_note(e)));
         events.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
         Ok(events)
     }
@@ -120,7 +121,8 @@ impl Store {
     pub async fn replies(&self, id: EventId) -> NostrResult<Vec<Event>> {
         let filter = Filter::new().kind(Kind::TextNote).event(id);
         let mut events: Vec<Event> = self.query(filter).await?.into_iter().collect();
-        events.retain(|e| !is_machine_note(&e.content));
+        let drop_machines = machine_notes_hidden();
+        events.retain(|e| !(drop_machines && is_machine_note(e)));
         events.sort_by_key(|e| e.created_at.as_secs());
         Ok(events)
     }
@@ -162,20 +164,34 @@ impl Store {
     }
 }
 
-/// Machine notes (filters.ts:104-109): JSON-as-content events are bot
-/// droppings, not human speech — dropped at the chokepoint like tombstones.
-pub fn is_machine_note(content: &str) -> bool {
-    let t = content.trim_start();
-    t.starts_with("{\"content\"")
-        || serde_json::from_str::<serde_json::Value>(t)
-            .ok()
-            .map(|v| {
-                v.is_object()
-                    && v.get("content").map(|c| c.is_string()).unwrap_or(false)
-                    && v.get("kind").is_some()
-                    && v.get("tags").is_some()
-            })
-            .unwrap_or(false)
+/// Machine notes (filters.ts:104-109): a kind:1 whose ENTIRE content is a
+/// bare JSON object/array — an app using kind:1 as a data transport (chess
+/// moves, bots), never human discussion. The {/[ lead keeps prose that
+/// merely CONTAINS JSON. Built-in default; user can switch it in Settings →
+/// Content (machine_notes_hidden in prefs.json, default true).
+pub fn is_machine_note(ev: &Event) -> bool {
+    if ev.kind != Kind::TextNote {
+        return false;
+    }
+    let t = ev.content.trim();
+    if t.len() < 2 || (!t.starts_with('{') && !t.starts_with('[')) {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(t)
+        .map(|v| v.is_object() || v.is_array())
+        .unwrap_or(false)
+}
+
+/// The pref, read once per page (not per event).
+pub fn machine_notes_hidden() -> bool {
+    std::fs::read_to_string(config::state_file(config::files::PREFS))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| {
+            v.get("machine_notes_hidden")
+                .and_then(|h| h.as_bool())
+        })
+        .unwrap_or(true)
 }
 
 pub fn parse_key(hex: &str) -> Option<PublicKey> {
