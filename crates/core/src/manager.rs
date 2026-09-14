@@ -1018,6 +1018,24 @@ impl Core {
         rx
     }
 
+    /// Resolve a note/nevent bech32 to its event (embed/quote previews).
+    pub fn event_by_id_dech32(self: &Arc<Self>, bech32: &str) -> FeedRx {
+        use nostr::prelude::*;
+        let id = match Nip19::from_bech32(bech32) {
+            Ok(Nip19::EventId(id)) => Some(id),
+            Ok(Nip19::Event(e)) => Some(e.event_id),
+            _ => None,
+        };
+        match id {
+            Some(id) => self.event_by_id(id),
+            None => {
+                let (tx, rx) = mpsc::unbounded_channel();
+                let _ = tx.send(FeedEvent::One(None, None));
+                rx
+            }
+        }
+    }
+
     /// Resolve one event by id (repost targets); None if unknown everywhere.
     pub fn event_by_id(self: &Arc<Self>, id: EventId) -> FeedRx {
         let (tx, rx) = mpsc::unbounded_channel();

@@ -122,7 +122,8 @@ pub fn shell(
         content.append(&chip);
     }
 
-    let (markup, images) = render_content(event.content.as_str(), &mention_resolver(ctx));
+    let rendered = render_content(event.content.as_str(), &mention_resolver(ctx));
+    let (markup, images) = (rendered.markup, rendered.images);
 
     // Content warning: hidden behind a reveal (content.ts cwWrap; the blur
     // node lands in M4).

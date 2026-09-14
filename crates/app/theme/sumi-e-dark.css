@@ -285,3 +285,33 @@ window {
     border-radius: 8px;
     padding: 10px;
 }
+
+/* Quote embeds (content.ts embedCard): border-left whisper, quiet. */
+.embed-slot {
+    margin-top: 4px;
+}
+
+.embed-card {
+    border: none;
+    border-left: 2px solid @hairline;
+    border-radius: 0;
+    padding: 8px 12px;
+    margin-top: 4px;
+    background-color: alpha(@panel, 0.5);
+}
+
+.embed-card:hover {
+    background-color: alpha(@ink, 0.04);
+}
+
+/* Hue-bucket avatar circles (render/util.ts:74). */
+.avatar-circle {
+    border-radius: 999px;
+    align-items: center;
+    justify-content: center;
+}
+
+.avatar-initial {
+    color: @washi;
+    font-size: 15px;
+}

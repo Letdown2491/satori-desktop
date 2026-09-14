@@ -237,7 +237,7 @@ fn comment_row(
         .xalign(0.0)
         .halign(gtk::Align::Start)
         .build();
-    text.set_markup(&render_content(ev.content.as_str(), &crate::cards::resolver_pub(ctx)).0);
+    text.set_markup(&render_content(ev.content.as_str(), &crate::cards::resolver_pub(ctx)).markup);
     body.append(&text);
 
     // Reply + like — the comment action row (comments.ts per-comment Reply).

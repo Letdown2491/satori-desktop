@@ -29,14 +29,22 @@ pub fn set_dark(dark: bool) {
 fn apply(dark: bool) {
     eprintln!("[theme] applying {}", if dark { "dark" } else { "light" });
     crate::icons::set_dark(dark);
-    let css = if dark {
-        include_str!("../theme/sumi-e-dark.css")
+    let mut css = if dark {
+        include_str!("../theme/sumi-e-dark.css").to_string()
     } else {
-        include_str!("../theme/sumi-e.css")
+        include_str!("../theme/sumi-e.css").to_string()
     };
+    // Hue buckets for placeholder avatars (render/util.ts:74 — hsl 45%/32%).
+    for i in 0..36 {
+        css.push_str(&format!(
+            "\n.avatar-circle.hue-{i} {{ background-color: hsl({} 45% {}); }}",
+            i * 10,
+            if dark { "38%" } else { "32%" }
+        ));
+    }
     let display = gdk::Display::default().expect("no default display");
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(css);
+    provider.load_from_string(css.as_str());
     PROVIDER.with(|cell| {
         if let Some(old) = cell.borrow_mut().take() {
             gtk::style_context_remove_provider_for_display(&display, &old);

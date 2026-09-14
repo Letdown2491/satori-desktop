@@ -80,6 +80,58 @@ pub fn thread_page(ctx: &Ctx, event: &Event) -> adw::NavigationPage {
         .build()
 }
 
+/// NIP-10 nesting: a reply's parent is its last `e` tag that exists in the
+/// reply set (else it's a root); children indent under the left border.
+fn nest_replies(ctx: &Ctx, replies: &[Event], map: &HashMap<String, Profile>, box_: &gtk::Box) {
+    let ids: std::collections::HashSet<String> =
+        replies.iter().map(|r| r.id.to_string()).collect();
+
+    fn render(
+        ctx: &Ctx,
+        ev: &Event,
+        map: &HashMap<String, Profile>,
+        children: &HashMap<String, Vec<Event>>,
+        depth: usize,
+        parent_box: &gtk::Box,
+    ) {
+        let card = note_card(ctx, ev, map.get(&ev.pubkey.to_string()), false);
+        card.add_css_class("thread-reply");
+        card.set_margin_top(if depth == 0 { 0 } else { 4 });
+        parent_box.append(&card);
+        if depth < 3
+            && let Some(kids) = children.get(&ev.id.to_string()) {
+                let slot = gtk::Box::builder()
+                    .orientation(gtk::Orientation::Vertical)
+                    .margin_start(if depth == 0 { 20 } else { 14 })
+                    .css_classes(["comment-children"])
+                    .build();
+                parent_box.append(&slot);
+                for kid in kids {
+                    render(ctx, kid, map, children, depth + 1, &slot);
+                }
+            }
+    }
+
+    let mut children: HashMap<String, Vec<Event>> = HashMap::new();
+    let mut roots: Vec<Event> = Vec::new();
+    for r in replies {
+        // Last e tag = direct parent (NIP-10 marked-e reads right-to-left).
+        let parent = r
+            .tags
+            .clone()
+            .event_ids()
+            .last()
+            .filter(|pid| ids.contains(&pid.to_string()) && pid != &r.id);
+        match parent {
+            Some(pid) => children.entry(pid.to_string()).or_default().push(r.clone()),
+            None => roots.push(r.clone()),
+        }
+    }
+    for r in &roots {
+        render(ctx, r, map, &children, 0, box_);
+    }
+}
+
 fn thread_content(ctx: &Ctx, event: &Event, profile: Option<&Profile>) -> gtk::Widget {
     let column = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -160,11 +212,7 @@ fn thread_content(ctx: &Ctx, event: &Event, profile: Option<&Profile>) -> gtk::W
                     replies_label.set_visible(true);
                 } else {
                     replies_label.set_visible(true);
-                    for r in &replies {
-                        let profile = map.get(&r.pubkey.to_string()).cloned();
-                        let card = note_card(&ctx, r, profile.as_ref(), false);
-                        replies_box.append(&card);
-                    }
+                    nest_replies(&ctx, &replies, &map, &replies_box);
                 }
             }
             FeedEvent::Failed(msg) => {

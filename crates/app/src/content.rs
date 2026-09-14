@@ -12,10 +12,19 @@ pub fn esc(s: &str) -> String {
 /// Tokenize note content into markup: escaped runs, https links, `nostr:`
 /// refs and bare `@npub` mentions resolved through `resolve` (content.ts).
 /// Image-looking URLs are returned separately (media-run behavior).
-pub fn render_content(content: &str, resolve: NameResolver) -> (String, Vec<String>) {
+pub struct Rendered {
+    pub markup: String,
+    /// Image URLs extracted from the text (media runs).
+    pub images: Vec<String>,
+    /// note1/nevent1 bech32 references (quote/embed candidates).
+    pub refs: Vec<String>,
+}
+
+pub fn render_content(content: &str, resolve: NameResolver) -> Rendered {
     let mut images = Vec::new();
-    let markup = render_content_inner(content, &mut images, resolve);
-    (markup, images)
+    let mut refs = Vec::new();
+    let markup = render_content_inner(content, &mut images, &mut refs, resolve);
+    Rendered { markup, images, refs }
 }
 
 fn mention_markup(bech32: &str, resolve: NameResolver) -> String {
@@ -38,7 +47,7 @@ fn is_image_url(url: &str) -> bool {
         || path.ends_with(".gif")
 }
 
-fn render_content_inner(content: &str, images: &mut Vec<String>, resolve: NameResolver) -> String {
+fn render_content_inner(content: &str, images: &mut Vec<String>, refs: &mut Vec<String>, resolve: NameResolver) -> String {
     let mut out = String::with_capacity(content.len() + 64);
     let mut rest = content;
     loop {
@@ -89,6 +98,10 @@ fn render_content_inner(content: &str, images: &mut Vec<String>, resolve: NameRe
                         .unwrap_or(rest.len());
                     let raw = &rest[..end];
                     let bech = &rest[body_start..end];
+                    if (bech.starts_with("note1") || bech.starts_with("nevent1"))
+                        && !refs.contains(&bech.to_string()) {
+                            refs.push(bech.to_string());
+                        }
                     if bech.starts_with("npub1") || bech.starts_with("nprofile1") {
                         // mention_markup already carries the href.
                         out.push_str(&mention_markup(bech, resolve));
@@ -170,10 +183,11 @@ mod tests {
 
     #[test]
     fn escapes_and_links() {
-        let (m, _) = render_content(
+        let r = render_content(
             "hi & <you> see https://example.com/x and nostr:note1abc",
             &no_resolve,
         );
+        let m = r.markup;
         assert!(m.contains("&amp; &lt;you&gt;"));
         assert!(m.contains(r#"<a href="https://example.com/x">"#));
         assert!(m.contains(r#"<a href="nostr:note1abc">↗ note</a>"#));
@@ -181,7 +195,8 @@ mod tests {
 
     #[test]
     fn images_move_out_of_text() {
-        let (m, imgs) = render_content("look https://x.test/pic.png end", &no_resolve);
+        let r = render_content("look https://x.test/pic.png end", &no_resolve);
+        let (m, imgs) = (r.markup, r.images);
         assert!(!m.contains(r#"<a href="https://x.test/pic.png">"#));
         assert_eq!(imgs, vec!["https://x.test/pic.png".to_string()]);
     }
@@ -191,10 +206,13 @@ mod tests {
         let resolve = |b: &str| {
             (b.starts_with("npub1known")).then(|| "Matsu".to_string())
         };
-        let (m, _) = render_content(
-            "hey @npub1known and nostr:npub1unknownaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            &resolve,
-        );
+        let (m, _) = {
+            let r = render_content(
+                "hey @npub1known and nostr:npub1unknownaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &resolve,
+            );
+            (r.markup, r.refs)
+        };
         assert!(m.contains(">@Matsu</a>"));
         assert!(m.contains(">@npub1…aaaa</a>"));
     }

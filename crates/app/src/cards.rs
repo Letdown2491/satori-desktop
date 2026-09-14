@@ -5,8 +5,6 @@
 use std::collections::HashMap;
 
 use adw::prelude::*;
-use gtk::gdk;
-use gtk::glib;
 use gtk::pango::WrapMode;
 use nostr::prelude::*;
 use satori_core::manager::Profile;
@@ -48,7 +46,7 @@ fn picture_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool)
             .xalign(0.0)
             .valign(gtk::Align::Start)
             .build();
-        body.set_markup(&render_content(ev.content.as_str(), &resolver(ctx)).0);
+        body.set_markup(&render_content(ev.content.as_str(), &resolver(ctx)).markup);
         s.content.append(&body);
     }
 
@@ -57,15 +55,15 @@ fn picture_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool)
     }
     if metas.is_empty() {
         // No imeta: honest fallback to the text pipeline (which extracts URLs).
-        let (markup, images) = render_content(ev.content.as_str(), &resolver(ctx));
+        let rendered = render_content(ev.content.as_str(), &resolver(ctx));
         let body = gtk::Label::builder()
             .wrap(true)
             .wrap_mode(WrapMode::WordChar)
             .xalign(0.0)
             .build();
-        body.set_markup(&markup);
+        body.set_markup(&rendered.markup);
         s.content.append(&body);
-        for url in images {
+        for url in rendered.images {
             let meta = satori_core::nip::imeta::ImageMeta {
                 url,
                 dim: None,
@@ -158,7 +156,7 @@ fn video_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool) -
             .wrap_mode(WrapMode::WordChar)
             .xalign(0.0)
             .build();
-        body.set_markup(&render_content(ev.content.as_str(), &resolver(ctx)).0);
+        body.set_markup(&render_content(ev.content.as_str(), &resolver(ctx)).markup);
         s.content.append(&body);
     }
 
@@ -314,7 +312,7 @@ fn calendar_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool
             .wrap_mode(WrapMode::WordChar)
             .xalign(0.0)
             .build();
-        body.set_markup(&render_content(data.description.as_str(), &resolver(ctx)).0);
+        body.set_markup(&render_content(data.description.as_str(), &resolver(ctx)).markup);
         s.content.append(&body);
     }
 
@@ -503,7 +501,7 @@ fn article_reader(ctx: &Ctx, ev: &Event, data: &satori_core::nip::article::Artic
                     .valign(gtk::Align::Start)
                     .css_classes(["article-para"])
                     .build();
-                p.set_markup(&render_content(&text, &resolver(ctx)).0);
+                p.set_markup(&render_content(&text, &resolver(ctx)).markup);
                 column.append(&p);
             }
             crate::markdown::Block::Heading(level, text) => {
@@ -786,7 +784,7 @@ fn podcast_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool)
             .xalign(0.0)
             .valign(gtk::Align::Start)
             .build();
-        notes.set_markup(&render_content(data.notes.as_str(), &resolver(ctx)).0);
+        notes.set_markup(&render_content(data.notes.as_str(), &resolver(ctx)).markup);
         let reveal = gtk::Revealer::builder()
             .transition_type(gtk::RevealerTransitionType::SlideDown)
             .child(&notes)
@@ -886,7 +884,7 @@ fn classified_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bo
             .wrap_mode(WrapMode::WordChar)
             .xalign(0.0)
             .build();
-        body.set_markup(&render_content(data.summary.as_str(), &resolver(ctx)).0);
+        body.set_markup(&render_content(data.summary.as_str(), &resolver(ctx)).markup);
         s.content.append(&body);
     }
 

@@ -54,7 +54,7 @@ pub async fn fetch_image(url: &str) -> Result<DecodedImage, String> {
             .and_then(|mut f| f.write_all(&body))
             .map_err(|e| e.to_string())?;
         WRITE_COUNT.fetch_add(1, Ordering::Relaxed);
-        if WRITE_COUNT.load(Ordering::Relaxed) % 50 == 0 {
+        if WRITE_COUNT.load(Ordering::Relaxed).is_multiple_of(50) {
             trim_cache(200 * 1024 * 1024, 150 * 1024 * 1024);
         }
         body

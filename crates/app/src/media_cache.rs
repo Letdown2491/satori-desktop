@@ -31,12 +31,11 @@ impl TexCache {
     }
 
     fn insert(&mut self, url: &str, tex: gdk::MemoryTexture) {
-        if self.map.len() >= self.cap && !self.map.contains_key(url) {
-            if let Some(oldest) = self.order.first().cloned() {
+        if self.map.len() >= self.cap && !self.map.contains_key(url)
+            && let Some(oldest) = self.order.first().cloned() {
                 self.map.remove(&oldest);
                 self.order.remove(0);
             }
-        }
         self.map.insert(url.to_string(), tex);
         self.order.push(url.to_string());
     }
