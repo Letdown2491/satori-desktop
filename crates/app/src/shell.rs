@@ -28,10 +28,7 @@ pub fn poll_feed_dot(ctx: &Ctx, dot: &gtk::Image) {
     glib::timeout_add_seconds_local(60, move || {
         let ctx2 = ctx.clone();
         let dot2 = dot.clone();
-        crate::bridge::drain(ctx2.core.feed_dot(), move |ev| match ev {
-            satori_core::manager::FeedEvent::NotifDot(unread) => dot2.set_visible(unread),
-            _ => {}
-        });
+        crate::bridge::drain(ctx2.core.feed_dot(), move |ev| if let satori_core::manager::FeedEvent::NotifDot(unread) = ev { dot2.set_visible(unread) });
         glib::ControlFlow::Continue
     });
 }

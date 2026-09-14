@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use gtk::glib;
 use nostr::prelude::*;
 use satori_core::manager::{FeedEvent, FeedPage, Profile};
 
@@ -228,12 +229,21 @@ impl FeedView {
         });
     }
 
-    fn on_loaded(&self, page: &FeedPage, replace: bool) {
-        if replace {
-            self.list.remove_all();
-            self.faces.borrow_mut().clear();
+    fn on_loaded(self: &Rc<Self>, page: &FeedPage, replace: bool) {
+        if replace && self.list.first_child().is_some() {
+            // The ink-wash dispersal (styles.css .feed.clearing): soften the
+            // current set, dissolve, rebuild — the new rows fade in via
+            // inkfade.
+            self.list.add_css_class("clearing");
+            let view = Rc::clone(self);
+            let page = page.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(280), move || {
+                view.rebuild_from(&page);
+                glib::ControlFlow::Break
+            });
+            return; // the timeout rebuilds
         }
-        self.absorb_profiles(page);
+        self.rebuild_from(page);
         for ev in &page.notes {
             self.append_note(ev);
         }
@@ -255,6 +265,39 @@ impl FeedView {
                 .css_classes(["serif", "empty-quote"])
                 .build();
             quote.set_text("“Nothing exists; all is a beginning.”");
+            empty.append(&quote);
+            empty.append(&crate::icons::enso(90));
+            self.list.append(&empty);
+        }
+    }
+
+    /// Clear + render a page (the dispersal's second half).
+    fn rebuild_from(&self, page: &FeedPage) {
+        self.list.remove_all();
+        self.faces.borrow_mut().clear();
+        self.absorb_profiles(page);
+        for ev in &page.notes {
+            self.append_note(ev);
+        }
+        self.hydrate_faces();
+        self.state.set_visible_child_name("feed");
+        self.list.remove_css_class("clearing");
+        if let Some(oldest) = page.notes.last().map(|e| e.created_at.as_secs()) {
+            self.oldest_at.set(Some(oldest));
+        }
+        // Empty landing: the quiet quote + still ensō (svg.ts quoteEmpty).
+        if page.notes.is_empty() {
+            let empty = gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .spacing(8)
+                .halign(gtk::Align::Center)
+                .margin_top(48)
+                .margin_bottom(64)
+                .build();
+            let quote = gtk::Label::builder()
+                .css_classes(["serif", "empty-quote"])
+                .build();
+            quote.set_text("\u{201c}Nothing exists; all is a beginning.\u{201d}");
             empty.append(&quote);
             empty.append(&crate::icons::enso(90));
             self.list.append(&empty);
@@ -379,11 +422,10 @@ impl FeedView {
         let card = card_for(&self.ctx, ev, profile.as_ref(), false);
         crate::motion::fade_in(&card);
         // Register the faces slot for batch hydration (kind 1 only).
-        if ev.kind == Kind::TextNote {
-            if let Some(slot) = crate::note_card::faces_slot(&card) {
+        if ev.kind == Kind::TextNote
+            && let Some(slot) = crate::note_card::faces_slot(&card) {
                 self.faces.borrow_mut().insert(ev.id.to_string(), slot);
             }
-        }
         self.list.append(&card);
     }
 

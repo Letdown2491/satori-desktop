@@ -217,7 +217,118 @@ pub fn shell(
         content.append(&media);
     }
 
+    // Quote embeds: lazy compact previews of referenced notes (content.ts
+    // embedCard — no actions, click opens the thread).
+    for bech in rendered.refs.iter().take(3) {
+        let slot = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .css_classes(["embed-slot"])
+            .build();
+        let waiting = gtk::Label::builder()
+            .label("Loading quote…")
+            .css_classes(["tagline"])
+            .halign(gtk::Align::Start)
+            .build();
+        slot.append(&waiting);
+        content.append(&slot);
+        let ctx2 = ctx.clone();
+        let bech2 = bech.clone();
+        drain(ctx2.core.event_by_id_dech32(&bech2), move |reply| {
+            use satori_core::manager::FeedEvent;
+            match reply {
+                FeedEvent::One(Some(target), prof) => {
+                    waiting.set_visible(false);
+                    slot.append(&embed_card(&ctx2, &target, prof.as_ref()));
+                }
+                _ => waiting.set_text("Quote unavailable."),
+            }
+        });
+    }
+
     Shell { root, content, faces }
+}
+
+/// Compact embed card for quotes/references — border-left, name + time +
+/// clamped text, thumbnail when media, click → thread (embedCard).
+pub fn embed_card(ctx: &Ctx, target: &Event, profile: Option<&Profile>) -> gtk::Widget {
+    let card = gtk::Button::builder()
+        .css_classes(["embed-card"])
+        .build();
+    let inner = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(3)
+        .build();
+
+    let head = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(6)
+        .build();
+    let name = profile
+        .map(|p| p.display())
+        .unwrap_or_else(|| short_key(&target.pubkey));
+    let name_label = gtk::Label::builder()
+        .css_classes(["note-author"])
+        .halign(gtk::Align::Start)
+        .build();
+    name_label.set_markup(&format!(
+        "<a href=\"profile:{}\">{}</a>",
+        target.pubkey,
+        esc_markup(&name)
+    ));
+    {
+        let ctx2 = ctx.clone();
+        let who = target.pubkey;
+        name_label.connect_activate_link(move |_, _| {
+            crate::profile::open_profile(&ctx2, who);
+            glib::Propagation::Stop
+        });
+    }
+    head.append(&name_label);
+    head.append(
+        &gtk::Label::builder()
+            .label(time_ago(target.created_at.as_secs()))
+            .css_classes(["tagline"])
+            .build(),
+    );
+    inner.append(&head);
+
+    let text = gtk::Label::builder()
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .lines(3)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .xalign(0.0)
+        .halign(gtk::Align::Start)
+        .build();
+    text.set_markup(&render_content(target.content.as_str(), &mention_resolver(ctx)).markup);
+    inner.append(&text);
+
+    // Image thumb when the quoted note carries media.
+    let thumbs: Vec<String> = satori_core::nip::imeta::parse(target)
+        .into_iter()
+        .map(|m| m.url)
+        .collect();
+    if thumbs.is_empty() {
+        card.set_child(Some(&inner));
+    } else {
+        let holder = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .build();
+        holder.append(&inner);
+        holder.append(&crate::cards::thumb_picture(ctx, &thumbs[0]));
+        card.set_child(Some(&holder));
+    }
+
+    {
+        let ctx2 = ctx.clone();
+        let target = target.clone();
+        card.connect_clicked(move |_| {
+            if target.kind == Kind::TextNote {
+                crate::thread::thread_page_by_id(&ctx2, target.id);
+            }
+        });
+    }
+    card.upcast()
 }
 
 /// The action row — reply / like / bookmark / repeat / trash (own), plus
@@ -465,6 +576,22 @@ pub fn avatar_widget(ctx: &Ctx, pubkey: PublicKey, profile: Option<&Profile>) ->
 }
 
 /// The hue-bucket CSS class for a pubkey (render/util.ts:74 — 36 buckets).
+/// Display-name resolution for inline mentions (profile cache).
+pub fn mention_resolver(ctx: &Ctx) -> impl Fn(&str) -> Option<String> + '_ {
+    use nostr::prelude::*;
+    move |b: &str| {
+        Nip19::from_bech32(b)
+            .ok()
+            .and_then(|n| match n {
+                Nip19::Pubkey(pk) => ctx.core.profile_of(&pk),
+                Nip19::Profile(p) => ctx.core.profile_of(&p.public_key),
+                _ => None,
+            })
+            .map(|p| p.name)
+            .filter(|n| !n.is_empty())
+    }
+}
+
 pub fn hue_class(pk: &PublicKey) -> String {
     let hex_str = pk.to_string();
     let hue: u32 = u32::from_str_radix(&hex_str[..4], 16).unwrap_or(0) % 360;

@@ -27,6 +27,7 @@ pub fn profile_page(ctx: &Ctx, who: PublicKey) -> adw::NavigationPage {
         .spacing(6)
         .css_classes(["note-card"])
         .build();
+    // Banner strip prepends on load (profile.ts profileHeader).
     let avatar = crate::note_card::avatar_widget(ctx, who, None);
     avatar.set_width_request(72);
     avatar.set_height_request(72);
@@ -164,6 +165,22 @@ pub fn profile_page(ctx: &Ctx, who: PublicKey) -> adw::NavigationPage {
                     .or_else(|| Some(Profile::default()))
                 {
                     name.set_text(if p.name.is_empty() { "—" } else { &p.name });
+                    if !p.banner.is_empty() {
+                        let banner = crate::cards::media_picture(
+                            &ctx,
+                            &satori_core::nip::imeta::ImageMeta {
+                                url: p.banner.clone(),
+                                dim: None,
+                                alt: None,
+                                mime: None,
+                            },
+                            130,
+                        );
+                        banner.set_height_request(110);
+                        banner.add_css_class("profile-banner");
+                        // Banner above the identity block.
+                        head.prepend(&banner);
+                    }
                     if !p.about.is_empty() {
                         about.set_text(&p.about);
                         about.set_visible(true);

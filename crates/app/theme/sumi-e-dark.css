@@ -338,3 +338,18 @@ window {
 .embed-thumb {
     margin-left: 10px;
 }
+
+/* The ink-wash dispersal (styles.css .feed.clearing). */
+.feed-list {
+    transition: opacity 0.3s ease, filter 0.3s ease;
+}
+
+.feed-list.clearing {
+    opacity: 0;
+    filter: blur(12px);
+}
+
+.profile-banner {
+    border-radius: 12px;
+    margin-bottom: 8px;
+}

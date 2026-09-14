@@ -120,6 +120,7 @@ pub struct Profile {
     pub name: String,
     pub picture: String,
     pub about: String,
+    pub banner: String,
 }
 
 impl Profile {
@@ -130,6 +131,7 @@ impl Profile {
             display_name: Option<String>,
             picture: Option<String>,
             about: Option<String>,
+            banner: Option<String>,
         }
         let raw: RawMeta = serde_json::from_str(&ev.content).ok()?;
         Some(Self {
@@ -137,6 +139,7 @@ impl Profile {
             name: raw.display_name.or(raw.name).unwrap_or_default(),
             picture: raw.picture.unwrap_or_default(),
             about: raw.about.unwrap_or_default(),
+            banner: raw.banner.unwrap_or_default(),
         })
     }
 
@@ -405,15 +408,63 @@ impl Core {
     async fn build_active(&self, session: &Session) -> Result<Active> {
         let signer = self.build_signer(session).await?;
         let pool = Arc::new(Pool::open().await.map_err(|e| LoginError::Resume(e.to_string()))?);
+        // Undo-window prefs live in prefs.json (theme.ts semantics); core
+        // reads its slice at session build — TODO(M1): cleaner pref split.
+        let mut undo = crate::undo::UndoWindow::default();
+        if let Ok(raw) = std::fs::read_to_string(crate::config::state_file(
+            crate::config::files::PREFS,
+        ))
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(b) = v.get("undo_enabled").and_then(|b| b.as_bool()) {
+                    undo.enabled = b;
+                }
+                if let Some(sec) = v.get("undo_seconds").and_then(|s| s.as_u64()) {
+                    undo.set_seconds(sec as u32);
+                }
+            }
         Ok(Active {
             session: session.clone(),
             signer,
             pool,
-            undo: crate::undo::UndoWindow::default(),
+            undo,
             write_relays: Vec::new(),
             read_relays: Vec::new(),
             follows: Vec::new(),
         })
+    }
+
+    /// Live undo-window update (settings): active state + prefs.json.
+    pub fn set_undo(&self, enabled: bool, seconds: u32) {
+        {
+            let mut a = self.active.lock().unwrap();
+            if let Some(a) = a.as_mut() {
+                a.undo.enabled = enabled;
+                a.undo.set_seconds(seconds);
+            }
+        }
+        // Read-modify-write prefs.json, preserving app-owned keys.
+        let path =
+            crate::config::state_file(crate::config::files::PREFS);
+        let mut value = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("undo_enabled".into(), enabled.into());
+            obj.insert("undo_seconds".into(), seconds.into());
+        }
+        if let Ok(body) = serde_json::to_string_pretty(&value) {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let _ = std::fs::create_dir_all(crate::config::data_dir());
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .and_then(|mut f| f.write_all(body.as_bytes()));
+        }
     }
 
     // --- feed ------------------------------------------------------------------

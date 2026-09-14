@@ -43,7 +43,9 @@ pub fn notifications_page(ctx: &Ctx) -> adw::NavigationPage {
         .build();
 
     // Opening the page marks seen (routes/notifications.ts:115) — the dot
-    // goes quiet even if the fetch is slow.
+    // goes quiet even if the fetch is slow. The pre-visit high-water splits
+    // the page into New / Earlier.
+    let prev_high_water = satori_core::read_state::load().notif;
     ctx.core.mark_notifications_seen();
 
     {
@@ -61,7 +63,32 @@ pub fn notifications_page(ctx: &Ctx) -> adw::NavigationPage {
                     status.set_text("Nothing new. Sit quietly.");
                     status.set_visible(true);
                 }
-                for n in &notifs {
+                let new_count = notifs
+                    .iter()
+                    .filter(|n| n.created_at.as_secs() > prev_high_water)
+                    .count();
+                if new_count > 0 && new_count < notifs.len() {
+                    let head = gtk::Label::builder()
+                        .label("New")
+                        .css_classes(["serif", "note-author", "section-title"])
+                        .halign(gtk::Align::Start)
+                        .margin_top(8)
+                        .build();
+                    list.append(&head);
+                }
+                for (i, n) in notifs.iter().enumerate() {
+                    if new_count > 0
+                        && new_count < notifs.len()
+                        && i == new_count
+                    {
+                        let head = gtk::Label::builder()
+                            .label("Earlier")
+                            .css_classes(["serif", "section-title", "tagline"])
+                            .halign(gtk::Align::Start)
+                            .margin_top(16)
+                            .build();
+                        list.append(&head);
+                    }
                     let profile = map.get(&n.pubkey.to_string()).cloned();
                     let card = card_for(&ctx, n, profile.as_ref(), false);
                     list.append(&card);
