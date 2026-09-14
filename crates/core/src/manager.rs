@@ -422,18 +422,21 @@ impl Core {
         let mut active = self.active().await?;
 
         let me = active.me();
+        // The NIP-65 fetch itself needs a connected pool: indexers first,
+        // then the discovered read set (nip65.ts bootstrap order).
+        active.pool.connect_reads(Vec::new()).await.ok();
         let (read, write) = active
             .pool
             .nip65(me)
             .await
             .unwrap_or_else(|_| (Vec::new(), Vec::new()));
+        active.read_relays = read.clone();
         active.write_relays = write.clone();
-        active.read_relays = read;
         if let Some(a) = self.active.lock().unwrap().as_mut() {
+            a.read_relays = read.clone();
             a.write_relays = write;
-            a.read_relays = active.read_relays.clone();
         }
-        active.pool.connect_reads(active.read_relays.clone()).await.ok();
+        active.pool.connect_reads(read).await.ok();
 
         let follows = active.pool.follows(me).await.unwrap_or_default();
         active.follows = follows.clone();

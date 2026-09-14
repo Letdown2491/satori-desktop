@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use gtk::glib;
 use satori_core::manager::PublishEvent;
 
 use crate::bridge::drain;
@@ -47,7 +48,7 @@ pub fn settings_page(ctx: &Ctx) -> adw::NavigationPage {
     // --- Relays (NIP-65) ----------------------------------------------------
     let relays = section("Relays");
     let hint = gtk::Label::builder()
-        .label("Where your events go and come from. Published as your NIP-65 list.")
+        .label("Where your events go and come from. Published as your NIP-65 list. Five indexers are always used for reading; add your own relays to route writes.")
         .css_classes(["tagline"])
         .wrap(true)
         .halign(gtk::Align::Start)
@@ -106,17 +107,42 @@ pub fn settings_page(ctx: &Ctx) -> adw::NavigationPage {
         .child(&scroll)
         .build();
 
-    // Populate from the session's current NIP-65 (bootstrap already fetched it).
+    // Populate from the session's current NIP-65. If bootstrap is still
+    // landing (or found nothing yet), catch up on a short poll — the pane is
+    // a projection of core state.
     {
+        let ctx_pop = ctx.clone();
         let rows = Rc::clone(&rows);
-        let (read, write) = ctx.core.current_relays();
-        let mut urls = read.clone();
-        urls.extend(write.iter().filter(|w| !read.contains(*w)).cloned());
-        for url in urls {
-            let r = read.contains(&url);
-            let w = write.contains(&url);
-            let row = relay_row(&url, r, w, rows.clone());
-            list.append(&row);
+        let list = list.clone();
+        let populate = move || {
+            let rows = Rc::clone(&rows);
+            let (read, write) = ctx_pop.core.current_relays();
+            let mut urls = read.clone();
+            urls.extend(write.iter().filter(|w| !read.contains(*w)).cloned());
+            if urls.is_empty() {
+                return false; // keep polling
+            }
+            for url in urls {
+                if rows.borrow().contains_key(&url) {
+                    continue;
+                }
+                let r = read.contains(&url);
+                let w = write.contains(&url);
+                let row = relay_row(&url, r, w, rows.clone());
+                list.append(&row);
+            }
+            true
+        };
+        if !populate() {
+            let mut tries = 0;
+            glib::timeout_add_local(std::time::Duration::from_millis(800), move || {
+                tries += 1;
+                if populate() || tries > 30 {
+                    glib::ControlFlow::Break
+                } else {
+                    glib::ControlFlow::Continue
+                }
+            });
         }
     }
 
@@ -152,6 +178,10 @@ pub fn settings_page(ctx: &Ctx) -> adw::NavigationPage {
                 if w.is_active() {
                     write.push(url.clone());
                 }
+            }
+            if read.is_empty() && write.is_empty() {
+                ctx.toast("Nothing to publish — add a relay first");
+                return;
             }
             let core = ctx.core.clone();
             let cb_ctx = ctx.clone();
