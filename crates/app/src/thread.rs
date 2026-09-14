@@ -13,14 +13,81 @@ use crate::bridge::drain;
 use crate::ctx::Ctx;
 use crate::note_card::note_card;
 
+/// Open a thread by event id (nostr:note/nevent links): a loading page that
+/// fetches the anchor event, then fills with the thread.
+pub fn thread_page_by_id(ctx: &Ctx, id: EventId) -> adw::NavigationPage {
+    let stack = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .build();
+    let loading = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(10)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+    loading.append(&crate::icons::enso(120));
+    loading.append(&gtk::Label::new(Some("Fetching the note…")));
+    stack.add_named(&loading, Some("loading"));
+
+    let page = adw::NavigationPage::builder()
+        .title("Thread")
+        .child(&stack)
+        .build();
+
+    {
+        let ctx = ctx.clone();
+        let stack = stack.clone();
+        let page_for_title = page.clone();
+        let _ = &page_for_title;
+        drain(ctx.core.event_by_id(id), move |reply| {
+            use satori_core::manager::FeedEvent;
+            match reply {
+                FeedEvent::One(Some(ev), profile) => {
+                    let content = thread_content(&ctx, &ev, profile.as_ref());
+                    stack.remove(&loading);
+                    stack.add_child(&content);
+                    stack.set_visible_child(&content);
+                }
+                FeedEvent::One(None, _) => {
+                    stack.remove(&loading);
+                    let missing = gtk::Label::builder()
+                        .label("This note could not be found on your relays.")
+                        .css_classes(["tagline"])
+                        .build();
+                    stack.add_child(&missing);
+                    stack.set_visible_child(&missing);
+                }
+                FeedEvent::Failed(msg) => {
+                    eprintln!("[thread] fetch by id: {msg}");
+                }
+                _ => {}
+            }
+        });
+    }
+    page
+}
+
 pub fn thread_page(ctx: &Ctx, event: &Event) -> adw::NavigationPage {
+    let content = thread_content(ctx, event, None);
+    let scroll = gtk::ScrolledWindow::builder()
+        .child(&content)
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+    adw::NavigationPage::builder()
+        .title("Thread")
+        .child(&scroll)
+        .build()
+}
+
+fn thread_content(ctx: &Ctx, event: &Event, profile: Option<&Profile>) -> gtk::Widget {
     let column = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .margin_top(6)
         .spacing(8)
         .build();
 
-    let focused = note_card(ctx, event, None, true);
+    let focused = note_card(ctx, event, profile, true);
     column.append(&focused);
 
     let reply_btn = gtk::Button::builder()
@@ -50,18 +117,6 @@ pub fn thread_page(ctx: &Ctx, event: &Event) -> adw::NavigationPage {
         .css_classes(["tagline"])
         .build();
     column.append(&loading);
-
-    let clamp = adw::Clamp::builder().maximum_size(720).child(&column).build();
-    let scroll = gtk::ScrolledWindow::builder()
-        .child(&clamp)
-        .hexpand(true)
-        .vexpand(true)
-        .build();
-
-    let page = adw::NavigationPage::builder()
-        .title("Thread")
-        .child(&scroll)
-        .build();
 
     // Reply composer bound to this thread: pending replies prepend here.
     {
@@ -95,8 +150,6 @@ pub fn thread_page(ctx: &Ctx, event: &Event) -> adw::NavigationPage {
         let replies_box = replies_box.clone();
         let replies_label = replies_label.clone();
         let loading = loading.clone();
-        let page_for_nav = page.clone();
-        let _ = &page_for_nav;
         drain(ctx.core.thread(event.id), move |ev| match ev {
             FeedEvent::Replies(replies, profiles) => {
                 loading.set_visible(false);
@@ -121,5 +174,6 @@ pub fn thread_page(ctx: &Ctx, event: &Event) -> adw::NavigationPage {
         });
     }
 
-    page
+    let clamp = adw::Clamp::builder().maximum_size(720).child(&column).build();
+    clamp.upcast()
 }

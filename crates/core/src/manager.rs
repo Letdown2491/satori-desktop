@@ -169,6 +169,8 @@ pub struct Core {
     own_bookmarked: Mutex<HashSet<String>>,
     /// Muted authors (pubkey hex) — NIP-51 kind:10000, content encrypted.
     muted: Mutex<HashSet<String>>,
+    /// Resolved profiles (mentions/name display) — absorbed as they stream in.
+    profiles_mem: Mutex<std::collections::HashMap<String, Profile>>,
     /// Live undo holds: token → cancel signal.
     holds: Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>>,
 }
@@ -193,6 +195,7 @@ impl Core {
             own_liked: Mutex::new(HashSet::new()),
             own_bookmarked: Mutex::new(HashSet::new()),
             muted: Mutex::new(HashSet::new()),
+            profiles_mem: Mutex::new(std::collections::HashMap::new()),
             holds: Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -637,6 +640,19 @@ impl Core {
         rx
     }
 
+    fn absorb_profiles(&self, profiles: &[Profile]) {
+        let mut m = self.profiles_mem.lock().unwrap();
+        for p in profiles {
+            m.insert(p.pubkey.clone(), p.clone());
+        }
+    }
+
+    /// Display resolution for inline mentions (content.ts: @names from the
+    /// profile cache; misses render as short npubs).
+    pub fn profile_of(&self, pk: &PublicKey) -> Option<Profile> {
+        self.profiles_mem.lock().unwrap().get(&pk.to_string()).cloned()
+    }
+
     async fn page_from_store(&self, active: &Active, until: Option<u64>) -> Result<FeedPage> {
         let follows = active.follows.clone();
         let mut notes = active
@@ -652,6 +668,7 @@ impl Core {
             notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
         }
         let profiles = Self::profiles_for(active, &notes).await;
+        self.absorb_profiles(&profiles);
         Ok(FeedPage { notes, profiles })
     }
 
@@ -973,6 +990,75 @@ impl Core {
                     }
                     None => None,
                 };
+                Ok((ev, profile))
+            }
+            .await;
+            match res {
+                Ok((ev, profile)) => {
+                    let _ = tx.send(FeedEvent::One(ev, profile));
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
+    /// One addressable event by (kind, author, d) — naddr resolution.
+    pub fn event_by_address(
+        self: &Arc<Self>,
+        kind: u16,
+        author: PublicKey,
+        identifier: String,
+    ) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<(Option<Event>, Option<Profile>)> = async {
+                let active = this.active().await?;
+                let filter = Filter::new()
+                    .author(author)
+                    .kind(Kind::from_u16(kind))
+                    .identifier(&identifier)
+                    .limit(1);
+                let ev = active.pool.get(filter).await.unwrap_or_default();
+                // Addressable events: newest replaces (NIP-01); take the
+                // greatest (id-ordered BTreeSet ≈ latest seen).
+                let ev = ev.into_iter().next_back();
+                if let Some(ev) = &ev {
+                    let _ = active.pool.store.save(ev).await;
+                }
+                let profile = match &ev {
+                    Some(ev) => {
+                        let authors = [ev.pubkey];
+                        let cached = active
+                            .pool
+                            .store
+                            .profiles(&authors)
+                            .await
+                            .unwrap_or_default();
+                        let mut p: Option<Profile> =
+                            cached.iter().filter_map(Profile::from_event).next();
+                        if p.is_none() {
+                            let f = Filter::new()
+                                .kind(Kind::Metadata)
+                                .author(ev.pubkey)
+                                .limit(1);
+                            for meta in active.pool.get(f).await.unwrap_or_default() {
+                                let _ = active.pool.store.save(&meta).await;
+                                if p.is_none() {
+                                    p = Profile::from_event(&meta);
+                                }
+                            }
+                        }
+                        p
+                    }
+                    None => None,
+                };
+                if let Some(p) = &profile {
+                    this.absorb_profiles(std::slice::from_ref(p));
+                }
                 Ok((ev, profile))
             }
             .await;

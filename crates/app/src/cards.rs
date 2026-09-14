@@ -43,7 +43,7 @@ fn picture_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool)
             .xalign(0.0)
             .valign(gtk::Align::Start)
             .build();
-        body.set_markup(&render_content(ev.content.as_str()).0);
+        body.set_markup(&render_content(ev.content.as_str(), &resolver(ctx)).0);
         s.content.append(&body);
     }
 
@@ -52,7 +52,7 @@ fn picture_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool)
     }
     if metas.is_empty() {
         // No imeta: honest fallback to the text pipeline (which extracts URLs).
-        let (markup, images) = render_content(ev.content.as_str());
+        let (markup, images) = render_content(ev.content.as_str(), &resolver(ctx));
         let body = gtk::Label::builder()
             .wrap(true)
             .wrap_mode(WrapMode::WordChar)
@@ -153,7 +153,7 @@ fn video_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool) -
             .wrap_mode(WrapMode::WordChar)
             .xalign(0.0)
             .build();
-        body.set_markup(&render_content(ev.content.as_str()).0);
+        body.set_markup(&render_content(ev.content.as_str(), &resolver(ctx)).0);
         s.content.append(&body);
     }
 
@@ -309,7 +309,7 @@ fn calendar_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool
             .wrap_mode(WrapMode::WordChar)
             .xalign(0.0)
             .build();
-        body.set_markup(&render_content(data.description.as_str()).0);
+        body.set_markup(&render_content(data.description.as_str(), &resolver(ctx)).0);
         s.content.append(&body);
     }
 
@@ -498,7 +498,7 @@ fn article_reader(ctx: &Ctx, ev: &Event, data: &satori_core::nip::article::Artic
             .xalign(0.0)
             .valign(gtk::Align::Start)
             .build();
-        p.set_markup(&render_content(para).0);
+        p.set_markup(&render_content(para, &resolver(ctx)).0);
         column.append(&p);
     }
 
@@ -512,6 +512,71 @@ fn article_reader(ctx: &Ctx, ev: &Event, data: &satori_core::nip::article::Artic
         .title(&data.title)
         .child(&scroll)
         .build()
+}
+
+/// Open an addressable entity (naddr link): fetch, then route — articles to
+/// the reader, everything else to a focused card page (comments via NIP-22
+/// land in M2).
+pub fn entity_page_by_naddr(
+    ctx: &Ctx,
+    kind: u16,
+    author: PublicKey,
+    identifier: String,
+) -> adw::NavigationPage {
+    let stack = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .build();
+    let loading = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(10)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+    loading.append(&crate::icons::enso(120));
+    loading.append(&gtk::Label::new(Some("Fetching…")));
+    stack.add_named(&loading, Some("loading"));
+
+    let page = adw::NavigationPage::builder()
+        .title("Reference")
+        .child(&stack)
+        .build();
+
+    {
+        let ctx = ctx.clone();
+        let stack = stack.clone();
+        drain(ctx.core.event_by_address(kind, author, identifier), move |reply| {
+            use satori_core::manager::FeedEvent;
+            match reply {
+                FeedEvent::One(Some(ev), profile) => {
+                    let content: gtk::Widget = if ev.kind == Kind::Custom(30023) {
+                        match satori_core::nip::article::parse(&ev) {
+                            Some(data) => article_reader(&ctx, &ev, &data).upcast(),
+                            None => card_for(&ctx, &ev, profile.as_ref(), true).upcast(),
+                        }
+                    } else {
+                        card_for(&ctx, &ev, profile.as_ref(), true).upcast()
+                    };
+                    stack.remove(&loading);
+                    stack.add_child(&content);
+                    stack.set_visible_child(&content);
+                }
+                FeedEvent::One(None, _) => {
+                    stack.remove(&loading);
+                    let missing = gtk::Label::builder()
+                        .label("This reference could not be found on your relays.")
+                        .css_classes(["tagline"])
+                        .build();
+                    stack.add_child(&missing);
+                    stack.set_visible_child(&missing);
+                }
+                FeedEvent::Failed(msg) => {
+                    eprintln!("[naddr] {msg}");
+                }
+                _ => {}
+            }
+        });
+    }
+    page
 }
 
 // --- shared bits ---------------------------------------------------------------------
@@ -577,4 +642,25 @@ pub fn media_picture(
         }
     });
     pic
+}
+
+/// Extract the PublicKey from a profile bech32 (npub/nprofile) — for
+/// mention-name resolution inside render_content.
+fn nip19_pk(bech: &str) -> Option<nostr::key::PublicKey> {
+    use nostr::prelude::*;
+    Nip19::from_bech32(bech).ok().and_then(|n| match n {
+        Nip19::Pubkey(pk) => Some(pk),
+        Nip19::Profile(p) => Some(p.public_key),
+        _ => None,
+    })
+}
+
+/// Context-bound resolver for render_content.
+fn resolver(ctx: &Ctx) -> impl Fn(&str) -> Option<String> + '_ {
+    move |b: &str| {
+        nip19_pk(b)
+            .and_then(|pk| ctx.core.profile_of(&pk))
+            .map(|p| p.name)
+            .filter(|n| !n.is_empty())
+    }
 }

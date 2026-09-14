@@ -89,7 +89,20 @@ pub fn shell(
         return Shell { root, content };
     }
 
-    let (markup, images) = render_content(event.content.as_str());
+    fn mention_resolver(ctx: &Ctx) -> impl Fn(&str) -> Option<String> + '_ {
+    use nostr::prelude::*;
+    move |b: &str| {
+        Nip19::from_bech32(b).ok().and_then(|n| match n {
+            Nip19::Pubkey(pk) => ctx.core.profile_of(&pk),
+            Nip19::Profile(p) => ctx.core.profile_of(&p.public_key),
+            _ => None,
+        })
+        .map(|p| p.name)
+        .filter(|n| !n.is_empty())
+    }
+}
+
+    let (markup, images) = render_content(event.content.as_str(), &mention_resolver(ctx));
 
     // Content warning: hidden behind a reveal (content.ts cwWrap; the blur
     // node lands in M4).
@@ -306,13 +319,25 @@ fn open_thread(ctx: &Ctx) -> Rc<dyn Fn(&Event)> {
 
 /// `nostr:` / `https:` dispatch (thread links are buttons, not hrefs).
 fn handle_link(ctx: &Ctx, uri: &str) {
-    // nostr:npub → profile; other nostr refs are inert until thread-shell
-    // fetching lands (M2).
+    use nostr::prelude::*;
+    // The NIP-21 router (content.ts): profiles, threads, entities — all
+    // in-app; https goes to the browser.
     if let Some(bech) = uri.strip_prefix("nostr:") {
-        if bech.starts_with("npub1")
-            && let Ok(pk) = PublicKey::from_bech32(bech) {
-                crate::profile::open_profile(ctx, pk);
+        match Nip19::from_bech32(bech) {
+            Ok(Nip19::Pubkey(pk)) => crate::profile::open_profile(ctx, pk),
+            Ok(Nip19::Profile(p)) => crate::profile::open_profile(ctx, p.public_key),
+            Ok(Nip19::EventId(id)) => {
+                crate::thread::thread_page_by_id(ctx, id);
             }
+            Ok(Nip19::Event(e)) => {
+                crate::thread::thread_page_by_id(ctx, e.event_id);
+            }
+            Ok(Nip19::Coordinate(c)) => {
+                let (kind, author, ident) = (c.kind, c.public_key, c.identifier.clone());
+                crate::cards::entity_page_by_naddr(ctx, u16::from(kind), author, ident);
+            }
+            _ => {}
+        }
         return;
     }
     gtk::UriLauncher::new(uri).launch(
