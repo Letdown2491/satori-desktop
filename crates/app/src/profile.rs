@@ -1,13 +1,14 @@
 //! Profile view — port of `src/routes/read.rs` getProfile + `render/note.ts`
-//! profileHeader (slice 1): header (avatar, name, npub, about) + their notes.
-//! Pinned/articles strips, follow/mute buttons, banner land in M2/M3.
+//! profileHeader (slice 1): header (avatar, name, npub, about) + their notes,
+//! follow/unfollow and mute/unmute (encrypted list writes in core).
+//! Pinned/articles strips and banner land in M2/M3.
 
 use std::collections::HashMap;
 
 use adw::prelude::*;
 use gtk::pango::WrapMode;
 use nostr::prelude::*;
-use satori_core::manager::{FeedEvent, Profile};
+use satori_core::manager::{FeedEvent, Profile, PublishEvent};
 
 use crate::bridge::drain;
 use crate::ctx::Ctx;
@@ -50,8 +51,29 @@ pub fn profile_page(ctx: &Ctx, who: PublicKey) -> adw::NavigationPage {
         .wrap_mode(WrapMode::WordChar)
         .xalign(0.0)
         .halign(gtk::Align::Start)
+        .visible(false)
         .build();
     head.append(&about_label);
+
+    // Follow + mute: dual-label buttons flipped by state (actions.ts
+    // label-on/label-off, expressed as state).
+    let actions = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+
+    let following = ctx.core.is_following(&who);
+    let follow_btn = gtk::Button::new();
+    style_follow(&follow_btn, following);
+    actions.append(&follow_btn);
+
+    let muted = ctx.core.is_muted(&who);
+    let mute_btn = gtk::Button::builder()
+        .label(if muted { "Unmute" } else { "Mute" })
+        .css_classes(["flat", "pill"])
+        .build();
+    actions.append(&mute_btn);
+    head.append(&actions);
     column.append(&head);
 
     // Notes.
@@ -76,6 +98,53 @@ pub fn profile_page(ctx: &Ctx, who: PublicKey) -> adw::NavigationPage {
         .child(&scroll)
         .build();
 
+    // Follow toggle: optimistic, revert on failure.
+    {
+        let ctx = ctx.clone();
+        let btn = follow_btn.clone();
+        follow_btn.connect_clicked(move |_| {
+            let follow = !ctx.core.is_following(&who);
+            style_follow(&btn, follow);
+            let ctx2 = ctx.clone();
+            let btn2 = btn.clone();
+            drain(ctx2.core.set_following(who, follow), move |ev| if let PublishEvent::Failed { error, .. } = ev {
+                eprintln!("[follow] {error}");
+                style_follow(&btn2, !btn2.css_classes().iter().any(|c| c == "flat"));
+            });
+        });
+    }
+
+    // Mute toggle: optimistic; muting also hides their notes from the feed
+    // (gated at the store chokepoint) and from this page.
+    {
+        let ctx = ctx.clone();
+        let btn = mute_btn.clone();
+        let list = list.clone();
+        mute_btn.connect_clicked(move |_| {
+            let mute = !ctx.core.is_muted(&who);
+            btn.set_label(if mute { "Unmute" } else { "Mute" });
+            let ctx2 = ctx.clone();
+            let btn2 = btn.clone();
+            let list = list.clone();
+            drain(ctx2.core.set_muted(who, mute), move |ev| match ev {
+                PublishEvent::Failed { error, .. } => {
+                    eprintln!("[mute] {error}");
+                    btn2.set_label(if mute { "Mute" } else { "Unmute" });
+                }
+                PublishEvent::Committed { .. } if mute => {
+                    // Their cards leave this page immediately.
+                    let mut child = list.first_child();
+                    while let Some(widget) = child {
+                        child = widget.next_sibling();
+                        list.remove(&widget);
+                    }
+                }
+                _ => {}
+            });
+        });
+    }
+
+    // Load notes + metadata.
     {
         let ctx = ctx.clone();
         let list = list.clone();
@@ -87,7 +156,6 @@ pub fn profile_page(ctx: &Ctx, who: PublicKey) -> adw::NavigationPage {
         drain(ctx.core.profile(who), move |ev| match ev {
             FeedEvent::Loaded(page) => {
                 status.set_visible(false);
-                // Header metadata: latest profile for this author.
                 if let Some(p) = page
                     .profiles
                     .iter()
@@ -148,9 +216,13 @@ pub fn profile_page(ctx: &Ctx, who: PublicKey) -> adw::NavigationPage {
     page
 }
 
+fn style_follow(btn: &gtk::Button, following: bool) {
+    btn.set_label(if following { "Following" } else { "Follow" });
+    btn.set_css_classes(if following { &["flat", "pill"] } else { &["seal-btn", "pill"] });
+}
+
 /// Entry from anywhere a pubkey is known.
 pub fn open_profile(ctx: &Ctx, who: PublicKey) {
     let page = profile_page(ctx, who);
     ctx.nav.push(&page);
 }
-

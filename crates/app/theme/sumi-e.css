@@ -158,3 +158,8 @@ window {
 .cw-btn {
     color: @warn;
 }
+
+/* Pill buttons (profile actions; web radius ladder: pills 999px). */
+.pill {
+    border-radius: 999px;
+}

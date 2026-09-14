@@ -14,7 +14,7 @@ use nostr_connect::prelude::*;
 use tokio::sync::mpsc;
 
 use crate::error::{LoginError, Result};
-use crate::pool::{Pool, INDEXERS};
+use crate::pool::Pool;
 use crate::secrets;
 use crate::session::{self, Session, SessionMode};
 use crate::signer::{self, Signer};
@@ -147,6 +147,8 @@ pub struct Core {
     /// Own reactions: target event id (hex) → engaged.
     own_liked: Mutex<HashSet<String>>,
     own_bookmarked: Mutex<HashSet<String>>,
+    /// Muted authors (pubkey hex) — NIP-51 kind:10000, content encrypted.
+    muted: Mutex<HashSet<String>>,
     /// Live undo holds: token → cancel signal.
     holds: Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>>,
 }
@@ -170,6 +172,7 @@ impl Core {
             hold_seq: AtomicU64::new(1),
             own_liked: Mutex::new(HashSet::new()),
             own_bookmarked: Mutex::new(HashSet::new()),
+            muted: Mutex::new(HashSet::new()),
             holds: Mutex::new(std::collections::HashMap::new()),
         }
     }
@@ -209,6 +212,23 @@ impl Core {
         session::clear();
         secrets::delete(secrets::BUNKER_CLIENT_SECRET);
         secrets::delete(secrets::NSEC);
+        self.own_liked.lock().unwrap().clear();
+        self.own_bookmarked.lock().unwrap().clear();
+        self.muted.lock().unwrap().clear();
+    }
+
+    /// Follow-state lookup for profile pages (from the cached contact list).
+    pub fn is_following(&self, who: &PublicKey) -> bool {
+        self.active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|a| a.follows.iter().any(|f| f == who))
+            .unwrap_or(false)
+    }
+
+    pub fn is_muted(&self, who: &PublicKey) -> bool {
+        self.muted.lock().unwrap().contains(&who.to_string())
     }
 
     /// Engagement lookups for card rendering (pure set membership, render is a
@@ -453,16 +473,51 @@ impl Core {
                 }
             }
         }
-        // TODO(port): bookmarks need the NIP-44-decrypted private list too (M3).
+
+        // Private lists (NIP-51, content = nip44-encrypted tag JSON — the web
+        // app's private-by-default semantics): bookmarks 10003, mutes 10000.
         if let Ok(Some(ev)) = active
             .pool
             .store
             .latest_by_kind(me, Kind::Custom(10003))
             .await
         {
+            if !ev.content.is_empty()
+                && let Ok(plain) = active.signer.nip44_decrypt_self(&me, ev.content.as_str()).await {
+                    let mut b = self.own_bookmarked.lock().unwrap();
+                    for id in parse_list_event(&plain) {
+                        b.insert(id);
+                    }
+                }
+            // Public tags still count (merge public+private — list semantics).
             let mut b = self.own_bookmarked.lock().unwrap();
             for id in ev.tags.clone().event_ids() {
                 b.insert(id.to_string());
+            }
+        }
+
+        if let Ok(Some(ev)) = active
+            .pool
+            .store
+            .latest_by_kind(me, Kind::Custom(10000))
+            .await
+        {
+            let decrypted: Vec<String> = if ev.content.is_empty() {
+                Vec::new()
+            } else {
+                active
+                    .signer
+                    .nip44_decrypt_self(&me, ev.content.as_str())
+                    .await
+                    .map(|plain| parse_list_event(&plain))
+                    .unwrap_or_default()
+            };
+            let mut m = self.muted.lock().unwrap();
+            for pk in decrypted {
+                m.insert(pk);
+            }
+            for pk in ev.tags.clone().public_keys() {
+                m.insert(pk.to_string());
             }
         }
     }
@@ -521,6 +576,10 @@ impl Core {
                     .feed_page(&active.follows, Some(until), PAGE + 1)
                     .await
                     .map_err(|e| LoginError::Resume(e.to_string()))?;
+                {
+                    let muted = this.muted.lock().unwrap();
+                    notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
+                }
                 let has_more = notes.len() > PAGE;
                 notes.truncate(PAGE);
                 let profiles = Self::profiles_for(&active, &notes).await;
@@ -541,12 +600,18 @@ impl Core {
 
     async fn page_from_store(&self, active: &Active, until: Option<u64>) -> Result<FeedPage> {
         let follows = active.follows.clone();
-        let notes = active
+        let mut notes = active
             .pool
             .store
             .feed_page(&follows, until, PAGE)
             .await
             .map_err(|e| LoginError::Resume(e.to_string()))?;
+        // Mutes gate here — every feed page passes this chokepoint
+        // (pool.ts: NIP-09/NIP-40 consume-at-the-chokepoint role).
+        {
+            let muted = self.muted.lock().unwrap();
+            notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
+        }
         let profiles = Self::profiles_for(active, &notes).await;
         Ok(FeedPage { notes, profiles })
     }
@@ -1056,7 +1121,8 @@ impl Core {
         rx
     }
 
-    /// Bookmark (NIP-51 kind:10003, public slice).
+    /// Bookmark (NIP-51 kind:10003, private by default: content is a
+    /// nip44-encrypted tag list — the web app's private-default semantics).
     pub fn bookmark(self: &Arc<Self>, target: &Event) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
@@ -1065,23 +1131,84 @@ impl Core {
             let res: Result<()> = async {
                 let active = this.active().await?;
                 let me = active.me();
-                // Merge into the existing list event (read-modify-write).
-                let prior = active
-                    .pool
-                    .store
-                    .latest_by_kind(me, Kind::Custom(10003))
-                    .await
-                    .ok()
-                    .flatten();
-                let mut tags: Vec<Tag> = prior
-                    .as_ref()
-                    .map(|ev| ev.tags.clone().to_vec())
-                    .unwrap_or_default();
-                tags.push(Tag::event(target.id));
-                let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(10003), tags, "");
+                let mut ids: Vec<String> = this.own_bookmarked.lock().unwrap().clone().into_iter().collect();
+                ids.push(target.id.to_string());
+                let plain = list_json(&ids, "e");
+                let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
+                let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(10003), [], content);
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;
                 this.own_bookmarked.lock().unwrap().insert(target.id.to_string());
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
+    }
+
+    /// Follow / unfollow (NIP-02 kind:3 read-modify-write).
+    pub fn set_following(self: &Arc<Self>, who: PublicKey, follow: bool) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let mut follows = active.follows.clone();
+                if follow {
+                    if !follows.contains(&who) {
+                        follows.push(who);
+                    }
+                } else {
+                    follows.retain(|f| f != &who);
+                }
+                let tags: Vec<Tag> = follows.iter().map(|pk| Tag::public_key(*pk)).collect();
+                let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::ContactList, tags, "");
+                let signed = active.signer.sign_event(unsigned).await?;
+                Self::commit(&active, &signed, &tx).await?;
+                {
+                    let mut a = this.active.lock().unwrap();
+                    if let Some(a) = a.as_mut() {
+                        a.follows = follows;
+                    }
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
+    }
+
+    /// Mute / unmute (NIP-51 kind:10000, content encrypted to self).
+    pub fn set_muted(self: &Arc<Self>, who: PublicKey, mute: bool) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let mut mutes = this.muted.lock().unwrap().clone();
+                let hex = who.to_string();
+                if mute {
+                    mutes.insert(hex.clone());
+                } else {
+                    mutes.remove(&hex);
+                }
+                let plain = list_json(&mutes.into_iter().collect::<Vec<_>>(), "p");
+                let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
+                let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(10000), [], content);
+                let signed = active.signer.sign_event(unsigned).await?;
+                Self::commit(&active, &signed, &tx).await?;
                 Ok(())
             }
             .await;
@@ -1133,6 +1260,14 @@ impl Core {
     }
 }
 
-fn _silence_indexers() {
-    let _ = INDEXERS.len();
+/// NIP-51 encrypted list content: [["p", hex], ...] / [["e", hex], ...].
+fn list_json(items: &[String], letter: &str) -> String {
+    let arr: Vec<[String; 2]> = items.iter().map(|i| [letter.to_string(), i.clone()]).collect();
+    serde_json::to_string(&arr).unwrap_or_default()
+}
+
+/// Parse an encrypted list's plaintext back into item ids.
+fn parse_list_event(plain: &str) -> Vec<String> {
+    let arr: Vec<[String; 2]> = serde_json::from_str(plain).unwrap_or_default();
+    arr.into_iter().filter_map(|pair| pair.get(1).cloned()).collect()
 }

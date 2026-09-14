@@ -41,6 +41,39 @@ impl Signer {
             }
         }
     }
+
+    /// NIP-44 encrypt to self (private lists — NIP-51).
+    pub async fn nip44_encrypt_self(&self, me: &PublicKey, plaintext: &str) -> Result<String> {
+        match self {
+            Self::Bunker(c) => c
+                .nip44_encrypt_async(me, plaintext)
+                .await
+                .map_err(|e| LoginError::Connect(e.to_string())),
+            Self::Local(k) => nostr::nips::nip44::encrypt(
+                k.secret_key(),
+                me,
+                plaintext,
+                nostr::nips::nip44::Version::V2,
+            )
+            .map_err(|e| LoginError::Connect(e.to_string())),
+        }
+    }
+
+    /// NIP-44 decrypt from self.
+    pub async fn nip44_decrypt_self(&self, me: &PublicKey, payload: &str) -> Result<String> {
+        match self {
+            Self::Bunker(c) => c
+                .nip44_decrypt_async(me, payload)
+                .await
+                .map_err(|e| LoginError::Connect(e.to_string())),
+            Self::Local(k) => nostr::nips::nip44::decrypt(
+                k.secret_key(),
+                me,
+                payload,
+            )
+            .map_err(|e| LoginError::Connect(e.to_string())),
+        }
+    }
 }
 
 /// Parse an nsec (NIP-19 bech32) or hex secret key.
