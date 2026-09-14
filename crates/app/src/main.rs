@@ -104,6 +104,7 @@ fn build_ui(app: &adw::Application) {
             feed_login.bootstrap();
             shell::poll_notif(&ctx, &handles.bell_dot);
             shell::poll_feed_dot(&ctx, &handles.home_dot);
+            crate::shell::poll_time_ticks();
             stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);
         }
     });
@@ -134,6 +135,8 @@ fn build_ui(app: &adw::Application) {
     }
     app.add_action(&logout);
 
+    gtk::Window::set_default_icon_name("satori-logo");
+
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Satori")
@@ -154,6 +157,7 @@ fn build_ui(app: &adw::Application) {
             feed.bootstrap();
             shell::poll_notif(&ctx, &handles.bell_dot);
             shell::poll_feed_dot(&ctx, &handles.home_dot);
+            crate::shell::poll_time_ticks();
             stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);
         }
         None => {

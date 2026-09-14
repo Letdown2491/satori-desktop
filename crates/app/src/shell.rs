@@ -20,6 +20,14 @@ pub struct ShellHandles {
     pub home_dot: gtk::Image,
 }
 
+/// Time-ago tick: refresh visible labels every 60s.
+pub fn poll_time_ticks() {
+    glib::timeout_add_seconds_local(60, || {
+        crate::note_card::tick_time_labels();
+        glib::ControlFlow::Continue
+    });
+}
+
 /// Home-dot poll: the store answers locally (no relays) — lights when the
 /// following feed holds notes newer than the last home view.
 pub fn poll_feed_dot(ctx: &Ctx, dot: &gtk::Image) {

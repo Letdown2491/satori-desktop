@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Satori
+GenericName=Nostr Client
+Comment=A quiet Nostr client — ink on washi
+Exec=satori
+Icon=io.github.Letdown2491.Satori
+Terminal=false
+Categories=Network;InstantMessaging;
+Keywords=nostr;satori;social;

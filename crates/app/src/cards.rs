@@ -103,14 +103,22 @@ fn video_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool) -
     let stack = gtk::Stack::builder()
         .transition_type(gtk::StackTransitionType::Crossfade)
         .build();
+    // Facade aspect follows the poster's imeta dim (video.ts: orientation
+    // from dim or kind; short = portrait).
+    let (pw, ph) = poster.and_then(|p| p.dim).unwrap_or((16, 9));
+    let facade_h = if short {
+        ((240.0 * ph as f64 / pw as f64) as i32).clamp(320, 560)
+    } else {
+        ((640.0 * ph as f64 / pw as f64) as i32).clamp(180, 420)
+    };
     let facade = gtk::Overlay::builder()
-        .width_request(if short { 240 } else { 640 })
-        .height_request(if short { 460 } else { 360 })
+        .height_request(facade_h)
+        .hexpand(true)
         .css_classes(["note-media", "video-facade"])
         .build();
     if let Some(p) = poster {
         // Poster behind the play glyph.
-        facade.set_child(Some(&media_picture(ctx, p, if short { 460 } else { 360 })));
+        facade.set_child(Some(&media_picture(ctx, p, facade_h)));
     }
     let facade_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -565,6 +573,15 @@ fn article_reader(ctx: &Ctx, ev: &Event, data: &satori_core::nip::article::Artic
             crate::markdown::Block::Rule => {
                 column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
             }
+            crate::markdown::Block::Image(url) => {
+                let meta = satori_core::nip::imeta::ImageMeta {
+                    url,
+                    dim: None,
+                    alt: None,
+                    mime: None,
+                };
+                column.append(&media_picture(ctx, &meta, 460));
+            }
         }
     }
 
@@ -668,6 +685,16 @@ fn highlight_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: boo
     let s = shell(ctx, ev, profile, focused, false);
 
     // Serif blockquote with a vermilion rule (highlight.ts quote-first).
+    // When the context carries the quote verbatim, mark it in place
+    // (highlight.ts <mark class="hl-mark">); else quote + clamped context.
+    let marked = data.context.as_deref().and_then(|c| {
+        let pos = c.find(&data.content)?;
+        Some((
+            c[..pos].to_string(),
+            data.content.clone(),
+            c[pos + data.content.len()..].to_string(),
+        ))
+    });
     let quote = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .css_classes(["hl-quote"])
@@ -678,12 +705,19 @@ fn highlight_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: boo
         .xalign(0.0)
         .css_classes(["serif", "hl-text"])
         .build();
-    text.set_text(&data.content);
+    match &marked {
+        Some((before, mark, after)) => text.set_markup(&format!(
+            "{}<b><span foreground=\"#b23a26\">{}</span></b>{}",
+            esc(before.trim_start()),
+            esc(mark),
+            esc(after.trim_end())
+        )),
+        None => text.set_text(&data.content),
+    }
     quote.append(&text);
     s.content.append(&quote);
 
-    // Surrounding context, clamped + muted (the <mark> splice is M4 polish).
-    if let Some(context) = &data.context {
+    if let (Some(context), None) = (&data.context, &marked) {
         let line = gtk::Label::builder()
             .label(context)
             .wrap(true)

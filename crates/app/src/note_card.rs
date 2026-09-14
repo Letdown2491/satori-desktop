@@ -3,6 +3,7 @@
 //! action glyphs (no counts). Media cards, reply-faces, CW and clamps land
 //! with the manifest registry (M4).
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -83,6 +84,7 @@ pub fn shell(
         .label(time_ago(event.created_at.as_secs()))
         .css_classes(["flat", "time-link"])
         .build();
+    register_time_label(&time, event.created_at.as_secs());
     {
         let open = open_thread(ctx);
         let event = event.clone();
@@ -98,15 +100,25 @@ pub fn shell(
         .build();
     root.append(&content);
 
-    // Reply-faces slot: 3 overlapping replier circles, filled by the feed's
-    // batch hydration (note.ts reply-faces — people, not counts).
-    let faces = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(4)
-        .css_classes(["feed-faces"])
+    // Reply-faces: a quiet button holding 3 replier circles (note.ts
+    // reply-faces — people, not counts); click opens the thread.
+    let faces_btn = gtk::Button::builder()
+        .css_classes(["flat", "feed-faces"])
         .visible(false)
         .build();
-    root.append(&faces);
+    let faces_inner = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(4)
+        .build();
+    faces_btn.set_child(Some(&faces_inner));
+    {
+        let ctx2 = ctx.clone();
+        let ev_id = event.id;
+        faces_btn.connect_clicked(move |_| {
+            crate::thread::thread_page_by_id(&ctx2, ev_id);
+        });
+    }
+    root.append(&faces_btn);
 
     if !with_text {
         return Shell { root, content };
@@ -475,12 +487,14 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
     s.root
 }
 
-/// The card's faces slot, for feed-level hydration.
+/// The card's faces slot (the inner Box of the faces button), for
+/// feed-level hydration.
 pub fn faces_slot(card: &gtk::Box) -> Option<gtk::Box> {
     let mut child = card.first_child()?;
     loop {
         if child.has_css_class("feed-faces") {
-            return child.downcast().ok();
+            let btn: gtk::Button = child.downcast().ok()?;
+            return btn.child()?.downcast().ok();
         }
         child = child.next_sibling()?;
     }
@@ -597,6 +611,31 @@ pub fn avatar_widget(ctx: &Ctx, pubkey: PublicKey, profile: Option<&Profile>) ->
         }
     }
     stack
+}
+
+/// Live time labels: every card's time button registers here; a 60s poll
+/// reticks the visible ones (labels never go stale).
+pub fn register_time_label(btn: &gtk::Button, secs: u64) {
+    TIME_LABELS.with(|reg| {
+        reg.borrow_mut().push((btn.downgrade(), secs));
+    });
+}
+
+pub fn tick_time_labels() {
+    TIME_LABELS.with(|reg| {
+        reg.borrow_mut().retain(|(weak, secs)| match weak.upgrade() {
+            Some(btn) => {
+                btn.set_label(&time_ago(*secs));
+                true
+            }
+            None => false,
+        });
+    });
+}
+
+thread_local! {
+    static TIME_LABELS: RefCell<Vec<(glib::WeakRef<gtk::Button>, u64)>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 /// The hue-bucket CSS class for a pubkey (render/util.ts:74 — 36 buckets).

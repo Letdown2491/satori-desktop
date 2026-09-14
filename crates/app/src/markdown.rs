@@ -70,6 +70,13 @@ pub fn blocks(src: &str) -> Vec<Block> {
             continue;
         }
 
+        // Own-line image: ![alt](url) or a bare image URL.
+        if let Some(url) = image_line(trim) {
+            flush_para(&mut out, &mut para);
+            out.push(Block::Image(url));
+            continue;
+        }
+
         if trim == "---" {
             flush_para(&mut out, &mut para);
             out.push(Block::Rule);
@@ -94,6 +101,7 @@ pub enum Block {
     Quote(String),
     List(Vec<String>),
     Code(String),
+    Image(String),
     Rule,
 }
 
@@ -133,6 +141,24 @@ pub fn inline(src: &str) -> String {
 }
 
 /// Wrap marker-delimited segments (odd indices = inside).
+fn image_line(line: &str) -> Option<String> {
+    let is_img_ext = |u: &str| {
+        let path = u.split(['?', '#']).next().unwrap_or("");
+        [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+            .iter()
+            .any(|ext| path.ends_with(ext))
+    };
+    if line.starts_with("![") {
+        let close = line.find("](")?;
+        let url = line[close + 2..].strip_suffix(')')?;
+        return is_img_ext(url).then(|| url.to_string());
+    }
+    if line.starts_with("https://") && is_img_ext(line) {
+        return Some(line.to_string());
+    }
+    None
+}
+
 fn wrap_pairs(s: &str, marker: &str, open: &str, close: &str) -> String {
     let parts: Vec<&str> = s.split(marker).collect();
     if parts.len() < 3 || parts.len().is_multiple_of(2) {
