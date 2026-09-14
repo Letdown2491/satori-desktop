@@ -429,7 +429,15 @@ impl Core {
             .pool
             .nip65(me)
             .await
-            .unwrap_or_else(|_| (Vec::new(), Vec::new()));
+            .unwrap_or_else(|_| {
+                eprintln!("[core] nip65 fetch failed or timed out");
+                (Vec::new(), Vec::new())
+            });
+        eprintln!(
+            "[core] bootstrap: {} read relay(s), {} write relay(s)",
+            read.len(),
+            write.len()
+        );
         active.read_relays = read.clone();
         active.write_relays = write.clone();
         if let Some(a) = self.active.lock().unwrap().as_mut() {

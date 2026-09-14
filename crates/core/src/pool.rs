@@ -122,3 +122,48 @@ impl Pool {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Live-network probe (run: cargo test -p satori-core -- --ignored --nocapture).
+    /// Proves: indexers connect → kind:10002 discovery → store roundtrip →
+    /// split parsing. The settings pane depends on exactly this chain.
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn nip65_discovery_end_to_end() {
+        let pool = Pool::open().await.unwrap();
+        pool.connect_reads(Vec::new()).await.ok();
+
+        // Any relay list off the indexers proves discovery.
+        let filter = Filter::new().kind(Kind::RelayList).limit(3);
+        let events = pool.get(filter).await.expect("fetch");
+        println!("discovered {} relay list(s)", events.len());
+        assert!(!events.is_empty(), "indexers returned no kind:10002 events");
+
+        let ev = events.iter().next().unwrap();
+        let r_tags = ev
+            .tags
+            .clone()
+            .to_vec()
+            .iter()
+            .filter(|t| t.as_slice().first().map(String::as_str) == Some("r"))
+            .count();
+        println!("author {} has {} r-tags", ev.pubkey, r_tags);
+        assert!(r_tags > 0);
+
+        // Store roundtrip: the exact query nip65() runs.
+        pool.store.save(ev).await.unwrap();
+        let cached = pool
+            .store
+            .latest_by_kind(ev.pubkey, Kind::RelayList)
+            .await
+            .unwrap();
+        assert!(cached.is_some(), "latest_by_kind lost the stored relay list");
+
+        let (read, write) = pool.nip65(ev.pubkey).await.unwrap();
+        println!("nip65 split: {} read, {} write", read.len(), write.len());
+        assert!(!read.is_empty() || !write.is_empty());
+    }
+}
