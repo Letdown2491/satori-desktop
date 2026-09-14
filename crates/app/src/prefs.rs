@@ -10,6 +10,11 @@ pub struct Prefs {
     /// `None` → follow the desktop color scheme.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dark: Option<bool>,
+    /// The undo window (theme.ts: enabled by default, 5s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo_seconds: Option<u32>,
 }
 
 pub fn load() -> Prefs {

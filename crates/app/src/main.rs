@@ -110,13 +110,12 @@ fn build_ui(app: &adw::Application) {
     });
     stack.add_named(login_page.widget(), Some("login"));
 
-    // Settings page (account menu).
+    // Settings: an AdwPreferencesWindow (account menu).
     let settings_action = gio::SimpleAction::new("settings", None);
     {
         let ctx = ctx.clone();
         settings_action.connect_activate(move |_, _| {
-            let page = crate::settings::settings_page(&ctx);
-            ctx.nav.push(&page);
+            crate::settings::open_settings(&ctx);
         });
     }
     app.add_action(&settings_action);
