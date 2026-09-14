@@ -11,8 +11,10 @@ mod feed;
 mod login;
 mod note_card;
 mod notifications;
+mod prefs;
 mod profile;
 mod search;
+mod settings;
 mod shell;
 mod theme;
 mod thread;
@@ -67,6 +69,17 @@ fn build_ui(app: &adw::Application) {
         }
     });
     stack.add_named(login_page.widget(), Some("login"));
+
+    // Settings page (account menu).
+    let settings_action = gio::SimpleAction::new("settings", None);
+    {
+        let ctx = ctx.clone();
+        settings_action.connect_activate(move |_, _| {
+            let page = crate::settings::settings_page(&ctx);
+            ctx.nav.push(&page);
+        });
+    }
+    app.add_action(&settings_action);
 
     // Log out: wipe the session (secrets included) and return to the login page.
     let logout = gio::SimpleAction::new("logout", None);

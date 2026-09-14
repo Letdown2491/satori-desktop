@@ -2564,6 +2564,8 @@ dependencies = [
  "libadwaita",
  "nostr",
  "satori-core",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

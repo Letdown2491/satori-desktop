@@ -36,6 +36,11 @@ pub struct Pool {
 }
 
 impl Pool {
+    /// Direct client access for pool management (relay add/remove).
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
     pub async fn open() -> Result<Self, SdkError> {
         let store = Store::open().await?;
         // Throwaway pool keys: NIP-42 auth uses these; signing never does.

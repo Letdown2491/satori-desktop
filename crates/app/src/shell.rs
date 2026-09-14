@@ -119,6 +119,7 @@ pub fn build_main(
 
     let avatar = adw::Avatar::builder().size(28).show_initials(true).build();
     let account_menu = gtk::gio::Menu::new();
+    account_menu.append(Some("Settings"), Some("app.settings"));
     account_menu.append(Some("Log out"), Some("app.logout"));
     let avatar_btn = gtk::MenuButton::builder()
         .child(&avatar)

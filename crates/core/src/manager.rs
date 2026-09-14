@@ -85,6 +85,8 @@ struct Active {
     undo: crate::undo::UndoWindow,
     /// Own NIP-65 write relays.
     write_relays: Vec<String>,
+    /// Own NIP-65 read relays (indexers are always on).
+    read_relays: Vec<String>,
     follows: Vec<PublicKey>,
 }
 
@@ -396,6 +398,7 @@ impl Core {
             pool,
             undo: crate::undo::UndoWindow::default(),
             write_relays: Vec::new(),
+            read_relays: Vec::new(),
             follows: Vec::new(),
         })
     }
@@ -425,10 +428,12 @@ impl Core {
             .await
             .unwrap_or_else(|_| (Vec::new(), Vec::new()));
         active.write_relays = write.clone();
+        active.read_relays = read;
         if let Some(a) = self.active.lock().unwrap().as_mut() {
             a.write_relays = write;
+            a.read_relays = active.read_relays.clone();
         }
-        active.pool.connect_reads(read).await.ok();
+        active.pool.connect_reads(active.read_relays.clone()).await.ok();
 
         let follows = active.pool.follows(me).await.unwrap_or_default();
         active.follows = follows.clone();
@@ -1151,6 +1156,64 @@ impl Core {
         rx
     }
 
+    /// Current NIP-65 relay split (settings pane projection).
+    pub fn current_relays(&self) -> (Vec<String>, Vec<String>) {
+        self.active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|a| (a.read_relays.clone(), a.write_relays.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Publish the NIP-65 relay list (kind:10002 RMW) and swap it in live:
+    /// new reads join the pool, removed writes stop receiving publishes.
+    pub fn set_relays(self: &Arc<Self>, read: Vec<String>, write: Vec<String>) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let mut tags: Vec<Tag> = Vec::new();
+                for url in &read {
+                    let marker = if write.contains(url) { None } else { Some("read") };
+                    tags.push(relay_tag(url, marker));
+                }
+                for url in &write {
+                    if read.contains(url) {
+                        continue; // both-capability tags carry no marker
+                    }
+                    tags.push(relay_tag(url, Some("write")));
+                }
+                let unsigned =
+                    UnsignedEvent::new(me, Timestamp::now(), Kind::RelayList, tags, "");
+                let signed = active.signer.sign_event(unsigned).await?;
+                Self::commit(&active, &signed, &tx).await?;
+                {
+                    let mut a = this.active.lock().unwrap();
+                    if let Some(a) = a.as_mut() {
+                        a.read_relays = read.clone();
+                        a.write_relays = write.clone();
+                    }
+                }
+                // New reads join the pool (removed reads drain on restart; a
+                // live force_remove port lands with the pool rewrite — M2).
+                for url in &read {
+                    let _ = active.pool.client().add_relay(url.clone()).await;
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
+    }
+
     /// Follow / unfollow (NIP-02 kind:3 read-modify-write).
     pub fn set_following(self: &Arc<Self>, who: PublicKey, follow: bool) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -1257,6 +1320,14 @@ impl Core {
             .unwrap()
             .clone()
             .ok_or(LoginError::Resume("no active session".into()))
+    }
+}
+
+/// NIP-65 `r` tag with optional read/write marker.
+fn relay_tag(url: &str, marker: Option<&str>) -> Tag {
+    match marker {
+        Some(m) => Tag::custom("r", [url.to_string(), m.to_string()]),
+        None => Tag::custom("r", [url.to_string()]),
     }
 }
 
