@@ -41,7 +41,7 @@ pub fn build_main(
     // Home: back to the feed (pop the whole nav stack — routes/pages.ts
     // home = navigate to /) + fetch new since the newest known note.
     let home = gtk::Button::builder()
-        .icon_name("home-symbolic")
+        .icon_name("go-home-symbolic")
         .css_classes(["flat"])
         .tooltip_text("Home")
         .build();
@@ -57,7 +57,7 @@ pub fn build_main(
 
     // Bell with quiet dot — opens the notifications page (layout.ts notifBell).
     let bell_img = gtk::Image::builder()
-        .icon_name("notification-symbolic")
+        .icon_name("preferences-system-notifications-symbolic")
         .icon_size(gtk::IconSize::Normal)
         .build();
     let bell_dot = gtk::Image::builder()
