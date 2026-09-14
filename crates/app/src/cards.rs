@@ -21,9 +21,14 @@ pub fn card_for(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool)
     match ev.kind {
         Kind::Custom(20) => picture_card(ctx, ev, profile, focused),
         Kind::Custom(21) | Kind::Custom(22) => video_card(ctx, ev, profile, focused),
+        Kind::Custom(54) => podcast_card(ctx, ev, profile, focused),
         Kind::Custom(1068) => poll_card(ctx, ev, profile, focused),
-        Kind::Custom(31922) | Kind::Custom(31923) => calendar_card(ctx, ev, profile, focused),
         Kind::Custom(30023) => article_card(ctx, ev, profile, focused),
+        Kind::Custom(30402) => classified_card(ctx, ev, profile, focused),
+        Kind::Custom(30617) => repo_card(ctx, ev, profile, focused),
+        Kind::Custom(30818) => wiki_card(ctx, ev, profile, focused),
+        Kind::Custom(31922) | Kind::Custom(31923) => calendar_card(ctx, ev, profile, focused),
+        Kind::Custom(9802) => highlight_card(ctx, ev, profile, focused),
         _ => note_card(ctx, ev, profile, focused),
     }
 }
@@ -577,6 +582,449 @@ pub fn entity_page_by_naddr(
         });
     }
     page
+}
+
+// --- highlight (NIP-84) ---------------------------------------------------------------
+
+fn highlight_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool) -> gtk::Box {
+    let data = satori_core::nip::highlight::parse(ev);
+    let s = shell(ctx, ev, profile, focused, false);
+
+    // Serif blockquote with a vermilion rule (highlight.ts quote-first).
+    let quote = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .css_classes(["hl-quote"])
+        .build();
+    let text = gtk::Label::builder()
+        .wrap(true)
+        .wrap_mode(WrapMode::WordChar)
+        .xalign(0.0)
+        .css_classes(["serif", "hl-text"])
+        .build();
+    text.set_text(&data.content);
+    quote.append(&text);
+    s.content.append(&quote);
+
+    // Surrounding context, clamped + muted (the <mark> splice is M4 polish).
+    if let Some(context) = &data.context {
+        let line = gtk::Label::builder()
+            .label(context)
+            .wrap(true)
+            .wrap_mode(WrapMode::WordChar)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .lines(3)
+            .css_classes(["tagline"])
+            .build();
+        s.content.append(&line);
+    }
+
+    // Citation: by X · source host.
+    let mut cite = String::new();
+    if let Some(author) = &data.author {
+        cite.push_str(&format!("— {} ", esc(author)));
+    } else if let Some(p) = profile {
+        cite.push_str(&format!("— {} ", esc(&p.display())));
+    }
+    if let Some(source) = &data.source {
+        cite.push_str(&format!("· {}", esc(&display_host(source))));
+    }
+    let cite_label = gtk::Label::builder()
+        .css_classes(["tagline"])
+        .halign(gtk::Align::Start)
+        .build();
+    cite_label.set_markup(&cite);
+    s.content.append(&cite_label);
+
+    s.root.append(&actions_row(ctx, ev, &s.root, &[]));
+    s.root
+}
+
+fn display_host(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_else(|| url.to_string())
+}
+
+// --- podcast (NIP-F4) --------------------------------------------------------------------
+
+fn podcast_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool) -> gtk::Box {
+    let Some(data) = satori_core::nip::podcast::parse(ev) else {
+        return note_card(ctx, ev, profile, focused);
+    };
+    let s = shell(ctx, ev, profile, focused, false);
+
+    if let Some(img) = &data.image {
+        let meta = satori_core::nip::imeta::ImageMeta {
+            url: img.clone(),
+            dim: None,
+            alt: None,
+            mime: None,
+        };
+        s.content.append(&media_picture(ctx, &meta, 360));
+    }
+
+    let title = gtk::Label::builder()
+        .css_classes(["serif", "note-author"])
+        .wrap(true)
+        .wrap_mode(WrapMode::WordChar)
+        .halign(gtk::Align::Start)
+        .build();
+    title.set_markup(&format!("<big>{}</big>", esc(&data.title)));
+    s.content.append(&title);
+
+    // Audio facade → MediaControls on play (preload=none posture).
+    if let Some(audio_url) = data.url.clone() {
+        let stack = gtk::Stack::builder().build();
+        let play_btn = gtk::Button::builder()
+            .child(&crate::icons::icon_sized("play", 26))
+            .css_classes(["flat", "pill", "podcast-play"])
+            .halign(gtk::Align::Start)
+            .build();
+        stack.add_named(&play_btn, Some("facade"));
+        {
+            let stack = stack.clone();
+            play_btn.connect_clicked(move |_| {
+                let file = gtk::gio::File::for_uri(&audio_url);
+                let media = gtk::MediaFile::for_file(&file);
+                let controls = gtk::MediaControls::new(Some(&media));
+                controls.add_css_class("podcast-controls");
+                stack.remove(&stack.first_child().expect("facade"));
+                stack.add_child(&controls);
+                stack.set_visible_child(&controls);
+            });
+        }
+        stack.set_visible_child_name("facade");
+        s.content.append(&stack);
+    }
+
+    // Show notes, fully collapsed (podcast.ts collapse()).
+    if !data.notes.is_empty() {
+        let notes = gtk::Label::builder()
+            .wrap(true)
+            .wrap_mode(WrapMode::WordChar)
+            .xalign(0.0)
+            .valign(gtk::Align::Start)
+            .build();
+        notes.set_markup(&render_content(data.notes.as_str(), &resolver(ctx)).0);
+        let reveal = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::SlideDown)
+            .child(&notes)
+            .visible(false)
+            .build();
+        let toggle = gtk::Button::builder()
+            .label("Show notes")
+            .css_classes(["flat", "older-btn"])
+            .halign(gtk::Align::Start)
+            .build();
+        s.content.append(&toggle);
+        s.content.append(&reveal);
+        {
+            let reveal = reveal.clone();
+            let toggle_recv = toggle.clone();
+            toggle_recv.connect_clicked(move |_| {
+                let show = !reveal.is_visible();
+                reveal.set_visible(true);
+                reveal.set_reveal_child(show);
+                toggle.set_label(if show { "Hide notes" } else { "Show notes" });
+            });
+        }
+    }
+
+    s.root.append(&actions_row(ctx, ev, &s.root, &[]));
+    s.root
+}
+
+// --- classified (NIP-99) -------------------------------------------------------------------
+
+fn classified_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool) -> gtk::Box {
+    let Some(data) = satori_core::nip::classified::parse(ev) else {
+        return note_card(ctx, ev, profile, focused);
+    };
+    let s = shell(ctx, ev, profile, focused, false);
+
+    let head = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    let title = gtk::Label::builder()
+        .css_classes(["serif", "note-author"])
+        .wrap(true)
+        .wrap_mode(WrapMode::WordChar)
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .build();
+    title.set_markup(&format!("<big>{}</big>", esc(&data.title)));
+    head.append(&title);
+    // Sold badge (classified.ts).
+    if data.status.as_deref() == Some("sold") {
+        head.append(&gtk::Label::builder()
+            .label("Sold")
+            .css_classes(["badge", "sold-badge"])
+            .valign(gtk::Align::Start)
+            .build());
+    }
+    s.content.append(&head);
+
+    // Price-forward meta (classified.ts: "100 USD / day").
+    if let Some(price) = &data.price {
+        let price_label = gtk::Label::builder()
+            .css_classes(["serif", "price"])
+            .halign(gtk::Align::Start)
+            .build();
+        price_label.set_markup(&format!(
+            "<span foreground=\"#b23a26\">{}</span>",
+            esc(price)
+        ));
+        s.content.append(&price_label);
+    }
+
+    let mut meta_bits: Vec<String> = Vec::new();
+    if let Some(cond) = &data.condition {
+        meta_bits.push(esc(cond));
+    }
+    if let Some(loc) = &data.location {
+        meta_bits.push(esc(loc));
+    }
+    if !meta_bits.is_empty() {
+        s.content.append(&meta_line("map-pin", &meta_bits.join(" · ")));
+    }
+
+    for img in data.images.iter().take(4) {
+        let meta = satori_core::nip::imeta::ImageMeta {
+            url: img.clone(),
+            dim: None,
+            alt: None,
+            mime: None,
+        };
+        s.content.append(&media_picture(ctx, &meta, 420));
+    }
+
+    if !data.summary.is_empty() {
+        let body = gtk::Label::builder()
+            .wrap(true)
+            .wrap_mode(WrapMode::WordChar)
+            .xalign(0.0)
+            .build();
+        body.set_markup(&render_content(data.summary.as_str(), &resolver(ctx)).0);
+        s.content.append(&body);
+    }
+
+    // "Message seller" is the DM CTA in the web app — deferred with DMs (D6).
+
+    let when = data
+        .published_at
+        .unwrap_or_else(|| ev.created_at.as_secs());
+    let meta2 = gtk::Label::builder()
+        .css_classes(["tagline"])
+        .halign(gtk::Align::Start)
+        .build();
+    meta2.set_text(&time_ago(when));
+    s.content.append(&meta2);
+
+    s.root.append(&actions_row(ctx, ev, &s.root, &[]));
+    s.root
+}
+
+// --- wiki (NIP-54) -------------------------------------------------------------------------
+
+fn wiki_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool) -> gtk::Box {
+    let Some(data) = satori_core::nip::wiki::parse(ev) else {
+        return note_card(ctx, ev, profile, focused);
+    };
+    let s = shell(ctx, ev, profile, focused, false);
+
+    let title = gtk::Label::builder()
+        .css_classes(["serif", "wordmark"])
+        .wrap(true)
+        .wrap_mode(WrapMode::WordChar)
+        .halign(gtk::Align::Start)
+        .build();
+    let shown = if data.title.is_empty() { data.topic.clone() } else { data.title.clone() };
+    title.set_markup(&format!("<span size=\"17300\">{}</span>", esc(&shown)));
+    s.content.append(&title);
+
+    if let Some(summary) = &data.summary {
+        let sum = gtk::Label::builder()
+            .label(summary)
+            .wrap(true)
+            .wrap_mode(WrapMode::WordChar)
+            .xalign(0.0)
+            .css_classes(["tagline"])
+            .build();
+        s.content.append(&sum);
+    }
+
+    // AsciiDoc subset: headings, lists, bold/italic, [[wikilinks]] → naddr
+    // links (asciidoc.ts subset; the full parser is M4 polish).
+    for line in data.content.lines() {
+        let line_trim = line.trim();
+        if line_trim.is_empty() {
+            continue;
+        }
+        if let Some(h) = line_trim.strip_prefix("== ") {
+            let head = gtk::Label::builder()
+                .css_classes(["serif", "note-author"])
+                .halign(gtk::Align::Start)
+                .build();
+            head.set_markup(&esc(h));
+            s.content.append(&head);
+            continue;
+        }
+        let body = gtk::Label::builder()
+            .wrap(true)
+            .wrap_mode(WrapMode::WordChar)
+            .xalign(0.0)
+            .valign(gtk::Align::Start)
+            .build();
+        body.set_markup(&asciidoc_line(line_trim, &ev.pubkey));
+        s.content.append(&body);
+    }
+
+    s.root.append(&actions_row(ctx, ev, &s.root, &[]));
+    s.root
+}
+
+/// One AsciiDoc line: wikilinks + bold + italic markers → markup.
+fn asciidoc_line(line: &str, author: &PublicKey) -> String {
+    let mut out = esc(line);
+    // **bold** → <b>, __italic__ → <i> (marker pairs, non-greedy).
+    if let Ok(re_b) = regex_like_replace(&out, "**") {
+        out = re_b;
+    }
+    let _ = author;
+    out
+}
+
+fn regex_like_replace(s: &str, marker: &str) -> Result<String, ()> {
+    // Split on the marker; every odd segment is wrapped.
+    let parts: Vec<&str> = s.split(marker).collect();
+    if parts.len() < 2 || parts.len().is_multiple_of(2) {
+        return Err(());
+    }
+    let wrapped: String = parts
+        .iter()
+        .enumerate()
+        .map(|(i, seg)| {
+            if i % 2 == 1 {
+                let tag = if marker == "**" { "b" } else { "i" };
+                format!("<{tag}>{seg}</{tag}>")
+            } else {
+                seg.to_string()
+            }
+        })
+        .collect();
+    Ok(wrapped)
+}
+
+// --- repo (NIP-34) ---------------------------------------------------------------------------
+
+fn repo_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool) -> gtk::Box {
+    let Some(data) = satori_core::nip::repo::parse(ev) else {
+        return note_card(ctx, ev, profile, focused);
+    };
+    let s = shell(ctx, ev, profile, focused, false);
+
+    let head = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    head.append(&crate::icons::icon_sized("git", 22));
+    let name = gtk::Label::builder()
+        .css_classes(["serif", "note-author"])
+        .halign(gtk::Align::Start)
+        .build();
+    name.set_markup(&format!("<big>{}</big>", esc(&data.name)));
+    head.append(&name);
+    s.content.append(&head);
+
+    if !data.description.is_empty() {
+        let body = gtk::Label::builder()
+            .wrap(true)
+            .wrap_mode(WrapMode::WordChar)
+            .xalign(0.0)
+            .build();
+        body.set_markup(&esc(&data.description));
+        s.content.append(&body);
+    }
+
+    // Topic chips.
+    if !data.topics.is_empty() {
+        let chips = gtk::FlowBox::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .selection_mode(gtk::SelectionMode::None)
+            .max_children_per_line(6)
+            .activate_on_single_click(false)
+            .css_classes(["topic-chips"])
+            .build();
+        for t in data.topics.iter().take(8) {
+            chips.append(&gtk::Label::builder()
+                .label(t)
+                .css_classes(["tagline", "chip"])
+                .build());
+        }
+        s.content.append(&chips);
+    }
+
+    // Browse: clone blocks + web/maintainers/relays rows (repo.ts reader).
+    let browse = gtk::Button::builder()
+        .label("Browse")
+        .css_classes(["flat", "pill"])
+        .halign(gtk::Align::Start)
+        .build();
+    let detail = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .visible(false)
+        .build();
+    {
+        let detail = detail.clone();
+        browse.connect_clicked(move |_| {
+            detail.set_visible(!detail.is_visible());
+        });
+    }
+    for url in &data.clone {
+        let block = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .css_classes(["clone-block"])
+            .build();
+        block.append(&gtk::Label::builder()
+            .label(url)
+            .halign(gtk::Align::Start)
+            .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::Middle)
+            .css_classes(["mono"])
+            .build());
+        let copy = gtk::Button::builder()
+            .label("Copy")
+            .css_classes(["flat", "pill"])
+            .build();
+        {
+            let url = url.clone();
+            copy.connect_clicked(move |_| {
+                let display = gtk::gdk::Display::default().expect("display");
+                display.clipboard().set_text(&url);
+            });
+        }
+        block.append(&copy);
+        detail.append(&block);
+    }
+    for w in &data.web {
+        detail.append(&meta_line("globe", w));
+    }
+    if !data.maintainers.is_empty() {
+        detail.append(&meta_line("gear", &format!("{} maintainer(s)", data.maintainers.len())));
+    }
+    if !data.relays.is_empty() {
+        detail.append(&meta_line("globe", &format!("{} relay(s)", data.relays.len())));
+    }
+    s.content.append(&browse);
+    s.content.append(&detail);
+
+    s.root.append(&actions_row(ctx, ev, &s.root, &[]));
+    s.root
 }
 
 // --- shared bits ---------------------------------------------------------------------

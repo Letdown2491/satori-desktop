@@ -119,7 +119,7 @@ fn display_url(url: &str) -> String {
 /// pastes).
 fn display_nostr_ref(bech: &str) -> Option<String> {
     use nostr::prelude::*;
-    if let Some(n) = Nip19::from_bech32(bech).ok() {
+    if let Ok(n) = Nip19::from_bech32(bech) {
         return match n {
             Nip19::EventId(_) | Nip19::Event(_) => Some("↗ note".to_string()),
             Nip19::Coordinate(c) => match u16::from(c.kind) {

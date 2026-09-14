@@ -174,3 +174,57 @@ window {
     font-family: "Adwaita Mono", monospace;
     font-size: 12px;
 }
+
+/* Highlight (NIP-84): serif blockquote, vermilion rule (styles.css hl-*). */
+.hl-quote {
+    border-left: 3px solid @vermilion;
+    padding-left: 14px;
+}
+
+.hl-text {
+    font-size: 16px;
+}
+
+/* Classified price + sold badge. */
+.price {
+    font-size: 17px;
+}
+
+.sold-badge {
+    color: @panel;
+    background-color: @muted;
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-size: 12px;
+}
+
+/* Podcast + repo extras. */
+.podcast-play {
+    background-color: @panel;
+    border: 1px solid @hairline;
+}
+
+.podcast-controls {
+    background-color: @panel;
+    border: 1px solid @hairline;
+    border-radius: 10px;
+}
+
+.chip {
+    background-color: @panel;
+    border: 1px solid @hairline;
+    border-radius: 999px;
+    padding: 2px 10px;
+}
+
+.topic-chips {
+    border: none;
+    background: none;
+}
+
+.clone-block {
+    background-color: @panel;
+    border: 1px solid @hairline;
+    border-radius: 8px;
+    padding: 6px 10px;
+}

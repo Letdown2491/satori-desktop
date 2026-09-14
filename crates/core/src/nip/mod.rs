@@ -7,10 +7,20 @@
 //! | `imeta` | 68/71/92 — media metadata |
 //! | `poll` | 88 — poll options + tally |
 //! | `calendar` | 52 — calendar events + RSVP addressing |
+//! | `highlight` | 84 — highlight quotes |
+//! | `classified` | 99 — classified listings |
+//! | `podcast` | F4 — podcast episodes |
+//! | `wiki` | 54 — wiki topics (AsciiDoc subset) |
+//! | `repo` | 34 — git repositories |
 //!
 //! NIP-96 stays rejected; Blossom only (matches the web app).
 
 pub mod article;
 pub mod calendar;
+pub mod classified;
+pub mod highlight;
 pub mod imeta;
+pub mod podcast;
 pub mod poll;
+pub mod repo;
+pub mod wiki;

@@ -17,6 +17,25 @@ use crate::config;
 
 type NostrResult<T> = Result<T, DbError>;
 
+/// The content kinds the following feed carries (content-prefs.ts catalog's
+/// default surface). Per-user pref filtering lands with settings/content.
+pub const FEED_KINDS: [Kind; 14] = [
+    Kind::TextNote,       // 1
+    Kind::Repost,         // 6
+    Kind::Custom(20),     // picture (NIP-68)
+    Kind::Custom(21),     // video (NIP-71)
+    Kind::Custom(22),     // short video
+    Kind::Custom(54),     // podcast episode (NIP-F4)
+    Kind::Custom(1068),   // poll (NIP-88)
+    Kind::Custom(30023),  // article (NIP-23)
+    Kind::Custom(30402),  // classified (NIP-99)
+    Kind::Custom(30617),  // repo (NIP-34)
+    Kind::Custom(30818),  // wiki (NIP-54)
+    Kind::Custom(31922),  // calendar date (NIP-52)
+    Kind::Custom(31923),  // calendar time
+    Kind::Custom(9802),   // highlight (NIP-84)
+];
+
 pub struct Store {
     db: Arc<NostrLmdb>,
 }

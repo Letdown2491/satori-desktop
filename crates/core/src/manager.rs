@@ -26,19 +26,7 @@ const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const PAGE: usize = 40;
 const BOOTSTRAP_DEPTH: usize = 200;
 
-/// The content kinds the following feed carries (content-prefs.ts catalog's
-/// default surface). Per-user pref filtering lands with settings/content.
-const FEED_KINDS: [Kind; 9] = [
-    Kind::TextNote,      // 1
-    Kind::Repost,        // 6
-    Kind::Custom(20),    // picture (NIP-68)
-    Kind::Custom(21),    // video (NIP-71)
-    Kind::Custom(22),    // short video
-    Kind::Custom(1068),  // poll (NIP-88)
-    Kind::Custom(30023), // article (NIP-23)
-    Kind::Custom(31922), // calendar date (NIP-52)
-    Kind::Custom(31923), // calendar time
-];
+
 
 /// Progress events streamed back to the login UI.
 #[derive(Debug, Clone)]
@@ -476,7 +464,7 @@ impl Core {
         // Deep feed fetch (deadline-capped).
         if !follows.is_empty() {
             let filter = Filter::new()
-                .kinds(FEED_KINDS)
+                .kinds(crate::store::FEED_KINDS)
                 .authors(follows.clone())
                 .limit(BOOTSTRAP_DEPTH);
             for ev in active.pool.get(filter).await.unwrap_or_default() {
@@ -588,7 +576,7 @@ impl Core {
             .map(|e| e.created_at.as_secs())
             .unwrap_or(0);
         let filter = Filter::new()
-            .kinds(FEED_KINDS)
+            .kinds(crate::store::FEED_KINDS)
             .authors(follows.clone())
             .since(Timestamp::from(since))
             .limit(100);
@@ -1123,7 +1111,7 @@ impl Core {
                 let active = this.active().await?;
                 // Their notes: relay fetch into the store, then project.
                 let filter = Filter::new()
-                    .kind(Kind::TextNote)
+                    .kinds(crate::store::FEED_KINDS)
                     .author(who)
                     .limit(50);
                 for ev in active.pool.get(filter).await.unwrap_or_default() {
