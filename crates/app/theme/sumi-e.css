@@ -139,3 +139,22 @@ window {
     margin-top: -14px;
     margin-left: 14px;
 }
+
+/* Repost wrapper (NIP-18): quiet head, hairline link to the original. */
+.repost-head {
+    font-size: 12px;
+}
+
+.repost-wrap .note-card {
+    border-radius: 10px;
+}
+
+/* Inline media (radius ladder: media 10px). */
+.note-media {
+    border-radius: 10px;
+}
+
+/* Content-warning reveal. */
+.cw-btn {
+    color: @warn;
+}

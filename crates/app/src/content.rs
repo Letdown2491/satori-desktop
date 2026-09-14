@@ -2,12 +2,29 @@
 //! (tokenizer slice) + `timeAgo` (render/util.ts).
 
 /// Escape for Pango markup.
-fn esc(s: &str) -> String {
+pub fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 /// Tokenize note content into markup: escaped runs, https links, `nostr:` refs.
-pub fn render_content(content: &str) -> String {
+/// Image-looking URLs are returned separately (rendered as media, content.ts
+/// media-run behavior).
+pub fn render_content(content: &str) -> (String, Vec<String>) {
+    let mut images = Vec::new();
+    let markup = render_content_inner(content, &mut images);
+    (markup, images)
+}
+
+fn is_image_url(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or("");
+    path.ends_with(".png")
+        || path.ends_with(".jpg")
+        || path.ends_with(".jpeg")
+        || path.ends_with(".webp")
+        || path.ends_with(".gif")
+}
+
+fn render_content_inner(content: &str, images: &mut Vec<String>) -> String {
     let mut out = String::with_capacity(content.len() + 64);
     let mut rest = content;
     loop {
@@ -32,11 +49,17 @@ pub fn render_content(content: &str) -> String {
                         .find(|c: char| c.is_whitespace() || c == ')' || c == '<')
                         .unwrap_or(rest.len());
                     let url = &rest[..end];
-                    out.push_str(&format!(
-                        r#"<a href="{}">{}</a>"#,
-                        esc(url),
-                        esc(&display_url(url))
-                    ));
+                    if is_image_url(url) {
+                        if !images.contains(&url.to_string()) {
+                            images.push(url.to_string());
+                        }
+                    } else {
+                        out.push_str(&format!(
+                            r#"<a href="{}">{}</a>"#,
+                            esc(url),
+                            esc(&display_url(url))
+                        ));
+                    }
                     rest = &rest[end..];
                 } else {
                     // nostr:<bech32> — skip the scheme, then take bech32 chars.
@@ -105,9 +128,16 @@ mod tests {
 
     #[test]
     fn escapes_and_links() {
-        let m = render_content("hi & <you> see https://example.com/x and nostr:note1abc");
+        let (m, _) = render_content("hi & <you> see https://example.com/x and nostr:note1abc");
         assert!(m.contains("&amp; &lt;you&gt;"));
         assert!(m.contains(r#"<a href="https://example.com/x">"#));
         assert!(m.contains(r#"<a href="nostr:note1abc">↗ note</a>"#));
+    }
+
+    #[test]
+    fn images_move_out_of_text() {
+        let (m, imgs) = render_content("look https://x.test/pic.png end");
+        assert!(!m.contains(r#"<a href="https://x.test/pic.png">"#));
+        assert_eq!(imgs, vec!["https://x.test/pic.png".to_string()]);
     }
 }

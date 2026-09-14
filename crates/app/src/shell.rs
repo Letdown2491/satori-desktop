@@ -6,7 +6,6 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
-use gtk::prelude::*;
 use nostr::prelude::*;
 
 use crate::ctx::Ctx;
@@ -27,10 +26,7 @@ pub fn poll_notif(ctx: &Ctx, dot: &gtk::Image) {
     glib::timeout_add_seconds_local(90, move || {
         let ctx = ctx.clone();
         let dot = dot.clone();
-        crate::bridge::drain(ctx.core.notifications(), move |ev| match ev {
-            satori_core::manager::FeedEvent::NotifDot(unread) => dot.set_visible(unread),
-            _ => {}
-        });
+        crate::bridge::drain(ctx.core.notifications(), move |ev| if let satori_core::manager::FeedEvent::NotifDot(unread) = ev { dot.set_visible(unread) });
         glib::ControlFlow::Continue
     });
 }

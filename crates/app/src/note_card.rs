@@ -67,13 +67,22 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
     root.append(&head);
 
     // --- body -----------------------------------------------------------------
+    let (markup, images) = render_content(event.content.as_str());
+
+    // Content warning: hidden behind a reveal (content.ts cwWrap; the blur
+    // node lands in M4).
+    let cw_reason = event.tags.iter().find_map(|t| {
+        let parts = t.as_slice();
+        (parts.first().map(String::as_str) == Some("content-warning"))
+            .then(|| parts.get(1).cloned().unwrap_or_default())
+    });
     let body = gtk::Label::builder()
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .xalign(0.0)
         .valign(gtk::Align::Start)
         .build();
-    body.set_markup(&render_content(event.content.as_str()));
+    body.set_markup(&markup);
     {
         let ctx_link = ctx.clone();
         body.connect_activate_link(move |_, uri| {
@@ -81,7 +90,64 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
             glib::Propagation::Stop
         });
     }
-    root.append(&body);
+    match cw_reason {
+        Some(reason) => {
+            let reveal = gtk::Button::builder()
+                .label(format!("Content warning: {} — show", esc_markup(&reason)).as_str())
+                .css_classes(["flat", "cw-btn"])
+                .halign(gtk::Align::Start)
+                .build();
+            let revealed = gtk::Revealer::builder()
+                .transition_type(gtk::RevealerTransitionType::SlideDown)
+                .child(&body)
+                .build();
+            reveal.connect_clicked({
+                let revealed = revealed.clone();
+                let reveal = reveal.clone();
+                move |_| {
+                    let showing = revealed.reveals_child();
+                    revealed.set_reveal_child(!showing);
+                    reveal.set_label(if showing { "Hide" } else { "Show" });
+                }
+            });
+            root.append(&reveal);
+            root.append(&revealed);
+        }
+        None => root.append(&body),
+    }
+
+    // Media runs (content.ts: images render inline, aspect-capped).
+    if !images.is_empty() {
+        let media = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .build();
+        for url in images {
+            let pic = gtk::Picture::builder()
+                .content_fit(gtk::ContentFit::Cover)
+                .height_request(240)
+                .hexpand(true)
+                .css_classes(["note-media"])
+                .build();
+            media.append(&pic);
+            let core = ctx.core.clone();
+            let pic = pic.clone();
+            drain(core.fetch_image(url), move |img| {
+                if let Some(decoded) = img {
+                    let bytes = glib::Bytes::from_owned(decoded.rgba);
+                    let tex = gdk::MemoryTexture::new(
+                        decoded.width as i32,
+                        decoded.height as i32,
+                        gdk::MemoryFormat::R8g8b8a8,
+                        &bytes,
+                        decoded.width as usize * 4,
+                    );
+                    pic.set_paintable(Some(&tex));
+                }
+            });
+        }
+        root.append(&media);
+    }
 
     // --- actions --------------------------------------------------------------
     let acts = gtk::Box::builder()
@@ -214,11 +280,10 @@ fn handle_link(ctx: &Ctx, uri: &str) {
     // nostr:npub → profile; other nostr refs are inert until thread-shell
     // fetching lands (M2).
     if let Some(bech) = uri.strip_prefix("nostr:") {
-        if bech.starts_with("npub1") {
-            if let Ok(pk) = PublicKey::from_bech32(bech) {
+        if bech.starts_with("npub1")
+            && let Ok(pk) = PublicKey::from_bech32(bech) {
                 crate::profile::open_profile(ctx, pk);
             }
-        }
         return;
     }
     gtk::UriLauncher::new(uri).launch(

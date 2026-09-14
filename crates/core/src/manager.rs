@@ -43,6 +43,7 @@ pub type ConnectRx = mpsc::UnboundedReceiver<ConnectEvent>;
 
 /// Stream of feed/write results for the UI.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum FeedEvent {
     Loaded(FeedPage),
     /// Older page + has-more.
@@ -54,6 +55,8 @@ pub enum FeedEvent {
     NotifDot(bool),
     /// NIP-50 search results (notes).
     Search(Vec<Event>, Vec<Profile>),
+    /// One event by id (repost target resolution), + author profile.
+    One(Option<Event>, Option<Profile>),
     BootstrapDone,
     Failed(String),
 }
@@ -104,6 +107,7 @@ pub struct Profile {
     pub pubkey: String,
     pub name: String,
     pub picture: String,
+    pub about: String,
 }
 
 impl Profile {
@@ -113,12 +117,14 @@ impl Profile {
             name: Option<String>,
             display_name: Option<String>,
             picture: Option<String>,
+            about: Option<String>,
         }
         let raw: RawMeta = serde_json::from_str(&ev.content).ok()?;
         Some(Self {
             pubkey: ev.pubkey.to_string(),
             name: raw.display_name.or(raw.name).unwrap_or_default(),
             picture: raw.picture.unwrap_or_default(),
+            about: raw.about.unwrap_or_default(),
         })
     }
 
@@ -406,7 +412,7 @@ impl Core {
         // Deep feed fetch (deadline-capped).
         if !follows.is_empty() {
             let filter = Filter::new()
-                .kind(Kind::TextNote)
+                .kinds([Kind::TextNote, Kind::Repost])
                 .authors(follows.clone())
                 .limit(BOOTSTRAP_DEPTH);
             for ev in active.pool.get(filter).await.unwrap_or_default() {
@@ -483,7 +489,7 @@ impl Core {
             .map(|e| e.created_at.as_secs())
             .unwrap_or(0);
         let filter = Filter::new()
-            .kind(Kind::TextNote)
+            .kinds([Kind::TextNote, Kind::Repost])
             .authors(follows.clone())
             .since(Timestamp::from(since))
             .limit(100);
@@ -678,6 +684,96 @@ impl Core {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         crate::read_state::advance(|s| s.notif = s.notif.max(now));
+    }
+
+    /// Repost (NIP-18 kind:6).
+    pub fn repost(self: &Arc<Self>, target: &Event) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        let target = target.clone();
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                let unsigned = UnsignedEvent::new(
+                    active.me(),
+                    Timestamp::now(),
+                    Kind::Repost,
+                    [Tag::event(target.id), Tag::public_key(target.pubkey)],
+                    format!("nostr:{}", target.id.to_bech32().unwrap_or_default()),
+                );
+                let signed = active.signer.sign_event(unsigned).await?;
+                Self::commit(&active, &signed, &tx).await?;
+                let _ = active.pool.store.save(&signed).await;
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
+    }
+
+    /// Resolve one event by id (repost targets); None if unknown everywhere.
+    pub fn event_by_id(self: &Arc<Self>, id: EventId) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<(Option<Event>, Option<Profile>)> = async {
+                let active = this.active().await?;
+                let cached = active.pool.store.event_by_id(id).await.ok().flatten();
+                let ev = match cached {
+                    Some(ev) => Some(ev),
+                    None => {
+                        let fetched = active
+                            .pool
+                            .get(Filter::new().id(id).limit(1))
+                            .await
+                            .unwrap_or_default();
+                        let ev = fetched.into_iter().next();
+                        if let Some(ev) = &ev {
+                            let _ = active.pool.store.save(ev).await;
+                        }
+                        ev
+                    }
+                };
+                let profile = match &ev {
+                    Some(ev) => {
+                        let authors = [ev.pubkey];
+                        let cached = active.pool.store.profiles(&authors).await.unwrap_or_default();
+                        let mut p: Option<Profile> =
+                            cached.iter().filter_map(Profile::from_event).next();
+                        if p.is_none() {
+                            let filter = Filter::new()
+                                .kind(Kind::Metadata)
+                                .author(ev.pubkey)
+                                .limit(1);
+                            for meta in active.pool.get(filter).await.unwrap_or_default() {
+                                let _ = active.pool.store.save(&meta).await;
+                                if p.is_none() {
+                                    p = Profile::from_event(&meta);
+                                }
+                            }
+                        }
+                        p
+                    }
+                    None => None,
+                };
+                Ok((ev, profile))
+            }
+            .await;
+            match res {
+                Ok((ev, profile)) => {
+                    let _ = tx.send(FeedEvent::One(ev, profile));
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
     }
 
     // --- search (NIP-50) ----------------------------------------------------------

@@ -25,7 +25,7 @@ use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent};
+use satori_core::manager::Core;
 
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder()

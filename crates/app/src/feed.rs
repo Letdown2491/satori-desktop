@@ -11,6 +11,7 @@ use nostr::prelude::*;
 use satori_core::manager::{FeedEvent, FeedPage, Profile};
 
 use crate::bridge::drain;
+use crate::content::esc;
 use crate::ctx::Ctx;
 use crate::note_card::note_card;
 
@@ -245,6 +246,62 @@ impl FeedView {
 
     fn append_note(&self, ev: &Event) {
         let profile = self.profiles.borrow().get(&ev.pubkey.to_string()).cloned();
+        if ev.kind == Kind::Repost {
+            // NIP-18 wrapper: quiet "reposted by" line + the reposted note.
+            let wrap = gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .css_classes(["repost-wrap"])
+                .build();
+            let by = profile
+                .as_ref()
+                .map(|p| p.display())
+                .unwrap_or_else(|| {
+                    let hex = ev.pubkey.to_string();
+                    format!("npub1…{}", &hex[hex.len().saturating_sub(6)..])
+                });
+            let head = gtk::Label::builder()
+                .css_classes(["tagline", "repost-head"])
+                .halign(gtk::Align::Start)
+                .build();
+            head.set_markup(&format!("↻ Reposted by {}", esc(&by)));
+            wrap.append(&head);
+
+            let slot = gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .build();
+            let waiting = gtk::Label::builder()
+                .label("Loading repost…")
+                .css_classes(["tagline"])
+                .build();
+            slot.append(&waiting);
+            wrap.append(&slot);
+            self.list.append(&wrap);
+
+            // Target: e tag first, else the nostr: ref in content (NIP-18).
+            let target = ev.tags.event_ids().next().or_else(|| {
+                ev.content
+                    .strip_prefix("nostr:")
+                    .and_then(|bech| EventId::from_bech32(bech).ok())
+            });
+            if let Some(id) = target {
+                let ctx = self.ctx.clone();
+                let slot = slot.clone();
+                let waiting = waiting.clone();
+                drain(ctx.core.event_by_id(id), move |e| match e {
+                    FeedEvent::One(Some(target_ev), target_profile) => {
+                        waiting.set_visible(false);
+                        slot.append(&note_card(&ctx, &target_ev, target_profile.as_ref(), false));
+                    }
+                    FeedEvent::One(None, _) => {
+                        waiting.set_text("Repost unavailable.");
+                    }
+                    _ => {}
+                });
+            } else {
+                waiting.set_text("Repost unavailable.");
+            }
+            return;
+        }
         let card = note_card(&self.ctx, ev, profile.as_ref(), false);
         self.list.append(&card);
     }

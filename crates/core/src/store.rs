@@ -47,7 +47,7 @@ impl Store {
         limit: usize,
     ) -> NostrResult<Vec<Event>> {
         let mut filter = Filter::new()
-            .kind(Kind::TextNote)
+            .kinds([Kind::TextNote, Kind::Repost])
             .authors(authors.to_vec())
             .limit(limit);
         if let Some(ts) = until {
@@ -87,6 +87,11 @@ impl Store {
     pub async fn own_reactions(&self, author: PublicKey) -> NostrResult<Vec<Event>> {
         let filter = Filter::new().kind(Kind::Reaction).author(author).limit(5000);
         Ok(self.query(filter).await?.into_iter().collect())
+    }
+
+    /// Fetch one event by id (repost target resolution).
+    pub async fn event_by_id(&self, id: EventId) -> NostrResult<Option<Event>> {
+        self.db.event_by_id(&id).await
     }
 
     /// Local tombstone (own deletions — NIP-09).

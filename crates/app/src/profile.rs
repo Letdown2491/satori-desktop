@@ -45,13 +45,13 @@ pub fn profile_page(ctx: &Ctx, who: PublicKey) -> adw::NavigationPage {
     npub_label.set_markup(&format!("<tt>{}</tt>", &npub[..npub.len().min(24)]));
     head.append(&npub_label);
 
-    let about = gtk::Label::builder()
+    let about_label = gtk::Label::builder()
         .wrap(true)
         .wrap_mode(WrapMode::WordChar)
         .xalign(0.0)
         .halign(gtk::Align::Start)
         .build();
-    head.append(&about);
+    head.append(&about_label);
     column.append(&head);
 
     // Notes.
@@ -81,7 +81,7 @@ pub fn profile_page(ctx: &Ctx, who: PublicKey) -> adw::NavigationPage {
         let list = list.clone();
         let status = status.clone();
         let name = name.clone();
-        let about = about.clone();
+        let about = about_label.clone();
         let who_hex = who.to_string();
         let avatar_stack = avatar.clone();
         drain(ctx.core.profile(who), move |ev| match ev {
@@ -96,6 +96,10 @@ pub fn profile_page(ctx: &Ctx, who: PublicKey) -> adw::NavigationPage {
                     .or_else(|| Some(Profile::default()))
                 {
                     name.set_text(if p.name.is_empty() { "—" } else { &p.name });
+                    if !p.about.is_empty() {
+                        about.set_text(&p.about);
+                        about.set_visible(true);
+                    }
                     if !p.picture.is_empty() {
                         let core = ctx.core.clone();
                         let stack = avatar_stack.clone();

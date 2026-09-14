@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 
 use adw::prelude::*;
-use nostr::prelude::*;
 use satori_core::manager::{FeedEvent, Profile};
 
 use crate::bridge::drain;
