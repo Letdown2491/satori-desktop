@@ -51,8 +51,7 @@ impl FeedView {
             .halign(gtk::Align::Center)
             .visible(false)
             .build();
-        let enso = gtk::Picture::for_file(&gtk::gio::File::for_path(crate::shell::enso_path()));
-        enso.set_size_request(120, 120);
+        let enso = crate::icons::enso(120);
         let words = gtk::Label::builder()
             .label("Caught up.")
             .css_classes(["serif", "empty-quote"])
@@ -85,7 +84,7 @@ impl FeedView {
 
         // Compose FAB (styles.css:525) — overlay, bottom-right of the column.
         let fab = gtk::Button::builder()
-            .icon_name("document-edit-symbolic")
+            .child(&crate::icons::icon_sized("compose", 22))
             .css_classes(["fab"])
             .width_request(52)
             .height_request(52)
@@ -104,9 +103,7 @@ impl FeedView {
             .halign(gtk::Align::Center)
             .valign(gtk::Align::Center)
             .build();
-        let enso_load =
-            gtk::Picture::for_file(&gtk::gio::File::for_path(crate::shell::enso_path()));
-        enso_load.set_size_request(120, 120);
+        let enso_load = crate::icons::enso(120);
         loading.append(&enso_load);
         loading.append(&gtk::Label::new(Some("Gathering the pond…")));
 

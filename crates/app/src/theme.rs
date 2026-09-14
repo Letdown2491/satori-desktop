@@ -28,6 +28,7 @@ pub fn set_dark(dark: bool) {
 
 fn apply(dark: bool) {
     eprintln!("[theme] applying {}", if dark { "dark" } else { "light" });
+    crate::icons::set_dark(dark);
     let css = if dark {
         include_str!("../theme/sumi-e-dark.css")
     } else {

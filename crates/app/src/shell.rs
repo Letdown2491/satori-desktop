@@ -41,7 +41,7 @@ pub fn build_main(
     // Home: back to the feed (pop the whole nav stack — routes/pages.ts
     // home = navigate to /) + fetch new since the newest known note.
     let home = gtk::Button::builder()
-        .icon_name("go-home-symbolic")
+        .child(&crate::icons::icon("home"))
         .css_classes(["flat"])
         .tooltip_text("Home")
         .build();
@@ -57,12 +57,11 @@ pub fn build_main(
 
     // Bell with quiet dot — opens the notifications page (layout.ts notifBell).
     let bell_img = gtk::Image::builder()
-        .icon_name("preferences-system-notifications-symbolic")
+        
         .icon_size(gtk::IconSize::Normal)
         .build();
     let bell_dot = gtk::Image::builder()
         .icon_name("media-record-symbolic")
-        .icon_size(gtk::IconSize::Inherit)
         .css_classes(["bell-dot"])
         .visible(false)
         .build();
@@ -94,11 +93,7 @@ pub fn build_main(
     header.set_title_widget(Some(&switcher));
 
     // Compose — the FAB also exists in the feed; the pen is the reachable twin.
-    let compose_btn = gtk::Button::builder()
-        .icon_name("document-edit-symbolic")
-        .css_classes(["flat"])
-        .tooltip_text("Compose")
-        .build();
+    let compose_btn = crate::icons::action_button("compose", "Compose");
     {
         let ctx = ctx.clone();
         let feed = Rc::clone(&feed);
@@ -108,11 +103,7 @@ pub fn build_main(
     }
     header.pack_end(&compose_btn);
 
-    let search_btn = gtk::Button::builder()
-        .icon_name("edit-find-symbolic")
-        .css_classes(["flat"])
-        .tooltip_text("Search")
-        .build();
+    let search_btn = crate::icons::action_button("search", "Search");
     {
         let ctx = ctx.clone();
         search_btn.connect_clicked(move |_| {
@@ -146,9 +137,4 @@ pub fn update_avatar(avatar: &adw::Avatar, pubkey: PublicKey) {
     if npub.len() >= 7 {
         avatar.set_text(Some(&npub[..7]));
     }
-}
-
-pub(crate) fn enso_path() -> std::path::PathBuf {
-    // Assets ship as GResources in packaging; dev-time path for now.
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/enso.svg")
 }

@@ -157,11 +157,7 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
         .build();
 
     // Reply — opens the composer (the web app's #modal).
-    let reply = gtk::Button::builder()
-        .icon_name("mail-reply-sender-symbolic")
-        .css_classes(["flat", "act"])
-        .tooltip_text("Reply")
-        .build();
+    let reply = crate::icons::action_button("reply", "Reply");
     {
         let ctx = ctx.clone();
         let event = event.clone();
@@ -177,7 +173,7 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
         .tooltip_text("React")
         .build();
     let liked = ctx.core.is_liked(&event.id);
-    like.set_icon_name(if liked { "starred-symbolic" } else { "non-starred-symbolic" });
+    like.set_child(Some(&crate::icons::icon(if liked { "like-filled" } else { "like" })));
     if liked {
         like.add_css_class("engaged");
     }
@@ -190,12 +186,12 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
             if ctx_btn.core.is_liked(&event_btn.id) {
                 return; // unlike lands with the private-list work (M3)
             }
-            like.set_icon_name("starred-symbolic");
+            like.set_child(Some(&crate::icons::icon("like-filled")));
             like.add_css_class("engaged");
             let ctx2 = ctx_btn.clone();
             let like2 = like.clone();
             drain(ctx2.core.react(&event_btn), move |ev| if let satori_core::manager::PublishEvent::Failed { error, .. } = ev {
-                like2.set_icon_name("non-starred-symbolic");
+                like2.set_child(Some(&crate::icons::icon("like")));
                 like2.remove_css_class("engaged");
                 eprintln!("[react] {error}");
             });
@@ -203,11 +199,7 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
     }
 
     // Bookmark.
-    let bookmark = gtk::Button::builder()
-        .icon_name("bookmark-new-symbolic")
-        .css_classes(["flat", "act"])
-        .tooltip_text("Bookmark")
-        .build();
+    let bookmark = crate::icons::action_button("bookmark", "Bookmark");
     if ctx.core.is_bookmarked(&event.id) {
         bookmark.add_css_class("engaged");
     }
@@ -232,11 +224,7 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
 
     // Delete — own events only (NIP-09).
     if is_own {
-        let delete = gtk::Button::builder()
-            .icon_name("user-trash-symbolic")
-            .css_classes(["flat", "act"])
-            .tooltip_text("Delete")
-            .build();
+        let delete = crate::icons::action_button("trash", "Delete");
         {
             let ctx = ctx.clone();
             let event = event.clone();

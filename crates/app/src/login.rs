@@ -14,7 +14,6 @@ use gtk::glib;
 use nostr::prelude::*;
 use satori_core::manager::{ConnectEvent, ConnectRx, Core};
 
-use crate::shell;
 
 #[derive(Clone)]
 pub struct LoginPage {
@@ -107,8 +106,7 @@ impl LoginPage {
         form.append(&nsec_hint);
 
         // Waiting page: breathing ensō + status + cancel.
-        let enso = gtk::Picture::for_file(&gtk::gio::File::for_path(shell::enso_path()));
-        enso.set_size_request(120, 120);
+        let enso = crate::icons::enso(120);
         let waiting_status = gtk::Label::builder()
             .label("Waiting for approval…")
             .css_classes(["serif"])

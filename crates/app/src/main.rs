@@ -8,6 +8,7 @@ mod composer;
 mod content;
 mod ctx;
 mod feed;
+mod icons;
 mod login;
 mod note_card;
 mod notifications;
@@ -39,6 +40,7 @@ fn main() -> glib::ExitCode {
 
 fn build_ui(app: &adw::Application) {
     theme::load_current();
+    icons::install();
     let core = Arc::new(Core::new());
 
     // The main shell: nav (feed → thread → notifications) under a toast

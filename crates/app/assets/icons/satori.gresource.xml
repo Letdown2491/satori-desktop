@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/github/letdown2491/satori/icons">
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-alert-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-back-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-bell-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-bookmark-filled-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-bookmark-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-calendar-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-clock-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-compose-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-gear-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-git-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-globe-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-home-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-image-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-like-filled-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-like-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-lock-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-map-pin-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-more-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-mute-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-notes-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-pin-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-play-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-quote-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-repeat-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-reply-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-search-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-settings-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-shield-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-smile-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-thread-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-trash-symbolic.svg</file>
+    <file compressed="false" preprocess="xml-stripblanks">hicolor/scalable/apps/satori-zap-symbolic.svg</file>
+  </gresource>
+</gresources>

@@ -264,11 +264,7 @@ fn relay_row(url: &str, read: bool, write: bool, rows: RelayRowState) -> gtk::Bo
     row.append(&r);
     row.append(&w);
 
-    let remove = gtk::Button::builder()
-        .icon_name("user-trash-symbolic")
-        .css_classes(["flat", "act"])
-        .tooltip_text("Remove")
-        .build();
+    let remove = crate::icons::action_button("trash", "Remove");
     {
         let row = row.clone();
         let rows = Rc::clone(&rows);
