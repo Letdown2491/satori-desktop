@@ -315,3 +315,26 @@ window {
     color: @washi;
     font-size: 15px;
 }
+
+/* Reply faces: overlapping 20px discs (note.ts reply-faces). */
+.feed-faces {
+    margin-top: 2px;
+}
+
+.face-disc {
+    border-radius: 999px;
+    margin-right: -6px;
+}
+
+.face-initial {
+    color: @washi;
+    font-size: 9px;
+}
+
+.face-plus {
+    margin-left: 10px;
+}
+
+.embed-thumb {
+    margin-left: 10px;
+}

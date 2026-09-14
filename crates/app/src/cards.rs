@@ -1132,6 +1132,32 @@ fn meta_line(icon: &str, text: &str) -> gtk::Box {
     row
 }
 
+/// A small square thumbnail (embed cards).
+pub fn thumb_picture(ctx: &Ctx, url: &str) -> gtk::Picture {
+    let pic = gtk::Picture::builder()
+        .content_fit(gtk::ContentFit::Cover)
+        .width_request(64)
+        .height_request(64)
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Start)
+        .css_classes(["note-media", "embed-thumb"])
+        .build();
+    if let Some(tex) = crate::media_cache::mem_get(url) {
+        pic.set_paintable(Some(&tex));
+        return pic;
+    }
+    let core = ctx.core.clone();
+    let pic_fill = pic.clone();
+    let url_owned = url.to_string();
+    drain(core.fetch_image(url_owned.clone()), move |img| {
+        if let Some(decoded) = img {
+            let tex = crate::media_cache::from_decoded(&url_owned, &decoded);
+            pic_fill.set_paintable(Some(&tex));
+        }
+    });
+    pic
+}
+
 /// A media tile: aspect-reserved (imeta dim) placeholder, filled async
 /// through the guarded media pipeline.
 pub fn media_picture(

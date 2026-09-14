@@ -27,6 +27,7 @@ pub struct FeedView {
     /// token → pending card (the undo window).
     pending: std::cell::RefCell<HashMap<u64, gtk::Widget>>,
     profiles: std::cell::RefCell<HashMap<String, Profile>>,
+    faces: std::cell::RefCell<HashMap<String, gtk::Box>>,
 }
 
 impl FeedView {
@@ -154,6 +155,7 @@ impl FeedView {
             oldest_at: std::cell::Cell::new(None),
             pending: std::cell::RefCell::new(HashMap::new()),
             profiles: std::cell::RefCell::new(HashMap::new()),
+            faces: std::cell::RefCell::new(HashMap::new()),
         });
 
         // Compose.
@@ -229,11 +231,13 @@ impl FeedView {
     fn on_loaded(&self, page: &FeedPage, replace: bool) {
         if replace {
             self.list.remove_all();
+            self.faces.borrow_mut().clear();
         }
         self.absorb_profiles(page);
         for ev in &page.notes {
             self.append_note(ev);
         }
+        self.hydrate_faces();
         self.state.set_visible_child_name("feed");
         if let Some(oldest) = page.notes.last().map(|e| e.created_at.as_secs()) {
             self.oldest_at.set(Some(oldest));
@@ -255,6 +259,31 @@ impl FeedView {
             empty.append(&crate::icons::enso(90));
             self.list.append(&empty);
         }
+    }
+
+    /// Batch hydration of reply-faces (routes/feed.ts getFaces).
+    fn hydrate_faces(&self) {
+        let ids: Vec<EventId> = self
+            .faces
+            .borrow()
+            .keys()
+            .filter_map(|h| EventId::from_hex(h).ok())
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let ctx = self.ctx.clone();
+        let faces_map = self.faces.clone();
+        drain(ctx.core.reply_faces(ids), move |reply| {
+            if let FeedEvent::Faces(per_note) = reply {
+                let map = faces_map.borrow();
+                for (id, who) in per_note {
+                    if let Some(slot) = map.get(&id.to_string()) {
+                        crate::note_card::fill_faces(slot, &who);
+                    }
+                }
+            }
+        });
     }
 
     fn on_older(&self, ev: FeedEvent) {
@@ -349,6 +378,12 @@ impl FeedView {
         }
         let card = card_for(&self.ctx, ev, profile.as_ref(), false);
         crate::motion::fade_in(&card);
+        // Register the faces slot for batch hydration (kind 1 only).
+        if ev.kind == Kind::TextNote {
+            if let Some(slot) = crate::note_card::faces_slot(&card) {
+                self.faces.borrow_mut().insert(ev.id.to_string(), slot);
+            }
+        }
         self.list.append(&card);
     }
 

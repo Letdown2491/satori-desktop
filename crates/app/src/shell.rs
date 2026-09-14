@@ -16,6 +16,24 @@ pub struct ShellHandles {
     pub avatar: adw::Avatar,
     /// The quiet dot on the bell (hidden by default).
     pub bell_dot: gtk::Image,
+    /// The quiet dot on home (new notes since the last view).
+    pub home_dot: gtk::Image,
+}
+
+/// Home-dot poll: the store answers locally (no relays) — lights when the
+/// following feed holds notes newer than the last home view.
+pub fn poll_feed_dot(ctx: &Ctx, dot: &gtk::Image) {
+    let ctx = ctx.clone();
+    let dot = dot.clone();
+    glib::timeout_add_seconds_local(60, move || {
+        let ctx2 = ctx.clone();
+        let dot2 = dot.clone();
+        crate::bridge::drain(ctx2.core.feed_dot(), move |ev| match ev {
+            satori_core::manager::FeedEvent::NotifDot(unread) => dot2.set_visible(unread),
+            _ => {}
+        });
+        glib::ControlFlow::Continue
+    });
 }
 
 /// Bell poll — the web app's quiet-dot poller (layout.ts: every 90s while
@@ -39,16 +57,30 @@ pub fn build_main(
     let header = gtk::HeaderBar::new();
 
     // Home: back to the feed (pop the whole nav stack — routes/pages.ts
-    // home = navigate to /) + fetch new since the newest known note.
+    // home = navigate to /) + fetch new since the newest known note. The
+    // quiet dot lights when new notes gathered while away (notesHome).
     let home = gtk::Button::builder()
-        .child(&crate::icons::icon("home"))
         .css_classes(["flat"])
         .tooltip_text("Home")
         .build();
+    let home_dot = gtk::Image::builder()
+        .icon_name("media-record-symbolic")
+        .css_classes(["bell-dot"])
+        .visible(false)
+        .build();
+    let home_overlay = gtk::Overlay::builder()
+        .child(&crate::icons::icon("home"))
+        .build();
+    home_overlay.add_overlay(&home_dot);
+    home.set_child(Some(&home_overlay));
     {
         let feed = Rc::clone(&feed);
         let nav = ctx.nav.clone();
+        let core = ctx.core.clone();
+        let dot = home_dot.clone();
         home.connect_clicked(move |_| {
+            dot.set_visible(false);
+            core.mark_feed_seen();
             nav.pop_to_page(&feed.page);
             feed.refresh();
         });
@@ -127,7 +159,7 @@ pub fn build_main(
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&content));
-    (toolbar.upcast(), ShellHandles { avatar, bell_dot })
+    (toolbar.upcast(), ShellHandles { avatar, bell_dot, home_dot })
 }
 
 /// The account avatar shows a short npub until profile cards land (M2's

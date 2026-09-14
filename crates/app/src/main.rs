@@ -72,6 +72,7 @@ fn build_ui(app: &adw::Application) {
         move |_pk| {
             feed_login.bootstrap();
             shell::poll_notif(&ctx, &handles.bell_dot);
+            shell::poll_feed_dot(&ctx, &handles.home_dot);
             stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);
         }
     });
@@ -121,6 +122,7 @@ fn build_ui(app: &adw::Application) {
             }
             feed.bootstrap();
             shell::poll_notif(&ctx, &handles.bell_dot);
+            shell::poll_feed_dot(&ctx, &handles.home_dot);
             stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);
         }
         None => {

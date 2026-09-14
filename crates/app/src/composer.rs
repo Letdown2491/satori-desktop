@@ -5,6 +5,7 @@
 use std::rc::Rc;
 
 use adw::prelude::*;
+use gtk::glib;
 use nostr::prelude::*;
 use satori_core::manager::{PublishEvent, Profile};
 
@@ -147,6 +148,22 @@ pub fn compose(ctx: &Ctx, reply_to: Option<Event>, hooks: Option<WriteHooks>) {
         });
     }
 
+    // Ctrl+Enter publishes (the web composer's keybinding).
+    {
+        let publish_btn = publish.clone();
+        let key = gtk::EventControllerKey::new();
+        key.connect_key_pressed(move |_, keyval, _code, mods| {
+            let enter = matches!(keyval, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter);
+            let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            if enter && ctrl {
+                publish_btn.activate();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        view.add_controller(key);
+    }
     dialog.present(ctx.nav.root().as_ref());
     view.grab_focus();
 }

@@ -17,6 +17,9 @@ pub struct ReadState {
     /// Last time the feed store was deep-filled (bootstrap skip marker).
     #[serde(default)]
     pub feed_warm_at: u64,
+    /// Newest note seen at the last home view (home-dot marker).
+    #[serde(default)]
+    pub feed_seen: u64,
 }
 
 pub fn load() -> ReadState {

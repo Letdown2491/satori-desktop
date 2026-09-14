@@ -65,6 +65,8 @@ pub enum FeedEvent {
     PollVotes(Vec<(String, u32)>),
     /// Comments on a target, oldest first + profiles.
     Comments(Vec<Event>, Vec<Profile>),
+    /// Reply-presence faces: (note id, up to 3 replier pubkeys).
+    Faces(Vec<(EventId, Vec<PublicKey>)>),
     BootstrapDone,
     Failed(String),
 }
@@ -811,6 +813,100 @@ impl Core {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         crate::read_state::advance(|s| s.notif = s.notif.max(now));
+    }
+
+    /// Reply-presence: per note, who replied (up to 3, earliest first) —
+    /// the web app's "faces" hydration (routes/feed.ts getFaces).
+    pub fn reply_faces(self: &Arc<Self>, ids: Vec<EventId>) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<Vec<(EventId, Vec<PublicKey>)>> = async {
+                let active = this.active().await?;
+                let filter = Filter::new()
+                    .kind(Kind::TextNote)
+                    .events(ids.clone())
+                    .limit(600);
+                let mut out: Vec<(EventId, Vec<PublicKey>)> = Vec::new();
+                let mut per_note: std::collections::HashMap<EventId, Vec<PublicKey>> =
+                    std::collections::HashMap::new();
+                let id_set: std::collections::HashSet<EventId> = ids.iter().copied().collect();
+                let mut replies: Vec<Event> = active
+                    .pool
+                    .get(filter)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                replies.sort_by_key(|e| e.created_at.as_secs());
+                for r in replies {
+                    // Parent = last e tag within the requested set.
+                    if let Some(pid) = r
+                        .tags
+                        .clone()
+                        .event_ids()
+                        .last()
+                        .filter(|pid| id_set.contains(pid))
+                    {
+                        let names = per_note.entry(pid).or_default();
+                        if names.len() < 3 && !names.contains(&r.pubkey) {
+                            names.push(r.pubkey);
+                        }
+                    }
+                }
+                for (id, names) in per_note {
+                    out.push((id, names));
+                }
+                Ok(out)
+            }
+            .await;
+            match res {
+                Ok(faces) => {
+                    let _ = tx.send(FeedEvent::Faces(faces));
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
+    /// Does the following feed hold notes newer than the last home view?
+    /// (Quiet-dot poll — the store answers, no relays.)
+    pub fn feed_dot(self: &Arc<Self>) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<bool> = async {
+                let active = this.active().await?;
+                let newest = active
+                    .pool
+                    .store
+                    .feed_page(&active.follows, None, 1)
+                    .await
+                    .map_err(|e| LoginError::Resume(e.to_string()))?;
+                Ok(newest
+                    .first()
+                    .map(|e| e.created_at.as_secs() > crate::read_state::load().feed_seen)
+                    .unwrap_or(false))
+            }
+            .await;
+            match res {
+                Ok(dot) => {
+                    let _ = tx.send(FeedEvent::NotifDot(dot));
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
+    /// Home opened: the feed is seen up to now (monotonic).
+    pub fn mark_feed_seen(self: &Arc<Self>) {
+        crate::read_state::advance(|s| s.feed_seen = s.feed_seen.max(now_secs()));
     }
 
     /// Comments on a target (NIP-22 kind:1111), oldest first.

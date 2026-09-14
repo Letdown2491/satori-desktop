@@ -22,6 +22,8 @@ pub struct Shell {
     pub root: gtk::Box,
     /// Kind-specific content slot (empty for plain notes with `with_text`).
     pub content: gtk::Box,
+    /// Reply-presence slot (feed-level hydration fills it).
+    pub faces: gtk::Box,
 }
 
 pub fn shell(
@@ -85,8 +87,18 @@ pub fn shell(
         .build();
     root.append(&content);
 
+    // Reply-faces slot: 3 overlapping replier circles, filled by the feed's
+    // batch hydration (note.ts reply-faces — people, not counts).
+    let faces = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(0)
+        .css_classes(["feed-faces"])
+        .visible(false)
+        .build();
+    root.append(&faces);
+
     if !with_text {
-        return Shell { root, content };
+        return Shell { root, content, faces };
     }
 
     fn mention_resolver(ctx: &Ctx) -> impl Fn(&str) -> Option<String> + '_ {
@@ -205,7 +217,7 @@ pub fn shell(
         content.append(&media);
     }
 
-    Shell { root, content }
+    Shell { root, content, faces }
 }
 
 /// The action row — reply / like / bookmark / repeat / trash (own), plus
@@ -330,6 +342,51 @@ pub fn note_card(ctx: &Ctx, event: &Event, profile: Option<&Profile>, focused: b
     s.root
 }
 
+/// The card's faces slot, for feed-level hydration.
+pub fn faces_slot(card: &gtk::Box) -> Option<gtk::Box> {
+    let mut child = card.first_child()?;
+    loop {
+        if child.has_css_class("feed-faces") {
+            return child.downcast().ok();
+        }
+        child = child.next_sibling()?;
+    }
+}
+
+/// Fill a faces slot: 3 overlapping hue circles + "+" (people, not counts).
+pub fn fill_faces(slot: &gtk::Box, who: &[PublicKey]) {
+    while let Some(c) = slot.first_child() {
+        slot.remove(&c);
+    }
+    if who.is_empty() {
+        slot.set_visible(false);
+        return;
+    }
+    for pk in who.iter().take(3) {
+        let disc = gtk::Box::builder()
+            .width_request(20)
+            .height_request(20)
+            .css_classes(["avatar-circle", "face-disc", hue_class(pk).as_str()])
+            .build();
+        let initial = pk
+            .to_string()
+            .chars()
+            .next()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "?".into());
+        disc.append(&gtk::Label::builder()
+            .label(&initial)
+            .css_classes(["face-initial"])
+            .build());
+        slot.append(&disc);
+    }
+    slot.append(&gtk::Label::builder()
+        .label("+")
+        .css_classes(["tagline", "face-plus"])
+        .build());
+    slot.set_visible(true);
+}
+
 fn open_thread(ctx: &Ctx) -> Rc<dyn Fn(&Event)> {
     let ctx = ctx.clone();
     Rc::new(move |event| {
@@ -377,43 +434,71 @@ fn short_key(pk: &PublicKey) -> String {
     format!("npub1…{}", &hex[hex.len().saturating_sub(6)..])
 }
 
-/// Avatar slot: initials fallback (hue-bucket color lands in M2), picture
+/// Avatar slot: hue-bucket initial circle (render/util.ts:74), picture
 /// swaps in when fetched through the guarded media pipeline.
 pub fn avatar_widget(ctx: &Ctx, pubkey: PublicKey, profile: Option<&Profile>) -> gtk::Stack {
-    let _ = pubkey;
     let stack = gtk::Stack::builder().width_request(34).height_request(34).build();
-    let initials = adw::Avatar::builder()
-        .size(34)
-        .show_initials(true)
-        .text(profile.map(|p| p.name.clone()).unwrap_or_else(|| "?".into()))
-        .build();
-    stack.add_child(&initials);
+    stack.add_child(&initial_circle(&pubkey, profile.map(|p| p.name.as_str()).filter(|n| !n.is_empty())));
 
     if let Some(p) = profile
-        && !p.picture.is_empty() {
+        && !p.picture.is_empty()
+    {
+        if let Some(tex) = crate::media_cache::mem_get(&p.picture) {
+            let pic = avatar_picture(&tex);
+            stack.add_child(&pic);
+            stack.set_visible_child(&pic);
+        } else {
             let core = ctx.core.clone();
             let stack = stack.clone();
-            drain(core.fetch_image(p.picture.clone()), move |img| {
+            let url = p.picture.clone();
+            drain(core.fetch_image(url.clone()), move |img| {
                 if let Some(decoded) = img {
-                    let bytes = glib::Bytes::from_owned(decoded.rgba);
-                    let tex = gdk::MemoryTexture::new(
-                        decoded.width as i32,
-                        decoded.height as i32,
-                        gdk::MemoryFormat::R8g8b8a8,
-                        &bytes,
-                        decoded.width as usize * 4,
-                    );
-                    let pic = gtk::Picture::builder()
-                        .content_fit(gtk::ContentFit::Cover)
-                        .width_request(34)
-                        .height_request(34)
-                        .build();
-                    pic.set_paintable(Some(&tex));
-                    pic.add_css_class("avatar-img");
+                    let tex = crate::media_cache::from_decoded(&url, &decoded);
+                    let pic = avatar_picture(&tex);
                     stack.add_child(&pic);
                     stack.set_visible_child(&pic);
                 }
             });
         }
+    }
     stack
+}
+
+/// The hue-bucket CSS class for a pubkey (render/util.ts:74 — 36 buckets).
+pub fn hue_class(pk: &PublicKey) -> String {
+    let hex_str = pk.to_string();
+    let hue: u32 = u32::from_str_radix(&hex_str[..4], 16).unwrap_or(0) % 360;
+    format!("hue-{}", hue / 10)
+}
+
+/// A colored disc with the first letter (initial fallback).
+fn initial_circle(pk: &PublicKey, name: Option<&str>) -> gtk::Widget {
+    let circle = gtk::Box::builder()
+        .width_request(34)
+        .height_request(34)
+        .valign(gtk::Align::Start)
+        .css_classes(["avatar-circle", hue_class(pk).as_str()])
+        .build();
+    let letter = name
+        .and_then(|n| n.chars().next())
+        .unwrap_or('?')
+        .to_string();
+    circle.append(
+        &gtk::Label::builder()
+            .label(&letter)
+            .css_classes(["avatar-initial", "serif"])
+            .build(),
+    );
+    circle.upcast()
+}
+
+fn avatar_picture(tex: &gdk::MemoryTexture) -> gtk::Picture {
+    let pic = gtk::Picture::builder()
+        .content_fit(gtk::ContentFit::Cover)
+        .width_request(34)
+        .height_request(34)
+        .build();
+    pic.set_paintable(Some(tex));
+    pic.add_css_class("avatar-img");
+    pic
 }
