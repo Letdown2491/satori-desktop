@@ -184,6 +184,7 @@ impl FeedView {
                 view.older_btn.set_sensitive(true);
             }
             FeedEvent::Failed(msg) => {
+                eprintln!("[feed] bootstrap failed: {msg}");
                 view.error.set_text(&msg);
                 view.error.set_visible(true);
                 view.state.set_visible_child_name("error");

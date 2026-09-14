@@ -176,18 +176,22 @@ impl Core {
 
     // --- lifecycle -----------------------------------------------------------
 
-    /// Resume a persisted session, if any. The bunker signer is rebuilt from
-    /// the transport secret without user interaction (ports session resume).
-    pub fn init(&self) -> Option<Session> {
-        let session = session::load()?;
+    /// Resume a persisted session, if any. Returns the session plus the
+    /// failure reason (shown on the login page — silent resume failures are
+    /// how users get lost). The bunker signer is rebuilt from the transport
+    /// secret without user interaction.
+    pub fn init(&self) -> (Option<Session>, Option<String>) {
+        let Some(session) = session::load() else {
+            return (None, None); // first run — not an error
+        };
         match self.rt.block_on(self.build_active(&session)) {
             Ok(active) => {
                 *self.active.lock().unwrap() = Some(active);
-                Some(session)
+                (Some(session), None)
             }
             Err(e) => {
                 eprintln!("[core] resume failed: {e}");
-                None
+                (None, Some(e.to_string()))
             }
         }
     }
@@ -295,7 +299,8 @@ impl Core {
         };
         session::save(&session)?;
 
-        let active = self.rt.block_on(self.build_active(&session))?;
+        // Already on the runtime (spawned task): await, never block_on.
+        let active = self.build_active(&session).await?;
         *self.active.lock().unwrap() = Some(active);
         *self.pending.lock().unwrap() = None;
         Ok(pk)

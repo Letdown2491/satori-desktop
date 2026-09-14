@@ -91,8 +91,10 @@ fn build_ui(app: &adw::Application) {
         .build();
     window.present();
 
-    // Resume a persisted session, else first-run: the login page.
-    match core.init() {
+    // Resume a persisted session, else first-run: the login page. Resume
+    // failures are surfaced on the login page, never silent.
+    let (resumed, resume_error) = core.init();
+    match resumed {
         Some(session) => {
             if let Ok(pk) = PublicKey::from_str(&session.pubkey) {
                 shell::update_avatar(&handles.avatar, pk);
@@ -102,6 +104,9 @@ fn build_ui(app: &adw::Application) {
             stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);
         }
         None => {
+            if let Some(err) = resume_error {
+                login_page.set_resume_error(&err);
+            }
             stack.set_visible_child_full("login", gtk::StackTransitionType::Crossfade);
         }
     }

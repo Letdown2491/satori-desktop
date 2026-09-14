@@ -210,6 +210,13 @@ impl LoginPage {
         self.nsec_entry.set_text("");
     }
 
+    /// A resume failure is surfaced here — the user must know why they're
+    /// back on the login page.
+    pub fn set_resume_error(&self, msg: &str) {
+        self.error.set_text(msg);
+        self.error.set_visible(true);
+    }
+
     fn show_form(&self) {
         self.stop_anim();
         self.pages.set_visible_child_full("form", gtk::StackTransitionType::Crossfade);
