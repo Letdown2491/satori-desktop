@@ -1,7 +1,7 @@
 //! Satori — a quiet Nostr client (native GTK4/libadwaita).
 //!
 //! M0: sumi-e theme, login (bunker + nsec), session resume, following feed,
-//! threads, posting with the undo window (DESIGN.md §9).
+//! threads, notifications, posting with the undo window (DESIGN.md §9).
 
 mod bridge;
 mod composer;
@@ -10,6 +10,7 @@ mod ctx;
 mod feed;
 mod login;
 mod note_card;
+mod notifications;
 mod shell;
 mod theme;
 mod thread;
@@ -22,7 +23,7 @@ use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
 use nostr::prelude::*;
-use satori_core::manager::Core;
+use satori_core::manager::{Core, FeedEvent};
 
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder()
@@ -36,8 +37,8 @@ fn build_ui(app: &adw::Application) {
     theme::load_current();
     let core = Arc::new(Core::new());
 
-    // The main shell: nav (feed → thread) under a toast overlay (the undo
-    // window surface), wrapped in the header bar.
+    // The main shell: nav (feed → thread → notifications) under a toast
+    // overlay (the undo window surface), wrapped in the header bar.
     let overlay = adw::ToastOverlay::new();
     let nav = adw::NavigationView::new();
     let ctx = ctx::Ctx { core: core.clone(), nav: nav.clone(), overlay: overlay.clone() };
@@ -45,7 +46,7 @@ fn build_ui(app: &adw::Application) {
     nav.add(&feed.page);
     overlay.set_child(Some(&nav));
 
-    let (main_shell, avatar) = shell::build_main(&ctx, Rc::clone(&feed), overlay.upcast());
+    let (main_shell, handles) = shell::build_main(&ctx, Rc::clone(&feed), overlay.upcast());
 
     let stack = gtk::Stack::builder()
         .transition_type(gtk::StackTransitionType::Crossfade)
@@ -54,7 +55,10 @@ fn build_ui(app: &adw::Application) {
 
     let login_page = login::LoginPage::new(core.clone(), {
         let stack = stack.clone();
+        let handles = handles.clone();
+        let ctx = ctx.clone();
         move |_pk| {
+            shell::poll_notif(&ctx, &handles.bell_dot);
             stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);
         }
     });
@@ -87,8 +91,9 @@ fn build_ui(app: &adw::Application) {
     match core.init() {
         Some(session) => {
             if let Ok(pk) = PublicKey::from_str(&session.pubkey) {
-                shell::update_avatar(&avatar, pk);
+                shell::update_avatar(&handles.avatar, pk);
             }
+            shell::poll_notif(&ctx, &handles.bell_dot);
             stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);
         }
         None => {

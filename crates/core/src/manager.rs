@@ -48,6 +48,10 @@ pub enum FeedEvent {
     /// Older page + has-more.
     Older(FeedPage, bool),
     Replies(Vec<Event>, Vec<Profile>),
+    /// Notifications (replies + mentions; reactions stay off by default).
+    Notifications(Vec<Event>, Vec<Profile>),
+    /// Whether the bell should light (unread past high-water).
+    NotifDot(bool),
     BootstrapDone,
     Failed(String),
 }
@@ -570,6 +574,108 @@ impl Core {
             }
         }
         profiles
+    }
+
+    // --- notifications ------------------------------------------------------------
+
+    /// The notification stream (port of `src/data/notifications.ts`, slice 1):
+    /// replies to my notes + mentions (#p=me), newest first, own events
+    /// dropped, reactions/poll-votes/zap classes land with their milestones.
+    pub fn notifications(self: &Arc<Self>) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<(Vec<Event>, Vec<Profile>, bool)> = async {
+                let active = this.active().await?;
+                let me = active.me();
+
+                // My recent notes give the reply surface (#e targets).
+                let my_notes = active
+                    .pool
+                    .store
+                    .feed_page(&[me], None, 100)
+                    .await
+                    .unwrap_or_default();
+                let ids: Vec<EventId> = my_notes.iter().map(|e| e.id).collect();
+
+                let since = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+                    .saturating_sub(7 * 86400);
+
+                let mut filters = vec![Filter::new()
+                    .kind(Kind::TextNote)
+                    .pubkeys([me]) // mentions (#p)
+                    .since(Timestamp::from(since))
+                    .limit(200)];
+                if !ids.is_empty() {
+                    filters.push(
+                        Filter::new()
+                            .kind(Kind::TextNote)
+                            .events(ids)
+                            .since(Timestamp::from(since))
+                            .limit(200),
+                    );
+                }
+                let mut mine_events: Vec<Event> = Vec::new();
+                for f in filters {
+                    for ev in active.pool.get(f).await.unwrap_or_default() {
+                        mine_events.push(ev);
+                    }
+                }
+                for ev in &mine_events {
+                    let _ = active.pool.store.save(ev).await;
+                }
+
+                // Dedup + drop own + sort desc.
+                let mut seen = std::collections::HashSet::new();
+                let mut notifs: Vec<Event> = mine_events
+                    .into_iter()
+                    .filter(|ev| ev.pubkey != me && seen.insert(ev.id))
+                    .collect();
+                notifs.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
+
+                let authors: Vec<PublicKey> = notifs.iter().map(|e| e.pubkey).collect();
+                let cached = active
+                    .pool
+                    .store
+                    .profiles(&authors)
+                    .await
+                    .unwrap_or_default();
+                let profiles: Vec<Profile> =
+                    cached.iter().filter_map(Profile::from_event).collect();
+
+                // Dot state: anything newer than the high-water?
+                let high_water = crate::read_state::load().notif;
+                let unread = notifs
+                    .first()
+                    .map(|e| e.created_at.as_secs() > high_water)
+                    .unwrap_or(false);
+
+                Ok((notifs, profiles, unread))
+            }
+            .await;
+            match res {
+                Ok((notifs, profiles, unread)) => {
+                    let _ = tx.send(FeedEvent::Notifications(notifs, profiles));
+                    let _ = tx.send(FeedEvent::NotifDot(unread));
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
+    /// Opening the notifications page advances the high-water (monotonic).
+    pub fn mark_notifications_seen(self: &Arc<Self>) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        crate::read_state::advance(|s| s.notif = s.notif.max(now));
     }
 
     // --- threads ----------------------------------------------------------------

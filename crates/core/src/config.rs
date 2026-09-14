@@ -55,3 +55,8 @@ pub fn media_cache_dir() -> PathBuf {
 pub fn state_file(name: &str) -> PathBuf {
     data_dir().join(name)
 }
+
+/// Parent of the data dir (for mkdir before files exist).
+pub fn data_dir_parent() -> Option<PathBuf> {
+    data_dir().parent().map(PathBuf::from)
+}

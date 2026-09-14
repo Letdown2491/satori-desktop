@@ -11,6 +11,7 @@
 @define-color err #d9543a;
 @define-color live #4caf6a;
 
+
 window {
     background-color: @washi;
     color: @ink;
@@ -131,4 +132,11 @@ window {
     border: 1px solid @hairline;
     border-radius: 8px;
     padding: 10px;
+}
+
+/* Quiet bell dot (styles.css: notifBell) — a dot, not a number. */
+.bell-dot {
+    color: @vermilion;
+    margin-top: -14px;
+    margin-left: 14px;
 }

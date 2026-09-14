@@ -5,16 +5,41 @@
 use std::rc::Rc;
 
 use adw::prelude::*;
+use gtk::glib;
+use gtk::prelude::*;
 use nostr::prelude::*;
 
 use crate::ctx::Ctx;
 use crate::feed::FeedView;
 
+#[derive(Clone)]
+pub struct ShellHandles {
+    pub avatar: adw::Avatar,
+    /// The quiet dot on the bell (hidden by default).
+    pub bell_dot: gtk::Image,
+}
+
+/// Bell poll — the web app's quiet-dot poller (layout.ts: every 90s while
+/// visible). One cheap question: anything newer than the high-water?
+pub fn poll_notif(ctx: &Ctx, dot: &gtk::Image) {
+    let ctx = ctx.clone();
+    let dot = dot.clone();
+    glib::timeout_add_seconds_local(90, move || {
+        let ctx = ctx.clone();
+        let dot = dot.clone();
+        crate::bridge::drain(ctx.core.notifications(), move |ev| match ev {
+            satori_core::manager::FeedEvent::NotifDot(unread) => dot.set_visible(unread),
+            _ => {}
+        });
+        glib::ControlFlow::Continue
+    });
+}
+
 pub fn build_main(
     ctx: &Ctx,
     feed: Rc<FeedView>,
     content: gtk::Widget,
-) -> (gtk::Widget, adw::Avatar) {
+) -> (gtk::Widget, ShellHandles) {
     let header = gtk::HeaderBar::new();
 
     // Home: back to the feed + fetch new since the newest known note.
@@ -28,6 +53,36 @@ pub fn build_main(
         home.connect_clicked(move |_| feed.refresh());
     }
     header.pack_start(&home);
+
+    // Bell with quiet dot — opens the notifications page (layout.ts notifBell).
+    let bell_img = gtk::Image::builder()
+        .icon_name("notification-symbolic")
+        .icon_size(gtk::IconSize::Normal)
+        .build();
+    let bell_dot = gtk::Image::builder()
+        .icon_name("media-record-symbolic")
+        .icon_size(gtk::IconSize::Inherit)
+        .css_classes(["bell-dot"])
+        .visible(false)
+        .build();
+    let bell_overlay = gtk::Overlay::builder().child(&bell_img).build();
+    bell_overlay.add_overlay(&bell_dot);
+    let bell = gtk::Button::builder()
+        .css_classes(["flat"])
+        .tooltip_text("Notifications")
+        .build();
+    bell.set_child(Some(&bell_overlay));
+    {
+        let ctx = ctx.clone();
+        let dot_hide = bell_dot.clone();
+        bell.connect_clicked(move |_| {
+            // Mark seen immediately; the page re-advances the high-water.
+            dot_hide.set_visible(false);
+            let page = crate::notifications::notifications_page(&ctx);
+            ctx.nav.push(&page);
+        });
+    }
+    header.pack_start(&bell);
 
     // Feed switcher (center): Following / timelines / Browse a relay — a real
     // popover menu arrives with the timeline views (M2).
@@ -73,7 +128,7 @@ pub fn build_main(
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&content));
-    (toolbar.upcast(), avatar)
+    (toolbar.upcast(), ShellHandles { avatar, bell_dot })
 }
 
 /// The account avatar shows a short npub until profile cards land (M2's
