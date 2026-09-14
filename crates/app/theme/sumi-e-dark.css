@@ -365,3 +365,40 @@ window {
     border-radius: 10px;
     padding: 8px 10px;
 }
+
+/* Gallery strip (content.ts gallery: 82%-width snap tiles). */
+.gallery-strip {
+    border-radius: 10px;
+}
+
+.gallery-strip .note-media {
+    border-radius: 10px;
+}
+
+.gallery-badge {
+    color: @washi;
+    background-color: rgba(0, 0, 0, 0.65);
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 12px;
+}
+
+/* The lightbox: ink blackout. */
+.lightbox {
+    background-color: rgba(10, 9, 7, 0.97);
+}
+
+.lightbox-close {
+    color: #e9e3d6;
+    background-color: rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    padding: 8px;
+}
+
+.lightbox-counter {
+    color: #e9e3d6;
+    background-color: rgba(255, 255, 255, 0.08);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 12px;
+}

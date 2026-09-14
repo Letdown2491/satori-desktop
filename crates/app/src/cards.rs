@@ -50,8 +50,8 @@ fn picture_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool)
         s.content.append(&body);
     }
 
-    for meta in &metas {
-        s.content.append(&media_picture(ctx, meta, 680));
+    if !metas.is_empty() {
+        s.content.append(&gallery(ctx, &metas));
     }
     if metas.is_empty() {
         // No imeta: honest fallback to the text pipeline (which extracts URLs).
@@ -587,12 +587,12 @@ fn article_reader(ctx: &Ctx, ev: &Event, data: &satori_core::nip::article::Artic
             }
             crate::markdown::Block::Image(url) => {
                 let meta = satori_core::nip::imeta::ImageMeta {
-                    url,
+                    url: url.clone(),
                     dim: None,
                     alt: None,
                     mime: None,
                 };
-                column.append(&media_picture(ctx, &meta, 460));
+                column.append(&gallery(ctx, &[meta]));
             }
         }
     }
@@ -914,14 +914,18 @@ fn classified_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bo
         s.content.append(&meta_line("map-pin", &meta_bits.join(" · ")));
     }
 
-    for img in data.images.iter().take(4) {
-        let meta = satori_core::nip::imeta::ImageMeta {
-            url: img.clone(),
-            dim: None,
-            alt: None,
-            mime: None,
-        };
-        s.content.append(&media_picture(ctx, &meta, 420));
+    if !data.images.is_empty() {
+        let metas: Vec<satori_core::nip::imeta::ImageMeta> = data
+            .images
+            .iter()
+            .map(|url| satori_core::nip::imeta::ImageMeta {
+                url: url.clone(),
+                dim: None,
+                alt: None,
+                mime: None,
+            })
+            .collect();
+        s.content.append(&gallery(ctx, &metas));
     }
 
     if !data.summary.is_empty() {
@@ -1383,6 +1387,69 @@ pub fn thumb_picture(ctx: &Ctx, url: &str) -> gtk::Picture {
         }
     });
     pic
+}
+
+/// A media block: one tile or a horizontal snap-strip gallery (content.ts
+/// gallery: scroll-snap tiles + count badge); every tile opens the lightbox.
+pub fn gallery(ctx: &Ctx, metas: &[satori_core::nip::imeta::ImageMeta]) -> gtk::Widget {
+    if metas.len() == 1 {
+        let pic = media_picture(ctx, &metas[0], 560);
+        let urls: Vec<String> = metas.iter().map(|m| m.url.clone()).collect();
+        pic.set_cursor(gtk::gdk::Cursor::from_name("zoom-in", None).as_ref());
+        let click = gtk::GestureClick::new();
+        click.set_button(1);
+        {
+            let urls = urls.clone();
+            let ctx2 = ctx.clone();
+            click.connect_released(move |g, _n, _x, _y| {
+                let _ = g;
+                crate::lightbox::open(&ctx2, urls.clone(), 0);
+            });
+        }
+        pic.add_controller(click);
+        return pic.upcast();
+    }
+
+    let scroll = gtk::ScrolledWindow::builder()
+        .height_request(480)
+        .hexpand(true)
+        .css_classes(["gallery-strip"])
+        .build();
+    scroll.set_policy(gtk::PolicyType::Always, gtk::PolicyType::Never);
+    let strip = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    let urls: Vec<String> = metas.iter().map(|m| m.url.clone()).collect();
+    for (i, meta) in metas.iter().enumerate() {
+        let tile = media_picture(ctx, meta, 480);
+        tile.set_width_request(560);
+        tile.set_hexpand(false);
+        tile.set_cursor(gtk::gdk::Cursor::from_name("zoom-in", None).as_ref());
+        let urls = urls.clone();
+        let ctx2 = ctx.clone();
+        let click = gtk::GestureClick::new();
+        click.set_button(1);
+        click.connect_released(move |g, _n, _x, _y| {
+            let _ = g;
+            crate::lightbox::open(&ctx2, urls.clone(), i);
+        });
+        tile.add_controller(click);
+        strip.append(&tile);
+    }
+    scroll.set_child(Some(&strip));
+
+    // Count badge.
+    let wrap = gtk::Overlay::builder().child(&scroll).build();
+    wrap.add_overlay(&gtk::Label::builder()
+        .label(format!("{} images", metas.len()))
+        .css_classes(["gallery-badge"])
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::End)
+        .margin_end(10)
+        .margin_bottom(10)
+        .build());
+    wrap.upcast()
 }
 
 /// A media tile: aspect-reserved (imeta dim) placeholder, filled async

@@ -226,37 +226,19 @@ pub fn shell(
         None => content.append(&body),
     }
 
-    // Media runs (content.ts: images render inline, aspect-capped).
+    // Media runs (content.ts): images render as a gallery (tiles open the
+    // lightbox).
     if !images.is_empty() {
-        let media = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(6)
-            .build();
-        for url in images {
-            let pic = gtk::Picture::builder()
-                .content_fit(gtk::ContentFit::Cover)
-                .height_request(240)
-                .hexpand(true)
-                .css_classes(["note-media"])
-                .build();
-            media.append(&pic);
-            let core = ctx.core.clone();
-            let pic = pic.clone();
-            drain(core.fetch_image(url), move |img| {
-                if let Some(decoded) = img {
-                    let bytes = glib::Bytes::from_owned(decoded.rgba);
-                    let tex = gdk::MemoryTexture::new(
-                        decoded.width as i32,
-                        decoded.height as i32,
-                        gdk::MemoryFormat::R8g8b8a8,
-                        &bytes,
-                        decoded.width as usize * 4,
-                    );
-                    pic.set_paintable(Some(&tex));
-                }
-            });
-        }
-        content.append(&media);
+        let metas: Vec<satori_core::nip::imeta::ImageMeta> = images
+            .iter()
+            .map(|url| satori_core::nip::imeta::ImageMeta {
+                url: url.clone(),
+                dim: None,
+                alt: None,
+                mime: None,
+            })
+            .collect();
+        content.append(&crate::cards::gallery(ctx, &metas));
     }
 
     // Mention prefetch: mentioned npubs aren't page authors — resolve them
@@ -303,7 +285,7 @@ pub fn shell(
                     waiting.set_visible(false);
                     slot.append(&embed_card(&ctx2, &target, prof.as_ref()));
                 }
-                _ => waiting.set_text("Quote unavailable."),
+                _ => waiting.set_visible(false),
             }
         });
     }

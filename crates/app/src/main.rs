@@ -11,6 +11,7 @@ mod content;
 mod ctx;
 mod feed;
 mod icons;
+mod lightbox;
 mod login;
 mod markdown;
 mod media_cache;
