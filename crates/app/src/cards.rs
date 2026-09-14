@@ -1153,18 +1153,16 @@ pub fn media_picture(
         .hexpand(true)
         .css_classes(["note-media"])
         .build();
+    if let Some(tex) = crate::media_cache::mem_get(&meta.url) {
+        pic.set_paintable(Some(&tex));
+        return pic;
+    }
     let core = ctx.core.clone();
     let pic_fill = pic.clone();
-    drain(core.fetch_image(meta.url.clone()), move |img| {
+    let url_owned = meta.url.clone();
+    drain(core.fetch_image(url_owned.clone()), move |img| {
         if let Some(decoded) = img {
-            let bytes = glib::Bytes::from_owned(decoded.rgba);
-            let tex = gdk::MemoryTexture::new(
-                decoded.width as i32,
-                decoded.height as i32,
-                gdk::MemoryFormat::R8g8b8a8,
-                &bytes,
-                decoded.width as usize * 4,
-            );
+            let tex = crate::media_cache::from_decoded(&url_owned, &decoded);
             pic_fill.set_paintable(Some(&tex));
         }
     });

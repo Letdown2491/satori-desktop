@@ -16,13 +16,36 @@ window {
     color: @ink;
 }
 
-/* Radius ladder: cards 12px (inputs 8 / media 10 / modals 14 / pills 999). */
+/* Cards: panels (compose, profile header, comments) keep the boxed look;
+   feed rows are FLAT with inset hairline separators (styles.css .note). */
 .note-card {
     background-color: @panel;
     border: 1px solid @hairline;
     border-radius: 12px;
     padding: 14px 16px;
     margin-bottom: 10px;
+}
+
+/* Timeline rows: flat on the washi, generous padding, hairline whisper
+   between (styles.css .note: padding 22px 20px, ::after inset hairline). */
+.feed-list .note-card {
+    background: none;
+    border: none;
+    border-radius: 0;
+    padding: 20px 20px 18px 20px;
+    margin: 0;
+    border-bottom: 1px solid alpha(@hairline, 0.55);
+}
+
+.feed-list .note-card.focused {
+    background-color: alpha(@vermilion, 0.05);
+    border-left: 3px solid @vermilion;
+    padding-left: 17px;
+}
+
+.feed-list .repost-wrap {
+    border-bottom: 1px solid alpha(@hairline, 0.55);
+    padding-bottom: 4px;
 }
 
 .note-author {
@@ -69,15 +92,7 @@ window {
 }
 
 /* Note cards (styles.css:1102 — notes bleed to the column edge). */
-.note-card {
-    padding: 18px 20px;
-    margin-bottom: 0;
-    transition: opacity 0.45s ease;
-}
 
-.note-card.focused {
-    border-left: 3px solid @vermilion;
-}
 
 .note-author {
     font-size: 15px;

@@ -13,6 +13,7 @@ mod feed;
 mod icons;
 mod login;
 mod markdown;
+mod media_cache;
 mod motion;
 mod note_card;
 mod notifications;

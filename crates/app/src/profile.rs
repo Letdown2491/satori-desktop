@@ -169,29 +169,35 @@ pub fn profile_page(ctx: &Ctx, who: PublicKey) -> adw::NavigationPage {
                         about.set_visible(true);
                     }
                     if !p.picture.is_empty() {
-                        let core = ctx.core.clone();
-                        let stack = avatar_stack.clone();
-                        drain(core.fetch_image(p.picture.clone()), move |img| {
-                            if let Some(decoded) = img {
-                                let bytes = gtk::glib::Bytes::from_owned(decoded.rgba);
-                                let tex = gtk::gdk::MemoryTexture::new(
-                                    decoded.width as i32,
-                                    decoded.height as i32,
-                                    gtk::gdk::MemoryFormat::R8g8b8a8,
-                                    &bytes,
-                                    decoded.width as usize * 4,
-                                );
-                                let pic = gtk::Picture::builder()
-                                    .content_fit(gtk::ContentFit::Cover)
-                                    .width_request(72)
-                                    .height_request(72)
-                                    .build();
-                                pic.set_paintable(Some(&tex));
-                                pic.add_css_class("avatar-img");
-                                stack.add_child(&pic);
-                                stack.set_visible_child(&pic);
-                            }
-                        });
+                        if let Some(tex) = crate::media_cache::mem_get(&p.picture) {
+                            let pic = gtk::Picture::builder()
+                                .content_fit(gtk::ContentFit::Cover)
+                                .width_request(72)
+                                .height_request(72)
+                                .build();
+                            pic.set_paintable(Some(&tex));
+                            pic.add_css_class("avatar-img");
+                            avatar_stack.add_child(&pic);
+                            avatar_stack.set_visible_child(&pic);
+                        } else {
+                            let core = ctx.core.clone();
+                            let stack = avatar_stack.clone();
+                            let url = p.picture.clone();
+                            drain(core.fetch_image(url.clone()), move |img| {
+                                if let Some(decoded) = img {
+                                    let tex = crate::media_cache::from_decoded(&url, &decoded);
+                                    let pic = gtk::Picture::builder()
+                                        .content_fit(gtk::ContentFit::Cover)
+                                        .width_request(72)
+                                        .height_request(72)
+                                        .build();
+                                    pic.set_paintable(Some(&tex));
+                                    pic.add_css_class("avatar-img");
+                                    stack.add_child(&pic);
+                                    stack.set_visible_child(&pic);
+                                }
+                            });
+                        }
                     }
                 }
                 let map: HashMap<String, Profile> =

@@ -14,6 +14,9 @@ pub struct ReadState {
     /// Newest following-feed note marked seen (UNIX secs).
     #[serde(default)]
     pub feed: u64,
+    /// Last time the feed store was deep-filled (bootstrap skip marker).
+    #[serde(default)]
+    pub feed_warm_at: u64,
 }
 
 pub fn load() -> ReadState {

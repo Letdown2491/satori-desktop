@@ -463,8 +463,14 @@ impl Core {
             a.follows = follows.clone();
         }
 
-        // Deep feed fetch (deadline-capped).
-        if !follows.is_empty() {
+        // Deep feed fetch — skipped when warm (feed-cache.ts: the store
+        // persists across runs; a recent bootstrap already filled depth).
+        let warm = crate::read_state::load().feed_warm_at
+            > now_secs().saturating_sub(600);
+        if warm {
+            eprintln!("[core] bootstrap: store is warm, skipping deep fetch");
+        }
+        if !follows.is_empty() && !warm {
             let filter = Filter::new()
                 .kinds(crate::store::FEED_KINDS)
                 .authors(follows.clone())
@@ -484,11 +490,14 @@ impl Core {
         }
         self.load_own_sets(&active).await;
 
+        crate::read_state::advance(|st| st.feed_warm_at = now_secs());
         let page = self.page_from_store(&active, None).await?;
         let _ = tx.send(FeedEvent::Loaded(page));
         let _ = tx.send(FeedEvent::BootstrapDone);
         Ok(())
     }
+
+
 
     async fn load_own_sets(&self, active: &Active) {
         let me = active.me();
@@ -1606,6 +1615,13 @@ impl Core {
             .clone()
             .ok_or(LoginError::Resume("no active session".into()))
     }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// NIP-65 `r` tag with optional read/write marker.

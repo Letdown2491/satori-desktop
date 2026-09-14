@@ -53,6 +53,10 @@ pub async fn fetch_image(url: &str) -> Result<DecodedImage, String> {
             .open(&path)
             .and_then(|mut f| f.write_all(&body))
             .map_err(|e| e.to_string())?;
+        WRITE_COUNT.fetch_add(1, Ordering::Relaxed);
+        if WRITE_COUNT.load(Ordering::Relaxed) % 50 == 0 {
+            trim_cache(200 * 1024 * 1024, 150 * 1024 * 1024);
+        }
         body
     };
 
@@ -110,4 +114,37 @@ fn is_internal_host(host: &str) -> bool {
 
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+use std::sync::atomic::{AtomicU64, Ordering};
+static WRITE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// LRU trim of the media cache by mtime (avatar-cache.ts: 200MB cap,
+/// draining to 150MB). Best-effort; runs inline on the fetch path.
+fn trim_cache(cap: u64, floor: u64) {
+    let dir = match std::fs::read_dir(config::media_cache_dir()) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let mut entries: Vec<(std::path::PathBuf, u64, std::time::SystemTime)> = dir
+        .flatten()
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some((e.path(), m.len(), m.modified().ok()?))
+        })
+        .collect();
+    let total: u64 = entries.iter().map(|(_, s, _)| s).sum();
+    if total < cap {
+        return;
+    }
+    entries.sort_by_key(|(_, _, m)| *m);
+    let mut remaining = total;
+    for (path, size, _) in entries {
+        if remaining < floor {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            remaining -= size;
+        }
+    }
 }

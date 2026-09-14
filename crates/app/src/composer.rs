@@ -148,4 +148,5 @@ pub fn compose(ctx: &Ctx, reply_to: Option<Event>, hooks: Option<WriteHooks>) {
     }
 
     dialog.present(ctx.nav.root().as_ref());
+    view.grab_focus();
 }
