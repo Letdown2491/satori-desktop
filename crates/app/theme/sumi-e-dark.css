@@ -149,11 +149,10 @@ window {
     padding: 10px;
 }
 
-/* Quiet bell dot (styles.css: notifBell) — a dot, not a number. */
+/* Quiet bell dot (styles.css: notifBell) — a dot, not a number; parked
+   top-right via overlay alignment (negative margins are illegal). */
 .bell-dot {
     color: @vermilion;
-    margin-top: -14px;
-    margin-left: 14px;
 }
 
 /* Repost wrapper (NIP-18): quiet head, hairline link to the original. */
@@ -321,7 +320,6 @@ window {
 
 .face-disc {
     border-radius: 999px;
-    margin-right: -6px;
 }
 
 .face-initial {

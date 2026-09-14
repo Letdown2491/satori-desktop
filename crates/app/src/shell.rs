@@ -63,6 +63,8 @@ pub fn build_main(
     let home_dot = gtk::Image::builder()
         .icon_name("media-record-symbolic")
         .css_classes(["bell-dot"])
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Start)
         .visible(false)
         .build();
     let home_overlay = gtk::Overlay::builder()
@@ -92,6 +94,8 @@ pub fn build_main(
     let bell_dot = gtk::Image::builder()
         .icon_name("media-record-symbolic")
         .css_classes(["bell-dot"])
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Start)
         .visible(false)
         .build();
     let bell_overlay = gtk::Overlay::builder().child(&bell_img).build();

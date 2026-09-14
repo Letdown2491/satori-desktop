@@ -102,7 +102,7 @@ pub fn shell(
     // batch hydration (note.ts reply-faces — people, not counts).
     let faces = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .spacing(0)
+        .spacing(4)
         .css_classes(["feed-faces"])
         .visible(false)
         .build();
