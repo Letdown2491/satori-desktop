@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
-use gtk::prelude::*;
 
 const ICON_RESOURCE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/satori-icons.gresource"));
 const ENSO_LIGHT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/enso-light.svg"));
@@ -63,19 +62,20 @@ pub fn icon_filled(name: &str) -> gtk::Image {
 
 /// The brushstroke ensō at the requested size. Ink follows the theme at
 /// creation time (widgets are transient; feeds recreate on reload).
-pub fn enso(size: i32) -> gtk::Picture {
+pub fn enso(size: i32) -> gtk::Image {
     let dark = DARK.load(Ordering::Relaxed);
     let bytes = if dark { ENSO_DARK } else { ENSO_LIGHT };
 
-    // GtkPicture wants a file/stream; write the SVG once (it carries the
-    // brush filter + dry-brush mask).
+    // GtkImage wants a file; write the SVG fresh (it carries the brush
+    // filter + dry-brush mask). pixel_size renders at exactly `size` — a
+    // Picture would allocate at the SVG's natural size.
     let dir = std::env::temp_dir().join("satori-assets");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join(if dark { "enso-dark.svg" } else { "enso-light.svg" });
     let _ = std::fs::write(&path, bytes); // always current content
-    let pic = gtk::Picture::for_file(&gio::File::for_path(&path));
-    pic.set_size_request(size, size);
-    pic
+    let img = gtk::Image::builder().pixel_size(size).build();
+    img.set_from_file(Some(&path));
+    img
 }
 
 /// Record the theme for future ensō creation.

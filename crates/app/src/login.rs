@@ -22,7 +22,7 @@ pub struct LoginPage {
     error: gtk::Label,
     bunker_entry: gtk::Entry,
     nsec_entry: gtk::PasswordEntry,
-    enso: gtk::Picture,
+    enso: gtk::Image,
     waiting_status: gtk::Label,
     cancelled: Rc<Cell<bool>>,
     anim: Rc<RefCell<Option<glib::SourceId>>>,

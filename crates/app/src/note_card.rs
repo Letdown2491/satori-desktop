@@ -772,13 +772,14 @@ fn initial_circle(pk: &PublicKey, name: Option<&str>) -> gtk::Widget {
     circle.upcast()
 }
 
-fn avatar_picture(tex: &gdk::MemoryTexture) -> gtk::Picture {
-    let pic = gtk::Picture::builder()
-        .content_fit(gtk::ContentFit::Cover)
-        .width_request(34)
-        .height_request(34)
+/// Fixed-size avatar rendering: GtkImage + pixel_size — a GtkPicture's
+/// natural size is the texture's intrinsic size (512+), which blows out
+/// boxes; GtkImage renders at exactly pixel_size.
+fn avatar_picture(tex: &gdk::MemoryTexture) -> gtk::Image {
+    let img = gtk::Image::builder()
+        .pixel_size(34)
+        .css_classes(["avatar-img"])
         .build();
-    pic.set_paintable(Some(tex));
-    pic.add_css_class("avatar-img");
-    pic
+    img.set_paintable(Some(tex));
+    img
 }

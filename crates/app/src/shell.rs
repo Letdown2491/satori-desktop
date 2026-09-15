@@ -221,16 +221,18 @@ pub fn update_identity(handles: &ShellHandles, ctx: &Ctx, pk: PublicKey) {
                     label.set_text(&p.name);
                 }
                 if !p.picture.is_empty() {
-                    if let Some(tex) = crate::media_cache::mem_get(&p.picture) {
-                        let pic = gtk::Picture::builder()
-                            .content_fit(gtk::ContentFit::Cover)
-                            .width_request(28)
-                            .height_request(28)
+                    let mk = |tex: &gtk::gdk::MemoryTexture| {
+                        let img = gtk::Image::builder()
+                            .pixel_size(28)
+                            .css_classes(["avatar-img"])
                             .build();
-                        pic.set_paintable(Some(&tex));
-                        pic.add_css_class("avatar-img");
-                        stack.add_child(&pic);
-                        stack.set_visible_child(&pic);
+                        img.set_paintable(Some(tex));
+                        img
+                    };
+                    if let Some(tex) = crate::media_cache::mem_get(&p.picture) {
+                        let img = mk(&tex);
+                        stack.add_child(&img);
+                        stack.set_visible_child(&img);
                     } else {
                         let core2 = core.clone();
                         let stack2 = stack.clone();
@@ -238,15 +240,9 @@ pub fn update_identity(handles: &ShellHandles, ctx: &Ctx, pk: PublicKey) {
                         drain(core2.fetch_image(url.clone()), move |img| {
                             if let Some(decoded) = img {
                                 let tex = crate::media_cache::from_decoded(&url, &decoded);
-                                let pic = gtk::Picture::builder()
-                                    .content_fit(gtk::ContentFit::Cover)
-                                    .width_request(28)
-                                    .height_request(28)
-                                    .build();
-                                pic.set_paintable(Some(&tex));
-                                pic.add_css_class("avatar-img");
-                                stack2.add_child(&pic);
-                                stack2.set_visible_child(&pic);
+                                let img = mk(&tex);
+                                stack2.add_child(&img);
+                                stack2.set_visible_child(&img);
                             }
                         });
                     }
