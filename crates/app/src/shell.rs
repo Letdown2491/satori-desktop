@@ -182,7 +182,6 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
 
     // --- collapse --------------------------------------------------------------
     let collapsed = crate::prefs::load().sidebar_collapsed.unwrap_or(false);
-    let collapse_btn = crate::icons::action_button("sidebar", "Toggle sidebar");
     let collapsible: Vec<gtk::Widget> = vec![
         home_lbl.upcast(),
         notif_lbl.upcast(),
