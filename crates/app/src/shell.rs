@@ -193,9 +193,10 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
         });
     }
 
-    // --- main area -----------------------------------------------------------------
+    // --- main area: expands, the sidebar stays at its 220px --------------
     let overlay = ctx.overlay.clone();
     overlay.set_child(Some(&sections));
+    overlay.set_hexpand(true);
 
     let separator = gtk::Separator::new(gtk::Orientation::Vertical);
     let layout = gtk::Box::builder()

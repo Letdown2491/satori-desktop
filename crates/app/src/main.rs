@@ -3,29 +3,30 @@
 //! M0: sumi-e theme, login (bunker + nsec), session resume, following feed,
 //! threads, notifications, posting with the undo window (DESIGN.md §9).
 
-mod bridge;
-mod cards;
-mod comments;
-mod composer;
-mod content;
-mod ctx;
-mod feed;
-mod icons;
-mod lightbox;
-mod login;
-mod markdown;
-mod media_cache;
-mod motion;
-mod note_card;
-mod notifications;
-mod prefs;
-mod profile;
-mod search;
-mod settings;
-mod shell;
-mod theme;
-mod thread;
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+use satori_lib as satori;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -81,25 +82,25 @@ fn main() -> glib::ExitCode {
 }
 
 fn build_ui(app: &adw::Application) {
-    theme::load_current();
-    icons::install();
+satori::theme::load_current();
+satori::icons::install();
     let core = Arc::new(Core::new());
 
     // The main shell: a sidebar + section stack (DESIGN: the sidebar IS the
     // chrome); toasts overlay the whole main area.
     let overlay = adw::ToastOverlay::new();
-    let ctx = ctx::Ctx::new(core.clone(), overlay.clone());
-    let feed = feed::FeedView::new(&ctx);
-    let (main_shell, handles) = shell::build_main(&ctx, Rc::clone(&feed));
+    let ctx = satori::ctx::Ctx::new(core.clone(), overlay.clone());
+    let feed = satori::feed::FeedView::new(&ctx);
+    let (main_shell, handles) = satori::shell::build_main(&ctx, Rc::clone(&feed));
 
     let stack = gtk::Stack::builder()
         .transition_type(gtk::StackTransitionType::Crossfade)
         .build();
     stack.add_named(&main_shell, Some("main"));
 
-    let login_page = login::LoginPage::new(core.clone(), {
+    let login_page = satori::login::LoginPage::new(core.clone(), {
         let stack = stack.clone();
-        let handles2 = shell::ShellHandles {
+        let handles2 = satori::shell::ShellHandles {
             home_dot: handles.home_dot.clone(),
             notif_dot: handles.notif_dot.clone(),
             avatar: handles.avatar.clone(),
@@ -109,9 +110,9 @@ fn build_ui(app: &adw::Application) {
         let feed_login = Rc::clone(&feed);
         move |_pk| {
             feed_login.bootstrap();
-            shell::poll_notif(&ctx, &handles2.notif_dot);
-            shell::poll_feed_dot(&ctx, &handles2.home_dot);
-            crate::shell::poll_time_ticks();
+            satori::shell::poll_notif(&ctx, &handles2.notif_dot);
+            satori::shell::poll_feed_dot(&ctx, &handles2.home_dot);
+            satori::shell::poll_time_ticks();
             stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);
         }
     });
@@ -122,7 +123,7 @@ fn build_ui(app: &adw::Application) {
     {
         let ctx = ctx.clone();
         settings_action.connect_activate(move |_, _| {
-            crate::settings::open_settings(&ctx);
+            satori::settings::open_settings(&ctx);
         });
     }
     app.add_action(&settings_action);
@@ -166,12 +167,12 @@ fn build_ui(app: &adw::Application) {
     match resumed {
         Some(session) => {
             if let Ok(pk) = PublicKey::from_str(&session.pubkey) {
-                shell::update_identity(&handles, &ctx, pk);
+                satori::shell::update_identity(&handles, &ctx, pk);
             }
             feed.bootstrap();
-            shell::poll_notif(&ctx, &handles.notif_dot);
-            shell::poll_feed_dot(&ctx, &handles.home_dot);
-            crate::shell::poll_time_ticks();
+            satori::shell::poll_notif(&ctx, &handles.notif_dot);
+            satori::shell::poll_feed_dot(&ctx, &handles.home_dot);
+            satori::shell::poll_time_ticks();
             stack.set_visible_child_full("main", gtk::StackTransitionType::Crossfade);
         }
         None => {

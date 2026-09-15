@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[lib]
+name = "satori_lib"
+path = "src/lib.rs"
+
 [[bin]]
 name = "satori"
 path = "src/main.rs"
