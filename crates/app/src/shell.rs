@@ -90,10 +90,6 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
     sidebar.set_hexpand(false);
     sidebar.set_halign(gtk::Align::Start);
 
-    // Collapse toggle: the sidebar's first row.
-    let collapse_btn = crate::icons::action_button("sidebar", "Toggle sidebar");
-    sidebar.append(&collapse_btn);
-
     // Identity row at the top (click → your profile): the avatar + name
     // patch themselves via the profile service once logged in.
     let avatar = adw::Avatar::builder().size(30).show_initials(true).build();
@@ -173,6 +169,10 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
 
     let (logout_btn, logout_lbl) = side_button("power", "Log out");
     sidebar.append(&logout_btn);
+
+    // Collapse toggle: last row.
+    let collapse_btn = crate::icons::action_button("sidebar", "Toggle sidebar");
+    sidebar.append(&collapse_btn);
     {
         let logout_btn2 = logout_btn.clone();
         logout_btn.connect_clicked(move |_| {

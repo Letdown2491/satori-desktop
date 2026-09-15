@@ -448,7 +448,14 @@ window {
 }
 
 /* AdwToolbarView draws an edge line under its top bar — kill it. */
-toolbarview > .top-bar {
+.top-bar {
+    background: none;
+    border-bottom: none;
+    box-shadow: none;
+}
+
+.top-bar > windowhandle > box,
+windowhandle box headerbar {
     background: none;
     border-bottom: none;
     box-shadow: none;

@@ -160,7 +160,6 @@ satori::icons::install();
     toolbar.add_top_bar(&titlebar);
     toolbar.set_content(Some(&stack));
     window.set_content(Some(&toolbar));
-    titlebar.pack_start(&handles.collapse_btn);
     window.present();
 
     // Resume a persisted session, else first-run: the login page. Resume
