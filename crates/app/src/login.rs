@@ -24,6 +24,7 @@ pub struct LoginPage {
     nsec_entry: gtk::PasswordEntry,
     enso: gtk::Image,
     waiting_status: gtk::Label,
+    waiting_hint: gtk::Label,
     cancelled: Rc<Cell<bool>>,
     anim: Rc<RefCell<Option<glib::SourceId>>>,
     tick: Rc<Cell<f64>>,
@@ -147,6 +148,7 @@ impl LoginPage {
             nsec_entry,
             enso,
             waiting_status,
+            waiting_hint,
             cancelled: Rc::new(Cell::new(false)),
             anim: Rc::new(RefCell::new(None)),
             tick: Rc::new(Cell::new(0.0)),
@@ -226,8 +228,14 @@ impl LoginPage {
         self.start_anim();
     }
 
+    /// The waiting page's hint differs per flow: nsec never needs approval.
+    fn set_waiting_hint(&self, hint: &str) {
+        self.waiting_hint.set_text(hint);
+    }
+
     fn begin_connect(&self, core: &Arc<Core>, uri: String, on_success: impl Fn(PublicKey) + 'static) {
         self.cancelled.set(false);
+        self.set_waiting_hint("Approve the request in your bunker app.");
         self.show_waiting("Waiting for approval…");
         let rx = core.connect_bunker(uri);
         self.drive(rx, core.clone(), on_success);
@@ -235,6 +243,7 @@ impl LoginPage {
 
     fn begin_nsec(&self, core: &Arc<Core>, secret: String, on_success: impl Fn(PublicKey) + 'static) {
         self.cancelled.set(false);
+        self.set_waiting_hint("Signing locally — nothing to approve.");
         self.show_waiting("Unsealing your key…");
         let rx = core.login_nsec(secret);
         self.drive(rx, core.clone(), on_success);

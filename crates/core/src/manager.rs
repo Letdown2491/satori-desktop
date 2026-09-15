@@ -238,13 +238,23 @@ impl Core {
     }
 
     pub fn logout(&self) {
-        *self.active.lock().unwrap() = None;
+        // Shut the bunker transport down FIRST (zombie kind-24133
+        // subscriptions = phantom approval prompts in the user's bunker app
+        // after logout).
+        let old = self.active.lock().unwrap().take();
+        if let Some(a) = old
+            && let Signer::Bunker(connect) = &a.signer {
+                let connect = Arc::clone(connect);
+                self.rt
+                    .spawn(async move { Arc::unwrap_or_clone(connect).shutdown().await });
+            }
         session::clear();
         secrets::delete(secrets::BUNKER_CLIENT_SECRET);
         secrets::delete(secrets::NSEC);
         self.own_liked.lock().unwrap().clear();
         self.own_bookmarked.lock().unwrap().clear();
         self.muted.lock().unwrap().clear();
+        eprintln!("[core] logout");
     }
 
     /// Follow-state lookup for profile pages (from the cached contact list).
@@ -1927,11 +1937,12 @@ impl Core {
     }
 
     async fn active(&self) -> Result<Active> {
-        self.active
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or(LoginError::Resume("no active session".into()))
+        let held = self.active.lock().unwrap().clone();
+        held.ok_or_else(|| {
+            eprintln!("[core] ERROR: something asked for the session while logged out");
+            eprintln!("{}", std::backtrace::Backtrace::force_capture());
+            LoginError::Resume("no active session".into())
+        })
     }
 }
 

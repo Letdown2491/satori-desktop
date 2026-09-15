@@ -110,11 +110,12 @@ pub fn notifications_page(ctx: &Ctx) -> (adw::NavigationPage, Rc<dyn Fn()>) {
             }
             FeedEvent::Failed(msg) => {
                 status.set_text(&format!("Could not load notifications: {msg}"));
+                eprintln!("[notif] fetch failed: {msg}");
             }
             _ => {}
         });
         }
     };
-    fetch();
+    // No construction fetch — the show hook runs on every real visit.
     (page, Rc::new(fetch))
 }
