@@ -201,11 +201,14 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
     let separator = gtk::Separator::new(gtk::Orientation::Vertical);
     let layout = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .halign(gtk::Align::Center)
         .build();
     layout.append(&ctx.overlay.clone());
     layout.append(&separator);
     layout.append(&sidebar);
+    // The app unit caps at 960 and CENTERS when the window is wider;
+    // below that it fills (no clipping at tiled widths). The clamp's own
+    // centering is the "margin: 0 auto" primitive.
+    let outer = adw::Clamp::builder().maximum_size(960).child(&layout).build();
 
     // Wire ctx AFTER construction (handlers above captured the parts).
     ctx.attach(&sections, navs, rows);
@@ -217,7 +220,7 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
     }
 
     (
-        layout.upcast(),
+        outer.upcast(),
         ShellHandles { home_dot, notif_dot, avatar, account_label },
     )
 }
