@@ -54,12 +54,32 @@ fn main() {
                     if let Some(k) = cl.child() { walk(&k, depth + 1, out); }
                 }
             }
-            eprintln!("[probe] walking...");
-            let mut out = Vec::new();
-            walk(win.upcast_ref(), 0, &mut out);
-            eprintln!("[probe] found {} wide boxes", out.len());
-            for (t, min_w, nat_w, cls) in out {
-                println!("WIDE {t} min={min_w} nat={nat_w} classes={:?}", cls);
+            // The layout: Box(H) -> [sidebar, sep, overlay]: allocations.
+            let layout = win.content().expect("content");
+            if let Some(lb) = layout.downcast_ref::<gtk::Box>() {
+                let mut c = lb.first_child();
+                while let Some(k) = c {
+                    let cls = k.css_classes().iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".");
+                    println!(
+                        "child {} ({}): allocated w={}, measured min={}, nat={}",
+                        k.type_().name(),
+                        cls,
+                        k.width(),
+                        k.measure(gtk::Orientation::Horizontal, -1).0,
+                        k.measure(gtk::Orientation::Horizontal, -1).1,
+                    );
+                    // If it's the sidebar, walk ITS children too.
+                    if let Some(sb) = k.downcast_ref::<gtk::Box>() {
+                        let mut sc = sb.first_child();
+                        while let Some(sk) = sc {
+                            let scl = sk.css_classes().iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".");
+                            let (mn, nt, _, _) = sk.measure(gtk::Orientation::Horizontal, -1);
+                            println!("  sidebar child {} ({}): alloc={}, min={}, nat={}", sk.type_().name(), scl, sk.width(), mn, nt);
+                            sc = sk.next_sibling();
+                        }
+                    }
+                    c = k.next_sibling();
+                }
             }
             println!("window: {}x{}", win.width(), win.height());
             std::process::exit(0);

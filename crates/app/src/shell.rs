@@ -86,6 +86,10 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
         .margin_end(6)
         .css_classes(["sidebar"])
         .build();
+    // Explicit false: stops hexpand propagation from inner rows (labels/
+    // dots expand WITHIN the sidebar; the sidebar itself stays 220px).
+    sidebar.set_hexpand(false);
+    sidebar.set_halign(gtk::Align::Start);
 
     // Wordmark: still ensō + serif name (layout.ts wordmark).
     let wordmark = gtk::Box::builder()
