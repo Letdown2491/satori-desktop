@@ -18,8 +18,8 @@ use crate::feed::FeedView;
 pub struct ShellHandles {
     pub home_dot: gtk::Image,
     pub notif_dot: gtk::Image,
-    /// Sidebar identity widgets (patched on login/resume).
-    pub avatar: gtk::Stack,
+    /// Sidebar identity widget (patched on login/resume).
+    pub avatar: adw::Avatar,
     pub account_label: gtk::Label,
     /// Lives in the titlebar (packed by main).
     pub collapse_btn: gtk::Button,
@@ -90,12 +90,15 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
     sidebar.set_hexpand(false);
     sidebar.set_halign(gtk::Align::Start);
 
+    // Collapse toggle: the sidebar's first row.
+    let collapsed = crate::prefs::load().sidebar_collapsed.unwrap_or(false);
+    let collapse_btn = crate::icons::action_button("sidebar", "Toggle sidebar");
+    sidebar.append(&collapse_btn);
+
     // Identity row at the top (click → your profile): the avatar + name
     // patch themselves via the profile service once logged in.
     let placeholder_pk = PublicKey::from_hex(&"0".repeat(64)).unwrap();
-    let avatar = crate::note_card::avatar_widget(ctx, placeholder_pk, None);
-    avatar.set_width_request(30);
-    avatar.set_height_request(30);
+    let avatar = adw::Avatar::builder().size(30).show_initials(true).build();
     let account_label = gtk::Label::builder()
         .label("Account")
         .halign(gtk::Align::Start)
@@ -167,11 +170,6 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
     }
 
     // Bottom: settings + account.
-    let spacer = gtk::Label::new(None);
-    spacer.set_vexpand(true);
-    sidebar.append(&spacer);
-    sidebar.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-
     let (settings_btn, settings_lbl) = side_button("gear", "Settings");
     sidebar.append(&settings_btn);
 
@@ -248,7 +246,7 @@ pub fn update_identity(handles: &ShellHandles, ctx: &Ctx, pk: PublicKey) {
     handles.account_label.set_text(&pk.to_bech32().unwrap_or_default()[..10]);
     // Reactive: the real name + avatar arrive via the profile service.
     let label = handles.account_label.clone();
-    let stack = handles.avatar.clone();
+    let avatar = handles.avatar.clone();
     let core = ctx.core.clone();
     drain(core.ensure_profiles(vec![pk]), move |reply| {
         if let satori_core::manager::FeedEvent::Profiles(ps) = reply
@@ -257,31 +255,16 @@ pub fn update_identity(handles: &ShellHandles, ctx: &Ctx, pk: PublicKey) {
                     label.set_text(&p.name);
                 }
                 if !p.picture.is_empty() {
-                    let mk = |tex: &gtk::gdk::MemoryTexture| {
-                        let img = gtk::Image::builder()
-                            .pixel_size(28)
-                            .css_classes(["avatar-img"])
-                            .build();
-                        img.set_paintable(Some(tex));
-                        img
-                    };
-                    if let Some(tex) = crate::media_cache::mem_get(&p.picture) {
-                        let img = mk(&tex);
-                        stack.add_child(&img);
-                        stack.set_visible_child(&img);
-                    } else {
-                        let core2 = core.clone();
-                        let stack2 = stack.clone();
-                        let url = p.picture.clone();
-                        drain(core2.fetch_image(url.clone()), move |img| {
-                            if let Some(decoded) = img {
-                                let tex = crate::media_cache::from_decoded(&url, &decoded);
-                                let img = mk(&tex);
-                                stack2.add_child(&img);
-                                stack2.set_visible_child(&img);
-                            }
-                        });
-                    }
+                    let core2 = core.clone();
+                    let avatar2 = avatar.clone();
+                    let url = p.picture.clone();
+                    drain(core2.fetch_image(url.clone()), move |img| {
+                        if let Some(decoded) = img {
+                            let tex = crate::media_cache::from_decoded(&url, &decoded);
+                            // AdwAvatar clips circular — GtkImage can't.
+                            avatar2.set_custom_image(Some(&tex));
+                        }
+                    });
                 }
             }
     });
