@@ -140,14 +140,13 @@ fn video_card(ctx: &Ctx, ev: &Event, profile: Option<&Profile>, focused: bool) -
             let url = url.clone();
             click.connect_released(move |g, _n, _x, _y| {
                 let _ = g;
+                let file = gtk::gio::File::for_uri(&url);
                 let video = gtk::Video::builder()
                     .autoplay(true)
                     .loop_(false)
+                    .file(&file)
                     .hexpand(true)
                     .build();
-                let file = gtk::gio::File::for_uri(&url);
-                let media = gtk::MediaFile::for_file(&file);
-                video.set_property("media-file", &media);
                 stack.add_named(&video, Some("player"));
                 stack.set_visible_child_name("player");
             });
@@ -1214,8 +1213,8 @@ pub fn av_facade(_ctx: &Ctx, url: &str) -> gtk::Widget {
         let url = url.to_string();
         play.connect_clicked(move |_| {
             let file = gtk::gio::File::for_uri(&url);
-            let media = gtk::MediaFile::for_file(&file);
             if audio {
+                let media = gtk::MediaFile::for_file(&file);
                 let controls = gtk::MediaControls::new(Some(&media));
                 controls.add_css_class("podcast-controls");
                 stack.remove(&stack.first_child().expect("facade"));
@@ -1224,9 +1223,9 @@ pub fn av_facade(_ctx: &Ctx, url: &str) -> gtk::Widget {
             } else {
                 let video = gtk::Video::builder()
                     .autoplay(true)
+                    .file(&file)
                     .hexpand(true)
                     .build();
-                video.set_property("media-file", &media);
                 stack.remove(&stack.first_child().expect("facade"));
                 stack.add_child(&video);
                 stack.set_visible_child(&video);

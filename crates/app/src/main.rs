@@ -60,6 +60,11 @@ fn main() -> glib::ExitCode {
         if domain == "Adwaita" && msg.contains("gtk-application-prefer-dark-theme") {
             return glib::LogWriterOutput::Handled;
         }
+        // GStreamer plugin-complaints (scaletempo etc.) are cosmetic for a
+        // client; errors still pass.
+        if domain.starts_with("GStreamer") && level == glib::LogLevel::Warning {
+            return glib::LogWriterOutput::Handled;
+        }
         glib::log_writer_default(level, fields);
         glib::LogWriterOutput::Handled
     });

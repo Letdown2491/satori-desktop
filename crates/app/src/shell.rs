@@ -152,7 +152,7 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
     let settings_btn = side_button("gear", "Settings");
     sidebar.append(&settings_btn);
 
-    // Account row = menu button (profile via Settings; log out in menu).
+    // Account row (click → your profile) + Log out row.
     let placeholder_pk = PublicKey::from_hex(&"0".repeat(64)).unwrap();
     let avatar = crate::note_card::avatar_widget(ctx, placeholder_pk, None);
     avatar.set_width_request(28);
@@ -169,16 +169,29 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
         .build();
     account_inner.append(&avatar);
     account_inner.append(&account_label);
-    let account_menu = gtk::gio::Menu::new();
-    account_menu.append(Some("Settings"), Some("app.settings"));
-    account_menu.append(Some("Log out"), Some("app.logout"));
-    let account_row = gtk::MenuButton::builder()
+    let account_row = gtk::Button::builder()
         .child(&account_inner)
-        .menu_model(&account_menu)
         .css_classes(["side-row", "side-account"])
         .halign(gtk::Align::Fill)
         .build();
+    {
+        let ctx2 = ctx.clone();
+        account_row.connect_clicked(move |_| {
+            if let Some(me) = ctx2.core.pubkey() {
+                crate::profile::open_profile(&ctx2, me);
+            }
+        });
+    }
     sidebar.append(&account_row);
+
+    let logout_btn = side_button("power", "Log out");
+    sidebar.append(&logout_btn);
+    {
+        let logout_btn2 = logout_btn.clone();
+        logout_btn.connect_clicked(move |_| {
+            logout_btn2.activate_action("app.logout", None).ok();
+        });
+    }
 
     // --- main area -----------------------------------------------------------------
     let overlay = ctx.overlay.clone();
