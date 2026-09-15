@@ -663,7 +663,7 @@ pub fn entity_page_by_naddr(
                         .hexpand(true)
                         .vexpand(true)
                         .build();
-                    let clamp = crate::shell::reading_column(&scroll, 660);
+                    let _clamp = crate::shell::reading_column(&scroll, 660);
                     page_box.append(&scroll);
                     let content: gtk::Widget = page_box.upcast();
                     stack.remove(&loading);

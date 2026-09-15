@@ -21,6 +21,8 @@ pub struct ShellHandles {
     /// Sidebar identity widgets (patched on login/resume).
     pub avatar: gtk::Stack,
     pub account_label: gtk::Label,
+    /// Lives in the titlebar (packed by main).
+    pub collapse_btn: gtk::Button,
 }
 
 fn side_button(icon: &str, label: &str) -> (gtk::Button, gtk::Label) {
@@ -88,21 +90,40 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
     sidebar.set_hexpand(false);
     sidebar.set_halign(gtk::Align::Start);
 
-    // Wordmark: still ensō + serif name (layout.ts wordmark).
-    let wordmark = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
-        .margin_top(18)
-        .margin_start(16)
-        .margin_bottom(18)
+    // Identity row at the top (click → your profile): the avatar + name
+    // patch themselves via the profile service once logged in.
+    let placeholder_pk = PublicKey::from_hex(&"0".repeat(64)).unwrap();
+    let avatar = crate::note_card::avatar_widget(ctx, placeholder_pk, None);
+    avatar.set_width_request(30);
+    avatar.set_height_request(30);
+    let account_label = gtk::Label::builder()
+        .label("Account")
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
         .build();
-    let wordmark_label = gtk::Label::builder()
-        .label("Satori")
-        .css_classes(["serif", "wordmark", "side-title"])
+    let account_row = gtk::Button::builder()
+        .css_classes(["side-row", "side-account"])
+        .halign(gtk::Align::Fill)
         .build();
-    wordmark.append(&crate::icons::enso(30));
-    wordmark.append(&wordmark_label);
-    sidebar.append(&wordmark);
+    {
+        let inner = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(10)
+            .build();
+        inner.append(&avatar);
+        inner.append(&account_label);
+        account_row.set_child(Some(&inner));
+    }
+    {
+        let ctx2 = ctx.clone();
+        account_row.connect_clicked(move |_| {
+            if let Some(me) = ctx2.core.pubkey() {
+                crate::profile::open_profile(&ctx2, me);
+            }
+        });
+    }
+    sidebar.append(&account_row);
 
     let (home_btn, home_dot, home_lbl) = side_button_dot("home", "Home");
     let (notif_btn, notif_dot, notif_lbl) = side_button_dot("bell", "Notifications");
@@ -154,50 +175,6 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
     let (settings_btn, settings_lbl) = side_button("gear", "Settings");
     sidebar.append(&settings_btn);
 
-    // Collapse toggle (top of the sidebar, above the wordmark).
-    let collapsed = crate::prefs::load().sidebar_collapsed.unwrap_or(false);
-    let collapse_btn = gtk::Button::builder()
-        .child(&crate::icons::icon("sidebar"))
-        .css_classes(["flat"])
-        .tooltip_text("Toggle sidebar")
-        .halign(gtk::Align::Start)
-        .margin_start(10)
-        .margin_bottom(10)
-        .build();
-    sidebar.append(&collapse_btn);
-
-    // Account row (click → your profile) + Log out row.
-    let placeholder_pk = PublicKey::from_hex(&"0".repeat(64)).unwrap();
-    let avatar = crate::note_card::avatar_widget(ctx, placeholder_pk, None);
-    avatar.set_width_request(28);
-    avatar.set_height_request(28);
-    let account_label = gtk::Label::builder()
-        .label("Account")
-        .halign(gtk::Align::Start)
-        .hexpand(true)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .build();
-    let account_inner = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(10)
-        .build();
-    account_inner.append(&avatar);
-    account_inner.append(&account_label);
-    let account_row = gtk::Button::builder()
-        .child(&account_inner)
-        .css_classes(["side-row", "side-account"])
-        .halign(gtk::Align::Fill)
-        .build();
-    {
-        let ctx2 = ctx.clone();
-        account_row.connect_clicked(move |_| {
-            if let Some(me) = ctx2.core.pubkey() {
-                crate::profile::open_profile(&ctx2, me);
-            }
-        });
-    }
-    sidebar.append(&account_row);
-
     let (logout_btn, logout_lbl) = side_button("power", "Log out");
     sidebar.append(&logout_btn);
     {
@@ -208,8 +185,9 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
     }
 
     // --- collapse --------------------------------------------------------------
+    let collapsed = crate::prefs::load().sidebar_collapsed.unwrap_or(false);
+    let collapse_btn = crate::icons::action_button("sidebar", "Toggle sidebar");
     let collapsible: Vec<gtk::Widget> = vec![
-        wordmark_label.clone().upcast(),
         home_lbl.upcast(),
         notif_lbl.upcast(),
         search_lbl.upcast(),
@@ -261,7 +239,7 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
 
     (
         outer.upcast(),
-        ShellHandles { home_dot, notif_dot, avatar, account_label },
+        ShellHandles { home_dot, notif_dot, avatar, account_label, collapse_btn },
     )
 }
 

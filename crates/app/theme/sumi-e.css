@@ -414,6 +414,8 @@ window {
 }
 
 .side-row {
+    background: none;
+    border: none;
     padding: 9px 12px;
     border-radius: 10px;
     color: @muted;
@@ -436,9 +438,18 @@ window {
     color: @ink;
 }
 
-/* Slim CSD titlebar: window controls only. */
+/* Slim CSD titlebar: window controls only, same paper. */
 .slim-titlebar {
     min-height: 0;
-    background-color: @panel;
+    background: none;
     border: none;
+    border-bottom: none;
+    box-shadow: none;
+}
+
+/* AdwToolbarView draws an edge line under its top bar — kill it. */
+toolbarview > .top-bar {
+    background: none;
+    border-bottom: none;
+    box-shadow: none;
 }

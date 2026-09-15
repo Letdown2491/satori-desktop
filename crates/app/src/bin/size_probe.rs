@@ -50,9 +50,8 @@ fn main() {
                     if let Some(k) = nv.visible_page() { walk(k.upcast_ref(), depth + 1, out); }
                 } else if let Some(t) = w.downcast_ref::<adw::ToolbarView>() {
                     if let Some(k) = t.content() { walk(&k, depth + 1, out); }
-                } else if let Some(cl) = w.downcast_ref::<adw::Clamp>() {
-                    if let Some(k) = cl.child() { walk(&k, depth + 1, out); }
-                }
+                } else if let Some(cl) = w.downcast_ref::<adw::Clamp>()
+                    && let Some(k) = cl.child() { walk(&k, depth + 1, out); }
             }
             // The layout: Box(H) -> [sidebar, sep, overlay]: allocations.
             let layout = win.content().expect("content");

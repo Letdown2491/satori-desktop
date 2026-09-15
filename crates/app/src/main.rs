@@ -105,6 +105,7 @@ satori::icons::install();
             notif_dot: handles.notif_dot.clone(),
             avatar: handles.avatar.clone(),
             account_label: handles.account_label.clone(),
+            collapse_btn: handles.collapse_btn.clone(),
         };
         let ctx = ctx.clone();
         let feed_login = Rc::clone(&feed);
@@ -150,8 +151,8 @@ satori::icons::install();
         .default_width(1100)
         .default_height(760)
         .build();
-    // Slim CSD titlebar via the toolbar view: window controls without
-    // chrome (AdwApplicationWindow forbids set_titlebar).
+    // Slim CSD titlebar via the toolbar view: the sidebar toggle left,
+    // window controls right — nothing else.
     let titlebar = gtk::HeaderBar::new();
     titlebar.add_css_class("flat");
     titlebar.add_css_class("slim-titlebar");
@@ -159,6 +160,7 @@ satori::icons::install();
     toolbar.add_top_bar(&titlebar);
     toolbar.set_content(Some(&stack));
     window.set_content(Some(&toolbar));
+    titlebar.pack_start(&handles.collapse_btn);
     window.present();
 
     // Resume a persisted session, else first-run: the login page. Resume
