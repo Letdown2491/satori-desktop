@@ -534,11 +534,30 @@ impl Core {
 
     async fn bootstrap_inner(&self, tx: &mpsc::UnboundedSender<FeedEvent>) -> Result<()> {
         let mut active = self.active().await?;
-
         let me = active.me();
-        // The NIP-65 fetch itself needs a connected pool: indexers first,
-        // then the discovered read set (nip65.ts bootstrap order).
+
+        // 1. PAINT FIRST: whatever the store already holds (instant — the
+        // LMDB cache persists across runs). Cached follows drive the filter.
+        let cached_follows: Vec<PublicKey> = active
+            .pool
+            .store
+            .latest_by_kind(me, Kind::ContactList)
+            .await
+            .unwrap_or(None)
+            .map(|ev| ev.tags.public_keys().collect())
+            .unwrap_or_default();
+        if !cached_follows.is_empty() {
+            active.follows = cached_follows.clone();
+            let page = self.page_from_store(&active, None).await?;
+            let _ = tx.send(FeedEvent::Loaded(page));
+        }
+        let _ = tx.send(FeedEvent::BootstrapDone);
+
+        // 2. The network phase — everything independent, IN PARALLEL. The
+        // UI re-renders when the fresh page lands (the reactive profile
+        // patching fills names/avatars as they arrive).
         active.pool.connect_reads(Vec::new()).await.ok();
+
         let (read, write) = active
             .pool
             .nip65(me)
@@ -565,35 +584,34 @@ impl Core {
         if let Some(a) = self.active.lock().unwrap().as_mut() {
             a.follows = follows.clone();
         }
-        // Eager warm: every follow's profile before the first paint
-        // (profile-cache.ts warm semantics — the feed resolves names).
+
+        // Profiles + engagement + deep fetch: parallel, none block paint.
         let mut warm_set = follows.clone();
         warm_set.push(me);
-        active.profiles.warm_await(warm_set).await;
+        active.profiles.warm(warm_set);
 
-        // Deep feed fetch — skipped when warm (feed-cache.ts: the store
-        // persists across runs; a recent bootstrap already filled depth).
-        let warm = crate::read_state::load().feed_warm_at
-            > now_secs().saturating_sub(600);
-        if warm {
-            eprintln!("[core] bootstrap: store is warm, skipping deep fetch");
-        }
-        if !follows.is_empty() && !warm {
-            let filter = Filter::new()
-                .kinds(crate::store::visible_kinds())
-                .authors(follows.clone())
-                .limit(BOOTSTRAP_DEPTH);
-            for ev in active.pool.get(filter).await.unwrap_or_default() {
-                let _ = active.pool.store.save(&ev).await;
+        let warm = crate::read_state::load().feed_warm_at > now_secs().saturating_sub(600);
+        let (engagement, _) = tokio::join!(
+            async {
+                let mine = Filter::new()
+                    .author(me)
+                    .kinds([Kind::Reaction, Kind::Custom(10003)])
+                    .limit(2000);
+                active.pool.get(mine).await.unwrap_or_default()
+            },
+            async {
+                if !follows.is_empty() && !warm {
+                    let filter = Filter::new()
+                        .kinds(crate::store::visible_kinds())
+                        .authors(follows.clone())
+                        .limit(BOOTSTRAP_DEPTH);
+                    active.pool.get(filter).await.unwrap_or_default()
+                } else {
+                    Default::default()
+                }
             }
-        }
-
-        // Own engagement sets.
-        let mine = Filter::new()
-            .author(me)
-            .kinds([Kind::Reaction, Kind::Custom(10003)])
-            .limit(2000);
-        for ev in active.pool.get(mine).await.unwrap_or_default() {
+        );
+        for ev in engagement {
             let _ = active.pool.store.save(&ev).await;
         }
         self.load_own_sets(&active).await;
@@ -601,7 +619,6 @@ impl Core {
         crate::read_state::advance(|st| st.feed_warm_at = now_secs());
         let page = self.page_from_store(&active, None).await?;
         let _ = tx.send(FeedEvent::Loaded(page));
-        let _ = tx.send(FeedEvent::BootstrapDone);
         Ok(())
     }
 
@@ -858,7 +875,8 @@ impl Core {
                 let active = this.active().await?;
                 let me = active.me();
 
-                // My recent notes give the reply surface (#e targets).
+                // Cached candidates paint instantly; the relay phase runs in
+                // parallel below and the response re-renders.
                 let my_notes = active
                     .pool
                     .store
@@ -867,32 +885,64 @@ impl Core {
                     .unwrap_or_default();
                 let ids: Vec<EventId> = my_notes.iter().map(|e| e.id).collect();
 
+                // Instant paint: the store's cached candidates.
+                let mut cached: Vec<Event> = Vec::new();
+                for id in &ids {
+                    if let Ok(replies) = active.pool.store.replies(*id).await {
+                        cached.extend(replies);
+                    }
+                }
+                cached.retain(|ev| ev.pubkey != me);
+                {
+                    let authors: Vec<PublicKey> = cached.iter().map(|e| e.pubkey).collect();
+                    let profiles = active
+                        .pool
+                        .store
+                        .profiles(&authors)
+                        .await
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(Profile::from_event)
+                        .collect();
+                    let _ = tx.send(FeedEvent::Notifications(cached, profiles));
+                }
+
                 let since = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0)
                     .saturating_sub(7 * 86400);
 
-                let mut filters = vec![Filter::new()
-                    .kind(Kind::TextNote)
-                    .pubkeys([me]) // mentions (#p)
-                    .since(Timestamp::from(since))
-                    .limit(200)];
-                if !ids.is_empty() {
-                    filters.push(
+                // Mentions (#p=me) and replies (#e=my notes): PARALLEL.
+                let mention_q = Box::pin(active.pool.get(
+                    Filter::new()
+                        .kind(Kind::TextNote)
+                        .pubkeys([me])
+                        .since(Timestamp::from(since))
+                        .limit(200),
+                ));
+                let reply_q = if ids.is_empty() {
+                    None
+                } else {
+                    Some(Box::pin(active.pool.get(
                         Filter::new()
                             .kind(Kind::TextNote)
                             .events(ids)
                             .since(Timestamp::from(since))
                             .limit(200),
-                    );
-                }
-                let mut mine_events: Vec<Event> = Vec::new();
-                for f in filters {
-                    for ev in active.pool.get(f).await.unwrap_or_default() {
-                        mine_events.push(ev);
+                    )))
+                };
+                let (mentions_res, replies_res) = tokio::join!(mention_q, async {
+                    match reply_q {
+                        Some(q) => q.await.unwrap_or_default(),
+                        None => Default::default(),
                     }
-                }
+                });
+                let mine_events: Vec<Event> = mentions_res
+                    .into_iter()
+                    .flat_map(|set| set.into_iter())
+                    .chain(replies_res)
+                    .collect();
                 for ev in &mine_events {
                     let _ = active.pool.store.save(ev).await;
                 }

@@ -70,6 +70,11 @@ pub fn notifications_page(ctx: &Ctx) -> (adw::NavigationPage, Rc<dyn Fn()>) {
             let prev = prev.clone();
             drain(ctx.core.notifications(), move |ev| match ev {
             FeedEvent::Notifications(notifs, profiles) => {
+                // Each event is a full page (cached-first, then fresh) —
+                // rebuild, never append.
+                while let Some(child) = list.first_child() {
+                    list.remove(&child);
+                }
                 let map: HashMap<String, Profile> =
                     profiles.iter().cloned().map(|p| (p.pubkey.clone(), p)).collect();
                 status.set_visible(false);

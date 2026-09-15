@@ -170,6 +170,19 @@ impl ProfileService {
         self.fetch_and_absorb(missing).await;
     }
 
+    /// Warm in the background (fire-and-forget): fetch + absorb, nobody
+    /// waits — the reactive UI patches as profiles land.
+    pub fn warm(self: &Arc<Self>, pks: Vec<PublicKey>) {
+        let missing = self.missing_or_stale(pks);
+        if missing.is_empty() {
+            return;
+        }
+        let service = Arc::clone(self);
+        tokio::spawn(async move {
+            service.fetch_and_absorb(missing).await;
+        });
+    }
+
     fn missing_or_stale(&self, pks: Vec<PublicKey>) -> Vec<PublicKey> {
         pks.into_iter()
             .filter(|pk| {
