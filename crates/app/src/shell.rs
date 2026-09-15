@@ -80,10 +80,6 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
         .width_request(220)
-        .margin_top(14)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(6)
         .css_classes(["sidebar"])
         .build();
     // Explicit false: stops hexpand propagation from inner rows (labels/
@@ -95,7 +91,8 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
     let wordmark = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
-        .margin_start(10)
+        .margin_top(18)
+        .margin_start(16)
         .margin_bottom(18)
         .build();
     wordmark.append(&crate::icons::enso(30));
@@ -197,14 +194,15 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
         });
     }
 
-    // --- main area: the sidebar+timeline unit centers in the window -------
+    // --- main area: fills the window right of the sidebar; the reading
+    // column centers within it (works tiled at 936, works wide) ----------
     let overlay = ctx.overlay.clone();
     overlay.set_child(Some(&sections));
+    overlay.set_hexpand(true);
 
     let separator = gtk::Separator::new(gtk::Orientation::Vertical);
     let layout = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .halign(gtk::Align::Center)
         .build();
     layout.append(&ctx.overlay.clone());
     layout.append(&separator);
