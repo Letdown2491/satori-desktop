@@ -30,16 +30,16 @@ pub fn notifications_page(ctx: &Ctx) -> adw::NavigationPage {
         .build();
     column.append(&status);
 
-    let clamp = crate::shell::reading_column(&column, 720);
     let scroll = gtk::ScrolledWindow::builder()
-        .child(&clamp)
+        .child(&column)
         .hexpand(true)
         .vexpand(true)
         .build();
 
+    let clamped = crate::shell::reading_column(&scroll, 720);
     let page = adw::NavigationPage::builder()
         .title("Notifications")
-        .child(&scroll)
+        .child(&clamped)
         .build();
 
     // Opening the page marks seen (routes/notifications.ts:115) — the dot

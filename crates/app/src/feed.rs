@@ -80,9 +80,8 @@ impl FeedView {
         column.append(&older_btn);
         column.append(&caught_up);
 
-        let clamp = crate::shell::reading_column(&column, 720);
         let scroll = gtk::ScrolledWindow::builder()
-            .child(&clamp)
+            .child(&column)
             .hexpand(true)
             .vexpand(true)
             .build();
@@ -143,9 +142,10 @@ impl FeedView {
         state.add_named(&feed_overlay, Some("feed"));
         state.add_named(&error, Some("error"));
 
+        let clamped = crate::shell::reading_column(&state, 720);
         let page = adw::NavigationPage::builder()
             .title("Following")
-            .child(&state)
+            .child(&clamped)
             .build();
 
         let view = Rc::new(Self {

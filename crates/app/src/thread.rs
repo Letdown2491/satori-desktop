@@ -74,9 +74,10 @@ pub fn thread_page(ctx: &Ctx, event: &Event) -> adw::NavigationPage {
         .hexpand(true)
         .vexpand(true)
         .build();
+    let clamped = crate::shell::reading_column(&scroll, 720);
     adw::NavigationPage::builder()
         .title("Thread")
-        .child(&scroll)
+        .child(&clamped)
         .build()
 }
 
@@ -222,6 +223,5 @@ fn thread_content(ctx: &Ctx, event: &Event, profile: Option<&Profile>) -> gtk::W
         });
     }
 
-    let clamp = crate::shell::reading_column(&column, 720);
-    clamp.upcast()
+    column.upcast()
 }

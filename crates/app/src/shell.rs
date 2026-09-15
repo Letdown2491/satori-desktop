@@ -194,15 +194,14 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
         });
     }
 
-    // --- main area: fills the window right of the sidebar; the reading
-    // column centers within it (works tiled at 936, works wide) ----------
+    // --- main area: the sidebar+timeline unit centers in the window -------
     let overlay = ctx.overlay.clone();
     overlay.set_child(Some(&sections));
-    overlay.set_hexpand(true);
 
     let separator = gtk::Separator::new(gtk::Orientation::Vertical);
     let layout = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
+        .halign(gtk::Align::Center)
         .build();
     layout.append(&ctx.overlay.clone());
     layout.append(&separator);
@@ -267,8 +266,10 @@ pub fn update_identity(handles: &ShellHandles, ctx: &Ctx, pk: PublicKey) {
     });
 }
 
-/// The reading column: max-width clamp that HUGS the sidebar (the
-/// sidebar + timeline form one tight unit; empty paper goes to the right).
+/// The reading column: an AdwClamp wrapping the scroll — its natural width
+/// is min(content, max), so the sidebar+timeline unit centers in the window
+/// AND shrinks on narrow/tiled windows. (A ScrolledWindow's natural size
+/// collapses to its minimum, so the clamp must sit OUTSIDE it.)
 pub fn reading_column(child: &impl IsA<gtk::Widget>, max: i32) -> adw::Clamp {
     adw::Clamp::builder().maximum_size(max).child(child).build()
 }

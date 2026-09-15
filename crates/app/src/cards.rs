@@ -600,15 +600,15 @@ fn article_reader(ctx: &Ctx, ev: &Event, data: &satori_core::nip::article::Artic
     let target = satori_core::nip::comment::CommentTarget::for_event(ev);
     column.append(&crate::comments::comments_section(ctx, &target));
 
-    let clamp = crate::shell::reading_column(&column, 660);
     let scroll = gtk::ScrolledWindow::builder()
-        .child(&clamp)
+        .child(&column)
         .hexpand(true)
         .vexpand(true)
         .build();
+    let clamped = crate::shell::reading_column(&scroll, 660);
     adw::NavigationPage::builder()
         .title(&data.title)
-        .child(&scroll)
+        .child(&clamped)
         .build()
 }
 
@@ -658,12 +658,12 @@ pub fn entity_page_by_naddr(
                     clamp_col.append(&card_for(&ctx, &ev, profile.as_ref(), true));
                     let target = satori_core::nip::comment::CommentTarget::for_event(&ev);
                     clamp_col.append(&crate::comments::comments_section(&ctx, &target));
-                    let clamp = crate::shell::reading_column(&clamp_col, 660);
                     let scroll = gtk::ScrolledWindow::builder()
-                        .child(&clamp)
+                        .child(&clamp_col)
                         .hexpand(true)
                         .vexpand(true)
                         .build();
+                    let clamp = crate::shell::reading_column(&scroll, 660);
                     page_box.append(&scroll);
                     let content: gtk::Widget = page_box.upcast();
                     stack.remove(&loading);
