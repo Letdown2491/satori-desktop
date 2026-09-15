@@ -91,13 +91,11 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
     sidebar.set_halign(gtk::Align::Start);
 
     // Collapse toggle: the sidebar's first row.
-    let collapsed = crate::prefs::load().sidebar_collapsed.unwrap_or(false);
     let collapse_btn = crate::icons::action_button("sidebar", "Toggle sidebar");
     sidebar.append(&collapse_btn);
 
     // Identity row at the top (click → your profile): the avatar + name
     // patch themselves via the profile service once logged in.
-    let placeholder_pk = PublicKey::from_hex(&"0".repeat(64)).unwrap();
     let avatar = adw::Avatar::builder().size(30).show_initials(true).build();
     let account_label = gtk::Label::builder()
         .label("Account")
