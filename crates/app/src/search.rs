@@ -44,7 +44,7 @@ pub fn search_page(ctx: &Ctx) -> adw::NavigationPage {
     let list = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
     column.append(&list);
 
-    let clamp = adw::Clamp::builder().maximum_size(720).child(&column).build();
+    let clamp = crate::shell::reading_column(&column, 720);
     let scroll = gtk::ScrolledWindow::builder()
         .child(&clamp)
         .hexpand(true)

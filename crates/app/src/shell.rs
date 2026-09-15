@@ -269,6 +269,15 @@ pub fn update_identity(handles: &ShellHandles, ctx: &Ctx, pk: PublicKey) {
     });
 }
 
+/// The reading column: max-width clamp that HUGS the sidebar (the
+/// sidebar + timeline form one tight unit; empty paper goes to the right).
+pub fn reading_column(child: &impl IsA<gtk::Widget>, max: i32) -> adw::Clamp {
+    let clamp = adw::Clamp::builder().maximum_size(max).child(child).build();
+    clamp.set_halign(gtk::Align::Start);
+    clamp.set_margin_start(16);
+    clamp
+}
+
 /// Dot polls (the web app's quiet-dot pollers — layout.ts).
 pub fn poll_notif(ctx: &Ctx, dot: &gtk::Image) {
     let ctx = ctx.clone();

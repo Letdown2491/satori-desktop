@@ -222,6 +222,6 @@ fn thread_content(ctx: &Ctx, event: &Event, profile: Option<&Profile>) -> gtk::W
         });
     }
 
-    let clamp = adw::Clamp::builder().maximum_size(720).child(&column).build();
+    let clamp = crate::shell::reading_column(&column, 720);
     clamp.upcast()
 }

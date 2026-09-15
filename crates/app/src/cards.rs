@@ -600,7 +600,7 @@ fn article_reader(ctx: &Ctx, ev: &Event, data: &satori_core::nip::article::Artic
     let target = satori_core::nip::comment::CommentTarget::for_event(ev);
     column.append(&crate::comments::comments_section(ctx, &target));
 
-    let clamp = adw::Clamp::builder().maximum_size(660).child(&column).build();
+    let clamp = crate::shell::reading_column(&column, 660);
     let scroll = gtk::ScrolledWindow::builder()
         .child(&clamp)
         .hexpand(true)
@@ -658,7 +658,7 @@ pub fn entity_page_by_naddr(
                     clamp_col.append(&card_for(&ctx, &ev, profile.as_ref(), true));
                     let target = satori_core::nip::comment::CommentTarget::for_event(&ev);
                     clamp_col.append(&crate::comments::comments_section(&ctx, &target));
-                    let clamp = adw::Clamp::builder().maximum_size(660).child(&clamp_col).build();
+                    let clamp = crate::shell::reading_column(&clamp_col, 660);
                     let scroll = gtk::ScrolledWindow::builder()
                         .child(&clamp)
                         .hexpand(true)

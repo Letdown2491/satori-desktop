@@ -80,7 +80,7 @@ impl FeedView {
         column.append(&older_btn);
         column.append(&caught_up);
 
-        let clamp = adw::Clamp::builder().maximum_size(720).child(&column).build();
+        let clamp = crate::shell::reading_column(&column, 720);
         let scroll = gtk::ScrolledWindow::builder()
             .child(&clamp)
             .hexpand(true)
