@@ -197,18 +197,18 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
         });
     }
 
-    // --- main area: expands, the sidebar stays at its 220px --------------
+    // --- main area: the sidebar+timeline unit centers in the window -------
     let overlay = ctx.overlay.clone();
     overlay.set_child(Some(&sections));
-    overlay.set_hexpand(true);
 
     let separator = gtk::Separator::new(gtk::Orientation::Vertical);
     let layout = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
+        .halign(gtk::Align::Center)
         .build();
-    layout.append(&sidebar);
-    layout.append(&separator);
     layout.append(&ctx.overlay.clone());
+    layout.append(&separator);
+    layout.append(&sidebar);
 
     // Wire ctx AFTER construction (handlers above captured the parts).
     ctx.attach(&sections, navs, rows);
@@ -272,10 +272,7 @@ pub fn update_identity(handles: &ShellHandles, ctx: &Ctx, pk: PublicKey) {
 /// The reading column: max-width clamp that HUGS the sidebar (the
 /// sidebar + timeline form one tight unit; empty paper goes to the right).
 pub fn reading_column(child: &impl IsA<gtk::Widget>, max: i32) -> adw::Clamp {
-    let clamp = adw::Clamp::builder().maximum_size(max).child(child).build();
-    clamp.set_halign(gtk::Align::Start);
-    clamp.set_margin_start(16);
-    clamp
+    adw::Clamp::builder().maximum_size(max).child(child).build()
 }
 
 /// Dot polls (the web app's quiet-dot pollers — layout.ts).
