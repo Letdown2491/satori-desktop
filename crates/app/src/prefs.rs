@@ -15,6 +15,9 @@ pub struct Prefs {
     pub undo_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undo_seconds: Option<u32>,
+    /// Sidebar collapsed to icon-only?
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_collapsed: Option<bool>,
 }
 
 pub fn load() -> Prefs {

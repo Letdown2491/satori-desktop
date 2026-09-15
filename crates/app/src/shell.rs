@@ -23,7 +23,7 @@ pub struct ShellHandles {
     pub account_label: gtk::Label,
 }
 
-fn side_button(icon: &str, label: &str) -> gtk::Button {
+fn side_button(icon: &str, label: &str) -> (gtk::Button, gtk::Label) {
     let btn = gtk::Button::builder()
         .css_classes(["side-row"])
         .halign(gtk::Align::Fill)
@@ -33,14 +33,15 @@ fn side_button(icon: &str, label: &str) -> gtk::Button {
         .spacing(10)
         .build();
     row.append(&crate::icons::icon_sized(icon, 17));
-    row.append(&gtk::Label::builder().label(label).halign(gtk::Align::Start).build());
+    let lbl = gtk::Label::builder().label(label).halign(gtk::Align::Start).build();
+    row.append(&lbl);
     btn.set_child(Some(&row));
-    btn
+    (btn, lbl)
 }
 
 /// A sidebar row with a quiet dot suffix.
-fn side_button_dot(icon: &str, label: &str) -> (gtk::Button, gtk::Image) {
-    let btn = side_button(icon, label);
+fn side_button_dot(icon: &str, label: &str) -> (gtk::Button, gtk::Image, gtk::Label) {
+    let (btn, lbl) = side_button(icon, label);
     let dot = gtk::Image::builder()
         .icon_name("media-record-symbolic")
         .css_classes(["bell-dot"])
@@ -52,7 +53,7 @@ fn side_button_dot(icon: &str, label: &str) -> (gtk::Button, gtk::Image) {
     if let Some(row) = btn.child().and_downcast::<gtk::Box>() {
         row.append(&dot);
     }
-    (btn, dot)
+    (btn, dot, lbl)
 }
 
 pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) {
@@ -95,21 +96,21 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
         .margin_start(16)
         .margin_bottom(18)
         .build();
-    wordmark.append(&crate::icons::enso(30));
-    wordmark.append(&gtk::Label::builder()
+    let wordmark_label = gtk::Label::builder()
         .label("Satori")
         .css_classes(["serif", "wordmark", "side-title"])
-        .build());
+        .build();
+    wordmark.append(&crate::icons::enso(30));
+    wordmark.append(&wordmark_label);
     sidebar.append(&wordmark);
 
-    let (home_btn, home_dot) = side_button_dot("home", "Home");
-    let (notif_btn, notif_dot) = side_button_dot("bell", "Notifications");
-    let search_btn = side_button("search", "Search");
+    let (home_btn, home_dot, home_lbl) = side_button_dot("home", "Home");
+    let (notif_btn, notif_dot, notif_lbl) = side_button_dot("bell", "Notifications");
+    let (search_btn, search_lbl) = side_button("search", "Search");
     home_btn.add_css_class("side-active");
     for b in [&home_btn, &notif_btn, &search_btn] {
         sidebar.append(b);
     }
-
     let mut navs = HashMap::new();
     navs.insert("feed", feed_nav.clone());
     navs.insert("notifications", notif_nav.clone());
@@ -150,8 +151,20 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
     sidebar.append(&spacer);
     sidebar.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
-    let settings_btn = side_button("gear", "Settings");
+    let (settings_btn, settings_lbl) = side_button("gear", "Settings");
     sidebar.append(&settings_btn);
+
+    // Collapse toggle (top of the sidebar, above the wordmark).
+    let collapsed = crate::prefs::load().sidebar_collapsed.unwrap_or(false);
+    let collapse_btn = gtk::Button::builder()
+        .child(&crate::icons::icon("sidebar"))
+        .css_classes(["flat"])
+        .tooltip_text("Toggle sidebar")
+        .halign(gtk::Align::Start)
+        .margin_start(10)
+        .margin_bottom(10)
+        .build();
+    sidebar.append(&collapse_btn);
 
     // Account row (click → your profile) + Log out row.
     let placeholder_pk = PublicKey::from_hex(&"0".repeat(64)).unwrap();
@@ -185,7 +198,7 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
     }
     sidebar.append(&account_row);
 
-    let logout_btn = side_button("power", "Log out");
+    let (logout_btn, logout_lbl) = side_button("power", "Log out");
     sidebar.append(&logout_btn);
     {
         let logout_btn2 = logout_btn.clone();
@@ -194,17 +207,44 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
         });
     }
 
+    // --- collapse --------------------------------------------------------------
+    let collapsible: Vec<gtk::Widget> = vec![
+        wordmark_label.clone().upcast(),
+        home_lbl.upcast(),
+        notif_lbl.upcast(),
+        search_lbl.upcast(),
+        settings_lbl.upcast(),
+        logout_lbl.upcast(),
+        account_label.clone().upcast(),
+    ];
+    let sidebar_for_collapse = sidebar.clone();
+    let apply_collapse = move |on: bool| {
+        sidebar_for_collapse.set_width_request(if on { 64 } else { 220 });
+        for w in &collapsible {
+            w.set_visible(!on);
+        }
+    };
+    apply_collapse(collapsed);
+    {
+        let apply = apply_collapse.clone();
+        collapse_btn.connect_clicked(move |_| {
+            let next = !crate::prefs::load().sidebar_collapsed.unwrap_or(false);
+            let mut p = crate::prefs::load();
+            p.sidebar_collapsed = Some(next);
+            crate::prefs::save(&p);
+            apply(next);
+        });
+    }
+
     // --- main area: the sidebar+timeline unit centers in the window -------
     let overlay = ctx.overlay.clone();
     overlay.set_child(Some(&sections));
 
-    let separator = gtk::Separator::new(gtk::Orientation::Vertical);
     let layout = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .build();
-    layout.append(&ctx.overlay.clone());
-    layout.append(&separator);
     layout.append(&sidebar);
+    layout.append(&ctx.overlay.clone());
     // The app unit caps at 960 and CENTERS when the window is wider;
     // below that it fills (no clipping at tiled widths). The clamp's own
     // centering is the "margin: 0 auto" primitive.

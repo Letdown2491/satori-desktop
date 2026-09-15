@@ -37,5 +37,6 @@
       <file compressed="false" preprocess="xml-stripblanks">scalable/apps/satori-logo.svg</file>
       <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-close-symbolic.svg</file>
       <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-power-symbolic.svg</file>
+      <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-sidebar-symbolic.svg</file>
   </gresource>
 </gresources>

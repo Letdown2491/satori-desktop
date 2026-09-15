@@ -402,9 +402,10 @@ window {
     font-size: 12px;
 }
 
-/* --- The sidebar (the chrome) ------------------------------------------------ */
+/* --- The sidebar (the chrome): the SAME paper as the app — no borders,
+       no color distinction; rows carry the hierarchy ------------------------ */
 .sidebar {
-    background-color: @panel;
+    background: none;
     transition: background-color 0.4s ease;
 }
 
