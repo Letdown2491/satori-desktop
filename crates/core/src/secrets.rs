@@ -22,37 +22,78 @@ fn entry(name: &str) -> Result<keyring::Entry> {
     keyring::Entry::new(SERVICE, name).map_err(LoginError::from)
 }
 
+/// The keyring path can BLOCK for the D-Bus timeout on systems without a
+/// Secret Service (niri sessions without gnome-keyring). Every keyring op
+/// runs on a blocking thread with a hard 2s deadline; then we fall back.
+async fn with_deadline<T: Send + 'static>(
+    op: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::task::spawn_blocking(op),
+    )
+    .await
+    {
+        Ok(Ok(res)) => res,
+        Ok(Err(join)) => Err(LoginError::Store(format!("{join}"))),
+        Err(_) => Err(LoginError::Store("secret service timed out".into())),
+    }
+}
+
 fn fallback_path(name: &str) -> PathBuf {
     config::data_dir().join(format!("{name}.secret"))
 }
 
-/// Best-effort store: Secret Service, falling back to a 0600 file.
-pub fn store(name: &str, secret: &str) -> Result<()> {
-    let stored = entry(name).is_ok_and(|e| e.set_password(secret).is_ok());
+/// Best-effort store: Secret Service (2s deadline), falling back to a
+/// 0600 file.
+pub async fn store(name: &str, secret: &str) -> Result<()> {
+    let name = name.to_string();
+    let secret = secret.to_string();
+    let stored: bool = {
+        let (n, v) = (name.clone(), secret.clone());
+        with_deadline(move || match entry(&n) {
+            Ok(e) => e.set_password(&v).map(|_| true).map_err(LoginError::from),
+            Err(e) => Err(e),
+        })
+        .await
+        .unwrap_or(false) // no service / timeout → file fallback
+    };
     if !stored {
-        file_store(name, secret)?;
+        file_store(&name, &secret)?;
     }
     Ok(())
 }
 
 /// Load a secret; `None` when never stored.
-pub fn load(name: &str) -> Result<Option<String>> {
-    if let Ok(e) = entry(name) {
-        match e.get_password() {
-            Ok(v) => return Ok(Some(v)),
-            Err(keyring::Error::NoEntry) => return file_load(name),
-            Err(e) => return Err(LoginError::from(e)),
-        }
+pub async fn load(name: &str) -> Result<Option<String>> {
+    let from_keyring: Option<String> = {
+        let name = name.to_string();
+        with_deadline(move || match entry(&name) {
+            Ok(e) => match e.get_password() {
+                Ok(v) => Ok(Some(v)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(e) => Err(LoginError::from(e)),
+            },
+            Err(e) => Err(e),
+        })
+        .await
+        .unwrap_or(None) // no service / timeout → file fallback
+    };
+    match from_keyring {
+        Some(v) => Ok(Some(v)),
+        None => file_load(name),
     }
-    file_load(name)
 }
 
 /// Best-effort delete from both stores (logout must not leave residue).
-pub fn delete(name: &str) {
-    if let Ok(e) = entry(name) {
-        let _ = e.delete_credential();
-    }
-    let _ = std::fs::remove_file(fallback_path(name));
+/// Fire-and-forget thread: safe from the UI thread, immune to D-Bus hangs.
+pub fn delete(name: &'static str) {
+    std::thread::spawn(move || {
+        if let Ok(e) = entry(name) {
+            let _ = e.delete_credential();
+        }
+        let _ = std::fs::remove_file(fallback_path(name));
+    });
 }
 
 fn file_store(name: &str, secret: &str) -> Result<()> {

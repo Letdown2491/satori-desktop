@@ -32,3 +32,10 @@ pub mod pool;
 pub mod publish;
 pub mod store;
 pub mod tor;
+
+#[cfg(test)]
+pub(crate) mod test_env {
+    /// Tests that touch prefs/secrets on disk serialize here (the env is
+    /// process-global; parallel runs delete each other's state).
+    pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}

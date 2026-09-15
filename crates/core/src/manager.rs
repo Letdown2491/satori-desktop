@@ -166,6 +166,10 @@ pub struct Core {
     active: Mutex<Option<Active>>,
     pending: Mutex<Option<Arc<NostrConnect>>>,
     hold_seq: AtomicU64,
+    /// ONE pool for the process: the LMDB write lock must not survive a
+    /// logout (a second env open on the same path deadlocks), and the
+    /// profile service's debouncer holds its handle forever by design.
+    pool: Mutex<Option<Arc<Pool>>>,
     /// Own reactions: target event id (hex) → engaged.
     own_liked: Mutex<HashSet<String>>,
     own_bookmarked: Mutex<HashSet<String>>,
@@ -194,6 +198,7 @@ impl Core {
             active: Mutex::new(None),
             pending: Mutex::new(None),
             hold_seq: AtomicU64::new(1),
+            pool: Mutex::new(None),
             own_liked: Mutex::new(HashSet::new()),
             own_bookmarked: Mutex::new(HashSet::new()),
             muted: Mutex::new(HashSet::new()),
@@ -350,7 +355,8 @@ impl Core {
         secrets::store(
             secrets::BUNKER_CLIENT_SECRET,
             &client_keys.secret_key().display_secret().to_string(),
-        )?;
+        )
+        .await?;
         let session = Session {
             pubkey: pk.to_string(),
             mode: SessionMode::Bunker { remote, relays },
@@ -388,7 +394,7 @@ impl Core {
         let keys = signer::parse_local_secret(secret)?;
         let pk = keys.public_key();
 
-        secrets::store(secrets::NSEC, &keys.secret_key().display_secret().to_string())?;
+        secrets::store(secrets::NSEC, &keys.secret_key().display_secret().to_string()).await?;
         let session = Session { pubkey: pk.to_string(), mode: SessionMode::Local };
         session::save(&session)?;
 
@@ -402,7 +408,8 @@ impl Core {
     async fn build_signer(&self, session: &Session) -> Result<Signer> {
         match &session.mode {
             SessionMode::Bunker { remote, relays } => {
-                let secret = secrets::load(secrets::BUNKER_CLIENT_SECRET)?
+                let secret = secrets::load(secrets::BUNKER_CLIENT_SECRET)
+                    .await?
                     .ok_or_else(|| LoginError::Resume("transport secret missing".into()))?;
                 let client_keys = signer::client_keys_from_secret(&secret)?;
                 // Repeated relays join with & (query params, not extra ?s).
@@ -418,16 +425,27 @@ impl Core {
                 Ok(Signer::Bunker(Arc::new(connect)))
             }
             SessionMode::Local => {
-                let secret = secrets::load(secrets::NSEC)?
+                let secret = secrets::load(secrets::NSEC)
+                    .await?
                     .ok_or_else(|| LoginError::Resume("local key missing".into()))?;
                 Ok(Signer::Local(signer::parse_local_secret(&secret)?))
             }
         }
     }
 
+    /// The process pool (create-or-get).
+    async fn pool(&self) -> Result<Arc<Pool>> {
+        if let Some(p) = self.pool.lock().unwrap().as_ref() {
+            return Ok(Arc::clone(p));
+        }
+        let p = Arc::new(Pool::open().await.map_err(|e| LoginError::Resume(e.to_string()))?);
+        *self.pool.lock().unwrap() = Some(Arc::clone(&p));
+        Ok(p)
+    }
+
     async fn build_active(&self, session: &Session) -> Result<Active> {
         let signer = self.build_signer(session).await?;
-        let pool = Arc::new(Pool::open().await.map_err(|e| LoginError::Resume(e.to_string()))?);
+        let pool = self.pool().await?;
         let profiles = crate::profiles::ProfileService::new(Arc::clone(&pool));
         // Undo-window prefs live in prefs.json (theme.ts semantics); core
         // reads its slice at session build — TODO(M1): cleaner pref split.
@@ -1942,4 +1960,52 @@ fn list_json(items: &[String], letter: &str) -> String {
 fn parse_list_event(plain: &str) -> Vec<String> {
     let arr: Vec<[String; 2]> = serde_json::from_str(plain).unwrap_or_default();
     arr.into_iter().filter_map(|pair| pair.get(1).cloned()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Logout → login → notifications must NOT fail with "no active
+    /// session" (the user-report). Runs headless; network errors are fine,
+    /// session-state errors are not. Login runs via block_on: the
+    /// spawned-task variant hangs in this container; the host does not.
+    #[test]
+    fn login_then_notifications_has_session() {
+        let _env = crate::test_env::ENV_LOCK.lock().unwrap();
+        let core = Arc::new(Core::new());
+        core.logout(); // start clean
+        let secret_path = std::env::temp_dir().join("satori-test-nsec");
+        let secret =
+            "e1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554";
+        let _ = std::fs::write(&secret_path, secret);
+
+        core.rt
+            .block_on(core.login_nsec_inner(secret))
+            .expect("login");
+        assert!(core.pubkey().is_some(), "no pubkey after login");
+
+        // The bug: notifications must not report "no active session".
+        let mut rx = core.notifications();
+        let mut got = None;
+        for _ in 0..500 {
+            match rx.try_recv() {
+                Ok(ev) => {
+                    got = Some(ev);
+                    break;
+                }
+                Err(_) => {}
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        match got {
+            Some(FeedEvent::Failed(msg)) => {
+                assert!(!msg.contains("no active session"), "session lost: {msg}");
+                eprintln!("network failure (acceptable headless): {msg}");
+            }
+            Some(_) => {}
+            None => panic!("notifications never resolved"),
+        }
+    }
 }

@@ -78,6 +78,7 @@ mod tests {
     /// container has no Secret Service, so store() exercises the fallback).
     #[test]
     fn session_roundtrip_and_file_fallback() {
+        let _env = crate::test_env::ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join(format!("satori-test-{}", std::process::id()));
         unsafe { std::env::set_var("XDG_DATA_HOME", &tmp) };
 
@@ -99,14 +100,20 @@ mod tests {
         }
 
         // Secret store: no keyring in the container -> 0600 file fallback.
-        secrets::store(secrets::NSEC, TEST_SECRET).expect("store fallback");
-        let path = config::data_dir().join(format!("{}.secret", secrets::NSEC));
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "fallback secret file must be 0600");
-        assert_eq!(
-            secrets::load(secrets::NSEC).unwrap().as_deref(),
-            Some(TEST_SECRET)
-        );
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                secrets::store(secrets::NSEC, TEST_SECRET).await.expect("store fallback");
+                let path = config::data_dir().join(format!("{}.secret", secrets::NSEC));
+                let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600, "fallback secret file must be 0600");
+                assert_eq!(
+                    secrets::load(secrets::NSEC).await.unwrap().as_deref(),
+                    Some(TEST_SECRET)
+                );
+            });
 
         secrets::delete(secrets::NSEC);
         clear();
