@@ -2007,5 +2007,34 @@ mod tests {
             Some(_) => {}
             None => panic!("notifications never resolved"),
         }
+
+        // THE USER'S FLOW: logout → re-login → notifications.
+        core.logout();
+        assert!(core.pubkey().is_none(), "pubkey survived logout");
+        core.rt
+            .block_on(core.login_nsec_inner(secret))
+            .expect("re-login");
+        assert!(core.pubkey().is_some(), "no pubkey after re-login");
+
+        let mut rx = core.notifications();
+        let mut got = None;
+        for _ in 0..500 {
+            match rx.try_recv() {
+                Ok(ev) => {
+                    got = Some(ev);
+                    break;
+                }
+                Err(_) => {}
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        match got {
+            Some(FeedEvent::Failed(msg)) => {
+                assert!(!msg.contains("no active session"), "session lost after re-login: {msg}");
+                eprintln!("network failure after re-login (acceptable headless): {msg}");
+            }
+            Some(_) => {}
+            None => panic!("notifications never resolved after re-login"),
+        }
     }
 }
