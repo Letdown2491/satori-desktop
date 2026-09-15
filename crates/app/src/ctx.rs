@@ -19,6 +19,9 @@ pub struct Ctx {
     navs: Rc<RefCell<HashMap<&'static str, adw::NavigationView>>>,
     side_rows: Rc<RefCell<HashMap<&'static str, gtk::Button>>>,
     active: Rc<Cell<&'static str>>,
+    /// Per-section hooks fired on switch (the notifications page fetches
+    /// when SHOWN, not at construction — it's built before any session).
+    pub show_hooks: Rc<RefCell<HashMap<&'static str, Rc<dyn Fn()>>>>,
 }
 
 impl Ctx {
@@ -30,6 +33,7 @@ impl Ctx {
             navs: Rc::new(RefCell::new(HashMap::new())),
             side_rows: Rc::new(RefCell::new(HashMap::new())),
             active: Rc::new(Cell::new("feed")),
+            show_hooks: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -59,6 +63,9 @@ impl Ctx {
         self.active.set(section);
         if let Some(stack) = self.sections.borrow().as_ref() {
             stack.set_visible_child_name(section);
+        }
+        if let Some(hook) = self.show_hooks.borrow().get(section) {
+            hook();
         }
         for (name, btn) in self.side_rows.borrow().iter() {
             if *name == section {

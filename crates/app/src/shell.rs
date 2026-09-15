@@ -64,7 +64,11 @@ pub fn build_main(ctx: &Ctx, feed: Rc<FeedView>) -> (gtk::Widget, ShellHandles) 
     feed_nav.add(&feed.page);
 
     let notif_nav = adw::NavigationView::new();
-    notif_nav.add(&crate::notifications::notifications_page(ctx));
+    let (notif_page, notif_refresh) = crate::notifications::notifications_page(ctx);
+    notif_nav.add(&notif_page);
+    ctx.show_hooks
+        .borrow_mut()
+        .insert("notifications", notif_refresh);
 
     let search_nav = adw::NavigationView::new();
     search_nav.add(&crate::search::search_page(ctx));

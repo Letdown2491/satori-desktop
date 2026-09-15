@@ -3,6 +3,7 @@
 //! no badges — a dot (layout.ts notifBell).
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use adw::prelude::*;
 use satori_core::manager::{FeedEvent, Profile};
@@ -11,7 +12,10 @@ use crate::bridge::drain;
 use crate::ctx::Ctx;
 use crate::cards::card_for;
 
-pub fn notifications_page(ctx: &Ctx) -> adw::NavigationPage {
+/// The notifications section root. Fetches WHEN SHOWN (the page is built
+/// once at shell construction — before any session exists — so a
+/// construction-time fetch would pin a stale error forever).
+pub fn notifications_page(ctx: &Ctx) -> (adw::NavigationPage, Rc<dyn Fn()>) {
     let column = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .margin_top(6)
@@ -42,19 +46,29 @@ pub fn notifications_page(ctx: &Ctx) -> adw::NavigationPage {
         .child(&clamped)
         .build();
 
-    // Opening the page marks seen (routes/notifications.ts:115) — the dot
-    // goes quiet even if the fetch is slow. The pre-visit high-water splits
-    // the page into New / Earlier.
-    let prev_high_water = satori_core::read_state::load().notif;
-    ctx.core.mark_notifications_seen();
+    let prev_high_water = Rc::new(std::cell::Cell::new(0u64));
 
-    {
+    let ctx = Rc::new(ctx.clone());
+    let list = Rc::new(list.clone());
+    let status = Rc::new(status.clone());
+    let fetch = {
         let ctx = ctx.clone();
         let list = list.clone();
         let status = status.clone();
-        let page2 = page.clone();
-        let _ = &page2;
-        drain(ctx.core.notifications(), move |ev| match ev {
+        let prev = prev_high_water.clone();
+        move || {
+            // Opening the page marks seen (routes/notifications.ts:115) —
+            // the dot goes quiet even if the fetch is slow. The pre-visit
+            // high-water splits the page into New / Earlier.
+            prev.set(satori_core::read_state::load().notif);
+            ctx.core.mark_notifications_seen();
+            // Clone per call: the outer closure must stay Fn (it re-runs on
+            // every page visit).
+            let ctx = ctx.clone();
+            let list = list.clone();
+            let status = status.clone();
+            let prev = prev.clone();
+            drain(ctx.core.notifications(), move |ev| match ev {
             FeedEvent::Notifications(notifs, profiles) => {
                 let map: HashMap<String, Profile> =
                     profiles.iter().cloned().map(|p| (p.pubkey.clone(), p)).collect();
@@ -65,7 +79,7 @@ pub fn notifications_page(ctx: &Ctx) -> adw::NavigationPage {
                 }
                 let new_count = notifs
                     .iter()
-                    .filter(|n| n.created_at.as_secs() > prev_high_water)
+                    .filter(|n| n.created_at.as_secs() > prev.get())
                     .count();
                 if new_count > 0 && new_count < notifs.len() {
                     let head = gtk::Label::builder()
@@ -99,7 +113,8 @@ pub fn notifications_page(ctx: &Ctx) -> adw::NavigationPage {
             }
             _ => {}
         });
-    }
-
-    page
+        }
+    };
+    fetch();
+    (page, Rc::new(fetch))
 }
