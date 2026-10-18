@@ -12,7 +12,7 @@ use std::{
 };
 
 use gpui::{
-    div, list, prelude::*, px, rgb, Context, Entity, EventEmitter, FontWeight, Image,
+    div, list, prelude::*, px, rgb, Context, Entity, EventEmitter, FontWeight,
     ListAlignment, ListState, Render, SharedString, Window,
 };
 use nostr::prelude::*;
@@ -27,7 +27,6 @@ pub struct Feed {
     profiles: HashMap<String, Profile>,
     liked: HashSet<String>,
     bookmarked: HashSet<String>,
-    images: HashMap<String, Arc<Image>>,
     quotes: content::Quotes,
     status: String,
     list: ListState,
@@ -43,7 +42,6 @@ impl Feed {
             profiles: HashMap::new(),
             liked: HashSet::new(),
             bookmarked: HashSet::new(),
-            images: HashMap::new(),
             quotes: HashMap::new(),
             status: "connecting to the relays…".into(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
@@ -127,18 +125,12 @@ impl Feed {
         }
     }
 
-    /// Queue core fetches for every media URL we haven't got yet.
+    /// Queue core fetches for every media URL we haven't got yet. Results
+    /// land in the shared media cache (media.rs) — a `cx.notify()` re-render
+    /// picks them up via the snapshot.
     fn want_images(&mut self, note: &Event, cx: &mut Context<Self>) {
         for url in content::media_urls(note) {
-            if self.images.contains_key(&url) {
-                continue;
-            }
-            media::fetch_png(&self.core, url, cx, |this, url, png, cx| {
-                if let Some(png) = png {
-                    this.images.insert(url, png);
-                }
-                cx.notify();
-            });
+            media::fetch(&self.core, url, cx, |_, _, _, cx| cx.notify());
         }
     }
 
@@ -181,15 +173,10 @@ impl Feed {
     /// Queue the profile picture fetch (core's guarded, disk-cached path).
     fn want_avatar(&mut self, profile: &Profile, cx: &mut Context<Self>) {
         let url = profile.picture.clone();
-        if url.is_empty() || self.images.contains_key(&url) {
+        if url.is_empty() {
             return;
         }
-        media::fetch_png(&self.core, url, cx, |this, url, png, cx| {
-            if let Some(png) = png {
-                this.images.insert(url, png);
-            }
-            cx.notify();
-        });
+        media::fetch(&self.core, url, cx, |_, _, _, cx| cx.notify());
     }
 
     /// Optimistic like, per §1.2: mutate state first (glyph flips vermilion
@@ -253,7 +240,7 @@ fn note_card(
     profiles: &HashMap<String, Profile>,
     liked: &HashSet<String>,
     bookmarked: &HashSet<String>,
-    images: &HashMap<String, Arc<Image>>,
+    media: &media::Snapshot,
     quotes: &content::Quotes,
     handle: Entity<Feed>,
 ) -> impl IntoElement {
@@ -291,7 +278,7 @@ fn note_card(
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(media::avatar(images, &picture, &name, 28.0))
+                .child(media::avatar(media, &picture, &name, 28.0))
                 .child(
                     // Clicking the author opens their profile (nav via shell).
                     div()
@@ -325,7 +312,11 @@ fn note_card(
                     let ev = ev_for_open.clone();
                     handle_open.update(cx, |_feed, cx| cx.emit(Nav::OpenThread(ev.id)));
                 })
-                .child(content::body(ev, images, quotes, handle)),
+                .child(content::body(
+                    ev,
+                    &content::Body { media, quotes, profiles },
+                    handle,
+                )),
         )
         .child(
             div()
@@ -369,6 +360,7 @@ impl Render for Feed {
         let handle = cx.entity();
         let status = self.status.clone();
         let empty = self.notes.is_empty();
+        let media = media::Snapshot::new(cx);
 
         div()
             .flex_1()
@@ -394,38 +386,46 @@ impl Render for Feed {
                 )
             })
             .child(
-                div().flex_1().min_h_0().child(if empty {
-                    div()
-                        .p_8()
-                        .text_color(rgb(theme::MUTED))
-                        .child("Nothing here yet — the relays are still answering.")
+                // The centered timeline column (the web app's reading width).
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .justify_center()
+                    .child(if empty {
+                        div()
+                            .w_full()
+                            .max_w(px(content::COL_W))
+                            .p_8()
+                            .text_color(rgb(theme::MUTED))
+                            .child("Nothing here yet — the relays are still answering.")
+                            .into_any_element()
+                    } else {
+                        // GPUI rule (D13): an entity can't be read while it renders,
+                        // so snapshot the data into the item closure; only the click
+                        // handlers touch the entity, later, legally.
+                        let notes = self.notes.clone();
+                        let profiles = self.profiles.clone();
+                        let liked = self.liked.clone();
+                        let bookmarked = self.bookmarked.clone();
+                        let quotes = self.quotes.clone();
+                        list(self.list.clone(), move |idx, _w, _cx| {
+                            match notes.get(idx) {
+                                Some(ev) => note_card(
+                                    idx, ev, &profiles, &liked, &bookmarked, &media, &quotes,
+                                    handle.clone(),
+                                )
+                                .into_any_element(),
+                                None => div().into_any_element(),
+                            }
+                        })
+                        // list() has no intrinsic height — it must be told to fill
+                        // its container or it lays out at 0px and paints nothing.
+                        .w_full()
+                        .max_w(px(content::COL_W))
+                        .h_full()
                         .into_any_element()
-                } else {
-                    // GPUI rule (D13): an entity can't be read while it renders,
-                    // so snapshot the data into the item closure; only the click
-                    // handlers touch the entity, later, legally.
-                    let notes = self.notes.clone();
-                    let profiles = self.profiles.clone();
-                    let liked = self.liked.clone();
-                    let bookmarked = self.bookmarked.clone();
-                    let images = self.images.clone();
-                    let quotes = self.quotes.clone();
-                    list(self.list.clone(), move |idx, _w, _cx| {
-                        match notes.get(idx) {
-                            Some(ev) => note_card(
-                                idx, ev, &profiles, &liked, &bookmarked, &images, &quotes,
-                                handle.clone(),
-                            )
-                            .into_any_element(),
-                            None => div().into_any_element(),
-                        }
-                    })
-                    // list() has no intrinsic height — it must be told to fill
-                    // its container or it lays out at 0px and paints nothing.
-                    .w_full()
-                    .h_full()
-                    .into_any_element()
-                }),
+                    }),
             )
     }
 }

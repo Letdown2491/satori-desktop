@@ -10,13 +10,13 @@ use std::sync::Arc;
 
 use gpui::{
     EventEmitter,
-    div, prelude::*, px, rgb, App, Context, Entity, FocusHandle, Focusable, KeyDownEvent, Render,
-    Window,
+    div, img, prelude::*, px, rgb, App, Context, Entity, FocusHandle, Focusable, KeyDownEvent,
+    ObjectFit, Render, Window,
 };
 use nostr::prelude::*;
 use satori_core::manager::Core;
 
-use crate::theme;
+use crate::{media, theme};
 use super::{
     composer::{Draft, Composer},
     feed::Feed,
@@ -43,6 +43,9 @@ pub struct Shell {
     /// Set when a pane was popped: the popped pane's Input may still hold
     /// window focus, dead-keying the shell until the next render refocuses.
     refocus: bool,
+    /// The lightbox overlay — full-screen image viewer over any pane
+    /// (lightbox.rs: Esc/‹/› keys, click closes).
+    lightbox: Option<(Vec<String>, usize)>,
     stack: Vec<Pane>,
 }
 
@@ -53,6 +56,7 @@ impl Shell {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
+            Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
             Nav::Pop => this.back(cx),
         })
         .detach();
@@ -61,6 +65,7 @@ impl Shell {
             focus: cx.focus_handle(),
             focused_once: false,
             refocus: false,
+            lightbox: None,
             stack: vec![],
         };
         shell.stack.push(Pane::Feed(feed));
@@ -72,6 +77,7 @@ impl Shell {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
+            Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
             Nav::Pop => this.back(cx),
         })
         .detach();
@@ -104,6 +110,26 @@ impl Shell {
         let view = cx.new(|cx| SettingsView::new(self.core.clone(), cx));
         self.stack.push(Pane::Settings(view));
         cx.notify();
+    }
+
+    /// The lightbox: show `urls[idx]` full-screen (lightbox.rs open). Every
+    /// URL is pre-joined into the shared media cache so ‹/› are instant once
+    /// tiles have loaded.
+    fn open_lightbox(&mut self, urls: Vec<String>, idx: usize, cx: &mut Context<Self>) {
+        for url in &urls {
+            media::fetch(&self.core, url.clone(), cx, |_, _, _, cx| cx.notify());
+        }
+        self.lightbox = Some((urls, idx));
+        cx.notify();
+    }
+
+    fn lightbox_nav(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some((urls, idx)) = self.lightbox.as_mut()
+            && !urls.is_empty()
+        {
+            *idx = (*idx as isize + delta).rem_euclid(urls.len() as isize) as usize;
+            cx.notify();
+        }
     }
 
     fn back(&mut self, cx: &mut Context<Self>) {
@@ -175,8 +201,21 @@ impl Render for Shell {
         }
 
         div()
+            .relative()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|shell, ev: &KeyDownEvent, _, cx| {
+                // The lightbox owns the keyboard while it's up: Esc closes it
+                // instead of popping the pane; arrows page through.
+                if shell.lightbox.is_some() {
+                    match ev.keystroke.key.as_str() {
+                        "escape" => shell.lightbox = None,
+                        "left" => shell.lightbox_nav(-1, cx),
+                        "right" => shell.lightbox_nav(1, cx),
+                        _ => {}
+                    }
+                    cx.notify();
+                    return;
+                }
                 // TODO(port): crates/app/src/main.rs escape-to-back — P1.
                 if ev.keystroke.key == "escape" {
                     shell.back(cx);
@@ -243,5 +282,124 @@ impl Render for Shell {
                 Pane::Settings(view) => view.clone().into_any_element(),
                 Pane::Composer(view) => view.clone().into_any_element(),
             })
+            .when_some(self.lightbox.clone(), |d, (urls, idx)| {
+                d.child(lightbox_overlay(&urls, idx, cx))
+            })
     }
+}
+
+/// The lightbox overlay (lightbox.rs): dark full-screen viewer, fit-to-screen
+/// image, ‹ › pager zones, Esc/arrow keys, click-to-advance on the picture.
+fn lightbox_overlay(urls: &[String], idx: usize, cx: &mut Context<Shell>) -> impl IntoElement {
+    let snap = media::Snapshot::new(cx);
+    let n = urls.len();
+    let png = urls.get(idx).and_then(|u| snap.png(u));
+    let caption = format!("{} / {}", idx + 1, n);
+
+    div()
+        .absolute()
+        .inset_0()
+        .bg(rgb(0x000000))
+        .opacity(0.94)
+        .flex()
+        .flex_col()
+        .font_family(theme::SANS)
+        // Top bar: index + close.
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px_4()
+                .py_2()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(0xb8b2a6))
+                        .child(caption),
+                )
+                .child(
+                    div()
+                        .id("lb-close")
+                        .cursor_pointer()
+                        .px_2()
+                        .text_size(px(13.0))
+                        .text_color(rgb(0xb8b2a6))
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            shell.lightbox = None;
+                            cx.notify();
+                        }))
+                        .child("✕"),
+                ),
+        )
+        // Middle: pager zones flanking the fit-to-screen image.
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .child(
+                    div()
+                        .id("lb-prev")
+                        .cursor_pointer()
+                        .w(px(64.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .on_click(cx.listener(|shell, _, _, cx| shell.lightbox_nav(-1, cx)))
+                        .child(
+                            div()
+                                .text_size(px(22.0))
+                                .text_color(rgb(0xb8b2a6))
+                                .child("‹"),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p_2()
+                        .child(match png {
+                            Some(p) => img(p)
+                                .size_full()
+                                .object_fit(ObjectFit::Contain)
+                                .into_any_element(),
+                            None => div()
+                                .text_size(px(12.0))
+                                .text_color(rgb(0xb8b2a6))
+                                .child("…")
+                                .into_any_element(),
+                        }),
+                )
+                .child(
+                    div()
+                        .id("lb-next")
+                        .cursor_pointer()
+                        .w(px(64.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .on_click(cx.listener(|shell, _, _, cx| shell.lightbox_nav(1, cx)))
+                        .child(
+                            div()
+                                .text_size(px(22.0))
+                                .text_color(rgb(0xb8b2a6))
+                                .child("›"),
+                        ),
+                ),
+        )
+        .child(
+            // Clicking anywhere else in the dark closes (lightbox.rs Esc).
+            div()
+                .id("lb-backdrop")
+                .flex_1()
+                .cursor_pointer()
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.lightbox = None;
+                    cx.notify();
+                })),
+        )
 }

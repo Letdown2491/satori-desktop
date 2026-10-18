@@ -23,6 +23,9 @@ fn main() {
     Application::new().run(|cx: &mut App| {
         bind_input_keys(cx);
         bind_composer_keys(cx);
+        // Shared decoded-image cache (media.rs) — avatars, tiles and the
+        // lightbox all key off it.
+        cx.default_global::<media::Cache>();
         let core = Arc::new(Core::new());
         let (session, err) = core.init();
         if let Some(e) = err {

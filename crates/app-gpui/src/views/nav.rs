@@ -11,6 +11,9 @@ pub enum Nav {
     OpenProfile(PublicKey),
     /// The composer, optionally replying to a note.
     OpenComposer(Option<Event>),
+    /// The lightbox overlay: full-screen image viewer (lightbox.rs), the
+    /// URL list plus the starting index.
+    OpenLightbox(Vec<String>, usize),
     /// The active pane closes itself (composer after commit/undo).
     Pop,
 }

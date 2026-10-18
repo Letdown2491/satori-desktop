@@ -8,7 +8,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use gpui::{
     div, list, prelude::*, px, rgb, Context, EventEmitter, FontWeight, ListAlignment,
-    ListState, Render, SharedString, Window, Image,
+    ListState, Render, SharedString, Window,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
@@ -22,7 +22,8 @@ pub struct ProfileView {
     profile: Option<Profile>,
     notes: Vec<Event>,
     following: bool,
-    images: HashMap<String, Arc<Image>>,
+    /// Known profiles — mention names in note bodies (word_flow).
+    profiles: HashMap<String, Profile>,
     quotes: content::Quotes,
     status: String,
     list: ListState,
@@ -37,7 +38,7 @@ impl ProfileView {
             who,
             profile: None,
             notes: vec![],
-            images: HashMap::new(),
+            profiles: HashMap::new(),
             quotes: HashMap::new(),
             status: "loading…".into(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
@@ -60,6 +61,9 @@ impl ProfileView {
     fn on_event(&mut self, ev: FeedEvent, cx: &mut Context<Self>) {
         match ev {
             FeedEvent::Loaded(page) => {
+                for p in &page.profiles {
+                    self.profiles.insert(p.pubkey.clone(), p.clone());
+                }
                 self.profile = page
                     .profiles
                     .iter()
@@ -91,30 +95,17 @@ impl ProfileView {
     /// Queue the profile picture fetch (core's guarded, disk-cached path).
     fn want_avatar(&mut self, profile: &Profile, cx: &mut Context<Self>) {
         let url = profile.picture.clone();
-        if url.is_empty() || self.images.contains_key(&url) {
+        if url.is_empty() {
             return;
         }
-        media::fetch_png(&self.core, url, cx, |this, url, png, cx| {
-            if let Some(png) = png {
-                this.images.insert(url, png);
-            }
-            cx.notify();
-        });
+        media::fetch(&self.core, url, cx, |_, _, _, cx| cx.notify());
     }
 
     /// Queue core fetches for every media URL in a note (avatars share the
-    /// same map; URLs are unique so there's no clash).
+    /// same cache; URLs are unique so there's no clash).
     fn want_media(&mut self, note: &Event, cx: &mut Context<Self>) {
         for url in content::media_urls(note) {
-            if self.images.contains_key(&url) {
-                continue;
-            }
-            media::fetch_png(&self.core, url, cx, |this, url, png, cx| {
-                if let Some(png) = png {
-                    this.images.insert(url, png);
-                }
-                cx.notify();
-            });
+            media::fetch(&self.core, url, cx, |_, _, _, cx| cx.notify());
         }
     }
 
@@ -167,7 +158,8 @@ impl Render for ProfileView {
         let notes = self.notes.clone();
         let empty = notes.is_empty();
         let following = self.following;
-        let images = self.images.clone();
+        let media = media::Snapshot::new(cx);
+        let profiles = self.profiles.clone();
         let quotes = self.quotes.clone();
         let handle = cx.entity();
         let follow_handle = handle.clone();
@@ -179,17 +171,24 @@ impl Render for ProfileView {
             .flex()
             .flex_col()
             .child(
-                // Header: name, about, follow seal.
+                // Header: name, about, follow seal — inner content rides the
+                // same centered column as the notes below.
                 div()
                     .w_full()
                     .flex()
                     .flex_col()
-                    .gap_2()
-                    .p_4()
+                    .items_center()
                     .border_b_1()
                     .border_color(rgb(theme::HAIRLINE))
                     .bg(rgb(theme::PANEL))
                     .child(
+                        div()
+                            .w(px(content::COL_W))
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .p_4()
+                            .child(
                         div()
                             .flex()
                             .items_center()
@@ -199,7 +198,7 @@ impl Render for ProfileView {
                                     .flex()
                                     .items_center()
                                     .gap_3()
-                                    .child(media::avatar(&images, &picture, &name, 48.0))
+                                    .child(media::avatar(&media, &picture, &name, 48.0))
                                     .child(
                                         div()
                                             .text_size(px(17.0))
@@ -250,19 +249,28 @@ impl Render for ProfileView {
                                 .child(about),
                         )
                     }),
+                        ),
             )
-            .child(if empty {
+            .child(
                 div()
-                    .p_4()
-                    .text_color(rgb(theme::MUTED))
-                    .child(if self.status.is_empty() {
-                        "No notes here yet.".to_string()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .justify_center()
+                    .child(if empty {
+                        div()
+                            .w_full()
+                            .max_w(px(content::COL_W))
+                            .p_4()
+                            .text_color(rgb(theme::MUTED))
+                            .child(if self.status.is_empty() {
+                                "No notes here yet.".to_string()
+                            } else {
+                                self.status.clone()
+                            })
+                            .into_any_element()
                     } else {
-                        self.status.clone()
-                    })
-                    .into_any_element()
-            } else {
-                list(self.list.clone(), move |idx, _w, _cx| {
+                        list(self.list.clone(), move |idx, _w, _cx| {
                     match notes.get(idx) {
                         Some(ev) => {
                             let time = super::feed::rel_time(ev.created_at.as_secs());
@@ -295,7 +303,15 @@ impl Render for ProfileView {
                                                 cx.emit(Nav::OpenThread(ev.id))
                                             });
                                         })
-                                        .child(content::body(ev, &images, &quotes, handle.clone())),
+                                        .child(content::body(
+                                            ev,
+                                            &content::Body {
+                                                media: &media,
+                                                quotes: &quotes,
+                                                profiles: &profiles,
+                                            },
+                                            handle.clone(),
+                                        )),
                                 )
                                 .into_any_element()
                         }
@@ -303,8 +319,10 @@ impl Render for ProfileView {
                     }
                 })
                 .w_full()
+                .max_w(px(content::COL_W))
                 .h_full()
                 .into_any_element()
-            })
+                    }),
+            )
     }
 }

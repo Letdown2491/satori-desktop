@@ -13,7 +13,7 @@ use std::{
 
 use gpui::{
     div, list, prelude::*, px, rgb, Context, Entity, EventEmitter, FontWeight, ListAlignment,
-    ListState, Render, SharedString, Window, Image,
+    ListState, Render, SharedString, Window,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
@@ -27,7 +27,6 @@ pub struct ThreadView {
     /// Replies flattened pre-order with their NIP-10 depth (nest_replies).
     replies: Vec<(Event, usize)>,
     profiles: HashMap<String, Profile>,
-    images: HashMap<String, Arc<Image>>,
     quotes: content::Quotes,
     status: String,
     list: ListState,
@@ -42,7 +41,6 @@ impl ThreadView {
             anchor: None,
             replies: vec![],
             profiles: HashMap::new(),
-            images: HashMap::new(),
             quotes: HashMap::new(),
             status: "loading the thread…".into(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
@@ -114,18 +112,11 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// Queue core fetches for every media URL we haven't got yet.
+    /// Queue core fetches for every media URL we haven't got yet (results
+    /// land in the shared media cache; notify re-renders pick them up).
     fn want_media(&mut self, note: &Event, cx: &mut Context<Self>) {
         for url in content::media_urls(note) {
-            if self.images.contains_key(&url) {
-                continue;
-            }
-            media::fetch_png(&self.core, url, cx, |this, url, png, cx| {
-                if let Some(png) = png {
-                    this.images.insert(url, png);
-                }
-                cx.notify();
-            });
+            media::fetch(&self.core, url, cx, |_, _, _, cx| cx.notify());
         }
     }
 
@@ -191,13 +182,17 @@ fn nest_replies(replies: &[Event]) -> Vec<(Event, usize)> {
     out
 }
 
+// The card takes the full render-time snapshot — one struct would hide the
+// shape, and GPUI's no-entity-reads-during-render rule makes them explicit.
+#[allow(clippy::too_many_arguments)]
 fn reply_row(
     idx: usize,
     ev: &Event,
     depth: usize,
     name: String,
-    images: &HashMap<String, Arc<Image>>,
+    media: &media::Snapshot,
     quotes: &content::Quotes,
+    profiles: &HashMap<String, Profile>,
     handle: Entity<ThreadView>,
 ) -> impl IntoElement {
     let time = super::feed::rel_time(ev.created_at.as_secs());
@@ -246,7 +241,11 @@ fn reply_row(
                     let ev = ev_for_click.clone();
                     open_handle.update(cx, |_view, cx| cx.emit(Nav::OpenThread(ev.id)));
                 })
-                .child(content::body(ev, images, quotes, body_handle)),
+                .child(content::body(
+                    ev,
+                    &content::Body { media, quotes, profiles },
+                    body_handle,
+                )),
         )
         .child(
             div()
@@ -281,7 +280,7 @@ impl Render for ThreadView {
         let replies_empty = self.replies.is_empty();
         let replies = self.replies.clone();
         let profiles = self.profiles.clone();
-        let images = self.images.clone();
+        let media = media::Snapshot::new(cx);
         let quotes = self.quotes.clone();
         let anchor = self.anchor.clone();
         let anchor_handle = handle.clone();
@@ -293,94 +292,119 @@ impl Render for ThreadView {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .child(match anchor {
-                Some(note) => {
-                    let anchor_reply = note.clone();
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .p_4()
-                        .border_b_1()
-                        .border_color(rgb(theme::HAIRLINE))
-                        .bg(rgb(theme::PANEL))
-                        .child(
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    // The centered timeline column (the web app's reading
+                    // width) — anchor and replies ride it together.
+                    .items_center()
+                    .child(match anchor {
+                        Some(note) => {
+                            let anchor_reply = note.clone();
                             div()
-                                .text_size(px(13.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(theme::INK))
-                                .child(self.name_for(&note)),
-                        )
-                        .child(content::body(&note, &images, &quotes, handle))
-                        .child(
-                            div()
+                                .w_full()
+                                .max_w(px(content::COL_W))
                                 .flex()
-                                .gap_5()
-                                .items_center()
+                                .flex_col()
+                                .gap_2()
+                                .p_4()
+                                .border_b_1()
+                                .border_color(rgb(theme::HAIRLINE))
+                                .bg(rgb(theme::PANEL))
                                 .child(
                                     div()
-                                        .id("anchor-reply")
-                                        .cursor_pointer()
+                                        .text_size(px(13.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(theme::INK))
+                                        .child(self.name_for(&note)),
+                                )
+                                .child(content::body(
+                                    &note,
+                                    &content::Body {
+                                        media: &media,
+                                        quotes: &quotes,
+                                        profiles: &profiles,
+                                    },
+                                    handle,
+                                ))
+                                .child(
+                                    div()
                                         .flex()
+                                        .gap_5()
                                         .items_center()
-                                        .gap_1()
-                                        .text_size(px(11.5))
-                                        .text_color(rgb(theme::MUTED))
-                                        .on_click(move |_, _, cx| {
-                                            let ev = anchor_reply.clone();
-                                            reply_all_handle.update(cx, |_view, cx| {
-                                                cx.emit(Nav::OpenComposer(Some(ev)));
-                                            });
-                                        })
-                                        .child(icons::bubble_icon(theme::MUTED))
-                                        .child("Reply"),
-                                ),
-                        )
-                        .into_any_element()
-                }
-                None => div()
-                    .p_4()
-                    .text_color(rgb(theme::MUTED))
-                    .child(status.clone())
-                    .into_any_element(),
-            })
-            .child(if replies_empty {
-                div()
-                    .p_4()
-                    .text_color(rgb(theme::MUTED))
-                    .child(if status.is_empty() {
-                        "No replies yet.".to_string()
-                    } else {
-                        status.clone()
-                    })
-                    .into_any_element()
-            } else {
-                list(self.list.clone(), move |idx, _w, _cx| {
-                    match replies.get(idx) {
-                        Some((ev, depth)) => {
-                            let key = ev.pubkey.to_string();
-                            let name = profiles
-                                .get(&key)
-                                .map(|p| p.display())
-                                .unwrap_or_else(|| format!("{}…", &key[..8]));
-                            reply_row(
-                                idx,
-                                ev,
-                                *depth,
-                                name,
-                                &images,
-                                &quotes,
-                                anchor_handle.clone(),
-                            )
-                            .into_any_element()
+                                        .child(
+                                            div()
+                                                .id("anchor-reply")
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .text_size(px(11.5))
+                                                .text_color(rgb(theme::MUTED))
+                                                .on_click(move |_, _, cx| {
+                                                    let ev = anchor_reply.clone();
+                                                    reply_all_handle.update(cx, |_view, cx| {
+                                                        cx.emit(Nav::OpenComposer(Some(ev)));
+                                                    });
+                                                })
+                                                .child(icons::bubble_icon(theme::MUTED))
+                                                .child("Reply"),
+                                        ),
+                                )
+                                .into_any_element()
                         }
-                        None => div().into_any_element(),
-                    }
-                })
-                .w_full()
-                .h_full()
-                .into_any_element()
-            })
+                        None => div()
+                            .w_full()
+                            .max_w(px(content::COL_W))
+                            .p_4()
+                            .text_color(rgb(theme::MUTED))
+                            .child(status.clone())
+                            .into_any_element(),
+                    })
+                    .child(if replies_empty {
+                        div()
+                            .w_full()
+                            .max_w(px(content::COL_W))
+                            .p_4()
+                            .text_color(rgb(theme::MUTED))
+                            .child(if status.is_empty() {
+                                "No replies yet.".to_string()
+                            } else {
+                                status.clone()
+                            })
+                            .into_any_element()
+                    } else {
+                        list(self.list.clone(), move |idx, _w, _cx| {
+                            match replies.get(idx) {
+                                Some((ev, depth)) => {
+                                    let key = ev.pubkey.to_string();
+                                    let name = profiles
+                                        .get(&key)
+                                        .map(|p| p.display())
+                                        .unwrap_or_else(|| format!("{}…", &key[..8]));
+                                    reply_row(
+                                        idx,
+                                        ev,
+                                        *depth,
+                                        name,
+                                        &media,
+                                        &quotes,
+                                        &profiles,
+                                        anchor_handle.clone(),
+                                    )
+                                    .into_any_element()
+                                }
+                                None => div().into_any_element(),
+                            }
+                        })
+                        .w_full()
+                        .max_w(px(content::COL_W))
+                        .h_full()
+                        .into_any_element()
+                    }),
+            )
     }
 }
