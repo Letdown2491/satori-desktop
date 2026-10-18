@@ -14,3 +14,7 @@ path = "src/main.rs"
 gpui = { workspace = true }
 nostr = { workspace = true }
 satori-core = { path = "../core" }
+image = { workspace = true }
+unicode-segmentation = "1"
+# File picker for the composer's attachments (xdg-desktop-portal backend).
+rfd = "0.15"

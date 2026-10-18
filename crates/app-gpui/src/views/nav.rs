@@ -9,4 +9,8 @@ use nostr::prelude::*;
 pub enum Nav {
     OpenThread(EventId),
     OpenProfile(PublicKey),
+    /// The composer, optionally replying to a note.
+    OpenComposer(Option<Event>),
+    /// The active pane closes itself (composer after commit/undo).
+    Pop,
 }

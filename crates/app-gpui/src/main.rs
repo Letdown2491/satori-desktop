@@ -4,6 +4,8 @@
 //! NOTE: shares the LMDB store with the GTK app — run one at a time until P4.
 
 mod icons;
+mod input;
+mod media;
 mod theme;
 mod views;
 
@@ -12,10 +14,15 @@ use std::sync::Arc;
 use gpui::{prelude::*, px, App, Application, Bounds, Focusable, WindowBounds, WindowOptions, size};
 use satori_core::manager::Core;
 
-use crate::views::shell::Shell;
+use crate::{
+    input::bind_input_keys,
+    views::{composer::bind_composer_keys, shell::Shell},
+};
 
 fn main() {
     Application::new().run(|cx: &mut App| {
+        bind_input_keys(cx);
+        bind_composer_keys(cx);
         let core = Arc::new(Core::new());
         let (session, err) = core.init();
         if let Some(e) = err {

@@ -8,19 +8,21 @@ use std::{collections::HashMap, sync::Arc};
 
 use gpui::{
     div, list, prelude::*, px, rgb, Context, Entity, EventEmitter, FontWeight, ListAlignment,
-    ListState, Render, SharedString, Window,
+    ListState, Render, SharedString, Window, Image,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, Profile};
+use satori_core::nip::imeta;
 
-use crate::{icons, theme};
-use super::nav::Nav;
+use crate::{icons, media, theme};
+use super::{content, nav::Nav};
 
 pub struct ThreadView {
     core: Arc<Core>,
     anchor: Option<Event>,
     replies: Vec<Event>,
     profiles: HashMap<String, Profile>,
+    images: HashMap<String, Arc<Image>>,
     status: String,
     list: ListState,
 }
@@ -34,6 +36,7 @@ impl ThreadView {
             anchor: None,
             replies: vec![],
             profiles: HashMap::new(),
+            images: HashMap::new(),
             status: "loading the thread…".into(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
@@ -55,13 +58,17 @@ impl ThreadView {
     fn on_event(&mut self, ev: FeedEvent, cx: &mut Context<Self>) {
         match ev {
             FeedEvent::One(Some(note), profile) => {
-                self.anchor = Some(note);
+                self.anchor = Some(note.clone());
                 if let Some(p) = profile {
                     self.profiles.insert(p.pubkey.clone(), p);
                 }
+                self.want_images(&note, cx);
             }
             FeedEvent::One(None, _) => self.status = "this note is gone or unreachable".into(),
             FeedEvent::Replies(replies, profiles) => {
+                for note in &replies {
+                    self.want_images(note, cx);
+                }
                 self.replies = replies;
                 for p in profiles {
                     self.profiles.insert(p.pubkey.clone(), p);
@@ -73,6 +80,22 @@ impl ThreadView {
         }
         self.list.reset(self.replies.len());
         cx.notify();
+    }
+
+    /// Queue core fetches for every imeta URL we haven't got yet.
+    fn want_images(&mut self, note: &Event, cx: &mut Context<Self>) {
+        for m in imeta::parse(note) {
+            let url = m.url;
+            if url.is_empty() || self.images.contains_key(&url) {
+                continue;
+            }
+            media::fetch_png(&self.core, url, cx, |this, url, png, cx| {
+                if let Some(png) = png {
+                    this.images.insert(url, png);
+                }
+                cx.notify();
+            });
+        }
     }
 
     fn name_for(&self, ev: &Event) -> String {
@@ -88,11 +111,15 @@ fn reply_row(
     idx: usize,
     ev: &Event,
     name: String,
+    images: &HashMap<String, Arc<Image>>,
     handle: Entity<ThreadView>,
 ) -> impl IntoElement {
     let time = super::feed::rel_time(ev.created_at.as_secs());
-    let content = ev.content.clone();
     let ev_for_click = ev.clone();
+    let ev_for_reply = ev.clone();
+    let open_handle = handle.clone();
+    let reply_handle = handle.clone();
+    let body_handle = handle.clone();
 
     div()
         .w_full()
@@ -126,14 +153,35 @@ fn reply_row(
             div()
                 .id(SharedString::from(format!("reply-{idx}")))
                 .cursor_pointer()
-                .font_family(theme::SERIF)
-                .text_size(px(14.5))
-                .text_color(rgb(theme::INK))
                 .on_click(move |_, _, cx| {
                     let ev = ev_for_click.clone();
-                    handle.update(cx, |_view, cx| cx.emit(Nav::OpenThread(ev.id)));
+                    open_handle.update(cx, |_view, cx| cx.emit(Nav::OpenThread(ev.id)));
                 })
-                .child(content),
+                .child(content::body(ev, images, body_handle)),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_4()
+                .items_center()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("reply-to-{idx}")))
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_size(px(11.5))
+                        .text_color(rgb(theme::MUTED))
+                        .on_click(move |_, _, cx| {
+                            let ev = ev_for_reply.clone();
+                            reply_handle.update(cx, |_view, cx| {
+                                cx.emit(Nav::OpenComposer(Some(ev)));
+                            });
+                        })
+                        .child(icons::bubble_icon(theme::MUTED))
+                        .child("Reply"),
+                ),
         )
 }
 
@@ -144,8 +192,10 @@ impl Render for ThreadView {
         let replies_empty = self.replies.is_empty();
         let replies = self.replies.clone();
         let profiles = self.profiles.clone();
+        let images = self.images.clone();
         let anchor = self.anchor.clone();
         let anchor_handle = handle.clone();
+        let reply_all_handle = handle.clone();
 
         div()
             .flex_1()
@@ -154,40 +204,51 @@ impl Render for ThreadView {
             .flex()
             .flex_col()
             .child(match anchor {
-                Some(note) => div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_4()
-                    .border_b_1()
-                    .border_color(rgb(theme::HAIRLINE))
-                    .bg(rgb(theme::PANEL))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(theme::INK))
-                            .child(self.name_for(&note)),
-                    )
-                    .child(
-                        div()
-                            .font_family(theme::SERIF)
-                            .italic()
-                            .text_size(px(16.0))
-                            .text_color(rgb(theme::INK))
-                            .child(note.content.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_5()
-                            .items_center()
-                            .child(icons::bubble_icon(theme::MUTED))
-                            .child(icons::heart_icon(theme::MUTED))
-                            .child(icons::bookmark_icon(theme::MUTED)),
-                    )
-                    .into_any_element(),
+                Some(note) => {
+                    let anchor_reply = note.clone();
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_4()
+                        .border_b_1()
+                        .border_color(rgb(theme::HAIRLINE))
+                        .bg(rgb(theme::PANEL))
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(theme::INK))
+                                .child(self.name_for(&note)),
+                        )
+                        .child(content::body(&note, &images, handle))
+                        .child(
+                            div()
+                                .flex()
+                                .gap_5()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .id("anchor-reply")
+                                        .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .text_size(px(11.5))
+                                        .text_color(rgb(theme::MUTED))
+                                        .on_click(move |_, _, cx| {
+                                            let ev = anchor_reply.clone();
+                                            reply_all_handle.update(cx, |_view, cx| {
+                                                cx.emit(Nav::OpenComposer(Some(ev)));
+                                            });
+                                        })
+                                        .child(icons::bubble_icon(theme::MUTED))
+                                        .child("Reply"),
+                                ),
+                        )
+                        .into_any_element()
+                }
                 None => div()
                     .p_4()
                     .text_color(rgb(theme::MUTED))
@@ -212,7 +273,8 @@ impl Render for ThreadView {
                                 .get(&ev.pubkey.to_string())
                                 .map(|p| p.display())
                                 .unwrap_or_else(|| format!("{}…", &ev.pubkey.to_string()[..8]));
-                            reply_row(idx, ev, name, anchor_handle.clone()).into_any_element()
+                            reply_row(idx, ev, name, &images, anchor_handle.clone())
+                                .into_any_element()
                         }
                         None => div().into_any_element(),
                     }

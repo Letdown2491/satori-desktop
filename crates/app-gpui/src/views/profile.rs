@@ -4,16 +4,16 @@
 //! and avatar images wait for the P2 image pipeline (core fetch → gpui `img`).
 //! Follow/mute management ports with the rest of the settings scope (P3).
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use gpui::{
     div, list, prelude::*, px, rgb, Context, EventEmitter, FontWeight, ListAlignment,
-    ListState, Render, SharedString, Window,
+    ListState, Render, SharedString, Window, Image,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, Profile};
 
-use crate::theme;
+use crate::{media, theme};
 use super::nav::Nav;
 
 pub struct ProfileView {
@@ -22,6 +22,7 @@ pub struct ProfileView {
     profile: Option<Profile>,
     notes: Vec<Event>,
     following: bool,
+    images: HashMap<String, Arc<Image>>,
     status: String,
     list: ListState,
 }
@@ -35,6 +36,7 @@ impl ProfileView {
             who,
             profile: None,
             notes: vec![],
+            images: HashMap::new(),
             status: "loading…".into(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             core,
@@ -61,6 +63,9 @@ impl ProfileView {
                     .iter()
                     .find(|p| p.pubkey == self.who.to_string())
                     .cloned();
+                if let Some(p) = self.profile.clone() {
+                    self.want_avatar(&p, cx);
+                }
                 // TODO(port): profile.rs renders all visible kinds; P1 is text
                 // notes only.
                 self.notes = page
@@ -76,6 +81,20 @@ impl ProfileView {
         self.list.reset(self.notes.len());
         cx.notify();
     }
+
+    /// Queue the profile picture fetch (core's guarded, disk-cached path).
+    fn want_avatar(&mut self, profile: &Profile, cx: &mut Context<Self>) {
+        let url = profile.picture.clone();
+        if url.is_empty() || self.images.contains_key(&url) {
+            return;
+        }
+        media::fetch_png(&self.core, url, cx, |this, url, png, cx| {
+            if let Some(png) = png {
+                this.images.insert(url, png);
+            }
+            cx.notify();
+        });
+    }
 }
 
 impl Render for ProfileView {
@@ -87,9 +106,11 @@ impl Render for ProfileView {
             .map(|p| p.display())
             .unwrap_or_else(|| format!("{}…", &who_hex[..8]));
         let about = self.profile.as_ref().map(|p| p.about.clone()).unwrap_or_default();
+        let picture = self.profile.as_ref().map(|p| p.picture.clone()).unwrap_or_default();
         let notes = self.notes.clone();
         let empty = notes.is_empty();
         let following = self.following;
+        let images = self.images.clone();
         let handle = cx.entity();
         let follow_handle = handle.clone();
 
@@ -113,14 +134,21 @@ impl Render for ProfileView {
                     .child(
                         div()
                             .flex()
-                            .items_baseline()
+                            .items_center()
                             .justify_between()
                             .child(
                                 div()
-                                    .text_size(px(17.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(theme::INK))
-                                    .child(name),
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(media::avatar(&images, &picture, &name, 48.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(17.0))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(theme::INK))
+                                            .child(name),
+                                    ),
                             )
                             .child(
                                 div()

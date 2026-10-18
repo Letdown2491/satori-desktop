@@ -21,6 +21,7 @@ RUN dnf -y install \
         fontconfig-devel \
         libxcb-devel \
         clang \
+        ydotool \
     && dnf -y clean all
 
 WORKDIR /srv

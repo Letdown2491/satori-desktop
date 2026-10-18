@@ -12,20 +12,23 @@ use std::{
 };
 
 use gpui::{
-    div, list, prelude::*, px, rgb, Context, Entity, EventEmitter, FontWeight, ListAlignment,
-    ListState, Render, SharedString, Window,
+    div, list, prelude::*, px, rgb, Context, Entity, EventEmitter, FontWeight, Image,
+    ListAlignment, ListState, Render, SharedString, Window,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
+use satori_core::manager::{Core, FeedEvent, FeedRx, Profile, PublishEvent};
+use satori_core::nip::imeta;
 
-use crate::{icons, theme};
-use super::nav::Nav;
+use crate::{icons, media, theme};
+use super::{content, nav::Nav};
 
 pub struct Feed {
     core: Arc<Core>,
     notes: Vec<Event>,
     profiles: HashMap<String, Profile>,
     liked: HashSet<String>,
+    bookmarked: HashSet<String>,
+    images: HashMap<String, Arc<Image>>,
     status: String,
     list: ListState,
 }
@@ -39,6 +42,8 @@ impl Feed {
             notes: vec![],
             profiles: HashMap::new(),
             liked: HashSet::new(),
+            bookmarked: HashSet::new(),
+            images: HashMap::new(),
             status: "connecting to the relays…".into(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
@@ -68,7 +73,7 @@ impl Feed {
             FeedEvent::Older(page, _more) => {
                 self.absorb(page.notes, page.profiles, cx);
             }
-            FeedEvent::Profiles(profiles) => self.absorb_profiles(profiles),
+            FeedEvent::Profiles(profiles) => self.absorb_profiles(profiles, cx),
             FeedEvent::Failed(e) => self.status = format!("… {e}"),
             _ => {}
         }
@@ -82,16 +87,17 @@ impl Feed {
         profiles: Vec<Profile>,
         cx: &mut Context<Self>,
     ) {
-        self.absorb_profiles(profiles);
+        self.absorb_profiles(profiles, cx);
         for note in notes {
             // TODO(port): note_card.rs renders all kinds via the manifest
-            // registry; the GPUI port starts with text notes only (P2/P3).
-            if note.kind != Kind::TextNote {
+            // registry; the GPUI port covers text + picture notes (P2).
+            if note.kind != Kind::TextNote && note.kind != Kind::Custom(20) {
                 continue;
             }
             if self.notes.iter().any(|n| n.id == note.id) {
                 continue;
             }
+            self.want_images(&note, cx);
             self.notes.push(note);
         }
         self.notes.sort_by_key(|n| std::cmp::Reverse(n.created_at));
@@ -112,16 +118,45 @@ impl Feed {
         }
     }
 
-    fn absorb_profiles(&mut self, profiles: Vec<Profile>) {
+    fn absorb_profiles(&mut self, profiles: Vec<Profile>, cx: &mut Context<Self>) {
         for p in profiles {
+            self.want_avatar(&p, cx);
             self.profiles.insert(p.pubkey.clone(), p);
         }
     }
 
+    /// Queue core fetches for every imeta URL we haven't got yet.
+    fn want_images(&mut self, note: &Event, cx: &mut Context<Self>) {
+        for m in imeta::parse(note) {
+            let url = m.url;
+            if url.is_empty() || self.images.contains_key(&url) {
+                continue;
+            }
+            media::fetch_png(&self.core, url, cx, |this, url, png, cx| {
+                if let Some(png) = png {
+                    this.images.insert(url, png);
+                }
+                cx.notify();
+            });
+        }
+    }
+
+    /// Queue the profile picture fetch (core's guarded, disk-cached path).
+    fn want_avatar(&mut self, profile: &Profile, cx: &mut Context<Self>) {
+        let url = profile.picture.clone();
+        if url.is_empty() || self.images.contains_key(&url) {
+            return;
+        }
+        media::fetch_png(&self.core, url, cx, |this, url, png, cx| {
+            if let Some(png) = png {
+                this.images.insert(url, png);
+            }
+            cx.notify();
+        });
+    }
+
     /// Optimistic like, per §1.2: mutate state first (glyph flips vermilion
     /// now), reconcile against core's publish events later.
-    /// TODO(port): note_card.rs `toggle_like` with rollback — P2. The spike
-    /// drains publish events without reconcile.
     fn toggle_like(&mut self, ev: &Event) {
         let id = ev.id.to_string();
         if !self.liked.insert(id) {
@@ -131,6 +166,28 @@ impl Feed {
         std::thread::spawn(move || {
             while rx.blocking_recv().is_some() {}
         });
+    }
+
+    /// Optimistic bookmark (private kind:10003 list) — engaged at once,
+    /// rolled back if core reports the publish failed.
+    fn toggle_bookmark(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        let id = ev.id.to_string();
+        if !self.bookmarked.insert(id.clone()) {
+            return;
+        }
+        let mut rx = self.core.bookmark(ev);
+        cx.spawn(async move |this, cx| {
+            while let Some(pv) = rx.recv().await {
+                if let PublishEvent::Failed { .. } = pv {
+                    let _ = this.update(cx, |this, cx| {
+                        this.bookmarked.remove(&id);
+                        this.status = "bookmark didn't go through — try again".into();
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
     }
 }
 
@@ -155,23 +212,29 @@ fn note_card(
     ev: &Event,
     profiles: &HashMap<String, Profile>,
     liked: &HashSet<String>,
+    bookmarked: &HashSet<String>,
+    images: &HashMap<String, Arc<Image>>,
     handle: Entity<Feed>,
 ) -> impl IntoElement {
     // TODO(port): note_card.rs layout — P0 minimal card; name fallback chain
     // matches Profile::display (render/util.ts style).
     let key = ev.pubkey.to_string();
-    let name = profiles
-        .get(&key)
+    let profile = profiles.get(&key);
+    let name = profile
         .map(|p| p.display())
         .unwrap_or_else(|| format!("{}…", &key[..8]));
+    let picture = profile.map(|p| p.picture.clone()).unwrap_or_default();
     let time = rel_time(ev.created_at.as_secs());
-    let content = ev.content.clone();
     let engaged = liked.contains(&ev.id.to_string());
-    let ev_for_click = ev.clone();
+    let saved = bookmarked.contains(&ev.id.to_string());
     let ev_for_open = ev.clone();
     let ev_for_profile = ev.clone();
+    let ev_for_like = ev.clone();
+    let ev_for_bookmark = ev.clone();
     let handle_open = handle.clone();
     let handle_profile = handle.clone();
+    let handle_like = handle.clone();
+    let handle_bookmark = handle.clone();
 
     div()
         .w_full()
@@ -185,13 +248,15 @@ fn note_card(
         .child(
             div()
                 .flex()
-                .items_baseline()
-                .justify_between()
+                .items_center()
+                .gap_2()
+                .child(media::avatar(images, &picture, &name, 28.0))
                 .child(
                     // Clicking the author opens their profile (nav via shell).
                     div()
                         .id(SharedString::from(format!("author-{idx}")))
                         .cursor_pointer()
+                        .flex_1()
                         .text_size(px(13.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(theme::INK))
@@ -215,27 +280,25 @@ fn note_card(
             div()
                 .id(SharedString::from(format!("open-{idx}")))
                 .cursor_pointer()
-                .font_family(theme::SERIF)
-                .text_size(px(15.5))
-                .text_color(rgb(theme::INK))
                 .on_click(move |_, _, cx| {
                     let ev = ev_for_open.clone();
                     handle_open.update(cx, |_feed, cx| cx.emit(Nav::OpenThread(ev.id)));
                 })
-                .child(content),
+                .child(content::body(ev, images, handle)),
         )
         .child(
             div()
                 .flex()
                 .gap_5()
                 .items_center()
+                .child(icons::bubble_icon(theme::MUTED))
                 .child(
                     div()
                         .id(SharedString::from(format!("like-{idx}")))
                         .cursor_pointer()
                         .on_click(move |_, _, cx| {
-                            let ev = ev_for_click.clone();
-                            handle.update(cx, |feed, _| feed.toggle_like(&ev));
+                            let ev = ev_for_like.clone();
+                            handle_like.update(cx, |feed, _| feed.toggle_like(&ev));
                         })
                         .child(icons::heart_icon(if engaged {
                             theme::VERMILION
@@ -243,8 +306,20 @@ fn note_card(
                             theme::MUTED
                         })),
                 )
-                .child(icons::bubble_icon(theme::MUTED))
-                .child(icons::bookmark_icon(theme::MUTED)),
+                .child(
+                    div()
+                        .id(SharedString::from(format!("bookmark-{idx}")))
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            let ev = ev_for_bookmark.clone();
+                            handle_bookmark.update(cx, |feed, cx| feed.toggle_bookmark(&ev, cx));
+                        })
+                        .child(icons::bookmark_icon(if saved {
+                            theme::VERMILION
+                        } else {
+                            theme::MUTED
+                        })),
+                ),
         )
 }
 
@@ -291,12 +366,14 @@ impl Render for Feed {
                     let notes = self.notes.clone();
                     let profiles = self.profiles.clone();
                     let liked = self.liked.clone();
+                    let bookmarked = self.bookmarked.clone();
+                    let images = self.images.clone();
                     list(self.list.clone(), move |idx, _w, _cx| {
                         match notes.get(idx) {
-                            Some(ev) => {
-                                note_card(idx, ev, &profiles, &liked, handle.clone())
-                                    .into_any_element()
-                            }
+                            Some(ev) => note_card(
+                                idx, ev, &profiles, &liked, &bookmarked, &images, handle.clone(),
+                            )
+                            .into_any_element(),
                             None => div().into_any_element(),
                         }
                     })
