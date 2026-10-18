@@ -1,6 +1,8 @@
 # Satori Desktop — Design & Build Spec
 
-Native Linux (GTK4/libadwaita) rewrite of Satori, a Nostr client. This document is the
+Native Linux desktop rewrite of Satori, a Nostr client, in Rust. The UI toolkit is
+GPUI (Zed) per D13; the GTK4/libadwaita app in `crates/app` is the working
+implementation being ported (§9.1). This document is the
 build spec: principles → decisions → architecture → milestones. The TypeScript app in
 `src/` + `public/` is the frozen reference implementation; its behavior documents *what*
 the product does, not *how* (the how was shaped by the browser, a constraint the desktop
@@ -337,6 +339,7 @@ rejected (Blossom only).
 | D10 | Single-user (one profile per instance), multi-account deferred | Matches product philosophy; simplifies state |
 | D11 | Note body: label-runs in feeds, TextView in focused views | Perf vs capability split; revisit with measurements (M1) |
 | D12 | App ID: `io.github.Letdown2491.Satori` (placeholder) | Flathub convention pending a real domain |
+| D13 | **UI toolkit: GPUI (Zed) replaces GTK4/libadwaita.** New `crates/app-gpui` ports the views; `crates/core` is untouched (this is the §1.3 design-for-exit payoff — the domain layer never knew about GTK). GTK app (`crates/app`) stays the daily driver until the GPUI build reaches parity, then is retired. | A one-screen spike (feed + note cards + stroke-drawn glyphs, real session/relays through `crates/core`) was convincing where arguments weren't: GPU rendering makes the sumi-e identity easier (glyphs painted as raw paths at any scale, no SVG/CSS toolchain), scrolling and text feel alive, and the whole UI stack is pure Rust. Accepted costs, recorded honestly: gpui 0.2.2 needs a vendored one-line patch to compile on Linux (xattr/ENOATTR, `vendor/xattr`); its published API already diverges from Zed main (API churn risk); silent failure modes (a render bug shows a blank window, not a warning); no CSS theming — sumi-e tokens become Rust constants (§5 tokens port to `theme.rs`). GPUI rules learned in the spike: never read an entity during its own render (panic) — snapshot data into item closures; `list()` has no intrinsic height — give it `.h_full()`; tokio receivers await fine on gpui's executor (the `drain` seam ports as-is). |
 
 ---
 
@@ -355,12 +358,40 @@ rejected (Blossom only).
 - **M3 — Correspond.** NIP-17 DMs end-to-end (inbox, requests, threads, send, read
   state, legacy read-only), relay management panes, settings (appearance/content),
   profile edit, follow/mute management views.
+  *Postponed — owner decision; DMs are the least-important part. Most non-DM scope
+  (relays, settings, profile edit, follow/mute) already landed under M0/M4.*
 - **M4 — Show everything.** Manifest registry complete (all rich cards), polls + votes,
   calendar + RSVP + .ics, highlights, wiki, repo, classified, podcast, custom NIP,
   fallback + NIP-89; Blossom upload wired into composer; galleries + lightbox.
 - **M5 — Sovereign.** Bundled tor + privacy modes + warm-up; NIP-37 draft sync;
   scheduled posts; list backup; backup/restore; Flatpak manifest polished (metainfo,
   icons, screenshots); private-relay policy; reduced-motion & a11y pass.
+
+---
+
+## 9.1 Port milestones (GPUI, per D13)
+
+The GTK milestones above describe *what* exists; the P-series below re-lands it on
+GPUI. Feature scope is already built in `crates/core` + the GTK app — the port is a
+re-expression of views, not a feature rebuild.
+
+- **P0 — Spike becomes the app (done).** `crates/app-gpui` scaffold: workspace dep +
+  xattr patch, `theme.rs` (sumi-e tokens as constants), `icons.rs` (PathBuilder
+  glyphs), feed view with real note cards. *Accept: real session, real feed, scroll,
+  like posts a real reaction.*
+- **P1 — Shell & navigation.** Header/sidebar, view switching (feed/thread/profile/
+  settings), Escape-to-back, keyboard habits from `main.rs` ported to gpui actions.
+- **P2 — Speak & read deeply.** Composer (undo window, multi-image attach via
+  `upload_chain`), thread view + comments, full note-card fidelity (replies, quoted
+  events, npub/URL rendering), optimistic bookmark/reply, profiles + avatars (core
+  image fetch → gpui `img`).
+- **P3 — Everything else.** Settings panes, notifications, search, rich cards from
+  the manifest registry, media proxying.
+- **P4 — Cutover.** Binary named `satori`; retire `crates/app`; Flatpak/packaging
+  update; both themes; reduced-motion equivalent.
+
+Port convention: each ported view cites its GTK/TS origin
+(`// TODO(port): <origin> — P<n>`), same discipline as `crates/core`.
 
 ---
 
@@ -373,3 +404,5 @@ rejected (Blossom only).
   v1**; a webview is a code-execution surface and can be revisited with a hard argument.
 - AsciiDoc depth for NIP-54 — subset matching `src/nostr/asciidoc.ts` coverage.
 - `engine.ts` wire-manifest idea — out of scope until external demand exists.
+- M3 (NIP-17 DMs) — **postponed by owner decision until explicitly re-prioritized**;
+  least-important milestone. Land M5 + `TODO(port)` chokepoint cleanup first.

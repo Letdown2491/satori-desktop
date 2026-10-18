@@ -2,6 +2,8 @@
 # Build:  podman build -t satori-dev -f Containerfile.dev
 # Check:  podman run --rm -v "$PWD:/srv:Z" -w /srv satori-dev cargo check --workspace
 # (:Z relabels the mount for SELinux on atomic hosts.)
+# The vulkan/wayland/fontconfig/clang packages exist for the GPUI UI crate
+# (crates/app-gpui, D13); gtk4/libadwaita remain for crates/app until P4.
 
 FROM registry.fedoraproject.org/fedora:44
 
@@ -12,6 +14,13 @@ RUN dnf -y install \
         libadwaita-devel \
         pkgconf-pkg-config \
         git \
+        vulkan-devel \
+        wayland-devel \
+        libxkbcommon-devel \
+        libxkbcommon-x11-devel \
+        fontconfig-devel \
+        libxcb-devel \
+        clang \
     && dnf -y clean all
 
 WORKDIR /srv

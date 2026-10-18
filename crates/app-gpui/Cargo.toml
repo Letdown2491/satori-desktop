@@ -1,0 +1,16 @@
+[package]
+name = "satori-gpui"
+description = "Satori's GPUI front-end: views re-expressed from crates/app on Zed's GPUI (D13). Domain logic lives in crates/core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "satori-gpui"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { workspace = true }
+nostr = { workspace = true }
+satori-core = { path = "../core" }

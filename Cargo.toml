@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/app"]
+members = ["crates/core", "crates/app", "crates/app-gpui"]
+
+# D13: gpui 0.2.2 → zed-async-tar → xattr 0.2.3 does not compile on Linux
+# (ENOATTR is macOS-only there); 0.2.3 is the last of its semver line, so the
+# patch is a vendored copy with ENOATTR aliased to ENODATA (same errno).
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +15,7 @@ license = "MIT"
 authors = ["Letdown2491"]
 
 [workspace.dependencies]
+gpui = "0.2.2"
 nostr = "0.45"
 nostr-sdk = "0.45"
 nostr-connect = "0.45"
@@ -23,6 +30,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 sha2 = "0.10"
 url = "2"
+base64 = "0.22"
 chrono = "0.4"
 
 [profile.release]
