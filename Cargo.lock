@@ -5641,6 +5641,8 @@ dependencies = [
  "nostr",
  "rfd",
  "satori-core",
+ "serde",
+ "serde_json",
  "unicode-segmentation",
 ]
 

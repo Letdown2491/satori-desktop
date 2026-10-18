@@ -420,7 +420,16 @@ re-expression of views, not a feature rebuild.
   content-sized chains (give input wrappers a definite height); an
   unwrapped single-line Input leaks its line width into taffy layout
   (`overflow_hidden` on the wrapper); Input gained single-line horizontal
-  scroll so long bunker URIs stay on one row.* Daily driver
+  scroll so long bunker URIs stay on one row. Settings pane done — the relay
+  editor (read/write toggles + add/remove, publish as NIP-65), media servers
+  (normalize https, publish kind 10063), the undo window, the feed-content
+  catalog and list backup (export/import via rfd's portal dialogs); `s` opens
+  it (the header seal is unclickable CSD-tiled). Found and fixed a real
+  data-loss bug the GTK original shared: `prefs::save` blind-serialized the
+  Prefs struct, so saving any pref wiped `content_hidden` from prefs.json —
+  save is now a read-modify-write merge in both crates. Verified live against
+  the real store: catalog/undo toggles, seconds field, media add/remove;
+  publish buttons left to the user (they broadcast).* Daily driver
   flipped to the GPUI binary (user decision, P2.5): `crates/app` stays only as
   the P3 porting reference (first-login no longer needs it); deletion remains
   the P4 formality.

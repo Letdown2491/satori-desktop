@@ -6,6 +6,7 @@
 mod icons;
 mod input;
 mod media;
+mod prefs;
 mod theme;
 mod views;
 

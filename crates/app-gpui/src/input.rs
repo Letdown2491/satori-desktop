@@ -219,6 +219,15 @@ impl Input {
         cx.notify();
     }
 
+    /// Empty the field and reset the cursor (an add-row after Add).
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.content.clear();
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.scroll_x = px(0.);
+        cx.notify();
+    }
+
     fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.is_selecting = true;
         let offset = self.index_for_mouse_position(event.position);

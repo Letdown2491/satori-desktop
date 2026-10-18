@@ -28,7 +28,22 @@ pub fn load() -> Prefs {
 }
 
 pub fn save(prefs: &Prefs) {
-    let Ok(body) = serde_json::to_string_pretty(prefs) else {
+    // Merge into the raw file — Prefs doesn't carry every key the file holds
+    // (content_hidden lives alongside), and a blind serialize would wipe them
+    // (toggling the undo window erased the feed catalog's hidden kinds).
+    let raw = std::fs::read_to_string(path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    let mut value = raw;
+    if let Ok(overlay) = serde_json::to_value(prefs) {
+        if let (Some(dst), Some(src)) = (value.as_object_mut(), overlay.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    let Ok(body) = serde_json::to_string_pretty(&value) else {
         return;
     };
     use std::io::Write;

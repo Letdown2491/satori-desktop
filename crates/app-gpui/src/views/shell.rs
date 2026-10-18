@@ -321,7 +321,7 @@ impl Render for Shell {
                 // own pane, the search field needs the same.
                 let composing = matches!(
                     shell.stack.last(),
-                    Some(Pane::Composer(_)) | Some(Pane::Search(_))
+                    Some(Pane::Composer(_)) | Some(Pane::Search(_)) | Some(Pane::Settings(_))
                 );
                 if !ev.keystroke.modifiers.modified() && !composing {
                     if ev.keystroke.key == "n" {
@@ -337,6 +337,11 @@ impl Render for Shell {
                     // (app.goto-search accel).
                     if ev.keystroke.key == "/" {
                         shell.open_search(cx);
+                    }
+                    // No GTK accel — same CSD story: the header Settings seal
+                    // needs a keyboard way in.
+                    if ev.keystroke.key == "s" {
+                        shell.open_settings(cx);
                     }
                 }
             }))

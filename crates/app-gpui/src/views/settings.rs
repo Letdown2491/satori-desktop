@@ -1,177 +1,872 @@
-//! Settings view (P1 slice): relays + media servers, read-only.
+//! Settings — port of `crates/app/src/settings.rs` (General/Content/Media/
+//! Relays pages) as one quiet scroll: the relay editor (NIP-65, kind 10002),
+//! media servers (Blossom, kind 10063), the undo window, the feed-content
+//! catalog, and list backup (export/import of the signed events via rfd's
+//! portal dialogs).
 //!
-//! TODO(port): crates/app/src/settings.rs — P3. The GTK pane's editing (relay
-//! add/remove, media server management, appearance/content prefs) ports once
-//! forms/inputs exist. P1 shows the live configuration so the route is real.
+//! TODO(port): theme choice waits for P4 (both themes).
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use gpui::{div, prelude::*, px, rgb, Context, Render, Window};
-use satori_core::manager::{Core, FeedEvent};
+use gpui::{
+    div, prelude::*, px, rgb, App, Context, Div, Entity, FocusHandle, Focusable, KeyDownEvent,
+    Render, SharedString, Stateful, Window,
+};
+use satori_core::manager::{Core, FeedEvent, PublishEvent};
 
-use crate::theme;
+use crate::{input::Input, prefs, theme};
 
 pub struct SettingsView {
     core: Arc<Core>,
-    read_relays: Vec<String>,
-    write_relays: Vec<String>,
-    media_servers: Vec<String>,
+    focus: FocusHandle,
+    // Relays (the NIP-65 editor): local edits; Publish commits as kind 10002.
+    relays: Vec<RelayEntry>,
+    add_relay: Entity<Input>,
+    relay_read: bool,
+    relay_write: bool,
+    // Media servers (Blossom): local edits; Publish commits as kind 10063.
+    servers: Vec<String>,
+    add_server: Entity<Input>,
+    // Composing: the undo window (the Input holds the seconds; the cached
+    // value is what a toggle applies without re-parsing).
+    undo_enabled: bool,
+    undo_secs_val: u32,
+    undo_secs: Entity<Input>,
+    // Content: the feed catalog.
+    machine_hidden: bool,
+    hidden_kinds: Vec<u16>,
+    // Toast equivalent (the pane has no header seal to hang one on).
     status: String,
+    status_err: bool,
+}
+
+#[derive(Clone)]
+struct RelayEntry {
+    url: String,
+    read: bool,
+    write: bool,
+}
+
+impl Focusable for SettingsView {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus.clone()
+    }
 }
 
 impl SettingsView {
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
-        let (read, write) = core.current_relays();
+        let p = prefs::load();
+        let undo_secs_val = p.undo_seconds.unwrap_or(5);
+        let undo_secs = cx.new(|cx| {
+            let mut i = Input::new(cx);
+            i.multiline = false;
+            i.content = undo_secs_val.to_string();
+            i.placeholder("")
+        });
         let view = Self {
-            read_relays: read,
-            write_relays: write,
-            media_servers: vec![],
+            core: core.clone(),
+            focus: cx.focus_handle(),
+            relays: relay_rows(core.current_relays()),
+            add_relay: cx.new(|cx| single_line("wss://…", cx)),
+            relay_read: true,
+            relay_write: true,
+            servers: vec![],
+            add_server: cx.new(|cx| single_line("https://…", cx)),
+            undo_enabled: p.undo_enabled.unwrap_or(true),
+            undo_secs_val,
+            undo_secs,
+            machine_hidden: satori_core::store::machine_notes_hidden(),
+            hidden_kinds: prefs::content_hidden(),
             status: String::new(),
-            core,
+            status_err: false,
         };
-        let rx = view.core.fetch_media_servers();
-        view.pump(rx, cx);
+        view.pump_feed(core.fetch_media_servers(), cx);
+        // The pane is a projection — bootstrap may still be landing the
+        // NIP-65 (settings.rs catch-up poll: 30 × 800ms).
+        cx.spawn(async move |this, cx| {
+            for _ in 0..15 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(800))
+                    .await;
+                let done = this
+                    .update(cx, |this, cx| {
+                        if this.relays.is_empty() {
+                            this.relays = relay_rows(this.core.current_relays());
+                            cx.notify();
+                        }
+                        !this.relays.is_empty()
+                    })
+                    .is_ok_and(|done| done);
+                if done {
+                    break;
+                }
+            }
+        })
+        .detach();
         view
     }
 
-    fn pump(&self, mut rx: satori_core::manager::FeedRx, cx: &mut Context<Self>) {
+    // --- pumps --------------------------------------------------------------
+
+    fn pump_feed(&self, mut rx: satori_core::manager::FeedRx, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.recv().await {
-                let _ = this.update(cx, |this, cx| this.on_event(ev, cx));
+                let _ = this.update(cx, |this, cx| this.on_feed_event(ev, cx));
             }
         })
         .detach();
     }
 
-    fn on_event(&mut self, ev: FeedEvent, cx: &mut Context<Self>) {
+    fn on_feed_event(&mut self, ev: FeedEvent, cx: &mut Context<Self>) {
         match ev {
-            FeedEvent::MediaServers(servers) => self.media_servers = servers,
-            FeedEvent::Failed(e) => self.status = format!("… {e}"),
+            FeedEvent::MediaServers(servers) => {
+                for url in servers {
+                    if !self.servers.contains(&url) {
+                        self.servers.push(url);
+                    }
+                }
+            }
+            FeedEvent::Failed(e) => self.set_status(format!("… {e}"), true),
             _ => {}
         }
         cx.notify();
     }
 
-    fn section(title: &str, items: &[String], fallback: &str) -> impl IntoElement {
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_4()
-            .border_b_1()
-            .border_color(rgb(theme::HAIRLINE))
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(theme::MUTED))
-                    .child(title.to_string()),
-            )
-            .child(if items.is_empty() {
-                div()
-                    .text_size(px(13.0))
-                    .text_color(rgb(theme::MUTED))
-                    .child(fallback.to_string())
+    fn pump_publish(
+        &self,
+        mut rx: satori_core::manager::PublishRx,
+        done: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                let stop = this
+                    .update(cx, |this, _cx| match ev {
+                        PublishEvent::Committed { .. } => {
+                            this.set_status(done.to_string(), false);
+                            true
+                        }
+                        PublishEvent::Failed { error, .. } => {
+                            this.set_status(format!("Publish failed: {error}"), true);
+                            true
+                        }
+                        _ => false,
+                    })
+                    .is_ok_and(|stop| stop);
+                if stop {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn set_status(&mut self, msg: String, err: bool) {
+        self.status = msg;
+        self.status_err = err;
+    }
+
+    // --- actions ------------------------------------------------------------
+
+    fn add_relay(&mut self, cx: &mut Context<Self>) {
+        let url = self.add_relay.read(cx).content.trim().to_string();
+        if url.is_empty() {
+            return;
+        }
+        if !url.starts_with("wss://") && !url.starts_with("ws://") {
+            self.set_status("Relay URLs start with wss://".into(), true);
+            cx.notify();
+            return;
+        }
+        if self.relays.iter().any(|r| r.url == url) {
+            return;
+        }
+        self.relays.push(RelayEntry {
+            url,
+            read: self.relay_read,
+            write: self.relay_write,
+        });
+        self.add_relay.update(cx, Input::clear);
+        cx.notify();
+    }
+
+    fn add_server(&mut self, cx: &mut Context<Self>) {
+        // normalizeMediaInput: trim, assume https, strip trailing slashes,
+        // reject junk, drop duplicates.
+        let raw = self.add_server.read(cx).content.trim().to_string();
+        if raw.is_empty() {
+            return;
+        }
+        let mut url = raw;
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            url = format!("https://{url}");
+        }
+        while url.ends_with('/') {
+            url.pop();
+        }
+        let host = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .unwrap_or("");
+        if host.is_empty() || !host.contains('.') || host.contains(' ') {
+            self.set_status("That doesn't look like a URL".into(), true);
+            cx.notify();
+            return;
+        }
+        if self.servers.contains(&url) {
+            return;
+        }
+        self.servers.push(url);
+        self.add_server.update(cx, Input::clear);
+        cx.notify();
+    }
+
+    fn remove_server(&mut self, url: &str, cx: &mut Context<Self>) {
+        self.servers.retain(|s| s != url);
+        cx.notify();
+    }
+
+    fn remove_relay(&mut self, url: &str, cx: &mut Context<Self>) {
+        self.relays.retain(|r| r.url != url);
+        cx.notify();
+    }
+
+    fn toggle_relay(&mut self, url: &str, read: bool, cx: &mut Context<Self>) {
+        if let Some(entry) = self.relays.iter_mut().find(|r| r.url == url) {
+            if read {
+                entry.read = !entry.read;
             } else {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .children(items.iter().map(|item| {
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(rgb(theme::INK))
-                            .child(item.clone())
-                    }))
-            })
+                entry.write = !entry.write;
+            }
+        }
+        cx.notify();
+    }
+
+    fn publish_relays(&mut self, cx: &mut Context<Self>) {
+        let read: Vec<String> = self
+            .relays
+            .iter()
+            .filter(|r| r.read)
+            .map(|r| r.url.clone())
+            .collect();
+        let write: Vec<String> = self
+            .relays
+            .iter()
+            .filter(|r| r.write)
+            .map(|r| r.url.clone())
+            .collect();
+        if read.is_empty() && write.is_empty() {
+            self.set_status("Nothing to publish — add a relay first".into(), true);
+            cx.notify();
+            return;
+        }
+        let rx = self.core.set_relays(read, write);
+        self.pump_publish(rx, "Relay list published", cx);
+    }
+
+    fn publish_servers(&mut self, cx: &mut Context<Self>) {
+        let servers = self.servers.clone();
+        if servers.is_empty() {
+            self.set_status("Nothing to publish — add a media server first".into(), true);
+            cx.notify();
+            return;
+        }
+        let rx = self.core.set_media_servers(servers);
+        self.pump_publish(rx, "Media server list published", cx);
+    }
+
+    fn set_undo(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.undo_enabled = enabled;
+        let mut p = prefs::load();
+        p.undo_enabled = Some(enabled);
+        p.undo_seconds = Some(self.undo_secs_val);
+        prefs::save(&p);
+        self.core.set_undo(enabled, self.undo_secs_val);
+        cx.notify();
+    }
+
+    fn apply_undo_secs(&mut self, cx: &mut Context<Self>) {
+        let raw = self.undo_secs.read(cx).content.trim().to_string();
+        match raw.parse::<u32>() {
+            Ok(secs) if (1..=30).contains(&secs) => {
+                self.undo_secs_val = secs;
+                self.set_undo(self.undo_enabled, cx);
+            }
+            _ => {
+                self.set_status("Hold is 1–30 seconds".into(), true);
+                cx.notify();
+            }
+        }
+    }
+
+    fn toggle_machine_notes(&mut self, cx: &mut Context<Self>) {
+        self.machine_hidden = !self.machine_hidden;
+        prefs::set_bool("machine_notes_hidden", self.machine_hidden);
+        cx.notify();
+    }
+
+    fn toggle_kind(&mut self, kinds: &[u16], cx: &mut Context<Self>) {
+        // "On" means no kind of the group is hidden; toggling flips that.
+        let hidden_now = kinds.iter().any(|k| self.hidden_kinds.contains(k));
+        prefs::set_kinds_hidden(kinds, !hidden_now);
+        self.hidden_kinds = prefs::content_hidden();
+        cx.notify();
+    }
+
+    // --- Backup: the signed list events, out and back -------------------------
+
+    fn export_backup(&mut self, cx: &mut Context<Self>) {
+        let core = self.core.clone();
+        cx.spawn(async move |this, cx| {
+            let mut rx = core.export_lists();
+            if let Some(FeedEvent::BackupJson(json)) = rx.recv().await {
+                // Blocking portal dialog on the background executor
+                // (composer.rs attachments pattern).
+                let path = cx
+                    .background_executor()
+                    .spawn(async move {
+                        rfd::FileDialog::new()
+                            .set_file_name("satori-backup.json")
+                            .save_file()
+                    })
+                    .await;
+                let _ = this.update(cx, |this, _cx| match path {
+                    Some(path) => match std::fs::write(&path, json.as_bytes()) {
+                        Ok(()) => this.set_status("Backup saved".into(), false),
+                        Err(_) => this.set_status("Could not write backup".into(), true),
+                    },
+                    None => return, // cancelled
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn import_backup(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let picked = cx
+                .background_executor()
+                .spawn(async move {
+                    rfd::FileDialog::new()
+                        .add_filter("JSON", &["json"])
+                        .pick_file()
+                })
+                .await;
+            let Some(path) = picked else {
+                return; // cancelled
+            };
+            let json = std::fs::read_to_string(&path).ok();
+            let Some(json) = json else {
+                let _ = this.update(cx, |this, _cx| {
+                    this.set_status("Could not read file".into(), true)
+                });
+                return;
+            };
+            let mut rx = match this.update(cx, |this, _| this.core.import_lists(json)) {
+                Ok(rx) => rx,
+                Err(_) => return,
+            };
+            while let Some(ev) = rx.recv().await {
+                let stop = this
+                    .update(cx, |this, _cx| match ev {
+                        PublishEvent::Restored(n) => {
+                            this.set_status(format!("Restored {n} list(s)"), false);
+                            true
+                        }
+                        PublishEvent::Failed { error, .. } => {
+                            this.set_status(format!("Import failed: {error}"), true);
+                            true
+                        }
+                        _ => false,
+                    })
+                    .is_ok_and(|stop| stop);
+                if stop {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
     }
 }
 
+fn relay_rows((read, write): (Vec<String>, Vec<String>)) -> Vec<RelayEntry> {
+    let mut rows: Vec<RelayEntry> = read
+        .iter()
+        .map(|url| RelayEntry {
+            url: url.clone(),
+            read: true,
+            write: write.contains(url),
+        })
+        .collect();
+    for url in write {
+        if !rows.iter().any(|r| r.url == url) {
+            rows.push(RelayEntry {
+                url,
+                read: false,
+                write: true,
+            });
+        }
+    }
+    rows
+}
+
+fn single_line(placeholder: &str, cx: &mut Context<Input>) -> Input {
+    let mut i = Input::new(cx);
+    i.multiline = false;
+    i.placeholder(placeholder)
+}
+
+/// The quiet pill switch (sumi-e: a dot moving between two states).
+fn toggle(id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .cursor_pointer()
+        .w(px(30.))
+        .h(px(16.))
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(if on { theme::LIVE } else { theme::HAIRLINE }))
+        .bg(rgb(theme::WASHI))
+        .flex()
+        .items_center()
+        .when(on, |d| d.justify_end())
+        .when(!on, |d| d.justify_start())
+        .p(px(2.))
+        .child(
+            div()
+                .size(px(10.))
+                .rounded_full()
+                .bg(rgb(if on { theme::LIVE } else { theme::HAIRLINE })),
+        )
+}
+
+/// A settings group: title + description + rows chained as children.
+fn group(title: &str, description: &str) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_4()
+        .pt_3()
+        .border_b_1()
+        .border_color(rgb(theme::HAIRLINE))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgb(theme::MUTED))
+                .child(title.to_string()),
+        )
+        .when(!description.is_empty(), |d| {
+            d.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(theme::MUTED))
+                    .child(description.to_string()),
+            )
+        })
+}
+
+fn field(input: Entity<Input>, id: &str) -> impl IntoElement {
+    let focus_target = input.clone();
+    div()
+        .id(SharedString::from(id.to_string()))
+        .cursor_text()
+        .flex_1()
+        .min_w_0()
+        .h(px(30.))
+        .px_2()
+        .rounded_sm()
+        .bg(rgb(theme::PANEL))
+        .border_1()
+        .border_color(rgb(theme::HAIRLINE))
+        .child(input)
+        // Click-to-focus, explicitly: the Input's own hitbox didn't win the
+        // focus transfer in this pane (login/search autofocus instead).
+        .on_click(move |_, window, cx| {
+            let fh = focus_target.read(cx).focus_handle(cx);
+            window.focus(&fh);
+        })
+}
+
+fn seal(id: impl Into<SharedString>, label: &str, color: u32) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .cursor_pointer()
+        .px_2()
+        .py_1()
+        .text_size(px(13.0))
+        .text_color(rgb(color))
+        .child(label.to_string())
+}
+
+fn muted(text: impl Into<String>) -> Div {
+    div()
+        .text_size(px(11.0))
+        .text_color(rgb(theme::MUTED))
+        .child(text.into())
+}
+
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let read = self.read_relays.clone();
-        let write = self.write_relays.clone();
-        let media = self.media_servers.clone();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let relays = self.relays.clone();
+        let servers = self.servers.clone();
+        let machine_hidden = self.machine_hidden;
+        let hidden_kinds = self.hidden_kinds.clone();
+        let undo_enabled = self.undo_enabled;
+        let relay_read = self.relay_read;
+        let relay_write = self.relay_write;
         let status = self.status.clone();
-        let core_refresh = self.core.clone();
+        let status_err = self.status_err;
+        let add_relay = self.add_relay.clone();
+        let add_server = self.add_server.clone();
+        let undo_secs = self.undo_secs.clone();
 
         div()
             .id("settings-root")
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                // Enter acts on whichever row is focused (single-line Inputs
+                // don't bind enter, so it bubbles here).
+                if ev.keystroke.key == "enter" {
+                    if this.add_relay.read(cx).focus_handle(cx).is_focused(window) {
+                        this.add_relay(cx);
+                    } else if this.add_server.read(cx).focus_handle(cx).is_focused(window) {
+                        this.add_server(cx);
+                    } else if this.undo_secs.read(cx).focus_handle(cx).is_focused(window) {
+                        this.apply_undo_secs(cx);
+                    }
+                }
+            }))
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .child(Self::section(
-                "Read relays",
-                &read,
-                "none configured",
-            ))
-            .child(Self::section(
-                "Write relays",
-                &write,
-                "none configured",
-            ))
+            // --- Composing (the undo window) --------------------------------
             .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .p_4()
-                    .border_b_1()
-                    .border_color(rgb(theme::HAIRLINE))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(theme::MUTED))
-                            .child("Media servers (Blossom)"),
-                    )
-                    .child(if media.is_empty() {
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(rgb(theme::MUTED))
-                            .child("default server")
-                    } else {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .children(
-                                media.iter().map(|s| {
+                group(
+                    "Composing",
+                    "The undo window is the breath before speech: posts are held before they go out.",
+                )
+                .child(
+                    div()
+                        .id("undo-row")
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(13.0))
+                                .text_color(rgb(theme::INK))
+                                .child("Undo window"),
+                        )
+                        .child(toggle("undo-toggle", undo_enabled))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_undo(!this.undo_enabled, cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .when(undo_enabled, |d| {
+                            d.child(field(undo_secs, "undo-secs-field"))
+                                .child(muted("seconds (1–30, Enter applies)"))
+                        })
+                        .when(!undo_enabled, |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(theme::MUTED))
+                                    .child("Posts publish immediately."),
+                            )
+                        }),
+                ),
+            )
+            // --- Content (the feed catalog) ---------------------------------
+            .child(
+                group(
+                    "Feed content",
+                    "What kinds your feed carries. Applies on the next home refresh.",
+                )
+                .child(
+                    div()
+                        .id("machine-notes-row")
+                        .w_full()
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .child(
                                     div()
                                         .text_size(px(13.0))
                                         .text_color(rgb(theme::INK))
-                                        .child(s.clone())
-                                }),
-                            )
-                    })
-                    .child(
-                        div()
-                            .id("refresh-media")
-                            .cursor_pointer()
-                            .mt_1()
-                            .text_size(px(12.0))
-                            .text_color(rgb(theme::MUTED))
-                            .on_click(move |_, _, _cx| {
-                                // TODO(port): settings.rs media server editing —
-                                // P3. Refresh-only until inputs exist.
-                                let mut rx = core_refresh.fetch_media_servers();
-                                std::thread::spawn(move || {
-                                    while rx.blocking_recv().is_some() {}
-                                });
-                            })
-                            .child("refresh"),
-                    ),
+                                        .child("Hide machine notes"),
+                                )
+                                .child(muted(
+                                    "Kind-1 events whose entire content is JSON — app data \
+                                     transports, not speech",
+                                )),
+                        )
+                        .child(toggle("machine-notes", machine_hidden))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_machine_notes(cx))),
+                )
+                .children(satori_core::store::CATALOG.iter().map(|(label, kinds)| {
+                    let kinds: Vec<u16> = kinds.to_vec();
+                    let on = !kinds.iter().any(|k| hidden_kinds.contains(k));
+                    div()
+                        .id(SharedString::from(format!("kind-row-{label}")))
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(13.0))
+                                .text_color(rgb(theme::INK))
+                                .child(label.to_string()),
+                        )
+                        .child(toggle(format!("kind-{label}"), on))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_kind(&kinds, cx);
+                        }))
+                })),
             )
+            // --- Media servers (Blossom, kind 10063) -------------------------
+            .child(
+                group(
+                    "Media servers",
+                    "Where your pictures upload (Blossom). With no list, uploads use \
+                     blossom.primal.net.",
+                )
+                .child(div().w_full().flex().flex_col().gap_0p5().children(
+                    servers.iter().map(|url| {
+                        let url_for_x = url.clone();
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .py_0p5()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(theme::INK))
+                                    .child(url.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("media-remove-{url}")))
+                                    .cursor_pointer()
+                                    .px_1()
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(theme::MUTED))
+                                    .child("×")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.remove_server(&url_for_x, cx);
+                                    })),
+                            )
+                    }),
+                ))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .pt_1()
+                        .child(field(add_server, "add-server-field"))
+                        .child(
+                            seal("add-server", "Add", theme::VERMILION)
+                                .on_click(cx.listener(|this, _, _, cx| this.add_server(cx))),
+                        ),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_end()
+                        .pt_1()
+                        .child(
+                            seal("publish-media", "Publish media server list", theme::LIVE)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.publish_servers(cx);
+                                })),
+                        ),
+                ),
+            )
+            // --- Relays (NIP-65, kind 10002) ---------------------------------
+            .child(
+                group(
+                    "Relays",
+                    "Where your events go and come from — published as your NIP-65 list. \
+                     Five indexers always serve reads.",
+                )
+                .child(div().w_full().flex().flex_col().gap_0p5().children(
+                    relays.iter().map(|relay| {
+                        let url_t = relay.url.clone();
+                        let url_w = relay.url.clone();
+                        let url_for_x = relay.url.clone();
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .py_0p5()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(theme::INK))
+                                    .child(relay.url.clone()),
+                            )
+                            .child(
+                                toggle(SharedString::from(format!("relay-r-{}", relay.url)), relay.read)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.toggle_relay(&url_t, true, cx);
+                                    })),
+                            )
+                            .child(
+                                toggle(SharedString::from(format!("relay-w-{}", relay.url)), relay.write)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.toggle_relay(&url_w, false, cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("relay-remove-{}", relay.url)))
+                                    .cursor_pointer()
+                                    .px_1()
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(theme::MUTED))
+                                    .child("×")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.remove_relay(&url_for_x, cx);
+                                    })),
+                            )
+                    }),
+                ))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .pt_1()
+                        .child(field(add_relay, "add-relay-field"))
+                        .child(
+                            toggle("relay-add-read", relay_read)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.relay_read = !this.relay_read;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            toggle("relay-add-write", relay_write)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.relay_write = !this.relay_write;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            seal("add-relay", "Add", theme::VERMILION)
+                                .on_click(cx.listener(|this, _, _, cx| this.add_relay(cx))),
+                        ),
+                )
+                .child(muted("the two toggles set read / write for the relay you add"))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_end()
+                        .pt_1()
+                        .child(
+                            seal("publish-relays", "Publish relay list", theme::LIVE)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.publish_relays(cx);
+                                })),
+                        ),
+                ),
+            )
+            // --- Backup: the signed list events ------------------------------
+            .child(
+                group(
+                    "List backup",
+                    "Your follows, mutes, bookmarks and relay lists as signed events.                      Restoring re-publishes them fresh.",
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(13.0))
+                                .text_color(rgb(theme::INK))
+                                .child("Export"),
+                        )
+                        .child(
+                            seal("export-backup", "Save…", theme::MUTED)
+                                .on_click(cx.listener(|this, _, _, cx| this.export_backup(cx))),
+                        ),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(13.0))
+                                .text_color(rgb(theme::INK))
+                                .child("Import & restore"),
+                        )
+                        .child(
+                            seal("import-backup", "Choose file…", theme::MUTED)
+                                .on_click(cx.listener(|this, _, _, cx| this.import_backup(cx))),
+                        ),
+                ),
+            )
+            // --- status ------------------------------------------------------
             .when(!status.is_empty(), |d| {
                 d.child(
                     div()
                         .p_4()
+                        .pt_2()
                         .text_size(px(12.0))
-                        .text_color(rgb(theme::ERR))
+                        .text_color(rgb(if status_err {
+                            theme::ERR
+                        } else {
+                            theme::MUTED
+                        }))
                         .child(status),
                 )
             })
