@@ -33,9 +33,192 @@ pub fn open_settings(ctx: &Ctx) {
 
     win.add(&general_page(ctx));
     win.add(&content_page());
+    win.add(&media_page(ctx));
     win.add(&backup_page(ctx));
     win.add(&relays_page(ctx));
     win.present();
+}
+
+// --- Media: the Blossom server list (kind:10063, BUD-03) ----------------------
+
+/// The media-server draft: URLs + the rows that render them.
+/// AdwPreferencesGroup doesn't expose its rows as widget children (its
+/// `first_child()` is the group's internal box), so the rows are tracked
+/// here and removed explicitly.
+#[derive(Default)]
+struct MediaState {
+    urls: Vec<String>,
+    rows: Vec<adw::ActionRow>,
+}
+
+fn media_page(ctx: &Ctx) -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::builder()
+        .title("Media")
+        .icon_name("satori-image-symbolic")
+        .build();
+
+    let state: Rc<std::cell::RefCell<MediaState>> =
+        Rc::new(std::cell::RefCell::new(MediaState::default()));
+
+    let your = adw::PreferencesGroup::builder()
+        .title("Media servers")
+        .description("Where your pictures upload (Blossom). With no list, uploads use blossom.primal.net.")
+        .build();
+
+    let add_row = adw::EntryRow::builder()
+        .title("Add a media server (https://…)")
+        .build();
+    let add_btn = gtk::Button::builder()
+        .icon_name("list-add-symbolic")
+        .css_classes(["flat"])
+        .valign(gtk::Align::Center)
+        .tooltip_text("Add")
+        .build();
+    add_row.add_suffix(&add_btn);
+    your.add(&add_row);
+    page.add(&your);
+
+    let list_group = adw::PreferencesGroup::builder().build();
+    page.add(&list_group);
+
+    // Add (button and Enter share one handler) — normalizeMediaInput: trim,
+    // assume https, strip trailing slashes, reject junk, drop duplicates.
+    let add = {
+        let state = Rc::clone(&state);
+        let list_group = list_group.clone();
+        move |row: &adw::EntryRow, toast_ctx: &Ctx| {
+            let raw = row.text().to_string().trim().to_string();
+            if raw.is_empty() {
+                return;
+            }
+            let mut url = raw.clone();
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                url = format!("https://{url}");
+            }
+            while url.ends_with('/') {
+                url.pop();
+            }
+            if url::Url::parse(&url).is_err() {
+                toast_ctx.toast("That doesn't look like a URL");
+                return;
+            }
+            let mut st = state.borrow_mut();
+            if st.urls.contains(&url) {
+                return;
+            }
+            st.urls.push(url);
+            drop(st);
+            render_media_rows(&list_group, &state);
+            row.set_text("");
+        }
+    };
+    {
+        let add = add.clone();
+        let ctx2 = ctx.clone();
+        let row_ref = add_row.clone();
+        add_btn.connect_clicked(move |_| {
+            add(&row_ref, &ctx2);
+        });
+    }
+    {
+        let add = add.clone();
+        let ctx2 = ctx.clone();
+        add_row.connect_entry_activated(move |row| {
+            add(row, &ctx2);
+        });
+    }
+
+    // Populate: fetch the current list (a relay query — rows land async).
+    {
+        let state = Rc::clone(&state);
+        let list_group = list_group.clone();
+        drain(ctx.core.fetch_media_servers(), move |ev| match ev {
+            FeedEvent::MediaServers(list) => {
+                {
+                    let mut st = state.borrow_mut();
+                    for url in list {
+                        if !st.urls.contains(&url) {
+                            st.urls.push(url);
+                        }
+                    }
+                }
+                render_media_rows(&list_group, &state);
+            }
+            FeedEvent::Failed(e) => eprintln!("[media] fetch: {e}"),
+            _ => {}
+        });
+    }
+
+    // Publish.
+    let publish_group = adw::PreferencesGroup::builder().build();
+    let publish_row = adw::ActionRow::builder()
+        .title("Publish media server list")
+        .subtitle("Signed as your Blossom server list (kind 10063) to your write relays")
+        .build();
+    let publish_btn = gtk::Button::builder()
+        .label("Publish")
+        .css_classes(["seal-btn", "pill"])
+        .valign(gtk::Align::Center)
+        .build();
+    publish_row.add_suffix(&publish_btn);
+    publish_group.add(&publish_row);
+    page.add(&publish_group);
+    {
+        let state = Rc::clone(&state);
+        let ctx = ctx.clone();
+        publish_btn.connect_clicked(move |_| {
+            let servers = state.borrow().urls.clone();
+            if servers.is_empty() {
+                ctx.toast("Nothing to publish — add a media server first");
+                return;
+            }
+            let core = ctx.core.clone();
+            let cb_ctx = ctx.clone();
+            drain(core.set_media_servers(servers), move |reply| match reply {
+                PublishEvent::Committed { .. } => cb_ctx.toast("Media server list published"),
+                PublishEvent::Failed { error, .. } => {
+                    cb_ctx.toast(&format!("Publish failed: {}", error));
+                    eprintln!("[media] {error}");
+                }
+                _ => {}
+            });
+        });
+    }
+
+    page
+}
+
+/// Rebuild the media-server rows from state (settings.rs relay-row idiom,
+/// minus the read/write toggles — Blossom servers have no capabilities).
+fn render_media_rows(group: &adw::PreferencesGroup, state: &Rc<std::cell::RefCell<MediaState>>) {
+    let mut st = state.borrow_mut();
+    for row in st.rows.drain(..) {
+        group.remove(&row);
+    }
+    for url in st.urls.clone() {
+        let row = adw::ActionRow::builder().title(url.clone()).build();
+        let remove = gtk::Button::builder()
+            .child(&crate::icons::icon("trash"))
+            .css_classes(["flat", "act"])
+            .tooltip_text("Remove")
+            .valign(gtk::Align::Center)
+            .build();
+        row.add_suffix(&remove);
+        // Removal mutates the live state (not a snapshot), then re-renders —
+        // Publish always reads exactly what the pane shows.
+        let state2 = Rc::clone(state);
+        let group2 = group.clone();
+        remove.connect_clicked(move |_| {
+            {
+                let mut st = state2.borrow_mut();
+                st.urls.retain(|u| *u != url);
+            }
+            // Borrow released before the re-render (render borrows again).
+            render_media_rows(&group2, &state2);
+        });
+        st.rows.push(row.clone());
+        group.add(&row);
+    }
 }
 
 // --- General: appearance + the undo window -----------------------------------

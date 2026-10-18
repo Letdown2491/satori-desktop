@@ -71,6 +71,8 @@ pub enum FeedEvent {
     Profiles(Vec<Profile>),
     /// A backup export payload (raw signed events JSON).
     BackupJson(String),
+    /// Your kind:10063 Blossom media-server list (settings pane).
+    MediaServers(Vec<String>),
     BootstrapDone,
     Failed(String),
 }
@@ -86,6 +88,8 @@ pub enum PublishEvent {
     Undone { token: u64 },
     /// Published (or hold expired — the backstop committed).
     Committed { token: u64 },
+    /// A Blossom upload finished (upload.rs): blob URL + the NIP-92 imeta tag.
+    Uploaded { url: String, imeta: Vec<String> },
     /// A restore finished: n events re-signed + published.
     Restored(u32),
     Failed { token: u64, error: String },
@@ -1722,6 +1726,241 @@ impl Core {
         Ok(())
     }
 
+    /// Post a NIP-68 picture (kind:20). `imeta` carries one or more full NIP-92
+    /// imeta tags (from `upload::blossom_upload_all`) — a picture needs at least
+    /// one. Same undo window as notes. Port of `publish.ts signPicture`.
+    pub fn post_picture(
+        self: &Arc<Self>,
+        title: String,
+        content: String,
+        imeta: Vec<Vec<String>>,
+        content_warning: Option<String>,
+    ) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res = this.post_picture_inner(&tx, title, content, imeta, content_warning).await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            }
+        });
+        rx
+    }
+
+    async fn post_picture_inner(
+        self: &Arc<Self>,
+        tx: &mpsc::UnboundedSender<PublishEvent>,
+        title: String,
+        content: String,
+        imeta: Vec<Vec<String>>,
+        content_warning: Option<String>,
+    ) -> Result<()> {
+        if imeta.is_empty() {
+            return Err(LoginError::Other("a picture needs at least one image".into()));
+        }
+        let active = self.active().await?;
+        let me = active.me();
+        // NIP-68: a picture event carries a `title` tag (structural). A blank
+        // composer title derives one from the caption's first non-empty line.
+        let mut tags: Vec<Tag> = vec![Tag::custom(
+            "title",
+            [if title.trim().is_empty() {
+                first_caption_line(&content)
+            } else {
+                title.trim().to_string()
+            }],
+        )];
+        if let Some(cw) = &content_warning {
+            tags.push(Tag::custom("content-warning", [cw.as_str()]));
+        }
+        for m in &imeta {
+            if m.len() >= 2 && m[0] == "imeta" {
+                tags.push(Tag::custom("imeta", m[1..].iter()));
+            }
+        }
+        // NIP-68 also surfaces each image's hash (`x`) + mime (`m`) as TOP-LEVEL
+        // tags (relay/client filtering), deduped across the imetas.
+        let mut xs: Vec<String> = Vec::new();
+        let mut mimes: Vec<String> = Vec::new();
+        for m in &imeta {
+            for v in m.iter().skip(1) {
+                if let Some(x) = v.strip_prefix("x ")
+                    && !xs.contains(&x.to_string())
+                {
+                    xs.push(x.to_string());
+                }
+                if let Some(mm) = v.strip_prefix("m ")
+                    && !mimes.contains(&mm.to_string())
+                {
+                    mimes.push(mm.to_string());
+                }
+            }
+        }
+        for x in &xs {
+            tags.push(Tag::custom("x", [x.as_str()]));
+        }
+        for m in &mimes {
+            tags.push(Tag::custom("m", [m.as_str()]));
+        }
+        // TODO(port): src/nostr/content.ts mention tokenization → p tags (the
+        // note path carries the same deferral).
+        let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(20), tags, content);
+        let signed = active.signer.sign_event(unsigned).await?;
+
+        match active.undo.hold_duration() {
+            Some(hold) => {
+                let token = self.hold_seq.fetch_add(1, Ordering::SeqCst);
+                let _ = tx.send(PublishEvent::Held {
+                    token,
+                    event: signed.clone(),
+                    hold_secs: hold.as_secs(),
+                });
+                self.hold_and_commit(Arc::new(active.clone()), token, signed, hold, tx.clone()).await;
+            }
+            None => Self::commit(&active, &signed, tx).await?,
+        }
+        Ok(())
+    }
+
+    /// Upload a blob to your Blossom servers (upload.ts). Emits
+    /// `PublishEvent::Uploaded` with the blob URL + NIP-92 imeta tag; feed that
+    /// imeta to `post_picture`.
+    pub fn blossom_upload(self: &Arc<Self>, bytes: Vec<u8>, content_type: String) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: std::result::Result<(), String> = async {
+                if bytes.len() as u64 > crate::upload::MAX_BYTES {
+                    return Err(format!(
+                        "that file is too large (max {} MB)",
+                        crate::upload::MAX_BYTES / (1024 * 1024)
+                    ));
+                }
+                let active = this.active().await.map_err(|e| e.to_string())?;
+                let me = active.me();
+                // Your kind:10063 media-server list, newest wins (upload.ts
+                // fetchBlossomServers); out-of-box default when unset.
+                let filter = Filter::new()
+                    .author(me)
+                    .kind(Kind::Custom(crate::upload::KIND_BLOSSOM_LIST))
+                    .limit(1);
+                let server = active
+                    .pool
+                    .get(filter)
+                    .await
+                    .ok()
+                    .and_then(|events| {
+                        events
+                            .into_iter()
+                            .max_by_key(|ev| ev.created_at.as_secs())
+                            .and_then(|ev| {
+                                ev.tags
+                                    .iter()
+                                    .find(|t| t.as_slice().first().map(String::as_str) == Some("server"))
+                                    .and_then(|t| t.as_slice().get(1).cloned())
+                            })
+                    })
+                    .unwrap_or_else(|| crate::upload::DEFAULT_BLOSSOM_SERVER.to_string());
+                let servers: Vec<String> = vec![server];
+                let hash = crate::upload::sha256_hex(&bytes);
+                let unsigned = crate::upload::blossom_auth_template(me, &hash);
+                let signed = active
+                    .signer
+                    .sign_event(unsigned)
+                    .await
+                    .map_err(|e| e.to_string())?;                let up = crate::upload::blossom_upload_all(
+                    &servers,
+                    bytes,
+                    &content_type,
+                    &hash,
+                    &signed,
+                )
+                .await?;
+                let _ = tx.send(PublishEvent::Uploaded { url: up.url, imeta: up.imeta });
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e });
+            }
+        });
+        rx
+    }
+
+    /// Fetch your kind:10063 media-server list for the settings pane. Emits
+    /// `FeedEvent::MediaServers` (empty list = the out-of-box default applies).
+    pub fn fetch_media_servers(self: &Arc<Self>) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<Vec<String>> = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let filter = Filter::new()
+                    .author(me)
+                    .kind(Kind::Custom(crate::upload::KIND_BLOSSOM_LIST))
+                    .limit(1);
+                let list = active
+                    .pool
+                    .get(filter)
+                    .await
+                    .ok()
+                    .and_then(|events| {
+                        events
+                            .into_iter()
+                            .max_by_key(|ev| ev.created_at.as_secs())
+                    })
+                    .map(|ev| server_tags(&ev))
+                    .unwrap_or_default();
+                Ok(list)
+            }
+            .await;
+            match res {
+                Ok(list) => {
+                    let _ = tx.send(FeedEvent::MediaServers(list));
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
+    /// Publish the media-server list (kind:10063, BUD-03) to your write
+    /// relays — routes/settings.ts postMedia + upload.ts serverListTemplate.
+    pub fn set_media_servers(self: &Arc<Self>, servers: Vec<String>) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let tags: Vec<Tag> = servers
+                    .iter()
+                    .map(|s| Tag::custom("server", [s.trim_end_matches('/').to_string()]))
+                    .collect();
+                let unsigned = UnsignedEvent::new(
+                    me,
+                    Timestamp::now(),
+                    Kind::Custom(crate::upload::KIND_BLOSSOM_LIST),
+                    tags,
+                    "",
+                );
+                let signed = active.signer.sign_event(unsigned).await?;
+                Self::commit(&active, &signed, &tx).await?;
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
+    }
+
     /// The undo window: sleep-or-cancel, then the backstop commit (ports
     /// undo.ts semantics; disk-persistence of holds lands in M1).
     async fn hold_and_commit(
@@ -2001,6 +2240,29 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// The caption's first non-empty line, capped at 120 chars — nip68.ts
+/// `firstCaptionLine`, the ONE definition the blank-picture-title derive uses.
+fn first_caption_line(content: &str) -> String {
+    content
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(120)
+        .collect()
+}
+
+/// The `server` tag values of a kind:10063 list (BUD-03).
+fn server_tags(ev: &Event) -> Vec<String> {
+    ev.tags
+        .iter()
+        .filter(|t| t.as_slice().first().map(String::as_str) == Some("server"))
+        .filter_map(|t| t.as_slice().get(1).cloned())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// NIP-65 `r` tag with optional read/write marker.

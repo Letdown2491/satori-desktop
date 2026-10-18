@@ -9,6 +9,7 @@ pub enum LoginError {
     Connect(String),
     Store(String),
     Resume(String),
+    Other(String),
 }
 
 impl fmt::Display for LoginError {
@@ -19,6 +20,7 @@ impl fmt::Display for LoginError {
             Self::Connect(s) => write!(f, "bunker connect failed: {s}"),
             Self::Store(s) => write!(f, "secret store: {s}"),
             Self::Resume(s) => write!(f, "session resume failed: {s}"),
+            Self::Other(s) => write!(f, "{s}"),
         }
     }
 }

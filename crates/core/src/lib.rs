@@ -32,6 +32,7 @@ pub mod pool;
 pub mod publish;
 pub mod store;
 pub mod tor;
+pub mod upload;
 
 #[cfg(test)]
 pub(crate) mod test_env {
