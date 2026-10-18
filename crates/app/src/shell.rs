@@ -29,6 +29,9 @@ fn side_button(icon: &str, label: &str) -> (gtk::Button, gtk::Label) {
     let btn = gtk::Button::builder()
         .css_classes(["side-row"])
         .halign(gtk::Align::Fill)
+        // The label is the affordance when expanded; the tooltip keeps the
+        // row legible when collapsed (consistent icon-first reading).
+        .tooltip_text(label)
         .build();
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)

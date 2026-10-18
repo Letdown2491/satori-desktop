@@ -143,6 +143,48 @@ satori::icons::install();
     }
     app.add_action(&logout);
 
+    // Keyboard surface (GNOME conventions, quiet): N composes, / opens
+    // search, Ctrl+R refreshes the feed. TextViews consume plain keys, so
+    // none of these steal keystrokes while typing.
+    let compose_action = gio::SimpleAction::new("compose", None);
+    {
+        let ctx = ctx.clone();
+        let core = Arc::clone(&core);
+        compose_action.connect_activate(move |_, _| {
+            if core.pubkey().is_some() {
+                satori::composer::compose(&ctx, None, None);
+            }
+        });
+    }
+    app.add_action(&compose_action);
+    app.set_accels_for_action("app.compose", &["N"]);
+
+    let goto_search = gio::SimpleAction::new("goto-search", None);
+    {
+        let ctx = ctx.clone();
+        let core = Arc::clone(&core);
+        goto_search.connect_activate(move |_, _| {
+            if core.pubkey().is_some() {
+                ctx.show("search");
+            }
+        });
+    }
+    app.add_action(&goto_search);
+    app.set_accels_for_action("app.goto-search", &["slash"]);
+
+    let refresh_action = gio::SimpleAction::new("refresh-feed", None);
+    {
+        let core = Arc::clone(&core);
+        let feed = Rc::clone(&feed);
+        refresh_action.connect_activate(move |_, _| {
+            if core.pubkey().is_some() {
+                feed.refresh();
+            }
+        });
+    }
+    app.add_action(&refresh_action);
+    app.set_accels_for_action("app.refresh-feed", &["<Primary>r"]);
+
     gtk::Window::set_default_icon_name("satori-logo");
 
     let window = adw::ApplicationWindow::builder()
@@ -161,6 +203,23 @@ satori::icons::install();
     toolbar.set_content(Some(&stack));
     window.set_content(Some(&toolbar));
     window.present();
+
+    // Escape steps back: pop the section's nav stack (thread → feed) when
+    // there is something to pop. Dialogs grab keys while open, so this only
+    // fires on the shell itself.
+    {
+        let ctx = ctx.clone();
+        let esc = gtk::EventControllerKey::new();
+        esc.connect_key_pressed(move |_, keyval, _, _| {
+            if keyval == gtk::gdk::Key::Escape
+                && ctx.nav().pop()
+            {
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        window.add_controller(esc);
+    }
 
     // Resume a persisted session, else first-run: the login page. Resume
     // failures are surfaced on the login page, never silent.

@@ -43,3 +43,22 @@ pub fn fade_in(widget: &impl IsA<gtk::Widget>) {
         }
     });
 }
+
+/// press pulse: a quick opacity dip-and-return on click (~180ms) — the GUI
+/// stand-in for the web's :active transform. Quiet: no size, no color.
+pub fn press_pulse(widget: &impl IsA<gtk::Widget>) {
+    let w = widget.clone();
+    let t = Rc::new(Cell::new(0.0_f64));
+    glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+        let v = t.get() + 0.09;
+        t.set(v);
+        let phase = (v * std::f64::consts::PI).sin();
+        w.set_opacity(1.0 - 0.45 * phase);
+        if v >= 1.0 {
+            w.set_opacity(1.0);
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+}

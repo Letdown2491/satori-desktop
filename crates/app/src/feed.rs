@@ -118,7 +118,11 @@ impl FeedView {
                 btn.set_visible(a.value() > 800.0);
             });
             let adj2 = adj.clone();
-            top_btn.connect_clicked(move |_| adj2.set_value(0.0));
+            let btn2 = top_btn.clone();
+            top_btn.connect_clicked(move |_| {
+                crate::motion::press_pulse(&btn2);
+                adj2.set_value(0.0);
+            });
         }
         let feed_overlay = gtk::Overlay::builder().child(&scroll).build();
         feed_overlay.add_overlay(&top_btn);
@@ -271,20 +275,7 @@ impl FeedView {
         }
         // Empty landing: the quiet quote + still ensō (svg.ts quoteEmpty).
         if page.notes.is_empty() && replace {
-            let empty = gtk::Box::builder()
-                .orientation(gtk::Orientation::Vertical)
-                .spacing(8)
-                .halign(gtk::Align::Center)
-                .margin_top(48)
-                .margin_bottom(64)
-                .build();
-            let quote = gtk::Label::builder()
-                .css_classes(["serif", "empty-quote"])
-                .build();
-            quote.set_text("“Nothing exists; all is a beginning.”");
-            empty.append(&quote);
-            empty.append(&crate::icons::enso(90));
-            self.list.append(&empty);
+            self.list.append(&empty_landing());
         }
     }
 
@@ -304,20 +295,7 @@ impl FeedView {
         }
         // Empty landing: the quiet quote + still ensō (svg.ts quoteEmpty).
         if page.notes.is_empty() {
-            let empty = gtk::Box::builder()
-                .orientation(gtk::Orientation::Vertical)
-                .spacing(8)
-                .halign(gtk::Align::Center)
-                .margin_top(48)
-                .margin_bottom(64)
-                .build();
-            let quote = gtk::Label::builder()
-                .css_classes(["serif", "empty-quote"])
-                .build();
-            quote.set_text("\u{201c}Nothing exists; all is a beginning.\u{201d}");
-            empty.append(&quote);
-            empty.append(&crate::icons::enso(90));
-            self.list.append(&empty);
+            self.list.append(&empty_landing());
         }
     }
 
@@ -503,4 +481,31 @@ pub fn hooks(view: &Rc<FeedView>) -> crate::composer::WriteHooks {
         undone: Rc::new(move |token| v2.remove_pending(token)),
         committed: Rc::new(move |token| v3.mark_committed(token)),
     }
+}
+
+/// The empty landing: quiet quote, still ensō, and one line of orientation
+/// for the first run (svg.ts quoteEmpty + a whisper of onboarding).
+fn empty_landing() -> gtk::Box {
+    let empty = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .halign(gtk::Align::Center)
+        .margin_top(48)
+        .margin_bottom(64)
+        .build();
+    let quote = gtk::Label::builder()
+        .css_classes(["serif", "empty-quote"])
+        .build();
+    quote.set_text("“Nothing exists; all is a beginning.”");
+    empty.append(&quote);
+    empty.append(&crate::icons::enso(90));
+    let hint = gtk::Label::builder()
+        .label("Notes from people you follow will gather here — search for a npub or name to begin.")
+        .css_classes(["tagline"])
+        .wrap(true)
+        .max_width_chars(44)
+        .justify(gtk::Justification::Center)
+        .build();
+    empty.append(&hint);
+    empty
 }
