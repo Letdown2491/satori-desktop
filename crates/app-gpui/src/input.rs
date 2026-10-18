@@ -90,6 +90,9 @@ pub struct Input {
     last_layout: Option<Layout>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// Single-line horizontal scroll: how far the line is shifted left so
+    /// the caret stays visible ( bunker URIs run long). 0 for multiline.
+    scroll_x: Pixels,
 }
 
 impl Input {
@@ -105,6 +108,7 @@ impl Input {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            scroll_x: px(0.),
         }
     }
 
@@ -257,12 +261,16 @@ impl Input {
             return 0;
         }
         let local_y = position.y - bounds.top();
+        let scroll_x = self.scroll_x;
         for para in &layout.paras {
             let para_bottom = para.y + para.line.size(layout.line_height).height;
             let is_last = para.start + para.len >= self.content.len()
                 && !self.content.ends_with('\n');
             if local_y <= para_bottom || is_last {
-                let local = GpPoint::new(position.x - bounds.left(), local_y - para.y);
+                let local = GpPoint::new(
+                    position.x - bounds.left() + scroll_x,
+                    local_y - para.y,
+                );
                 let col = para
                     .line
                     .closest_index_for_position(local, layout.line_height)
@@ -531,6 +539,8 @@ impl Element for InputElement {
         let content = input.content.clone();
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
+        let multiline = input.multiline;
+        let mut scroll_x = input.scroll_x;
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
@@ -573,7 +583,8 @@ impl Element for InputElement {
                     shape_text,
                     font_size,
                     std::slice::from_ref(&run),
-                    Some(bounds.size.width),
+                    // Single-line never wraps — it scrolls horizontally.
+                    if multiline { Some(bounds.size.width) } else { None },
                     None,
                 )
                 .ok()
@@ -583,6 +594,26 @@ impl Element for InputElement {
                 y += paras.last().unwrap().line.size(line_height).height;
             }
             byte_start += seg.len() + 1;
+        }
+
+        // Single-line: keep the caret inside the visible window by shifting
+        // the line left (multiline wraps instead — para.y grows downward).
+        if !multiline && let Some(para) = paras.first() {
+            let vis = bounds.size.width;
+            let caret = para
+                .line
+                .position_for_index(cursor - para.start, line_height)
+                .map(|p| p.x)
+                .unwrap_or(px(0.));
+            let scroll_max = (para.line.width() - vis).max(px(0.));
+            if caret < scroll_x {
+                scroll_x = (caret - px(24.)).max(px(0.));
+            } else if caret > scroll_x + vis - px(24.) {
+                scroll_x = (caret - vis + px(24.)).min(scroll_max).max(px(0.));
+            }
+            scroll_x = scroll_x.min(scroll_max);
+            let scrolled = scroll_x;
+            self.input.update(cx, |input, _| input.scroll_x = scrolled);
         }
 
         // Selection quads, one per visual row the selection touches.
@@ -612,8 +643,14 @@ impl Element for InputElement {
                     let row_y = para.y + p1.y;
                     selection.push(fill(
                         Bounds::from_corners(
-                            GpPoint::new(bounds.left() + p1.x, bounds.top() + row_y),
-                            GpPoint::new(bounds.left() + p2.x.max(p1.x), bounds.top() + row_y + lh),
+                            GpPoint::new(
+                                bounds.left() - scroll_x + p1.x,
+                                bounds.top() + row_y,
+                            ),
+                            GpPoint::new(
+                                bounds.left() - scroll_x + p2.x.max(p1.x),
+                                bounds.top() + row_y + lh,
+                            ),
                         ),
                         hsla(0.08, 0.5, 0.5, 0.18), // faint vermilion wash
                     ));
@@ -632,7 +669,10 @@ impl Element for InputElement {
                     {
                         cursor_quad = Some(fill(
                             Bounds::new(
-                                GpPoint::new(bounds.left() + pos.x, bounds.top() + para.y + pos.y),
+                                GpPoint::new(
+                                    bounds.left() - scroll_x + pos.x,
+                                    bounds.top() + para.y + pos.y,
+                                ),
                                 size(px(2.), lh),
                             ),
                             rgb(theme::VERMILION),
@@ -669,7 +709,10 @@ impl Element for InputElement {
         for para in &prepaint.paras {
             para.line
                 .paint(
-                    GpPoint::new(bounds.origin.x, bounds.origin.y + para.y),
+                    GpPoint::new(
+                        bounds.origin.x - self.input.read(cx).scroll_x,
+                        bounds.origin.y + para.y,
+                    ),
                     prepaint.line_height,
                     TextAlign::Left,
                     None,

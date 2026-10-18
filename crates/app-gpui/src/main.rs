@@ -11,13 +11,70 @@ mod views;
 
 use std::sync::Arc;
 
-use gpui::{prelude::*, px, App, Application, Bounds, Focusable, WindowBounds, WindowOptions, size};
+use gpui::{
+    div, prelude::*, px, App, Application, Bounds, Context, Entity, Render, WindowBounds,
+    WindowOptions, size,
+};
 use satori_core::manager::Core;
 
 use crate::{
     input::bind_input_keys,
-    views::{composer::bind_composer_keys, shell::Shell},
+    views::{
+        composer::bind_composer_keys, login::{Login, LoginView}, shell::Shell,
+    },
 };
+
+/// The window root: the login doors until a session exists, then the shell.
+/// The swap happens on Login::Approved — the shell focuses itself on first
+/// render (shell.rs focused_once).
+struct Root {
+    core: Arc<Core>,
+    login: Option<Entity<LoginView>>,
+    shell: Option<Entity<Shell>>,
+}
+
+impl Root {
+    fn new(
+        core: Arc<Core>,
+        session: bool,
+        resume_error: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (login, shell) = match session {
+            true => (None, Some(cx.new(|cx| Shell::new(core.clone(), cx)))),
+            false => {
+                // Resume failures surface on the doors — the user must know
+                // why they're back here (login.rs set_resume_error).
+                (Some(cx.new(|cx| LoginView::new(core.clone(), resume_error, cx))), None)
+            }
+        };
+        if let Some(login) = login.clone() {
+            cx.subscribe(&login, |this, _, _: &Login, cx| {
+                this.login = None;
+                this.shell = Some(cx.new(|cx| Shell::new(this.core.clone(), cx)));
+                cx.notify();
+            })
+            .detach();
+        }
+        Self { core, login, shell }
+    }
+}
+
+impl Render for Root {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        if let Some(login) = self.login.clone() {
+            login.into_any_element()
+        } else if let Some(shell) = self.shell.clone() {
+            shell.into_any_element()
+        } else {
+            div().into_any_element()
+        }
+    }
+}
 
 fn main() {
     Application::new().run(|cx: &mut App| {
@@ -28,11 +85,8 @@ fn main() {
         cx.default_global::<media::Cache>();
         let core = Arc::new(Core::new());
         let (session, err) = core.init();
-        if let Some(e) = err {
-            eprintln!("[satori-gpui] resume: {e}");
-        }
-        if session.is_none() {
-            eprintln!("[satori-gpui] no stored session — log in once with the GTK app first");
+        if err.is_some() {
+            eprintln!("[satori-gpui] resume error (surfaced on the login doors)");
         }
 
         // TODO(port): crates/app/src/shell.rs window geometry + state — P1.
@@ -46,12 +100,9 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |window, cx| {
-                let shell = cx.new(|cx| Shell::new(core, cx));
-                // Key events dispatch through the focus tree — focus the shell
-                // so Escape-to-back is live from the first keystroke.
-                window.focus(&shell.read(cx).focus_handle(cx));
-                shell
+            |_window, cx| {
+                let session_ok = session.is_some();
+                cx.new(|cx| Root::new(core, session_ok, err, cx))
             },
         )
         .expect("failed to open Satori window");

@@ -1,6 +1,7 @@
 pub mod composer;
 pub mod content;
 pub mod feed;
+pub mod login;
 pub mod nav;
 pub mod notifications;
 pub mod profile;

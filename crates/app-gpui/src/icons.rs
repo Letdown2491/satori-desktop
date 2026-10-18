@@ -95,3 +95,45 @@ pub fn bubble_icon(color: u32) -> impl IntoElement {
 pub fn bookmark_icon(color: u32) -> impl IntoElement {
     icon(bookmark, color, 17.0)
 }
+
+// The ensō — the brush circle with a gap, drawn as a slightly spiralling
+// arc that tapers toward the tail (the brush lifting off). It opens every
+// session: the waiting mark of the login flow.
+fn enso_glyph(b: &mut PathBuilder, g: &Grid) {
+    let start = 60.0_f32.to_radians();
+    let sweep = 320.0_f32.to_radians();
+    let n = 80;
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        let a = start + sweep * t;
+        // Radius tapers inward toward the tail.
+        let r = 9.2 - 1.1 * t;
+        let pt = g.p(12.0 + r * a.cos(), 12.0 + r * a.sin());
+        if i == 0 {
+            b.move_to(pt);
+        } else {
+            b.line_to(pt);
+        }
+    }
+}
+
+/// The ensō at display size — a brush circle, so the stroke runs heavier
+/// than the hairline glyphs.
+pub fn enso_icon(color: u32, size_px: f32) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let scale = bounds.size.width.min(bounds.size.height) / 24.0;
+            let g = Grid {
+                origin: bounds.origin,
+                scale: f32::from(scale),
+            };
+            let mut b = PathBuilder::stroke(px(2.4 * g.scale));
+            enso_glyph(&mut b, &g);
+            if let Ok(path) = b.build() {
+                window.paint_path(path, rgb(color));
+            }
+        },
+    )
+    .size(px(size_px))
+}

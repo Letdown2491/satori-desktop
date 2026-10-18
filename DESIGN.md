@@ -410,10 +410,20 @@ re-expression of views, not a feature rebuild.
   live: the Input handles characters via the IME path and lets key events
   bubble — shell keybindings fire for text typed in the search field (an "n"
   in "nostr" opened the composer); text surfaces must be guarded in the shell
-  key handler.* Daily driver
+  key handler. Login pane done (both doors, breathing ensō at the web app's
+  3.4s period, `Root` window view swaps doors→shell on approval, Esc cancels
+  a running flow; NIP-46 auth URLs are clickable chips — an improvement over
+  the GTK TODO). Verified live via a sandboxed instance
+  (`XDG_DATA_HOME=/tmp/… satori-gpui` — `data_dir()` already honors XDG, so
+  isolated stores need no new env var; that's the dev-stories seam too).
+  Login-layout gotchas recorded: gpui percent-height children collapse in
+  content-sized chains (give input wrappers a definite height); an
+  unwrapped single-line Input leaks its line width into taffy layout
+  (`overflow_hidden` on the wrapper); Input gained single-line horizontal
+  scroll so long bunker URIs stay on one row.* Daily driver
   flipped to the GPUI binary (user decision, P2.5): `crates/app` stays only as
-  the P3 porting reference + first-login tool (GPUI has no login flow yet —
-  port it in P3); deletion remains the P4 formality.
+  the P3 porting reference (first-login no longer needs it); deletion remains
+  the P4 formality.
 - **P4 — Cutover.** Binary named `satori`; retire `crates/app`; Flatpak/packaging
   update; both themes; reduced-motion equivalent.
 
