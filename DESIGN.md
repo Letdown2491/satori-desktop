@@ -379,8 +379,16 @@ re-expression of views, not a feature rebuild.
   xattr patch, `theme.rs` (sumi-e tokens as constants), `icons.rs` (PathBuilder
   glyphs), feed view with real note cards. *Accept: real session, real feed, scroll,
   like posts a real reaction.*
-- **P1 — Shell & navigation.** Header/sidebar, view switching (feed/thread/profile/
-  settings), Escape-to-back, keyboard habits from `main.rs` ported to gpui actions.
+- **P1 — Shell & navigation (done).** `shell.rs`: header (back/title/settings seal) +
+  nav stack of panes (feed/thread/profile/settings); content views emit `Nav`
+  events, the shell owns the stack. Thread view (anchor + flat replies, reply
+  click opens its own thread), profile view (name/about/follow seal + notes),
+  settings view (relays + media servers, read-only). Escape-to-back via root
+  key-down + focused shell handle. *Accept: click note → thread, Escape →
+  back, all four routes render.* Finding for P2: GPUI's Wayland CSD drag strip
+  overlays our header — in fullscreen, clicks on the top ~30px start a window
+  drag instead of hitting header buttons; interactive header elements need to
+  clear the CSD inset (or `TitlebarOptions::appear` revisited).
 - **P2 — Speak & read deeply.** Composer (undo window, multi-image attach via
   `upload_chain`), thread view + comments, full note-card fidelity (replies, quoted
   events, npub/URL rendering), optimistic bookmark/reply, profiles + avatars (core

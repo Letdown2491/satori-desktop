@@ -21,6 +21,7 @@ pub const ERR: u32 = 0xd9543a;
 #[allow(dead_code)] // full token set ported as the contract
 pub const LIVE: u32 = 0x4caf6a;
 
+#[allow(dead_code)] // P4: selected by theme at startup
 pub fn washi() -> gpui::Hsla {
     rgb(WASHI).into()
 }

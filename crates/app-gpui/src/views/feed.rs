@@ -12,13 +12,14 @@ use std::{
 };
 
 use gpui::{
-    div, list, prelude::*, px, rgb, Context, Entity, FontWeight, ListAlignment, ListState, Render,
-    SharedString, Window,
+    div, list, prelude::*, px, rgb, Context, Entity, EventEmitter, FontWeight, ListAlignment,
+    ListState, Render, SharedString, Window,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
 
 use crate::{icons, theme};
+use super::nav::Nav;
 
 pub struct Feed {
     core: Arc<Core>,
@@ -28,6 +29,8 @@ pub struct Feed {
     status: String,
     list: ListState,
 }
+
+impl EventEmitter<Nav> for Feed {}
 
 impl Feed {
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
@@ -131,7 +134,7 @@ impl Feed {
     }
 }
 
-fn rel_time(secs: u64) -> String {
+pub(crate) fn rel_time(secs: u64) -> String {
     // TODO(port): render/util.ts relative time — P0 minimal form.
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -165,6 +168,10 @@ fn note_card(
     let content = ev.content.clone();
     let engaged = liked.contains(&ev.id.to_string());
     let ev_for_click = ev.clone();
+    let ev_for_open = ev.clone();
+    let ev_for_profile = ev.clone();
+    let handle_open = handle.clone();
+    let handle_profile = handle.clone();
 
     div()
         .w_full()
@@ -181,10 +188,19 @@ fn note_card(
                 .items_baseline()
                 .justify_between()
                 .child(
+                    // Clicking the author opens their profile (nav via shell).
                     div()
+                        .id(SharedString::from(format!("author-{idx}")))
+                        .cursor_pointer()
                         .text_size(px(13.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(theme::INK))
+                        .on_click(move |_, _, cx| {
+                            let ev = ev_for_profile.clone();
+                            handle_profile.update(cx, |_feed, cx| {
+                                cx.emit(Nav::OpenProfile(ev.pubkey));
+                            });
+                        })
                         .child(name),
                 )
                 .child(
@@ -195,10 +211,17 @@ fn note_card(
                 ),
         )
         .child(
+            // Clicking the note body opens its thread (nav via the shell).
             div()
+                .id(SharedString::from(format!("open-{idx}")))
+                .cursor_pointer()
                 .font_family(theme::SERIF)
                 .text_size(px(15.5))
                 .text_color(rgb(theme::INK))
+                .on_click(move |_, _, cx| {
+                    let ev = ev_for_open.clone();
+                    handle_open.update(cx, |_feed, cx| cx.emit(Nav::OpenThread(ev.id)));
+                })
                 .child(content),
         )
         .child(
@@ -232,26 +255,28 @@ impl Render for Feed {
         let empty = self.notes.is_empty();
 
         div()
-            .size_full()
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden()
             .bg(rgb(theme::WASHI))
             .text_color(rgb(theme::INK))
             .font_family(theme::SANS)
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme::MUTED))
-                    .border_b_1()
-                    .border_color(rgb(theme::HAIRLINE))
-                    .child(if status.is_empty() {
-                        "Satori".to_string()
-                    } else {
-                        status
-                    }),
-            )
+            // Relay status line — the shell header carries the title now, so
+            // this only speaks when there's something to say.
+            .when(!status.is_empty(), |d| {
+                d.child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme::MUTED))
+                        .border_b_1()
+                        .border_color(rgb(theme::HAIRLINE))
+                        .child(status),
+                )
+            })
             .child(
                 div().flex_1().min_h_0().child(if empty {
                     div()

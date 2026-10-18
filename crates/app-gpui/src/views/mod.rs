@@ -1,1 +1,6 @@
 pub mod feed;
+pub mod nav;
+pub mod profile;
+pub mod settings;
+pub mod shell;
+pub mod thread;

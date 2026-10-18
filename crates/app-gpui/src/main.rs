@@ -9,10 +9,10 @@ mod views;
 
 use std::sync::Arc;
 
-use gpui::{prelude::*, px, App, Application, Bounds, WindowBounds, WindowOptions, size};
+use gpui::{prelude::*, px, App, Application, Bounds, Focusable, WindowBounds, WindowOptions, size};
 use satori_core::manager::Core;
 
-use crate::views::feed::Feed;
+use crate::views::shell::Shell;
 
 fn main() {
     Application::new().run(|cx: &mut App| {
@@ -36,7 +36,13 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |_, cx| cx.new(|cx| Feed::new(core, cx)),
+            |window, cx| {
+                let shell = cx.new(|cx| Shell::new(core, cx));
+                // Key events dispatch through the focus tree — focus the shell
+                // so Escape-to-back is live from the first keystroke.
+                window.focus(&shell.read(cx).focus_handle(cx));
+                shell
+            },
         )
         .expect("failed to open Satori window");
         cx.activate(true);
