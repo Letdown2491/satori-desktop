@@ -6,15 +6,12 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use gpui::{
-    div, list, prelude::*, px, rgb, Context, Entity, EventEmitter, FontWeight, ListAlignment,
-    ListState, Render, SharedString, Window,
-};
+use gpui::{div, list, prelude::*, px, rgb, Context, EventEmitter, ListAlignment, ListState, Render, Window};
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
 
 use crate::{media, theme};
-use super::{content, feed::rel_time, nav::Nav};
+use super::{content, nav::Nav};
 
 /// One list row: a section label (New / Earlier) or a notification card.
 #[derive(Clone)]
@@ -155,78 +152,6 @@ fn sectioned(prev: u64, notifs: &[Event]) -> Vec<Row> {
         .collect()
 }
 
-fn notif_card(
-    idx: usize,
-    ev: &Event,
-    profiles: &HashMap<String, Profile>,
-    media: &media::Snapshot,
-    quotes: &content::Quotes,
-    handle: Entity<NotificationsView>,
-) -> impl IntoElement {
-    let key = ev.pubkey.to_string();
-    let name = profiles
-        .get(&key)
-        .map(|p| p.display())
-        .unwrap_or_else(|| format!("{}…", &key[..8]));
-    let picture = profiles.get(&key).map(|p| p.picture.clone()).unwrap_or_default();
-    let time = rel_time(ev.created_at.as_secs());
-    let ev_for_open = ev.clone();
-    let ev_for_profile = ev.clone();
-    let handle_open = handle.clone();
-    let handle_profile = handle.clone();
-
-    div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .px_4()
-        .py_3()
-        .border_b_1()
-        .border_color(rgb(theme::HAIRLINE))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(media::avatar(media, &picture, &name, 28.0))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("notif-author-{idx}")))
-                        .cursor_pointer()
-                        .flex_1()
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::INK))
-                        .on_click(move |_, _, cx| {
-                            let ev = ev_for_profile.clone();
-                            handle_profile.update(cx, |_, cx| cx.emit(Nav::OpenProfile(ev.pubkey)));
-                        })
-                        .child(name),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgb(theme::MUTED))
-                        .child(time),
-                ),
-        )
-        .child(
-            div()
-                .id(SharedString::from(format!("notif-open-{idx}")))
-                .cursor_pointer()
-                .on_click(move |_, _, cx| {
-                    let ev = ev_for_open.clone();
-                    handle_open.update(cx, |_, cx| cx.emit(Nav::OpenThread(ev.id)));
-                })
-                .child(content::body(
-                    ev,
-                    &content::Body { media, quotes, profiles },
-                    handle,
-                )),
-        )
-}
-
 impl Render for NotificationsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let handle = cx.entity();
@@ -277,10 +202,9 @@ impl Render for NotificationsView {
                                     .text_color(rgb(theme::MUTED))
                                     .child(text.to_string())
                                     .into_any_element(),
-                                Some(Row::Note(ev)) => notif_card(
-                                    idx, ev, &profiles, &media, &quotes, handle.clone(),
-                                )
-                                .into_any_element(),
+                                Some(Row::Note(ev)) => content::compact_card(
+                                    idx, "notif", ev, &profiles, &media, &quotes, handle.clone(),
+                                ),
                                 None => div().into_any_element(),
                             }
                         })

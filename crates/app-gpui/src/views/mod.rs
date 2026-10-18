@@ -4,6 +4,7 @@ pub mod feed;
 pub mod nav;
 pub mod notifications;
 pub mod profile;
+pub mod search;
 pub mod settings;
 pub mod shell;
 pub mod thread;

@@ -23,6 +23,7 @@ use super::{
     nav::Nav,
     notifications::NotificationsView,
     profile::ProfileView,
+    search::SearchView,
     settings::SettingsView,
     thread::ThreadView,
 };
@@ -32,6 +33,7 @@ pub enum Pane {
     Thread(Entity<ThreadView>),
     Profile(Entity<ProfileView>),
     Notifications(Entity<NotificationsView>),
+    Search(Entity<SearchView>),
     Settings(Entity<SettingsView>),
     Composer(Entity<Composer>),
 }
@@ -62,7 +64,6 @@ impl Shell {
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
-            Nav::OpenNotifications => this.open_notifications(cx),
             Nav::Pop => this.back(cx),
         })
         .detach();
@@ -86,7 +87,6 @@ impl Shell {
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
-            Nav::OpenNotifications => this.open_notifications(cx),
             Nav::Pop => this.back(cx),
         })
         .detach();
@@ -129,6 +129,13 @@ impl Shell {
         self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Notifications(view));
         self.notif_unread = false;
+        cx.notify();
+    }
+
+    fn open_search(&mut self, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| SearchView::new(self.core.clone(), cx));
+        self.subscribe_nav(&view, cx);
+        self.stack.push(Pane::Search(view));
         cx.notify();
     }
 
@@ -207,6 +214,7 @@ impl Shell {
             Some(Pane::Thread(_)) => "Thread",
             Some(Pane::Profile(_)) => "Profile",
             Some(Pane::Notifications(_)) => "Notifications",
+            Some(Pane::Search(_)) => "Search",
             Some(Pane::Settings(_)) => "Settings",
             Some(Pane::Composer(_)) => "Compose",
             None => "Satori",
@@ -305,9 +313,16 @@ impl Render for Shell {
                 }
                 // TODO(port): crates/app/src/main.rs — "N composes" (app.compose
                 // accel). GTK's TextViews consume plain keys, so the accel only
-                // fires outside text; here the guard is "not already composing"
-                // (an open composer is the only text surface).
-                let composing = matches!(shell.stack.last(), Some(Pane::Composer(_)));
+                // fires outside text; here the guard is "a text surface is
+                // open". The Input handles characters via the IME path and
+                // lets the key events bubble, so anything typed into the
+                // search field would also fire these bindings (an "n" in
+                // "nostr" opened the composer) — the composer guard is its
+                // own pane, the search field needs the same.
+                let composing = matches!(
+                    shell.stack.last(),
+                    Some(Pane::Composer(_)) | Some(Pane::Search(_))
+                );
                 if !ev.keystroke.modifiers.modified() && !composing {
                     if ev.keystroke.key == "n" {
                         shell.open_composer(None, cx);
@@ -317,6 +332,11 @@ impl Render for Shell {
                     // the reliable way in.
                     if ev.keystroke.key == "u" {
                         shell.open_notifications(cx);
+                    }
+                    // TODO(port): crates/app/src/main.rs — "/" opens search
+                    // (app.goto-search accel).
+                    if ev.keystroke.key == "/" {
+                        shell.open_search(cx);
                     }
                 }
             }))
@@ -369,6 +389,7 @@ impl Render for Shell {
                 Pane::Thread(view) => view.clone().into_any_element(),
                 Pane::Profile(view) => view.clone().into_any_element(),
                 Pane::Notifications(view) => view.clone().into_any_element(),
+                Pane::Search(view) => view.clone().into_any_element(),
                 Pane::Settings(view) => view.clone().into_any_element(),
                 Pane::Composer(view) => view.clone().into_any_element(),
             })

@@ -404,7 +404,13 @@ re-expression of views, not a feature rebuild.
   (compact cards, mark-seen on open, New/Earlier high-water split, 90s bell-dot
   poll, `u` key opens — the header seals stay unclickable when CSD-tiled, so
   the keyboard is the reliable way in); non-text/empty-content events filtered
-  to the slice-1 spec (reactions land with their milestones).* Daily driver
+  to the slice-1 spec (reactions land with their milestones). Search pane done
+  (single-line Input, Enter or the seal runs, compact-card results, stale
+  answers dropped by generation counter, `/` key opens). GPUI gotcha found
+  live: the Input handles characters via the IME path and lets key events
+  bubble — shell keybindings fire for text typed in the search field (an "n"
+  in "nostr" opened the composer); text surfaces must be guarded in the shell
+  key handler.* Daily driver
   flipped to the GPUI binary (user decision, P2.5): `crates/app` stays only as
   the P3 porting reference + first-login tool (GPUI has no login flow yet —
   port it in P3); deletion remains the P4 formality.
