@@ -2,6 +2,7 @@ pub mod composer;
 pub mod content;
 pub mod feed;
 pub mod nav;
+pub mod notifications;
 pub mod profile;
 pub mod settings;
 pub mod shell;

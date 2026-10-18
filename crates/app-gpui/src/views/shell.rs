@@ -14,13 +14,14 @@ use gpui::{
     ObjectFit, Render, Window,
 };
 use nostr::prelude::*;
-use satori_core::manager::Core;
+use satori_core::manager::{Core, FeedEvent};
 
 use crate::{media, theme};
 use super::{
     composer::{Draft, Composer},
     feed::Feed,
     nav::Nav,
+    notifications::NotificationsView,
     profile::ProfileView,
     settings::SettingsView,
     thread::ThreadView,
@@ -30,6 +31,7 @@ pub enum Pane {
     Feed(Entity<Feed>),
     Thread(Entity<ThreadView>),
     Profile(Entity<ProfileView>),
+    Notifications(Entity<NotificationsView>),
     Settings(Entity<SettingsView>),
     Composer(Entity<Composer>),
 }
@@ -46,6 +48,9 @@ pub struct Shell {
     /// The lightbox overlay — full-screen image viewer over any pane
     /// (lightbox.rs: Esc/‹/› keys, click closes).
     lightbox: Option<(Vec<String>, usize)>,
+    /// Bell dot: anything newer than the read-state high-water? Polled every
+    /// 90s like the GTK shell (poll_notif); cleared when the pane opens.
+    notif_unread: bool,
     stack: Vec<Pane>,
 }
 
@@ -57,6 +62,7 @@ impl Shell {
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
+            Nav::OpenNotifications => this.open_notifications(cx),
             Nav::Pop => this.back(cx),
         })
         .detach();
@@ -66,9 +72,11 @@ impl Shell {
             focused_once: false,
             refocus: false,
             lightbox: None,
+            notif_unread: false,
             stack: vec![],
         };
         shell.stack.push(Pane::Feed(feed));
+        shell.watch_notif(cx);
         shell
     }
 
@@ -78,6 +86,7 @@ impl Shell {
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
+            Nav::OpenNotifications => this.open_notifications(cx),
             Nav::Pop => this.back(cx),
         })
         .detach();
@@ -110,6 +119,51 @@ impl Shell {
         let view = cx.new(|cx| SettingsView::new(self.core.clone(), cx));
         self.stack.push(Pane::Settings(view));
         cx.notify();
+    }
+
+    /// The notifications pane. Opening marks seen (the view constructor does
+    /// the read-state advance); the dot goes quiet at once and the next poll
+    /// confirms.
+    fn open_notifications(&mut self, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| NotificationsView::new(self.core.clone(), cx));
+        self.subscribe_nav(&view, cx);
+        self.stack.push(Pane::Notifications(view));
+        self.notif_unread = false;
+        cx.notify();
+    }
+
+    /// Bell-dot poll, every 90s (shell.rs poll_notif): one notifications()
+    /// drain, kept until the NotifDot verdict.
+    fn watch_notif(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(90))
+                    .await;
+                let _ = this.update(cx, |shell, cx| shell.check_notif_dot(cx));
+            }
+        })
+        .detach();
+    }
+
+    fn check_notif_dot(&mut self, cx: &mut Context<Self>) {
+        let mut rx = self.core.notifications();
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    FeedEvent::NotifDot(unread) => {
+                        let _ = this.update(cx, |shell, cx| {
+                            shell.notif_unread = unread;
+                            cx.notify();
+                        });
+                        break;
+                    }
+                    FeedEvent::Failed(_) => break,
+                    _ => {}
+                }
+            }
+        })
+        .detach();
     }
 
     /// The lightbox: show `urls[idx]` full-screen (lightbox.rs open). Every
@@ -152,6 +206,7 @@ impl Shell {
             Some(Pane::Feed(_)) => "Feed",
             Some(Pane::Thread(_)) => "Thread",
             Some(Pane::Profile(_)) => "Profile",
+            Some(Pane::Notifications(_)) => "Notifications",
             Some(Pane::Settings(_)) => "Settings",
             Some(Pane::Composer(_)) => "Compose",
             None => "Satori",
@@ -180,6 +235,33 @@ impl Shell {
             .text_color(rgb(theme::VERMILION))
             .on_click(cx.listener(|shell, _, _, cx| shell.open_composer(None, cx)))
             .child("Compose")
+    }
+
+    /// The notifications seal with its bell dot (layout.ts notifBell — no
+    /// counts, no badges, just a dot).
+    fn notif_seal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("open-notifications")
+            .cursor_pointer()
+            .flex()
+            .items_center()
+            .gap_1()
+            .p_1()
+            .on_click(cx.listener(|shell, _, _, cx| shell.open_notifications(cx)))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(rgb(theme::MUTED))
+                    .child("Notifs"),
+            )
+            .when(self.notif_unread, |d| {
+                d.child(
+                    div()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(rgb(theme::VERMILION)),
+                )
+            })
     }
 }
 
@@ -225,11 +307,17 @@ impl Render for Shell {
                 // accel). GTK's TextViews consume plain keys, so the accel only
                 // fires outside text; here the guard is "not already composing"
                 // (an open composer is the only text surface).
-                if ev.keystroke.key == "n"
-                    && !ev.keystroke.modifiers.modified()
-                    && !matches!(shell.stack.last(), Some(Pane::Composer(_)))
-                {
-                    shell.open_composer(None, cx);
+                let composing = matches!(shell.stack.last(), Some(Pane::Composer(_)));
+                if !ev.keystroke.modifiers.modified() && !composing {
+                    if ev.keystroke.key == "n" {
+                        shell.open_composer(None, cx);
+                    }
+                    // No GTK accel — the header seals are unclickable when the
+                    // window is CSD-tiled (§9.1 finding), so the keyboard is
+                    // the reliable way in.
+                    if ev.keystroke.key == "u" {
+                        shell.open_notifications(cx);
+                    }
                 }
             }))
             .size_full()
@@ -271,7 +359,8 @@ impl Render for Shell {
                             .child(title),
                     )
                     .when(!matches!(pane, Pane::Composer(_)), |h| {
-                        h.child(self.compose_seal(cx).into_any_element())
+                        h.child(self.notif_seal(cx).into_any_element())
+                            .child(self.compose_seal(cx).into_any_element())
                     })
                     .child(self.gear(cx).into_any_element()),
             )
@@ -279,6 +368,7 @@ impl Render for Shell {
                 Pane::Feed(view) => view.clone().into_any_element(),
                 Pane::Thread(view) => view.clone().into_any_element(),
                 Pane::Profile(view) => view.clone().into_any_element(),
+                Pane::Notifications(view) => view.clone().into_any_element(),
                 Pane::Settings(view) => view.clone().into_any_element(),
                 Pane::Composer(view) => view.clone().into_any_element(),
             })

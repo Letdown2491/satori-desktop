@@ -400,7 +400,14 @@ re-expression of views, not a feature rebuild.
   left to the user.* Mid-paragraph links/mentions stay plain text until P3
   (GPUI can't style spans in a wrapped block).
 - **P3 — Everything else.** Settings panes, notifications, search, rich cards from
-  the manifest registry, media proxying.
+  the manifest registry, media proxying. *Progress: notifications pane done
+  (compact cards, mark-seen on open, New/Earlier high-water split, 90s bell-dot
+  poll, `u` key opens — the header seals stay unclickable when CSD-tiled, so
+  the keyboard is the reliable way in); non-text/empty-content events filtered
+  to the slice-1 spec (reactions land with their milestones).* Daily driver
+  flipped to the GPUI binary (user decision, P2.5): `crates/app` stays only as
+  the P3 porting reference + first-login tool (GPUI has no login flow yet —
+  port it in P3); deletion remains the P4 formality.
 - **P4 — Cutover.** Binary named `satori`; retire `crates/app`; Flatpak/packaging
   update; both themes; reduced-motion equivalent.
 
