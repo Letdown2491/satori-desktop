@@ -3,6 +3,13 @@
 //! SVGs in a gresource so GTK recolors them from our CSS (`color:` on .act,
 //! .engaged → vermilion) exactly like the web's currentColor. Plus the
 //! procedural ensō generated at build time (build.rs).
+//!
+//! The SVGs follow GTK's symbolic icon format (docs.gtk.org/gtk4/icon-format.html):
+//! GTK ≥ 4.10 parses them with its own renderer, which IGNORES fill/stroke
+//! paint attributes — paint comes from the `class` attribute instead
+//! (`foreground-stroke` + `transparent-fill`; stroke-width/linecap/linejoin
+//! are honored as plain attributes). Only <path>/<circle>/<rect> are
+//! supported, so line/polyline/polygon are pre-converted to paths.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -48,15 +55,6 @@ pub fn action_button(name: &str, tooltip: &str) -> gtk::Button {
         .child(&icon(name))
         .css_classes(["flat", "act"])
         .tooltip_text(tooltip)
-        .build()
-}
-
-/// Filled variant (active like/bookmark states).
-#[allow(dead_code)]
-pub fn icon_filled(name: &str) -> gtk::Image {
-    gtk::Image::builder()
-        .icon_name(format!("satori-{name}-filled-symbolic"))
-        .pixel_size(18)
         .build()
 }
 

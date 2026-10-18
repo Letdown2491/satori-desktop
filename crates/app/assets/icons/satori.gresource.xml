@@ -4,7 +4,6 @@
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-alert-symbolic.svg</file>
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-back-symbolic.svg</file>
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-bell-symbolic.svg</file>
-    <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-bookmark-filled-symbolic.svg</file>
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-bookmark-symbolic.svg</file>
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-calendar-symbolic.svg</file>
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-clock-symbolic.svg</file>
@@ -14,7 +13,6 @@
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-globe-symbolic.svg</file>
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-home-symbolic.svg</file>
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-image-symbolic.svg</file>
-    <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-like-filled-symbolic.svg</file>
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-like-symbolic.svg</file>
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-lock-symbolic.svg</file>
     <file compressed="false" preprocess="xml-stripblanks">scalable/actions/satori-map-pin-symbolic.svg</file>

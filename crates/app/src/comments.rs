@@ -315,7 +315,7 @@ fn comment_row(
         .tooltip_text("React")
         .build();
     let liked = ctx.core.is_liked(&ev.id);
-    like.set_child(Some(&crate::icons::icon(if liked { "like-filled" } else { "like" })));
+    like.set_child(Some(&crate::icons::icon("like")));
     if liked {
         like.add_css_class("engaged");
     }
@@ -328,7 +328,6 @@ fn comment_row(
             if ctx.core.is_liked(&ev.id) {
                 return;
             }
-            like.set_child(Some(&crate::icons::icon("like-filled")));
             like.add_css_class("engaged");
             let ctx2 = ctx.clone();
             let like2 = like.clone();

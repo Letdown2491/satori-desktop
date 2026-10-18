@@ -411,7 +411,7 @@ pub fn actions_row(
         .tooltip_text("React")
         .build();
     let liked = ctx.core.is_liked(&event.id);
-    like.set_child(Some(&crate::icons::icon(if liked { "like-filled" } else { "like" })));
+    like.set_child(Some(&crate::icons::icon("like")));
     if liked {
         like.add_css_class("engaged");
     }
@@ -424,7 +424,8 @@ pub fn actions_row(
             if ctx_btn.core.is_liked(&event_btn.id) {
                 return; // unlike lands with the private-list work (M3)
             }
-            like.set_child(Some(&crate::icons::icon("like-filled")));
+            crate::motion::press_pulse(&like);
+            like.set_child(Some(&crate::icons::icon("like")));
             like.add_css_class("engaged");
             let ctx2 = ctx_btn.clone();
             let like2 = like.clone();
@@ -450,6 +451,7 @@ pub fn actions_row(
             if ctx_btn.core.is_bookmarked(&event_btn.id) {
                 return;
             }
+            crate::motion::press_pulse(&bookmark);
             bookmark.add_css_class("engaged");
             let ctx2 = ctx_btn.clone();
             let bookmark2 = bookmark.clone();

@@ -1,2 +1,2 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#2e3436" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="19 12 12 5 5 12"/></svg>
+<?xml version='1.0' encoding='UTF-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#2e3436" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19 L12 5" class="foreground-stroke transparent-fill" fill="none" stroke="#2e3436" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" /><path d="M19 12 L12 5 L5 12" class="foreground-stroke transparent-fill" fill="none" stroke="#2e3436" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" /></svg>
