@@ -1,18 +1,17 @@
-//! The composer: text, multi-image attach, undo window.
+//! The composer: text, multi-image attach, undo window, draft persistence.
 //!
 //! TODO(port): crates/app/src/composer.rs (Adw dialog) — P2. Same write path:
 //! attachments upload through `blossom_upload` one by one, then the note goes
 //! out via `post_note` (text/reply) or `post_picture` (kind 20 with imetas),
-//! and the undo window surfaces as an inline row while Held. Draft persistence
-//! (top-level notes only in the GTK app) and reply+image posts (core's
-//! `post_picture` takes no reply target — parity with the GTK composer) are
-//! later P2 items.
+//! and the undo window surfaces as an inline row while Held. Draft semantics
+//! match the GTK composer: a top-level compose restores whatever was stashed,
+//! and closing with un-published text stashes it again (replies get neither).
 
 use std::sync::Arc;
 
 use gpui::{
     actions, div, prelude::*, px, rgb, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    Render, Window,
+    Global, Render, Window,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, PublishEvent};
@@ -27,6 +26,16 @@ actions!(composer, [Publish]);
 /// bubbles up the focus path to this view.
 pub fn bind_composer_keys(cx: &mut gpui::App) {
     cx.bind_keys([gpui::KeyBinding::new("ctrl-enter", Publish, Some("Input"))]);
+}
+
+/// The stashed top-level draft (composer.rs's DRAFT thread-local, session
+/// scope like the web app's note.ts saveDraft — one draft at a time).
+#[derive(Default)]
+pub struct Draft(pub Option<String>);
+impl Global for Draft {}
+
+fn draft_take(cx: &mut App) -> Option<String> {
+    cx.default_global::<Draft>().0.take()
 }
 
 struct Attachment {
@@ -61,6 +70,13 @@ impl Composer {
             }
         });
         let focus = input.read(cx).focus_handle(cx);
+        // Draft restore: a top-level compose reopens with whatever was typed
+        // and closed before (composer.rs:114 — the take spends the stash).
+        if reply_to.is_none()
+            && let Some(text) = draft_take(cx).filter(|t| !t.trim().is_empty())
+        {
+            input.update(cx, |i, cx| i.set_text(&text, cx));
+        }
         Self {
             core,
             input,
@@ -136,6 +152,12 @@ impl Composer {
         self.posting = true;
         self.status.clear();
         let reply = self.reply_to.clone();
+        // A top-level publish consumes the buffer: the draft is spent
+        // (composer.rs:476). If the send fails, `draft_text` re-stashes on
+        // close.
+        if reply.is_none() {
+            cx.default_global::<Draft>().0 = None;
+        }
         let core = self.core.clone();
         let atts: Vec<(String, Vec<u8>)> = self
             .attachments
@@ -228,6 +250,17 @@ impl Composer {
             self.core.undo(token);
         }
         cx.notify();
+    }
+
+    /// Stash candidate, GTK close-handler semantics (composer.rs:509): the
+    /// whole buffer of a top-level compose that never sent — possibly empty,
+    /// so closing empty clears a stale draft. None = don't touch the draft
+    /// (replies, a send in flight, an undo window pending).
+    pub fn draft_candidate(&self, cx: &App) -> Option<String> {
+        if self.reply_to.is_some() || self.posting || self.undo.is_some() {
+            return None;
+        }
+        Some(self.input.read(cx).content.trim().to_string())
     }
 }
 

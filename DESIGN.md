@@ -389,10 +389,16 @@ re-expression of views, not a feature rebuild.
   overlays our header — in fullscreen, clicks on the top ~30px start a window
   drag instead of hitting header buttons; interactive header elements need to
   clear the CSD inset (or `TitlebarOptions::appear` revisited).
-- **P2 — Speak & read deeply.** Composer (undo window, multi-image attach via
-  `upload_chain`), thread view + comments, full note-card fidelity (replies, quoted
-  events, npub/URL rendering), optimistic bookmark/reply, profiles + avatars (core
-  image fetch → gpui `img`).
+- **P2 — Speak & read deeply (done).** Composer (undo window as inline row,
+  multi-image attach via `upload_chain`, session draft stashed/restored on
+  close/reopen), thread view + NIP-10 nested comments (last-`e` parent, depth
+  ≤ 3, flattened pre-order), note-card fidelity (imeta and standalone image
+  links as picture cards, npub mentions, note/nevent quote embeds via
+  `event_by_id_dech32`), optimistic bookmark/reply, avatars (core image fetch →
+  gpui `img`). *Accept: composer/undo round-trip, bookmark glyph, avatars,
+  rich bodies, quote embed, draft restore verified live; publish broadcast
+  left to the user.* Mid-paragraph links/mentions stay plain text until P3
+  (GPUI can't style spans in a wrapped block).
 - **P3 — Everything else.** Settings panes, notifications, search, rich cards from
   the manifest registry, media proxying.
 - **P4 — Cutover.** Binary named `satori`; retire `crates/app`; Flatpak/packaging

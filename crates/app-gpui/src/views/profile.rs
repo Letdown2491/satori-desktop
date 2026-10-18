@@ -11,10 +11,10 @@ use gpui::{
     ListState, Render, SharedString, Window, Image,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, Profile};
+use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
 
 use crate::{media, theme};
-use super::nav::Nav;
+use super::{content, nav::Nav};
 
 pub struct ProfileView {
     core: Arc<Core>,
@@ -23,6 +23,7 @@ pub struct ProfileView {
     notes: Vec<Event>,
     following: bool,
     images: HashMap<String, Arc<Image>>,
+    quotes: content::Quotes,
     status: String,
     list: ListState,
 }
@@ -37,6 +38,7 @@ impl ProfileView {
             profile: None,
             notes: vec![],
             images: HashMap::new(),
+            quotes: HashMap::new(),
             status: "loading…".into(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             core,
@@ -46,7 +48,7 @@ impl ProfileView {
         view
     }
 
-    fn pump(&self, mut rx: satori_core::manager::FeedRx, cx: &mut Context<Self>) {
+    fn pump(&self, mut rx: FeedRx, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.recv().await {
                 let _ = this.update(cx, |this, cx| this.on_event(ev, cx));
@@ -66,13 +68,17 @@ impl ProfileView {
                 if let Some(p) = self.profile.clone() {
                     self.want_avatar(&p, cx);
                 }
-                // TODO(port): profile.rs renders all visible kinds; P1 is text
-                // notes only.
+                // TODO(port): profile.rs renders all visible kinds; the GPUI
+                // port covers text + picture notes (P2).
                 self.notes = page
                     .notes
                     .into_iter()
-                    .filter(|n| n.kind == Kind::TextNote)
+                    .filter(|n| n.kind == Kind::TextNote || n.kind == Kind::Custom(20))
                     .collect();
+                for note in self.notes.clone() {
+                    self.want_media(&note, cx);
+                    self.want_quotes(&note, cx);
+                }
                 self.status.clear();
             }
             FeedEvent::Failed(e) => self.status = format!("… {e}"),
@@ -95,6 +101,57 @@ impl ProfileView {
             cx.notify();
         });
     }
+
+    /// Queue core fetches for every media URL in a note (avatars share the
+    /// same map; URLs are unique so there's no clash).
+    fn want_media(&mut self, note: &Event, cx: &mut Context<Self>) {
+        for url in content::media_urls(note) {
+            if self.images.contains_key(&url) {
+                continue;
+            }
+            media::fetch_png(&self.core, url, cx, |this, url, png, cx| {
+                if let Some(png) = png {
+                    this.images.insert(url, png);
+                }
+                cx.notify();
+            });
+        }
+    }
+
+    /// One quote-reference resolution, routed off `on_event` (its `Loaded`
+    /// arm is the profile page itself).
+    fn pump_quote(&self, bech: String, mut rx: FeedRx, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                if let FeedEvent::One(Some(target), prof) = ev {
+                    let _ = this.update(cx, |this, cx| {
+                        let key = target.pubkey.to_string();
+                        let name = prof
+                            .as_ref()
+                            .map(|p| p.display())
+                            .unwrap_or_else(|| format!("{}…", &key[..8]));
+                        this.quotes
+                            .insert(bech.clone(), Some(content::Embed { event: target, name }));
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Queue event fetches for standalone note/nevent references (embeds).
+    fn want_quotes(&mut self, note: &Event, cx: &mut Context<Self>) {
+        for bech in content::note_refs(note) {
+            if self.quotes.contains_key(&bech) {
+                continue;
+            }
+            // Reserve the key so we don't re-request while loading.
+            self.quotes.insert(bech.clone(), None);
+            let rx = self.core.event_by_id_dech32(&bech);
+            self.pump_quote(bech, rx, cx);
+        }
+    }
 }
 
 impl Render for ProfileView {
@@ -111,6 +168,7 @@ impl Render for ProfileView {
         let empty = notes.is_empty();
         let following = self.following;
         let images = self.images.clone();
+        let quotes = self.quotes.clone();
         let handle = cx.entity();
         let follow_handle = handle.clone();
 
@@ -208,9 +266,8 @@ impl Render for ProfileView {
                     match notes.get(idx) {
                         Some(ev) => {
                             let time = super::feed::rel_time(ev.created_at.as_secs());
-                            let content = ev.content.clone();
                             let ev_for_click = ev.clone();
-                            let note_handle = handle.clone();
+                            let body_handle = handle.clone();
                             div()
                                 .id(SharedString::from(format!("note-{idx}")))
                                 .cursor_pointer()
@@ -232,16 +289,13 @@ impl Render for ProfileView {
                                     div()
                                         .id(SharedString::from(format!("note-open-{idx}")))
                                         .cursor_pointer()
-                                        .font_family(theme::SERIF)
-                                        .text_size(px(14.5))
-                                        .text_color(rgb(theme::INK))
                                         .on_click(move |_, _, cx| {
                                             let ev = ev_for_click.clone();
-                                            note_handle.update(cx, |_, cx| {
+                                            body_handle.update(cx, |_, cx| {
                                                 cx.emit(Nav::OpenThread(ev.id))
                                             });
                                         })
-                                        .child(content),
+                                        .child(content::body(ev, &images, &quotes, handle.clone())),
                                 )
                                 .into_any_element()
                         }

@@ -17,7 +17,14 @@ use nostr::prelude::*;
 use satori_core::manager::Core;
 
 use crate::theme;
-use super::{composer::Composer, feed::Feed, nav::Nav, profile::ProfileView, settings::SettingsView, thread::ThreadView};
+use super::{
+    composer::{Draft, Composer},
+    feed::Feed,
+    nav::Nav,
+    profile::ProfileView,
+    settings::SettingsView,
+    thread::ThreadView,
+};
 
 pub enum Pane {
     Feed(Entity<Feed>),
@@ -30,6 +37,12 @@ pub enum Pane {
 pub struct Shell {
     core: Arc<Core>,
     focus: FocusHandle,
+    /// First render claims keyboard focus for the shell handle — without it
+    /// nothing is focused and the N/escape shortcuts are dead until a click.
+    focused_once: bool,
+    /// Set when a pane was popped: the popped pane's Input may still hold
+    /// window focus, dead-keying the shell until the next render refocuses.
+    refocus: bool,
     stack: Vec<Pane>,
 }
 
@@ -46,6 +59,8 @@ impl Shell {
         let mut shell = Self {
             core,
             focus: cx.focus_handle(),
+            focused_once: false,
+            refocus: false,
             stack: vec![],
         };
         shell.stack.push(Pane::Feed(feed));
@@ -93,7 +108,15 @@ impl Shell {
 
     fn back(&mut self, cx: &mut Context<Self>) {
         if self.stack.len() > 1 {
+            // Closing a composer stashes the top-level buffer (composer.rs:288);
+            // reply composers leave the draft untouched (`draft_candidate`).
+            if let Some(Pane::Composer(c)) = self.stack.last()
+                && let Some(text) = c.read(cx).draft_candidate(cx)
+            {
+                cx.default_global::<Draft>().0 = Some(text);
+            }
             self.stack.pop();
+            self.refocus = true;
             cx.notify();
         }
     }
@@ -141,10 +164,15 @@ impl Focusable for Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let depth = self.stack.len();
         let title = self.title();
         let pane = self.stack.last().unwrap();
+        if !self.focused_once || self.refocus {
+            self.focused_once = true;
+            self.refocus = false;
+            window.focus(&self.focus);
+        }
 
         div()
             .track_focus(&self.focus)

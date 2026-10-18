@@ -17,7 +17,6 @@ use gpui::{
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile, PublishEvent};
-use satori_core::nip::imeta;
 
 use crate::{icons, media, theme};
 use super::{content, nav::Nav};
@@ -29,6 +28,7 @@ pub struct Feed {
     liked: HashSet<String>,
     bookmarked: HashSet<String>,
     images: HashMap<String, Arc<Image>>,
+    quotes: content::Quotes,
     status: String,
     list: ListState,
 }
@@ -44,6 +44,7 @@ impl Feed {
             liked: HashSet::new(),
             bookmarked: HashSet::new(),
             images: HashMap::new(),
+            quotes: HashMap::new(),
             status: "connecting to the relays…".into(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
@@ -98,6 +99,7 @@ impl Feed {
                 continue;
             }
             self.want_images(&note, cx);
+            self.want_quotes(&note, cx);
             self.notes.push(note);
         }
         self.notes.sort_by_key(|n| std::cmp::Reverse(n.created_at));
@@ -125,11 +127,10 @@ impl Feed {
         }
     }
 
-    /// Queue core fetches for every imeta URL we haven't got yet.
+    /// Queue core fetches for every media URL we haven't got yet.
     fn want_images(&mut self, note: &Event, cx: &mut Context<Self>) {
-        for m in imeta::parse(note) {
-            let url = m.url;
-            if url.is_empty() || self.images.contains_key(&url) {
+        for url in content::media_urls(note) {
+            if self.images.contains_key(&url) {
                 continue;
             }
             media::fetch_png(&self.core, url, cx, |this, url, png, cx| {
@@ -138,6 +139,42 @@ impl Feed {
                 }
                 cx.notify();
             });
+        }
+    }
+
+    /// One quote-reference resolution, routed off `on_event` (quote replies
+    /// must not touch the feed list).
+    fn pump_quote(&self, bech: String, mut rx: FeedRx, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                if let FeedEvent::One(Some(target), prof) = ev {
+                    let _ = this.update(cx, |this, cx| {
+                        let key = target.pubkey.to_string();
+                        let name = prof
+                            .as_ref()
+                            .map(|p| p.display())
+                            .or_else(|| this.profiles.get(&key).map(|p| p.display()))
+                            .unwrap_or_else(|| format!("{}…", &key[..8]));
+                        this.quotes
+                            .insert(bech.clone(), Some(content::Embed { event: target, name }));
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Queue event fetches for standalone note/nevent references (embeds).
+    fn want_quotes(&mut self, note: &Event, cx: &mut Context<Self>) {
+        for bech in content::note_refs(note) {
+            if self.quotes.contains_key(&bech) {
+                continue;
+            }
+            // Reserve the key so we don't re-request while loading.
+            self.quotes.insert(bech.clone(), None);
+            let rx = self.core.event_by_id_dech32(&bech);
+            self.pump_quote(bech, rx, cx);
         }
     }
 
@@ -207,6 +244,9 @@ pub(crate) fn rel_time(secs: u64) -> String {
     }
 }
 
+// The card takes the full render-time snapshot — one struct would hide the
+// shape, and GPUI's no-entity-reads-during-render rule makes them explicit.
+#[allow(clippy::too_many_arguments)]
 fn note_card(
     idx: usize,
     ev: &Event,
@@ -214,6 +254,7 @@ fn note_card(
     liked: &HashSet<String>,
     bookmarked: &HashSet<String>,
     images: &HashMap<String, Arc<Image>>,
+    quotes: &content::Quotes,
     handle: Entity<Feed>,
 ) -> impl IntoElement {
     // TODO(port): note_card.rs layout — P0 minimal card; name fallback chain
@@ -284,7 +325,7 @@ fn note_card(
                     let ev = ev_for_open.clone();
                     handle_open.update(cx, |_feed, cx| cx.emit(Nav::OpenThread(ev.id)));
                 })
-                .child(content::body(ev, images, handle)),
+                .child(content::body(ev, images, quotes, handle)),
         )
         .child(
             div()
@@ -368,10 +409,12 @@ impl Render for Feed {
                     let liked = self.liked.clone();
                     let bookmarked = self.bookmarked.clone();
                     let images = self.images.clone();
+                    let quotes = self.quotes.clone();
                     list(self.list.clone(), move |idx, _w, _cx| {
                         match notes.get(idx) {
                             Some(ev) => note_card(
-                                idx, ev, &profiles, &liked, &bookmarked, &images, handle.clone(),
+                                idx, ev, &profiles, &liked, &bookmarked, &images, &quotes,
+                                handle.clone(),
                             )
                             .into_any_element(),
                             None => div().into_any_element(),
