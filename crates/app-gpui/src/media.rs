@@ -40,7 +40,7 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn new(cx: &gpui::App) -> Self {
-        let cache = cx.global::<Cache>().0.borrow();
+        let cache = cx.global::<Cache>().map.borrow();
         Self {
             ready: cache
                 .iter()
@@ -68,6 +68,12 @@ impl Snapshot {
     }
 }
 
+/// The cache's render-visible epoch — views compare it to decide whether
+/// their cached media snapshot is stale.
+pub fn generation(cx: &gpui::App) -> u64 {
+    cx.global::<Cache>().epoch.get()
+}
+
 type Cb = Box<dyn FnOnce(Option<CachedImage>, &mut gpui::AsyncApp)>;
 
 enum Entry {
@@ -87,9 +93,62 @@ impl Entry {
 }
 
 /// Shared decoded-media cache (media_cache.rs's mem layer).
-#[derive(Default)]
-pub struct Cache(std::cell::RefCell<HashMap<String, Entry>>);
+/// The decoded-image cache, bounded: every decoded RGBA stays in RAM until
+/// evicted, and decoded pixels are enormous (a 4000x3000 photo is ~48MB), so
+/// the cache evicts oldest-first past an entry and byte budget (the disk
+/// cache underneath is the real reservoir — eviction only costs a re-decode
+/// if the picture scrolls back). `epoch` bumps on every render-visible
+/// change so views can cache their snapshots instead of re-reading the
+/// whole cache per frame.
+pub struct Cache {
+    map: std::cell::RefCell<HashMap<String, Entry>>,
+    order: std::cell::RefCell<std::collections::VecDeque<String>>,
+    bytes: std::cell::Cell<u64>,
+    epoch: std::cell::Cell<u64>,
+}
+impl Default for Cache {
+    fn default() -> Self {
+        Self {
+            map: std::cell::RefCell::new(HashMap::new()),
+            order: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            bytes: std::cell::Cell::new(0),
+            epoch: std::cell::Cell::new(0),
+        }
+    }
+}
 impl gpui::Global for Cache {}
+
+/// Decoded-entry caps: 256 images / 768MB of decoded RGBA.
+const CACHE_MAX_ENTRIES: usize = 256;
+const CACHE_MAX_BYTES: u64 = 768 * 1024 * 1024;
+
+impl Cache {
+    /// Oldest-first eviction past the caps. Loading entries rotate to the
+    /// back (they're transient); Ready/NotMedia drop. Bounded passes.
+    fn evict(&self) {
+        for _ in 0..self.order.borrow().len() * 2 {
+            let over =
+                self.map.borrow().len() > CACHE_MAX_ENTRIES || self.bytes.get() > CACHE_MAX_BYTES;
+            if !over {
+                return;
+            }
+            let Some(url) = self.order.borrow_mut().pop_front() else {
+                return;
+            };
+            let loading = matches!(self.map.borrow().get(&url), Some(Entry::Loading(_)));
+            if loading {
+                self.order.borrow_mut().push_back(url);
+                continue;
+            }
+            if let Some(Entry::Ready(c)) = self.map.borrow_mut().remove(&url) {
+                let (w, h) = c.size;
+                self.bytes
+                    .set(self.bytes.get().saturating_sub(w as u64 * h as u64 * 4));
+            }
+            self.epoch.set(self.epoch.get() + 1);
+        }
+    }
+}
 
 /// Encode core's decoded RGBA as PNG bytes for gpui's image pipeline,
 /// keeping the decoded size for aspect-correct frames.
@@ -132,8 +191,9 @@ pub fn fetch<V: 'static>(
         Now(Option<CachedImage>),
     }
     let action = {
-        let mut cache = cx.global_mut::<Cache>().0.borrow_mut();
-        match cache.entry(url.clone()) {
+        let cache = cx.global_mut::<Cache>();
+        let mut map = cache.map.borrow_mut();
+        match map.entry(url.clone()) {
             std::collections::hash_map::Entry::Occupied(mut e) => match e.get_mut() {
                 Entry::Ready(c) => Action::Now(Some(c.clone())),
                 Entry::NotMedia => Action::Now(None),
@@ -144,6 +204,7 @@ pub fn fetch<V: 'static>(
             },
             std::collections::hash_map::Entry::Vacant(e) => {
                 e.insert(Entry::Loading(vec![Box::new(deliver)]));
+                cache.order.borrow_mut().push_back(url.clone());
                 Action::Start
             }
         }
@@ -165,23 +226,30 @@ pub fn fetch<V: 'static>(
                 // Publish globally, then drain every joiner.
                 let cbs = cx
                     .update(|app| {
-                        let mut cache = app.global_mut::<Cache>().0.borrow_mut();
-                        let st = png.as_ref().map_or(Entry::NotMedia, |p| {
-                            Entry::Ready(CachedImage::clone(p))
+                        let cache = app.global_mut::<Cache>();
+                        let mut map = cache.map.borrow_mut();
+                        let st = png.as_ref().map_or(Entry::NotMedia, |c| {
+                            let (w, h) = c.size;
+                            cache.bytes.set(cache.bytes.get() + w as u64 * h as u64 * 4);
+                            Entry::Ready(c.clone())
                         });
-                        match cache.remove(&url) {
+                        cache.epoch.set(cache.epoch.get() + 1);
+                        let cbs_out = match map.remove(&url) {
                             Some(Entry::Loading(cbs)) => {
-                                cache.insert(url.clone(), st);
+                                map.insert(url.clone(), st);
                                 cbs
                             }
                             other => {
                                 // Already replaced (shouldn't happen); restore it.
                                 if let Some(e) = other {
-                                    cache.insert(url.clone(), e);
+                                    map.insert(url.clone(), e);
                                 }
                                 Vec::new()
                             }
-                        }
+                        };
+                        drop(map);
+                        cache.evict();
+                        cbs_out
                     })
                     .unwrap_or_default();
                 for cb in cbs {

@@ -39,7 +39,31 @@ pub struct Feed {
     /// Endless scroll: the relays may have more; a round trip is in flight.
     has_more: bool,
     paging: bool,
+    /// Render snapshot (D13's snapshot rule, made cheap): the render item
+    /// closure used to clone the whole notes vec + profile map on every
+    /// frame — and `cx.notify()` fires for every profile resolution, image
+    /// arrival, poll tally and publish event. The snapshot rebuilds only
+    /// when the data changed (or the media cache's epoch moved).
+    snap: Option<FeedSnap>,
+    snap_dirty: bool,
+    /// Mirror of `notes` ids — dedupe was an O(n) scan per incoming note
+    /// (O(n·m) per bootstrap batch); now a hash lookup.
+    note_ids: HashSet<EventId>,
     list: ListState,
+}
+
+/// Everything the render's item closure reads, rebuilt (one deep copy) only
+/// when the data changed instead of every frame; the Arcs make the per-frame
+/// clone a refcount bump.
+struct FeedSnap {
+    notes: std::sync::Arc<Vec<Event>>,
+    profiles: std::sync::Arc<HashMap<String, Profile>>,
+    liked: std::sync::Arc<HashSet<String>>,
+    bookmarked: std::sync::Arc<HashSet<String>>,
+    quotes: std::sync::Arc<content::Quotes>,
+    cards: std::sync::Arc<cards::CardState>,
+    media: std::sync::Arc<media::Snapshot>,
+    media_epoch: u64,
 }
 
 impl EventEmitter<Nav> for Feed {}
@@ -60,6 +84,9 @@ impl Feed {
             status: "connecting to the relays…".into(),
             has_more: true,
             paging: false,
+            snap: None,
+            snap_dirty: true,
+            note_ids: HashSet::new(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
         // Endless scroll: the list's own scroll stream orders the next page
@@ -111,7 +138,14 @@ impl Feed {
         .detach();
     }
 
+    /// Any state mutation goes through here so the render snapshot knows to
+    /// rebuild. (on_event covers the event-driven arms wholesale.)
+    fn touch(&mut self) {
+        self.snap_dirty = true;
+    }
+
     fn on_event(&mut self, ev: FeedEvent, cx: &mut Context<Self>) {
+        self.touch();
         enum Reflow {
             Reset,
             Append(usize),
@@ -175,7 +209,7 @@ impl Feed {
             if note.kind != Kind::TextNote && !cards::is_feed_kind(note.kind) {
                 continue;
             }
-            if self.notes.iter().any(|n| n.id == note.id) {
+            if self.note_ids.contains(&note.id) {
                 continue;
             }
             self.want_images(&note, cx);
@@ -183,6 +217,7 @@ impl Feed {
             if note.kind == Kind::Custom(1068) {
                 self.want_poll(&note, cx);
             }
+            self.note_ids.insert(note.id);
             self.notes.push(note);
         }
         self.notes.sort_by_key(|n| std::cmp::Reverse(n.created_at));
@@ -288,6 +323,7 @@ impl Feed {
     /// Ballot selection (cards.rs poll_card): replace for single-choice,
     /// toggle for multiple.
     pub(crate) fn toggle_poll_sel(&mut self, ev: &Event, opt: String, multiple: bool, cx: &mut Context<Self>) {
+        self.touch();
         let sel = self.poll_sel.entry(ev.id).or_default();
         if sel.contains(&opt) {
             sel.retain(|o| *o != opt);
@@ -315,6 +351,7 @@ impl Feed {
                 if let PublishEvent::Committed { .. } = pv {
                     let _ = this.update(cx, |this, cx| {
                         this.voted.insert(id);
+                        this.touch();
                         // Fresh tally including our own vote.
                         let mut rx = this.core.poll_votes(id);
                         cx.spawn(async move |this, cx| {
@@ -322,6 +359,7 @@ impl Feed {
                                 if let FeedEvent::PollVotes(t) = ev {
                                     let _ = this.update(cx, |this, cx| {
                                         this.poll_tallies.insert(id, t);
+                                        this.touch();
                                         cx.notify();
                                     });
                                 }
@@ -347,6 +385,7 @@ impl Feed {
                 if let PublishEvent::Committed { .. } = pv {
                     let _ = this.update(cx, |this, cx| {
                         this.rsvped.insert(id, status.into());
+                        this.touch();
                         cx.notify();
                     });
                     break;
@@ -373,6 +412,7 @@ impl Feed {
         if !self.liked.insert(id) {
             return;
         }
+        self.touch();
         let mut rx = self.core.react(ev);
         std::thread::spawn(move || {
             while rx.blocking_recv().is_some() {}
@@ -386,6 +426,7 @@ impl Feed {
         if !self.bookmarked.insert(id.clone()) {
             return;
         }
+        self.touch();
         let mut rx = self.core.bookmark(ev);
         cx.spawn(async move |this, cx| {
             while let Some(pv) = rx.recv().await {
@@ -393,6 +434,7 @@ impl Feed {
                     let _ = this.update(cx, |this, cx| {
                         this.bookmarked.remove(&id);
                         this.status = "bookmark didn't go through — try again".into();
+                        this.touch();
                         cx.notify();
                     });
                 }
@@ -548,8 +590,34 @@ impl Render for Feed {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let handle = cx.entity();
         let status = self.status.clone();
-        let empty = self.notes.is_empty();
-        let media = media::Snapshot::new(cx);
+        // Rebuild the render snapshot only when something actually changed
+        // (any mutation sets snap_dirty; the media cache bumps its epoch on
+        // every render-visible image arrival/eviction). Frames in between —
+        // and there are many, since every view notify repaints the shell —
+        // just bump refcounts.
+        let media_epoch = media::generation(cx);
+        let stale = self.snap_dirty
+            || self.snap.as_ref().is_none_or(|s| s.media_epoch != media_epoch);
+        if stale {
+            self.snap = Some(FeedSnap {
+                notes: std::sync::Arc::new(self.notes.clone()),
+                profiles: std::sync::Arc::new(self.profiles.clone()),
+                liked: std::sync::Arc::new(self.liked.clone()),
+                bookmarked: std::sync::Arc::new(self.bookmarked.clone()),
+                quotes: std::sync::Arc::new(self.quotes.clone()),
+                cards: std::sync::Arc::new(cards::CardState {
+                    poll_tallies: self.poll_tallies.clone(),
+                    poll_sel: self.poll_sel.clone(),
+                    voted: self.voted.clone(),
+                    rsvped: self.rsvped.clone(),
+                }),
+                media: std::sync::Arc::new(media::Snapshot::new(cx)),
+                media_epoch,
+            });
+            self.snap_dirty = false;
+        }
+        let snap = self.snap.as_ref().unwrap();
+        let empty = snap.notes.is_empty();
 
         div()
             .flex_1()
@@ -592,18 +660,14 @@ impl Render for Feed {
                     } else {
                         // GPUI rule (D13): an entity can't be read while it renders,
                         // so snapshot the data into the item closure; only the click
-                        // handlers touch the entity, later, legally.
-                        let notes = self.notes.clone();
-                        let profiles = self.profiles.clone();
-                        let liked = self.liked.clone();
-                        let bookmarked = self.bookmarked.clone();
-                        let quotes = self.quotes.clone();
-                        let cards = cards::CardState {
-                            poll_tallies: self.poll_tallies.clone(),
-                            poll_sel: self.poll_sel.clone(),
-                            voted: self.voted.clone(),
-                            rsvped: self.rsvped.clone(),
-                        };
+                        // handlers touch the entity, later, legally. Arc clones.
+                        let notes = snap.notes.clone();
+                        let profiles = snap.profiles.clone();
+                        let liked = snap.liked.clone();
+                        let bookmarked = snap.bookmarked.clone();
+                        let quotes = snap.quotes.clone();
+                        let cards = snap.cards.clone();
+                        let media = snap.media.clone();
                         let paging = self.paging;
                         let has_more = self.has_more;
                         list(self.list.clone(), move |idx, _w, _cx| {
