@@ -106,6 +106,12 @@ impl ThreadView {
     fn on_event(&mut self, ev: FeedEvent, cx: &mut Context<Self>) {
         match ev {
             FeedEvent::One(Some(note), profile) => {
+                // An article landing as a thread anchor (quote embed, reply
+                // target) belongs in the reader, not the raw thread.
+                if u16::from(note.kind) == 30023 {
+                    cx.emit(Nav::OpenArticle(note.clone()));
+                    return;
+                }
                 self.anchor = Some(note.clone());
                 if let Some(p) = profile {
                     self.profiles.insert(p.pubkey.clone(), p);

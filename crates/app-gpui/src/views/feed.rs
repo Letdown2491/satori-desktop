@@ -610,7 +610,16 @@ fn note_card(
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     let ev = ev_for_open.clone();
-                    handle_open.update(cx, |_feed, cx| cx.emit(Nav::OpenThread(ev.id)));
+                    handle_open.update(cx, |_feed, cx| {
+                        // Articles open the reader (the card body is the
+                        // door — the "Read" seal is a second one, for the
+                        // summary card's tail). Everything else threads.
+                        if u16::from(ev.kind) == 30023 {
+                            cx.emit(Nav::OpenArticle(ev.clone()));
+                        } else {
+                            cx.emit(Nav::OpenThread(ev.id));
+                        }
+                    });
                 })
                 .child(cards::row_body(
                     ev,
