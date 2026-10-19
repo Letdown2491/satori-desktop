@@ -9,6 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 use gpui::{div, list, prelude::*, px, rgb, Context, EventEmitter, ListAlignment, ListState, Render, Window};
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
+use satori_core::notifications::parse_zap_receipt;
 
 use crate::{media, theme};
 use super::{content, nav::Nav};
@@ -21,10 +22,12 @@ enum NotifType {
     Mention,
     Reaction,
     PollVote,
+    Zap,
 }
 
 fn notif_type(ev: &Event) -> NotifType {
     match u16::from(ev.kind) {
+        9735 => NotifType::Zap,
         7 => NotifType::Reaction,
         1018 => NotifType::PollVote,
         1111 => NotifType::Reply,
@@ -35,12 +38,20 @@ fn notif_type(ev: &Event) -> NotifType {
     }
 }
 
-fn action_word(t: NotifType) -> &'static str {
+fn action_word(t: NotifType, ev: &Event) -> String {
     match t {
-        NotifType::Reply => "replied",
-        NotifType::Mention => "mentioned you",
-        NotifType::Reaction => "reacted",
-        NotifType::PollVote => "voted in your poll",
+        NotifType::Reply => "replied".into(),
+        NotifType::Mention => "mentioned you".into(),
+        NotifType::Reaction => "reacted".into(),
+        NotifType::PollVote => "voted in your poll".into(),
+        NotifType::Zap => {
+            let info = parse_zap_receipt(ev);
+            if info.sats == 0 {
+                "zapped".into()
+            } else {
+                format!("zapped {} sats", info.sats)
+            }
+        }
     }
 }
 
@@ -100,7 +111,9 @@ impl NotificationsView {
                 // renders whatever that stream vouches for.
                 let notifs: Vec<Event> = notifs
                     .into_iter()
-                    .filter(|e| !e.content.trim().is_empty())
+                    // Zap receipts have empty content — the label carries
+                    // them (parse_zap_receipt does the trust work).
+                    .filter(|e| !e.content.trim().is_empty() || u16::from(e.kind) == 9735)
                     .collect();
                 for p in profiles {
                     self.profiles.insert(p.pubkey.clone(), p);
@@ -239,7 +252,7 @@ impl Render for NotificationsView {
                                     idx,
                                     "notif",
                                     ev,
-                                    Some(action_word(*t)),
+                                    Some(action_word(*t, ev)),
                                     &profiles,
                                     &media,
                                     &quotes,

@@ -1188,7 +1188,7 @@ impl Core {
                     .saturating_sub(7 * 86400);
 
                 // Mentions (#p=me) and replies (#e=my notes): PARALLEL.
-                let mut mention_kinds = vec![Kind::TextNote, Kind::Custom(1111)];
+                let mut mention_kinds = vec![Kind::TextNote, Kind::Custom(1111), Kind::Custom(9735)];
                 if this.reaction_notifs() {
                     mention_kinds.push(Kind::Reaction);
                 }
@@ -1253,6 +1253,9 @@ impl Core {
                         ev.pubkey != me
                             && seen.insert(ev.id)
                             && !muted.contains(&ev.pubkey.to_string())
+                            // A stranger's thumbs-down is pure agitation
+                            // (notifications.ts): never shown. +/emoji stay.
+                            && !(u16::from(ev.kind) == 7 && ev.content.trim() == "-")
                     })
                     .collect();
                 notifs.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
@@ -2658,7 +2661,7 @@ impl Core {
                     .authors(follows.clone())
                     .since(now),
                 Filter::new()
-                    .kinds([Kind::TextNote, Kind::Custom(1111)])
+                    .kinds([Kind::TextNote, Kind::Custom(1111), Kind::Custom(9735)])
                     .pubkey(me)
                     .since(now),
                 Filter::new()

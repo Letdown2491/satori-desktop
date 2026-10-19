@@ -882,7 +882,7 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
     idx: usize,
     tag: &str,
     ev: &Event,
-    action: Option<&str>,
+    action: Option<String>,
     profiles: &HashMap<String, Profile>,
     media: &media::Snapshot,
     quotes: &Quotes,
