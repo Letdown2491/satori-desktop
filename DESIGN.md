@@ -441,7 +441,13 @@ re-expression of views, not a feature rebuild.
   pending — a busy feed (profiles resolving) ate the wheel mid-scroll
   and left the pane permanently blank. Reset now only when the note
   count changes. Verified under stress: scroll-during-bootstrap-storm,
-  60-tick deep scroll, rapid return to top.* Daily driver
+  60-tick deep scroll, rapid return to top.* UX polish pass (user
+  request): avatars are circles — gpui images paint their own quad and
+  ignore the parent's rounding, so the photo wears `rounded_full`
+  itself; posts lose their card boxes (no panel bg, no hairline rules)
+  and separate by whitespace alone, in feed, compact cards, thread
+  replies and anchor note; type moved to P052 (Palatino) for body serif
+  (Nimbus Roman read cramped) and Cantarell for UI chrome. Daily driver
   flipped to the GPUI binary (user decision, P2.5): `crates/app` stays only as
   the P3 porting reference (first-login no longer needs it); deletion remains
   the P4 formality.
