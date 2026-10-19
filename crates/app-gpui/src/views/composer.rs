@@ -92,6 +92,10 @@ pub struct Composer {
     posting: bool,
     status: String,
     autofocused: bool,
+    /// The tab whose field currently holds the caret — a tab switch hands
+    /// focus to the new tab's field (the note field's handle dangles when
+    /// the poll tab renders, and a dangling focus eats keystrokes).
+    focused_tab: Option<Tab>,
     focus: FocusHandle,
 }
 
@@ -138,6 +142,7 @@ impl Composer {
             posting: false,
             status: String::new(),
             autofocused: false,
+            focused_tab: None,
             focus,
         }
     }
@@ -484,6 +489,18 @@ impl Render for Composer {
         if !self.autofocused {
             self.autofocused = true;
             window.focus(&self.focus);
+            self.focused_tab = Some(Tab::Note);
+        }
+        if self.focused_tab != Some(self.tab) {
+            // A tab switch moves the caret: the poll's question, or back
+            // to the note field. (The note handle dangles on the poll tab
+            // — its div isn't rendered — and a dangling focus eats keys.)
+            self.focused_tab = Some(self.tab);
+            match self.tab {
+                Tab::Poll => window
+                    .focus(&self.poll_question.read(cx).focus_handle(cx)),
+                Tab::Note => window.focus(&self.focus),
+            }
         }
         let replying = self.reply_to.is_some();
         let quote_prev = self.quote.as_ref().map(|q| {
@@ -580,6 +597,8 @@ impl Render for Composer {
                         .border_color(rgb(theme::hairline()))
                         .bg(rgb(theme::panel()))
                         .p_2()
+                        .flex()
+                        .flex_col()
                         // Tabs on top square the box's shoulders; a reply
                         // (no tabs) keeps the full rounding.
                         .when(replying, |d| d.rounded(px(6.)))
@@ -605,15 +624,23 @@ impl Render for Composer {
                         .flex_col()
                         .gap_2()
                         .child(
-                            // Definite height: the Input fills its parent, so
-                            // an auto-height parent would collapse it to zero.
+                            // The question wears the same washi box as the
+                            // options — an unboxed bare input reads as blank
+                            // panel until typed. Definite height: the Input
+                            // fills its parent; auto would collapse it.
                             div()
-                                .h(window.line_height() * question_lines.max(1.6))
+                                .flex()
+                                .h(window.line_height() * question_lines.max(1.0) + px(16.0))
+                                .rounded(px(4.))
+                                .border_1()
+                                .border_color(rgb(theme::hairline()))
+                                .bg(rgb(theme::washi()))
+                                .p_2()
                                 .child(poll_question),
                         )
                         .children(poll_options.iter().enumerate().map(|(i, opt)| {
                             let opt_lines =
-                                est_lines(&opt.read(cx).content, 60.0);
+                                est_lines(&opt.read(cx).content, 60.0).max(1.0);
                             div()
                                 .flex()
                                 .items_center()
@@ -639,7 +666,8 @@ impl Render for Composer {
                                 .child(
                                     div()
                                         .flex_1()
-                                        .h(window.line_height() * (opt_lines + 1.6).max(2.2))
+                                        .flex()
+                                        .h(window.line_height() * (opt_lines + 0.8))
                                         .rounded(px(4.))
                                         .border_1()
                                         .border_color(rgb(theme::hairline()))
