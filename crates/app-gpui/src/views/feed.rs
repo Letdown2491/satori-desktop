@@ -414,7 +414,7 @@ impl Feed {
     /// picks them up via the snapshot.
     fn want_images(&mut self, note: &Event, cx: &mut Context<Self>) {
         for url in content::media_urls(note) {
-            media::fetch(&self.core, url, cx, |_, _, _, cx| cx.notify());
+            media::fetch(&self.core, url, cx.entity_id(), cx);
         }
     }
 
@@ -560,7 +560,7 @@ impl Feed {
         if url.is_empty() {
             return;
         }
-        media::fetch(&self.core, url, cx, |_, _, _, cx| cx.notify());
+        media::fetch(&self.core, url, cx.entity_id(), cx);
     }
 
     /// Optimistic like, per §1.2: mutate state first (glyph flips vermilion
@@ -965,7 +965,20 @@ impl Render for Feed {
                         let media = snap.media.clone();
                         let paging = self.paging;
                         let has_more = self.has_more;
-                        list(self.list.clone(), move |idx, _w, _cx| {
+                        let core = self.core.clone();
+                        list(self.list.clone(), move |idx, _w, cx| {
+                            // Re-request what this VISIBLE card paints but
+                            // the cache dropped — eviction is the RAM
+                            // budget working, and this is what brings an
+                            // evicted avatar back the moment its card
+                            // scrolls into view. Ready/not-media are silent
+                            // no-ops; only a landing notifies, so this
+                            // can't loop a render.
+                            if let Some(ev) = notes.get(idx) {
+                                for url in card_media_urls(ev, &profiles) {
+                                    media::fetch(&core, url, handle.entity_id(), cx);
+                                }
+                            }
                             match notes.get(idx) {
                                 Some(ev) if u16::from(ev.kind) == 6 => repost_card(
                                     ev, &profiles,  &media, &quotes, &cards,
@@ -990,6 +1003,30 @@ impl Render for Feed {
                     }),
             )
     }
+}
+
+/// Every media URL one card paints: the author's avatar, the body's
+/// pictures, and for a repost both the booster's line and the boosted
+/// card (which paints ITS author too). The lazy list renders only the
+/// visible window, so this doubles as the visible re-request set —
+/// evicted entries come back exactly when their card is seen.
+fn card_media_urls(ev: &Event, profiles: &HashMap<String, Profile>) -> Vec<String> {
+    fn one(note: &Event, profiles: &HashMap<String, Profile>, urls: &mut Vec<String>) {
+        if let Some(p) = profiles.get(&note.pubkey.to_string()) {
+            urls.push(p.picture.clone());
+        }
+        urls.extend(content::media_urls(note));
+    }
+    let mut urls: Vec<String> = Vec::new();
+    if u16::from(ev.kind) == 6 {
+        one(ev, profiles, &mut urls);
+        if let Some(inner) = repost_inner(ev) {
+            one(&inner, profiles, &mut urls);
+        }
+    } else {
+        one(ev, profiles, &mut urls);
+    }
+    urls
 }
 
 /// The boosted event inside a kind-6 payload (NIP-18: the content is the
@@ -1060,7 +1097,7 @@ fn repost_card(
                 )
                 .child(
                     div()
-                        .id(SharedString::from(format!("repost-{}", ev.id.to_string())))
+                        .id(SharedString::from(format!("repost-{}", ev.id)))
                         .cursor_pointer()
                         .on_click(move |_, _, cx| {
                             let note = open.clone().expect("inner held");

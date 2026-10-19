@@ -74,8 +74,8 @@ pub fn parse_zap_receipt(ev: &Event) -> ZapInfo {
         .unwrap_or(0);
     let desc = tag_value(ev, "description");
     let mut info = ZapInfo::default();
-    if let Some(desc) = desc {
-        if let Ok(req) = serde_json::from_str::<Event>(&desc) {
+    if let Some(desc) = desc
+        && let Ok(req) = serde_json::from_str::<Event>(&desc) {
             let matches = |name: &str| match tag_value(ev, name) {
                 Some(on) => tag_value(&req, name).as_deref() == Some(on.as_str()),
                 None => true,
@@ -92,7 +92,6 @@ pub fn parse_zap_receipt(ev: &Event) -> ZapInfo {
                     .unwrap_or(0);
             }
         }
-    }
     if paid > 0 {
         info.sats = paid / 1000;
     } else {

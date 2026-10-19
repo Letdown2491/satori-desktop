@@ -83,7 +83,7 @@ impl ArticleView {
             }
         }
         for url in urls {
-            media::fetch(&self.core, url, cx, |_, _, _, cx| cx.notify());
+            media::fetch(&self.core, url, cx.entity_id(), cx);
         }
     }
 
@@ -268,7 +268,7 @@ fn md_flow(
                 // npub mentions stay clickable inside styled runs.
                 for word in span.text.split_whitespace() {
                     let (core, punct) = content::split_trailing(word);
-                    match content::classify_token(&core) {
+                    match content::classify_token(core) {
                         content::Tok::Word(w) => {
                             flow = flow.child(styled(if punct.is_empty() {
                                 w
@@ -329,6 +329,14 @@ impl Render for ArticleView {
             .get(&author_pk.to_string())
             .map(|p| p.picture.clone())
             .unwrap_or_default();
+        // Evicted media comes back on render (fetch is a silent no-op for
+        // entries the cache still holds): the byline avatar and the cover.
+        if !author_pic.is_empty() {
+            media::fetch(&self.core, author_pic.clone(), cx.entity_id(), cx);
+        }
+        if let Some(url) = content::article_cover(&self.ev) {
+            media::fetch(&self.core, url, cx.entity_id(), cx);
+        }
         let published = self.data.published_at.map(super::feed::rel_time);
         // Reading time at ~220 wpm (content.ts's readingMinutes rate).
         let minutes = self.ev.content.split_whitespace().count() / 220 + 1;

@@ -120,13 +120,11 @@ impl NotificationsView {
     fn want_parents(&mut self, cx: &mut Context<Self>) {
         let mut ids: Vec<String> = Vec::new();
         for row in &self.rows {
-            if let Row::Note(ev, _) = row {
-                if let Some(pid) = notif_parent_id(ev) {
-                    if !self.parents.contains_key(&pid) && self.parents_asked.insert(pid.clone()) {
+            if let Row::Note(ev, _) = row
+                && let Some(pid) = notif_parent_id(ev)
+                    && !self.parents.contains_key(&pid) && self.parents_asked.insert(pid.clone()) {
                         ids.push(pid);
                     }
-                }
-            }
         }
         if ids.is_empty() {
             return;
@@ -180,7 +178,7 @@ impl NotificationsView {
 
     fn want_media(&mut self, note: &Event, cx: &mut Context<Self>) {
         for url in content::media_urls(note) {
-            media::fetch(&self.core, url, cx, |_, _, _, cx| cx.notify());
+            media::fetch(&self.core, url, cx.entity_id(), cx);
         }
     }
 
@@ -376,11 +374,10 @@ fn notif_card(
                         .child(time),
                 ),
         );
-    if let Some(pid) = &parent_id {
-        if let Some(w) = notif_whisper(idx, pid, parents, profiles, me, handle.clone()) {
+    if let Some(pid) = &parent_id
+        && let Some(w) = notif_whisper(idx, pid, parents, profiles, me, handle.clone()) {
             row = row.child(w);
         }
-    }
     let action_line = div()
         .text_size(px(13.0))
         .text_color(rgb(theme::muted()))
@@ -440,6 +437,13 @@ impl Render for NotificationsView {
         let rows = self.rows.clone();
         let profiles = self.profiles.clone();
         let media = media::Snapshot::new(cx);
+        // Evicted avatars come back on render — notifications are bounded
+        // content, so sweep the rows' authors (fetch is a silent no-op for
+        // entries the cache still holds).
+        let viewer = cx.entity_id();
+        for p in self.profiles.values() {
+            media::fetch(&self.core, p.picture.clone(), viewer, cx);
+        }
         let quotes = self.quotes.clone();
         let parents = self.parents.clone();
         let me = self.me.clone();

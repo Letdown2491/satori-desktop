@@ -202,7 +202,7 @@ impl Input {
         }
     }
 
-    fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         // IME composition in progress — let it commit on its own.
         if self.marked_range.is_some() {
             return;

@@ -1116,12 +1116,12 @@ impl Core {
         &self,
         active: &Active,
         until: Option<u64>,
-        kinds: &Vec<Kind>,
+        kinds: &[Kind],
     ) -> Result<Vec<Event>> {
         let mut notes = active
             .pool
             .store
-            .feed_page_kinds(&active.follows, until, PAGE + 1, kinds.clone())
+            .feed_page_kinds(&active.follows, until, PAGE + 1, kinds.to_vec())
             .await
             .map_err(|e| LoginError::Resume(e.to_string()))?;
         {
@@ -1135,13 +1135,13 @@ impl Core {
         &self,
         active: &Active,
         until: Option<u64>,
-        kinds: &Vec<Kind>,
+        kinds: &[Kind],
     ) -> Result<FeedPage> {
         let follows = active.follows.clone();
         let mut notes = active
             .pool
             .store
-            .feed_page_kinds(&follows, until, PAGE, kinds.clone())
+            .feed_page_kinds(&follows, until, PAGE, kinds.to_vec())
             .await
             .map_err(|e| LoginError::Resume(e.to_string()))?;
         // Mutes + deletions gate here — every feed page passes this
@@ -1887,7 +1887,7 @@ impl Core {
                     let n = missing.len();
                     let fetched = active
                         .pool
-                        .get(Filter::new().ids(missing).limit(n as usize))
+                        .get(Filter::new().ids(missing).limit(n))
                         .await
                         .unwrap_or_default();
                     for ev in &fetched {
@@ -3065,9 +3065,11 @@ impl Core {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
+
 
     /// Logout → login → notifications must NOT fail with "no active
     /// session" (the user-report). Runs headless; network errors are fine,
@@ -3092,12 +3094,9 @@ mod tests {
         let mut rx = core.notifications();
         let mut got = None;
         for _ in 0..500 {
-            match rx.try_recv() {
-                Ok(ev) => {
-                    got = Some(ev);
-                    break;
-                }
-                Err(_) => {}
+            if let Ok(ev) = rx.try_recv() {
+                got = Some(ev);
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
@@ -3121,12 +3120,9 @@ mod tests {
         let mut rx = core.notifications();
         let mut got = None;
         for _ in 0..500 {
-            match rx.try_recv() {
-                Ok(ev) => {
-                    got = Some(ev);
-                    break;
-                }
-                Err(_) => {}
+            if let Ok(ev) = rx.try_recv() {
+                got = Some(ev);
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }

@@ -86,13 +86,13 @@ impl SearchView {
                 for p in profiles {
                     let url = p.picture.clone();
                     if !url.is_empty() {
-                        media::fetch(&self.core, url, cx, |_, _, _, cx| cx.notify());
+                        media::fetch(&self.core, url, cx.entity_id(), cx);
                     }
                     self.profiles.insert(p.pubkey.clone(), p);
                 }
                 for n in &results {
                     for url in content::media_urls(n) {
-                        media::fetch(&self.core, url, cx, |_, _, _, cx| cx.notify());
+                        media::fetch(&self.core, url, cx.entity_id(), cx);
                     }
                     self.want_quotes(n, cx);
                 }
@@ -155,6 +155,12 @@ impl Render for SearchView {
         let results = self.results.clone();
         let profiles = self.profiles.clone();
         let media = media::Snapshot::new(cx);
+        // Evicted avatars come back on render — search results are bounded
+        // content (fetch is a silent no-op for entries the cache holds).
+        let viewer = cx.entity_id();
+        for p in self.profiles.values() {
+            media::fetch(&self.core, p.picture.clone(), viewer, cx);
+        }
         let quotes = self.quotes.clone();
         let input = self.input.clone();
 

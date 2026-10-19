@@ -308,7 +308,6 @@ impl Shell {
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(_) => continue,
-                    Err(_) => continue,
                 }
             }
         })
@@ -436,7 +435,7 @@ impl Shell {
     /// tiles have loaded.
     fn open_lightbox(&mut self, urls: Vec<String>, idx: usize, cx: &mut Context<Self>) {
         for url in &urls {
-            media::fetch(&self.core, url.clone(), cx, |_, _, _, cx| cx.notify());
+            media::fetch(&self.core, url.clone(), cx.entity_id(), cx);
         }
         self.lightbox = Some((urls, idx));
         cx.notify();
@@ -568,6 +567,11 @@ impl Shell {
             (None, Some(pk)) => (String::new(), format!("{}…", &pk.to_string()[..8])),
             _ => (String::new(), "You".to_string()),
         };
+        // The rail avatar comes back if the cache evicted it (silent no-op
+        // when the cache still holds it).
+        if !me_pic.is_empty() {
+            media::fetch(&self.core, me_pic.clone(), cx.entity_id(), cx);
+        }
         let me_avatar =
             media::avatar(self.rail_snap.as_ref().unwrap(), &me_pic, &me_name, 26.0);
 

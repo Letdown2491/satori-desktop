@@ -131,10 +131,7 @@ fn main() {
         let desktop = crate::desktop::probe();
         // Palette before the first frame: the pref wins; unset follows the
         // desktop's color-scheme (falls back to the night paper).
-        match crate::prefs::load().dark.or(desktop.dark) {
-            Some(false) => crate::theme::select(crate::theme::LIGHT),
-            _ => {}
-        }
+        if let Some(false) = crate::prefs::load().dark.or(desktop.dark) { crate::theme::select(crate::theme::LIGHT) }
         cx.set_global(desktop);
         let core = Arc::new(Core::new());
         let (session, err) = core.init();

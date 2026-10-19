@@ -181,7 +181,7 @@ pub fn media_assets(ev: &Event) -> Vec<MediaAsset> {
             } else {
                 continue;
             };
-            if !out.iter().any(|a| a.url() == &url) {
+            if !out.iter().any(|a| a.url() == url) {
                 out.push(asset);
             }
         }

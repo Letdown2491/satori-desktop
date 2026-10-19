@@ -150,7 +150,7 @@ impl ThreadView {
     /// land in the shared media cache; notify re-renders pick them up).
     fn want_media(&mut self, note: &Event, cx: &mut Context<Self>) {
         for url in content::media_urls(note) {
-            media::fetch(&self.core, url, cx, |_, _, _, cx| cx.notify());
+            media::fetch(&self.core, url, cx.entity_id(), cx);
         }
     }
 
@@ -334,6 +334,21 @@ impl Render for ThreadView {
         let replies = self.replies.clone();
         let profiles = self.profiles.clone();
         let media = media::Snapshot::new(cx);
+        // Evicted media comes back on render — a thread is bounded content,
+        // so sweep everything it paints (Ready/not-media URLs are silent
+        // no-ops in fetch; only a landing notifies, so no render loop).
+        let viewer = cx.entity_id();
+        for p in self.profiles.values() {
+            media::fetch(&self.core, p.picture.clone(), viewer, cx);
+        }
+        for url in self.anchor.as_ref().into_iter().flat_map(content::media_urls) {
+            media::fetch(&self.core, url, viewer, cx);
+        }
+        for (ev, _) in &self.replies {
+            for url in content::media_urls(ev) {
+                media::fetch(&self.core, url, viewer, cx);
+            }
+        }
         let quotes = self.quotes.clone();
         let anchor = self.anchor.clone();
         let anchor_handle = handle.clone();

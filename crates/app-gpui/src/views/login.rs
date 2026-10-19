@@ -203,7 +203,7 @@ impl Render for LoginView {
         div()
             .id("login")
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
                 // Enter submits whichever door is focused (single-line Inputs
                 // don't bind enter, so it bubbles here).
                 if ev.keystroke.key == "enter" {
@@ -419,7 +419,8 @@ impl Render for LoginView {
                                         None => {
                                             let enso =
                                                 icons::enso_icon(theme::muted(), 60.0);
-                                            let enso = if desktop::Desktop::get(cx)
+                                            
+                                            if desktop::Desktop::get(cx)
                                                 .reduced_motion
                                             {
                                                 div().child(enso).into_any_element()
@@ -439,8 +440,7 @@ impl Render for LoginView {
                                                     },
                                                 )
                                                 .into_any_element()
-                                            };
-                                            enso
+                                            }
                                         }
                                     },
                                 )

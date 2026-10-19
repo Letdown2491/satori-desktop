@@ -353,7 +353,7 @@ fn article_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) ->
     let read = feed.downgrade();
     card = card.child(
         div()
-            .id(SharedString::from(format!("read-{}", ev.id.to_string())))
+            .id(SharedString::from(format!("read-{}", ev.id)))
             .cursor_pointer()
             .font_family(theme::SERIF)
             .text_size(px(14.0))

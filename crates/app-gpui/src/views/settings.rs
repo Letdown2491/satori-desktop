@@ -401,12 +401,13 @@ impl SettingsView {
                             .save_file()
                     })
                     .await;
-                let _ = this.update(cx, |this, _cx| match path {
-                    Some(path) => match std::fs::write(&path, json.as_bytes()) {
-                        Ok(()) => this.set_status("Backup saved".into(), false),
-                        Err(_) => this.set_status("Could not write backup".into(), true),
-                    },
-                    None => {} // cancelled
+                let _ = this.update(cx, |this, _cx| {
+                    if let Some(path) = path {
+                        match std::fs::write(&path, json.as_bytes()) {
+                            Ok(()) => this.set_status("Backup saved".into(), false),
+                            Err(_) => this.set_status("Could not write backup".into(), true),
+                        }
+                    } // else: cancelled
                 });
             }
         })
@@ -639,7 +640,7 @@ impl Render for SettingsView {
                                 .text_size(px(13.0))
                                 .text_color(rgb(if !dark { theme::ink() } else { theme::muted() }))
                                 .when(!dark, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
-                                .on_click(cx.listener(|this, _, _, cx| {
+                                .on_click(cx.listener(|_this, _, _, cx| {
                                     cx.emit(Nav::SetTheme(false));
                                 }))
                                 .child("Light"),
@@ -657,7 +658,7 @@ impl Render for SettingsView {
                                 .text_size(px(13.0))
                                 .text_color(rgb(if dark { theme::ink() } else { theme::muted() }))
                                 .when(dark, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
-                                .on_click(cx.listener(|this, _, _, cx| {
+                                .on_click(cx.listener(|_this, _, _, cx| {
                                     cx.emit(Nav::SetTheme(true));
                                 }))
                                 .child("Dark"),

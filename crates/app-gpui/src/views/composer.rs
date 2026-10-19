@@ -119,7 +119,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Self {
         crate::theme::watch(cx); // repaint on theme change
-        let input = cx.new(|cx| Input::new(cx));
+        let input = cx.new(Input::new);
         let focus = input.read(cx).focus_handle(cx);
         // Draft restore: a top-level compose reopens with whatever was typed
         // and closed before (composer.rs:114 — the take spends the stash).
@@ -132,9 +132,9 @@ impl Composer {
         // @-mention detection: watch the buffer, find an active `@token`.
         cx.observe(&input, |this, _input, cx| this.detect_mention(cx))
             .detach();
-        let poll_question = cx.new(|cx| Input::new(cx));
+        let poll_question = cx.new(Input::new);
         let poll_options = (0..2)
-            .map(|_| cx.new(|cx| Input::new(cx)))
+            .map(|_| cx.new(Input::new))
             .collect();
         Self {
             core,
@@ -266,7 +266,6 @@ impl Composer {
             next.push_str(&text[..at]);
             next.push_str(&format!("@{} ", profile.display()));
             next.push_str(&text[cursor..]);
-            drop(i);
             self.input.update(cx, |i, cx| i.set_text(&next, cx));
         }
         let pk_hex = profile.pubkey.clone();
@@ -352,6 +351,11 @@ impl Composer {
 
     fn post(&mut self, cx: &mut Context<Self>) {
         if self.posting {
+            return;
+        }
+        // The poll tab publishes a poll, not the note buffer.
+        if self.tab == Tab::Poll {
+            self.post_poll(cx);
             return;
         }
         let text = self.input.read(cx).content.trim().to_string();
@@ -541,6 +545,13 @@ impl Render for Composer {
         let question_lines =
             est_lines(&poll_question.read(cx).content, 72.0);
         let quote_snap = media::Snapshot::new(cx);
+        // The quote card's avatar comes back if the cache evicted it
+        // (fetch is a silent no-op when the cache still holds it).
+        if let Some((_, _, picture)) = quote_prev.as_ref()
+            && !picture.is_empty()
+        {
+            media::fetch(&self.core, picture.clone(), cx.entity_id(), cx);
+        }
 
         div()
             .id("composer")
@@ -716,7 +727,7 @@ impl Render for Composer {
                                 .text_color(rgb(theme::muted()))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     if !this.posting && this.poll_options.len() < 6 {
-                                        this.poll_options.push(cx.new(|inner| Input::new(inner)));
+                                        this.poll_options.push(cx.new(Input::new));
                                         cx.notify();
                                     }
                                 }))

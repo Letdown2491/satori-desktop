@@ -48,8 +48,7 @@ pub fn blocks(src: &str) -> Vec<Block> {
 
         // ATX heading: #{1,6} + space (markdown.ts HEADING).
         let hashes = t.chars().take_while(|c| *c == '#').count();
-        if hashes >= 1
-            && hashes <= 6
+        if (1..=6).contains(&hashes)
             && t[hashes..].starts_with(' ')
         {
             flush_para(&mut out, &mut para);
@@ -151,8 +150,8 @@ fn is_hr(t: &str) -> bool {
 
 fn is_setext_underline(line: &str) -> bool {
     let t = line.trim();
-    (!t.is_empty() && t.chars().all(|c| c == '=') && t.len() >= 1)
-        || (!t.is_empty() && t.chars().all(|c| c == '-') && t.len() >= 1)
+    (!t.is_empty() && t.chars().all(|c| c == '=') && !t.is_empty())
+        || (!t.is_empty() && t.chars().all(|c| c == '-') && !t.is_empty())
 }
 
 /// A line that is only a bare `<br>` (no attributes) — markdown.ts BR_ONLY.

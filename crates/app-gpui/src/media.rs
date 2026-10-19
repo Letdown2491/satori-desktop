@@ -12,7 +12,7 @@ use std::{
     sync::Arc,
 };
 
-use gpui::{div, img, prelude::*, px, rgb, AnyElement, App, Image, ImageFormat, ImageSource};
+use gpui::{div, img, prelude::*, px, rgb, AnyElement, EntityId, Image, ImageFormat, ImageSource};
 use satori_core::manager::Core;
 use satori_core::media::DecodedImage;
 
@@ -73,10 +73,10 @@ pub fn generation(cx: &gpui::App) -> u64 {
     cx.global::<Cache>().epoch.get()
 }
 
-type Cb = Box<dyn FnOnce(Option<CachedImage>, &mut gpui::AsyncApp)>;
+type Cb = EntityId;
 
 enum Entry {
-    /// Fetch in flight; the joiners' callbacks fire on completion.
+    /// Fetch in flight; every waiting view id is notified on completion.
     Loading(Vec<Cb>),
     Ready(CachedImage),
     NotMedia,
@@ -190,46 +190,37 @@ pub fn cached_from_decoded(d: DecodedImage) -> Option<CachedImage> {
     })
 }
 
-/// Fetch one image through core and hand the PNG to every interested view.
-/// Joins an in-flight fetch for the same URL instead of re-requesting; a URL
-/// that fails to decode is remembered as not-media and reported as `None`.
-/// `apply` merges the result into the view and notifies.
-pub fn fetch<V: 'static>(
-    core: &Arc<Core>,
-    url: String,
-    cx: &mut gpui::Context<V>,
-    apply: impl Fn(&mut V, String, Option<CachedImage>, &mut gpui::Context<V>) + 'static,
-) {
-    let handle = cx.entity();
-    let apply = Arc::new(apply);
-    let deliver = {
-        let handle = handle.clone();
-        let apply = apply.clone();
-        let url2 = url.clone();
-        move |res: Option<CachedImage>, app: &mut gpui::AsyncApp| {
-            let _ = handle.update(app, |view, cx| apply(view, url2.clone(), res, cx));
-        }
-    };
-
+/// Fetch one image through core into the shared cache, notifying `view`
+/// when the fetch lands. Joins an in-flight fetch for the same URL (the
+/// landing notifies every waiter); a URL that fails to decode is remembered
+/// as not-media. Safe to call speculatively — including from render paths
+/// (the lazy list's visible items): Ready/NotMedia URLs are silent no-ops
+/// and only an actual landing notifies, so this can never loop a re-render.
+/// An evicted URL re-enters through the disk cache — a cheap background
+/// re-decode. (Eviction is the RAM budget working; THIS is what brings
+/// evicted avatars and pictures back when they're seen again.)
+pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) {
+    if url.is_empty() {
+        return;
+    }
     enum Action {
         Start,
         Joined,
-        Now(Option<CachedImage>),
+        Ready,
     }
     let action = {
         let cache = cx.global_mut::<Cache>();
         let mut map = cache.map.borrow_mut();
         match map.entry(url.clone()) {
             std::collections::hash_map::Entry::Occupied(mut e) => match e.get_mut() {
-                Entry::Ready(c) => Action::Now(Some(c.clone())),
-                Entry::NotMedia => Action::Now(None),
-                Entry::Loading(cbs) => {
-                    cbs.push(Box::new(deliver));
+                Entry::Ready(_) | Entry::NotMedia => Action::Ready,
+                Entry::Loading(waiters) => {
+                    waiters.push(view);
                     Action::Joined
                 }
             },
             std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(Entry::Loading(vec![Box::new(deliver)]));
+                e.insert(Entry::Loading(vec![view]));
                 cache.order.borrow_mut().push_back(url.clone());
                 Action::Start
             }
@@ -237,56 +228,46 @@ pub fn fetch<V: 'static>(
     };
 
     match action {
-        Action::Joined => {} // the completion callback delivers
-        Action::Now(res) => {
-            cx.spawn(async move |this, cx| {
-                let _ = this.update(cx, |view, cx| apply(view, url, res, cx));
-            })
-            .detach();
-        }
+        Action::Joined | Action::Ready => {} // the landing notifies every waiter
         Action::Start => {
             let rx = core.fetch_image(url.clone());
-            cx.spawn(async move |_this, cx| {
+            cx.spawn(async move |cx| {
                 let decoded = { let mut rx = rx; rx.recv().await }.flatten();
                 let cached = decoded.and_then(cached_from_decoded);
-                // Publish globally, then drain every joiner.
-                let cbs = cx
-                    .update(|app| {
-                        let cache = app.global_mut::<Cache>();
-                        let mut map = cache.map.borrow_mut();
-                        let st = cached.as_ref().map_or(Entry::NotMedia, |c| {
-                            let (w, h) = c.size;
-                            cache.bytes.set(cache.bytes.get() + w as u64 * h as u64 * 4);
-                            Entry::Ready(c.clone())
-                        });
-                        cache.epoch.set(cache.epoch.get() + 1);
-                        let cbs_out = match map.remove(&url) {
-                            Some(Entry::Loading(cbs)) => {
-                                map.insert(url.clone(), st);
-                                cbs
-                            }
-                            other => {
-                                // Already replaced (shouldn't happen); restore it.
-                                if let Some(e) = other {
-                                    map.insert(url.clone(), e);
-                                }
-                                Vec::new()
-                            }
-                        };
-                        drop(map);
-                        // Evict OUTSIDE the cache borrow; gpui's decoded
-                        // copies go with the entries (the asset cache never
-                        // evicts on its own — that was the RAM leak).
-                        let dropped = cache.evict();
-                        for png in dropped {
-                            ImageSource::Image(png).remove_asset(app);
+                // Publish globally, then wake every waiter.
+                let _ = cx.update(|app| {
+                    let cache = app.global_mut::<Cache>();
+                    let mut map = cache.map.borrow_mut();
+                    let st = cached.as_ref().map_or(Entry::NotMedia, |c| {
+                        let (w, h) = c.size;
+                        cache.bytes.set(cache.bytes.get() + w as u64 * h as u64 * 4);
+                        Entry::Ready(c.clone())
+                    });
+                    cache.epoch.set(cache.epoch.get() + 1);
+                    let waiters = match map.remove(&url) {
+                        Some(Entry::Loading(waiters)) => {
+                            map.insert(url.clone(), st);
+                            waiters
                         }
-                        cbs_out
-                    })
-                    .unwrap_or_default();
-                for cb in cbs {
-                    cb(cached.clone(), cx);
-                }
+                        other => {
+                            // Already replaced (shouldn't happen); restore it.
+                            if let Some(e) = other {
+                                map.insert(url.clone(), e);
+                            }
+                            Vec::new()
+                        }
+                    };
+                    drop(map);
+                    // Evict OUTSIDE the cache borrow; gpui's decoded
+                    // copies go with the entries (the asset cache never
+                    // evicts on its own — that was the RAM leak).
+                    for png in cache.evict() {
+                        ImageSource::Image(png).remove_asset(app);
+                    }
+                    for id in waiters {
+                        app.notify(id);
+                    }
+                });
             })
             .detach();
         }
