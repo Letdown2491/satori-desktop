@@ -103,6 +103,22 @@ impl Render for Root {
 
 fn main() {
     Application::new().run(|cx: &mut App| {
+        // Return glibc arena heap to the OS on a slow clock. gpui's image
+        // work allocates/frees large blocks on many threads; glibc retains
+        // the freed arenas (RSS stays at the high-water mark otherwise).
+        // malloc_trim(0) walks the arenas and gives the untouched pages
+        // back — cheap every 5 minutes, invisible otherwise.
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(300))
+                    .await;
+                unsafe {
+                    libc::malloc_trim(0);
+                }
+            }
+        })
+        .detach();
         bind_input_keys(cx);
         bind_composer_keys(cx);
         // Shared decoded-image cache (media.rs) — avatars, tiles and the

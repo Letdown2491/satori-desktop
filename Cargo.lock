@@ -5243,6 +5243,7 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "image",
+ "libc",
  "nostr",
  "qrcode",
  "rfd",

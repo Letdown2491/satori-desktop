@@ -117,10 +117,13 @@ impl Default for Cache {
 }
 impl gpui::Global for Cache {}
 
-/// Decoded-entry caps: 128 images / 256MB of decoded RGBA (the disk cache
+/// Decoded-entry caps: 128 images / 96MB of decoded RGBA (the disk cache
 /// is the reservoir; eviction only costs a re-decode on scroll-back).
+/// 96MB decoded lands the session plateau ≈ baseline + cap + encoded
+/// bytes — measured against the ~240MB gpui/tokio/LMDB floor, that keeps
+/// a hard-scrolled evening under ~400MB total.
 const CACHE_MAX_ENTRIES: usize = 128;
-const CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
+const CACHE_MAX_BYTES: u64 = 96 * 1024 * 1024;
 
 impl Cache {
     /// Oldest-first eviction past the caps. Loading entries rotate to the
