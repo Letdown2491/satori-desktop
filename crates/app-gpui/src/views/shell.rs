@@ -322,11 +322,8 @@ impl Shell {
             .flex()
             .flex_col()
             .items_center()
-            .pb(px(12.0))
+            .pt(px(14.0))
             .gap_1()
-            // The mark column floats mid-rail (spacers above and below); the
-            // gear still anchors the foot.
-            .child(div().flex_1())
             // The ensō: home. Same as the feed mark, drawn heavier.
             .child(self.rail_button(
                 // The ensō is the logo that happens to lead home — it never
@@ -405,8 +402,6 @@ impl Shell {
                     }
                 }),
             ))
-            .child(div().flex_1())
-            // Settings anchors the rail's foot.
             .child(self.rail_button(
                 "rail-settings",
                 "Settings",
