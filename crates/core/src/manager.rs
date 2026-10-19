@@ -1716,6 +1716,16 @@ impl Core {
     /// first, then one by-id relay round trip for the misses. Emits
     /// FeedEvent::Parents with whatever resolved — misses (deleted parents,
     /// relay gaps) just don't resolve, and the whisper degrades.
+    /// The signed-in identity's pubkey hex, if any — views use it to
+    /// phrase "your note" vs "{name}'s note" (the notifications whisper).
+    pub fn me(&self) -> Option<String> {
+        self.active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|a| a.session.pubkey.clone())
+    }
+
     pub fn load_parents(self: &Arc<Self>, ids: Vec<String>) -> FeedRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);

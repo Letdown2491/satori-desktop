@@ -6,13 +6,16 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use gpui::{div, list, prelude::*, px, rgb, Context, EventEmitter, ListAlignment, ListState, Render, Window};
+use std::collections::HashSet;
+
+use gpui::{div, list, prelude::*, px, rgb, Context, Entity, EventEmitter, FontWeight, ListAlignment, ListState, Render, SharedString, Window};
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
+use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile};
+use satori_core::nip::{comment, nip10};
 use satori_core::notifications::parse_zap_receipt;
 
 use crate::{media, theme};
-use super::{content, nav::Nav};
+use super::{content, nav::Nav, feed::rel_time};
 
 /// What the event did to you (notifications.ts `add`): a comment is always
 /// a reply; kind 1 splits by whether it carries an `e` tag.
@@ -67,6 +70,11 @@ pub struct NotificationsView {
     rows: Vec<Row>,
     profiles: HashMap<String, Profile>,
     quotes: content::Quotes,
+    /// What each notification answers (feed.rs's same resolver): id →
+    /// author + snippet. `parents_asked` keeps misses from re-requesting.
+    parents: HashMap<String, ParentNote>,
+    parents_asked: HashSet<String>,
+    me: String,
     status: String,
     list: ListState,
 }
@@ -85,6 +93,9 @@ impl NotificationsView {
             rows: vec![],
             profiles: HashMap::new(),
             quotes: HashMap::new(),
+            parents: HashMap::new(),
+            parents_asked: HashSet::new(),
+            me: String::new(),
             status: "Gathering…".into(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
@@ -97,6 +108,32 @@ impl NotificationsView {
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.recv().await {
                 let _ = this.update(cx, |this, cx| this.on_event(ev, prev_high_water, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Ask the core to resolve the notes these notifications answer
+    /// (feed.rs want_parents: store first, one relay round trip for
+    /// misses, asked-set keeps it from looping).
+    fn want_parents(&mut self, cx: &mut Context<Self>) {
+        let mut ids: Vec<String> = Vec::new();
+        for row in &self.rows {
+            if let Row::Note(ev, _) = row {
+                if let Some(pid) = notif_parent_id(ev) {
+                    if !self.parents.contains_key(&pid) && self.parents_asked.insert(pid.clone()) {
+                        ids.push(pid);
+                    }
+                }
+            }
+        }
+        if ids.is_empty() {
+            return;
+        }
+        let mut rx = self.core.load_parents(ids);
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| this.on_event(ev, 0, cx));
             }
         })
         .detach();
@@ -123,7 +160,15 @@ impl NotificationsView {
                     self.want_quotes(n, cx);
                 }
                 self.rows = sectioned(prev, &notifs);
+                self.me = self.core.me().unwrap_or_default();
+                self.want_parents(cx);
                 self.status.clear();
+            }
+            FeedEvent::Parents(p) => {
+                // The resolver's answer (store-first, relay for misses) —
+                // whispers fill in as these land.
+                self.parents.extend(p);
+                cx.notify();
             }
             FeedEvent::Failed(e) => self.status = format!("Could not load notifications: {e}"),
             _ => {}
@@ -172,6 +217,193 @@ impl NotificationsView {
     }
 }
 
+/// What this notification answers — the parent id to resolve and whisper
+/// about. A mention answers you directly (no parent); a reply points at
+/// the note it replies to (nip10.rs reply_parent), a comment at its
+/// lowercase-e parent, a zap at the zapped note (profile zaps have no
+/// e tag), a poll vote at the poll.
+fn notif_parent_id(ev: &Event) -> Option<String> {
+    match u16::from(ev.kind) {
+        1 => nip10::reply_parent(ev).map(|(id, _)| id),
+        1111 => match comment::parse_refs(ev).parent {
+            Some(comment::Ref::Event(id)) => Some(id.to_string()),
+            _ => None,
+        },
+        9735 | 1018 => ev
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(String::as_str) == Some("e"))
+            .and_then(|t| t.as_slice().get(1).cloned()),
+        _ => None,
+    }
+}
+
+/// The parent reference, the timeline whisper's voice aimed at YOUR
+/// things: "↳ on your note" / "↳ on {name}'s note", the parent's words
+/// in serif italic beneath, clickable into the parent's thread.
+/// Unresolved parents whisper nothing — the pump fills them in.
+fn notif_whisper<V: EventEmitter<Nav> + 'static>(
+    idx: usize,
+    parent_id: &str,
+    parents: &HashMap<String, ParentNote>,
+    profiles: &HashMap<String, Profile>,
+    me: &str,
+    handle: Entity<V>,
+) -> Option<gpui::AnyElement> {
+    let parent = parents.get(parent_id)?;
+    let label = if parent.author == me {
+        "\u{21b3} on your note".to_string()
+    } else {
+        let name = profiles
+            .get(&parent.author)
+            .map(|p| p.display())
+            .unwrap_or_else(|| format!("{}\u{2026}", &parent.author[..8]));
+        format!("\u{21b3} on {name}'s note")
+    };
+    let snippet = (!parent.snippet.is_empty()).then(|| parent.snippet.clone());
+    let id = parent_id.to_string();
+    Some(
+        div()
+            .id(SharedString::from(format!("notif-parent-{idx}")))
+            .cursor_pointer()
+            .pl(px(36.0)) // under the avatar column, like the feed whisper
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .on_click(move |_, _, cx| {
+                let id = id.clone();
+                handle.update(cx, |_, cx| {
+                    if let Ok(event_id) = EventId::from_hex(&id) {
+                        cx.emit(Nav::OpenThread(event_id));
+                    }
+                });
+            })
+            .children({
+                let mut kids = vec![div()
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme::INK))
+                    .child(label)
+                    .into_any_element()];
+                if let Some(snippet) = snippet {
+                    kids.push(
+                        div()
+                            .font_family(theme::SERIF)
+                            .italic()
+                            .text_size(px(12.5))
+                            .text_color(rgb(theme::MUTED))
+                            .child(snippet)
+                            .into_any_element(),
+                    );
+                }
+                kids
+            })
+            .into_any_element(),
+    )
+}
+
+/// A notification row. The action word lives in the body — it's the
+/// news, not a timestamp garnish — and the parent whisper above it
+/// references what the notification answers (the timeline's trick).
+#[allow(clippy::too_many_arguments)]
+fn notif_card(
+    idx: usize,
+    ev: &Event,
+    t: NotifType,
+    profiles: &HashMap<String, Profile>,
+    parents: &HashMap<String, ParentNote>,
+    media: &media::Snapshot,
+    quotes: &content::Quotes,
+    me: &str,
+    handle: Entity<NotificationsView>,
+) -> gpui::AnyElement {
+    let key = ev.pubkey.to_string();
+    let name = profiles
+        .get(&key)
+        .map(|p| p.display())
+        .unwrap_or_else(|| format!("{}\u{2026}", &key[..8]));
+    let picture = profiles
+        .get(&key)
+        .map(|p| p.picture.clone())
+        .unwrap_or_default();
+    let time = rel_time(ev.created_at.as_secs());
+    let parent_id = notif_parent_id(ev);
+    // Clicking opens the conversation: the parent's thread when there is
+    // one (your note's thread, for a reply), else the note itself. A
+    // profile zap has no thread to open.
+    let open: Option<EventId> = parent_id
+        .as_ref()
+        .and_then(|p| EventId::from_hex(p).ok())
+        .or_else(|| matches!(t, NotifType::Reply | NotifType::Mention).then_some(ev.id));
+    let ev_for_profile = ev.clone();
+    let handle_profile = handle.clone();
+    let ctx = content::Body { media, quotes, profiles };
+
+    let mut row = div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .px_4()
+        .py_3()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(media::avatar(media, &picture, &name, 28.0))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("notif-author-{idx}")))
+                        .cursor_pointer()
+                        .flex_1()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme::INK))
+                        .on_click(move |_, _, cx| {
+                            let ev = ev_for_profile.clone();
+                            handle_profile.update(cx, |_, cx| cx.emit(Nav::OpenProfile(ev.pubkey)));
+                        })
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme::MUTED))
+                        .child(time),
+                ),
+        );
+    if let Some(pid) = &parent_id {
+        if let Some(w) = notif_whisper(idx, pid, parents, profiles, me, handle.clone()) {
+            row = row.child(w);
+        }
+    }
+    let action_line = div()
+        .text_size(px(13.0))
+        .text_color(rgb(theme::MUTED))
+        .child(action_word(t, ev));
+    let handle_body = handle.clone();
+    let open_block = match open {
+        Some(target) => {
+            div()
+                .id(SharedString::from(format!("notif-open-{idx}")))
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    let target = target;
+                    handle.update(cx, |_, cx| cx.emit(Nav::OpenThread(target)));
+                })
+                .child(action_line)
+                .child(content::body(ev, &ctx, handle_body.clone()))
+                .into_any_element()
+        }
+        None => div()
+            .child(action_line)
+            .child(content::body(ev, &ctx, handle_body.clone()))
+            .into_any_element(),
+    };
+    row.child(open_block).into_any_element()
+}
+
 /// New / Earlier section labels at the high-water boundary
 /// (routes/notifications.ts) — only when the page straddles it.
 fn sectioned(prev: u64, notifs: &[Event]) -> Vec<Row> {
@@ -206,6 +438,8 @@ impl Render for NotificationsView {
         let profiles = self.profiles.clone();
         let media = media::Snapshot::new(cx);
         let quotes = self.quotes.clone();
+        let parents = self.parents.clone();
+        let me = self.me.clone();
         let empty = rows.is_empty();
 
         div()
@@ -248,14 +482,15 @@ impl Render for NotificationsView {
                                     .text_color(rgb(theme::MUTED))
                                     .child(text.to_string())
                                     .into_any_element(),
-                                Some(Row::Note(ev, t)) => content::compact_card(
+                                Some(Row::Note(ev, t)) => notif_card(
                                     idx,
-                                    "notif",
                                     ev,
-                                    Some(action_word(*t, ev)),
+                                    *t,
                                     &profiles,
+                                    &parents,
                                     &media,
                                     &quotes,
+                                    &me,
                                     handle.clone(),
                                 ),
                                 None => div().into_any_element(),
