@@ -441,7 +441,13 @@ impl Core {
         if let NostrConnectUri::Client { metadata, .. } = &mut uri {
             metadata.description = Some("A quiet Nostr reader.".to_string());
         }
-        let uri_str = uri.to_string();
+        // The SDK emits the client identity as a metadata= JSON blob (the
+        // pre-2025 NIP-46 draft); the current spec spells flat query params
+        // (name/url/image). Append both — old signers read the blob, current
+        // ones (kumaOS) the flat param. The handshake itself validates the
+        // secret against the parsed URI, so the extras ride along inert.
+        let mut uri_str = uri.to_string();
+        uri_str.push_str("&name=Satori");
         eprintln!("[core] nostrconnect uri ready: {} chars", uri_str.len());
         let _ = tx.send(ConnectEvent::Uri(uri_str));
 
