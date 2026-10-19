@@ -322,7 +322,9 @@ impl Shell {
             .flex()
             .flex_col()
             .items_center()
-            .pt(px(14.0))
+            // Glyph top lands at 19+9=28 — level with the feed's first
+            // avatar (16px page band + 12px note-card padding).
+            .pt(px(19.0))
             .gap_1()
             // The ensō: home. Same as the feed mark, drawn heavier.
             .child(self.rail_button(
@@ -457,7 +459,6 @@ impl Shell {
             .items_center()
             .gap_3()
             .px_4()
-            .pt(px(8.0))
             .pb(px(4.0))
             .child(
                 div()
@@ -599,6 +600,10 @@ impl Render for Shell {
                     .h_full()
                     .flex()
                     .flex_col()
+                    // The quiet band every page starts under (uniform top
+                    // padding — the feed's first note, the deep panes'
+                    // title row: all begin 16px down).
+                    .pt(px(16.0))
                     .when(depth > 1, |d| d.child(self.title_row(cx)))
                     .child(match pane {
                         Pane::Feed(view) => view.clone().into_any_element(),
