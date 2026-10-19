@@ -1150,14 +1150,23 @@ impl Core {
                     .unwrap_or_default();
                 let ids: Vec<EventId> = my_notes.iter().map(|e| e.id).collect();
 
-                // Instant paint: the store's cached candidates.
+                // Instant paint: the store's cached candidates (kind-1
+                // replies AND NIP-22 comments — the Amethyst migration
+                // made 1111 the carrier for non-kind-1 replies).
                 let mut cached: Vec<Event> = Vec::new();
                 for id in &ids {
                     if let Ok(replies) = active.pool.store.replies(*id).await {
                         cached.extend(replies);
                     }
+                    if let Ok(comments) = active.pool.store.comments(*id).await {
+                        cached.extend(comments);
+                    }
                 }
                 cached.retain(|ev| ev.pubkey != me);
+                {
+                    let muted = this.muted.lock().unwrap();
+                    cached.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
+                }
                 {
                     let authors: Vec<PublicKey> = cached.iter().map(|e| e.pubkey).collect();
                     let profiles = active
@@ -1181,7 +1190,7 @@ impl Core {
                 // Mentions (#p=me) and replies (#e=my notes): PARALLEL.
                 let mention_q = Box::pin(active.pool.get(
                     Filter::new()
-                        .kind(Kind::TextNote)
+                        .kinds([Kind::TextNote, Kind::Custom(1111)])
                         .pubkeys([me])
                         .since(Timestamp::from(since))
                         .limit(200),
@@ -1191,7 +1200,7 @@ impl Core {
                 } else {
                     Some(Box::pin(active.pool.get(
                         Filter::new()
-                            .kind(Kind::TextNote)
+                            .kinds([Kind::TextNote, Kind::Custom(1111)])
                             .events(ids)
                             .since(Timestamp::from(since))
                             .limit(200),
@@ -1214,9 +1223,14 @@ impl Core {
 
                 // Dedup + drop own + sort desc.
                 let mut seen = std::collections::HashSet::new();
+                let muted = this.muted.lock().unwrap().clone();
                 let mut notifs: Vec<Event> = mine_events
                     .into_iter()
-                    .filter(|ev| ev.pubkey != me && seen.insert(ev.id))
+                    .filter(|ev| {
+                        ev.pubkey != me
+                            && seen.insert(ev.id)
+                            && !muted.contains(&ev.pubkey.to_string())
+                    })
                     .collect();
                 notifs.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
 

@@ -64,13 +64,12 @@ impl NotificationsView {
         match ev {
             FeedEvent::Notifications(notifs, profiles) => {
                 // Each event is a full page (cached-first, then fresh) —
-                // rebuild, never append. The relay phase asks for TextNote
-                // only, but the cached store page can surface reactions
-                // (kind 7, usually empty content) — keep the page to the
-                // slice-1 spec: replies + mentions.
+                // rebuild, never append. The manager gates the types
+                // (kind-1 replies, NIP-22 comments, mutes); the view
+                // renders whatever that stream vouches for.
                 let notifs: Vec<Event> = notifs
                     .into_iter()
-                    .filter(|e| e.kind == Kind::TextNote && !e.content.trim().is_empty())
+                    .filter(|e| !e.content.trim().is_empty())
                     .collect();
                 for p in profiles {
                     self.profiles.insert(p.pubkey.clone(), p);

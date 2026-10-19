@@ -943,7 +943,20 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     let ev = ev_for_open.clone();
-                    handle_open.update(cx, |_, cx| cx.emit(Nav::OpenThread(ev.id)));
+                    handle_open.update(cx, |_, cx| {
+                        // A NIP-22 comment notifies about someone else's
+                        // note — the interesting thread is the parent's
+                        // (comment.rs parse_refs: lowercase e = parent).
+                        let target = if u16::from(ev.kind) == 1111 {
+                            match satori_core::nip::comment::parse_refs(&ev).parent {
+                                Some(satori_core::nip::comment::Ref::Event(id)) => id,
+                                _ => ev.id,
+                            }
+                        } else {
+                            ev.id
+                        };
+                        cx.emit(Nav::OpenThread(target));
+                    });
                 })
                 .child(body(ev, &ctx, handle)),
         )
