@@ -3,10 +3,12 @@
 Native Linux desktop rewrite of Satori, a Nostr client, in Rust. The UI toolkit is
 GPUI (Zed) per D13; the old GTK4/libadwaita app has been retired (§9.1, P4
 pulled forward). This document is the
-build spec: principles → decisions → architecture → milestones. The TypeScript app in
-`src/` + `public/` is the frozen reference implementation; its behavior documents *what*
-the product does, not *how* (the how was shaped by the browser, a constraint the desktop
-app does not have).
+build spec: principles → decisions → architecture → milestones. The original TypeScript
+web app (`src/` + `public/`) was the frozen reference implementation — its behavior
+documented *what* the product does, not *how* (the how was shaped by the browser, a
+constraint the desktop app does not have). It was retired at P4 parity (§8 D19): the
+code lives in git history at commit `a4b09e8` (`git show a4b09e8:src/<file>`), and the
+many `TODO(port)` citations across `crates/` point there.
 
 **Status:** living doc. Decisions in §8 are settled unless reopened with rationale.
 
@@ -96,7 +98,7 @@ timeouts; `h-optimistic` → mutate-then-reconcile.
 satori/
   Cargo.toml                # workspace
   crates/
-    core/                   # satori-core: nostr domain. NO gtk dependency.
+    core/                   # satori-core: nostr domain. NO UI dependency.
       src/
         pool.rs             # relay pool glue: outbox routing, budgets, auth, seen-on
         signer.rs           # bunker (nostr-connect) / local-key (Secret Service)
@@ -110,26 +112,27 @@ satori/
         tor.rs              # SOCKS transport, per-host isolation, privacy modes
         nip/                # thin NIPs not in nostr-sdk: 24,31,34,37,52,54,68,71,84,89,99,F4
         kinds.rs            # KindHandler trait + registry (§6.1)
-    app/                    # satori: the GTK binary. Depends on core; core never sees GTK.
+    app-gpui/               # satori-desktop (package satori-gpui): the GPUI binary.
       src/
-        main.rs             # AdwApplication, tokio↔GLib bridge
-        theme/              # sumi-e.css (light), sumi-e-dark.css, fonts
-        views/              # feed, thread, profile, article, messages, search,
-                            # notifications, bookmarks, drafts, settings, relay, login
-        widgets/            # note card, composer, media gallery, lightbox, ensō, dots
-  packaging/
-    flatpak/                # manifest, metainfo, icons, screenshots
-  Containerfile.dev         # podman dev image (host is bootc; GTK headers live here)
+        main.rs             # Application, the Root view (login doors → shell)
+        theme.rs            # sumi-e tokens (P052/Cantarell, night/washi palettes)
+        icons.rs            # PathBuilder stroke glyphs
+        views/              # shell, feed, thread, profile, reader, search,
+                            # notifications, composer, settings, login, lightbox
+  packaging/                # .desktop file; Flatpak manifest is the open P4 item
+  Containerfile.dev         # podman dev image (host is bootc; no GTK/Vulkan headers)
+  vendor/xattr              # gpui 0.2.2 transitive-dep compile fix ([patch.crates-io])
 ```
 
 ### 3.2 Async model
 
 - **tokio** runtime owns all I/O (relays, HTTP, Tor).
-- **GLib MainContext** owns all UI. Bridge: UI submits commands via an async channel;
-  tokio tasks send results back through a channel drained by `MainContext` — UI code
-  never blocks, network code never touches widgets.
+- **GPUI's executor** owns all UI (P4 cutover; the GTK-era `GLib MainContext`
+  bridge is retired with `crates/app`). UI code spawns on gpui's executor,
+  network results cross back through channel pumps — UI never blocks, network
+  code never touches elements.
 - State: a single `Core` handle (`Arc`) per profile exposing typed observables; views
-  subscribe, re-render as projections. No widget-owned truth.
+  subscribe, re-render as projections. No element-owned truth.
 
 ### 3.3 Storage
 
@@ -344,6 +347,7 @@ rejected (Blossom only).
 | D15 | **The GPUI binary is named `satori-desktop`** (package stays `satori-gpui`). | User preference during P4 prep; the P4 "binary named `satori`" goal is superseded. |
 | D17 | **The app never handles the master key.** The nsec login door is removed; sign-in is NIP-46 only — bunker:// paste or nostrconnect:// QR (advertised on `relay.nip46.com`), both holding only an ephemeral transport secret in `BUNKER_CLIENT_SECRET`. The core's `login_nsec_inner` survives as a `#[cfg(test)]` fixture for the logout/re-login flow tests; `SessionMode::Local` + its resume arm stay for reading old session files. nostrconnect metadata: `name: "Satori"`, `description: "A quiet Nostr reader."`; `url`/`icons` stay unset until the app has hosted art (both optional per NIP-46). The updated NIP-46 also defines `optional_client_metadata` (name/url/image) as the 4th `connect` param for the bunker flow — nostr-sdk 0.45's `connect_bunker` doesn't expose it (sends only pk+secret), noted as an SDK gap; likewise the SDK advertises nostrconnect metadata as a `metadata=` JSON blob while the current spec spells flat `name`/`url`/`image` query params. | User: "remove the sign in via nsec, that's not secure"; prompted by the discovery that a month-old local session had the master key sitting user-level-readable in the Secret Service. |
 | D18 | **The notification stream mirrors the reference's shape, not just kind 1.** Four layers were kind-1-only (relay mention filter, relay reply filter, cached store phase, render gate) — after Amethyst's NIP-22 migration real notifications were invisible. Stream = kind 1 + 1111 (replies/mentions, 1111 always a reply), 9735 zaps (embedded 9734 must verify + p/e/a match the receipt; bolt11 amount authoritative; unverifiable = anonymous, never a spoofed name), 1018 poll votes (#e my poll ids), kind 7 reactions behind the `reactionNotifs` pref (default off), `-` dislikes never. Mutes gate at both phases. Rows carry action words ("· replied", "· zapped 21 sats"); a comment row opens the PARENT's thread. | User approved all five notification types, zaps last ("maybe zaps last but all five sounds good"); reference is `src/data/notifications.ts`. |
+| D19 | **The TypeScript reference is retired at P4 parity.** `src/` + `public/` (1.8 MB, build tooling already gone — it was source-as-documentation only) deleted once the port's remaining slices closed; the code is unchanged since the initial commit, so the pinned address `a4b09e8` is its complete final state (`git show a4b09e8:src/<file>`). The ~118 `TODO(port)`/doc citations across `crates/` and this document stay as historical pointers to that address. Rationale: nothing executed it, and the product behavior it specified now lives in the Rust code it specified it for — the tree should say what the project IS, not what it was rewritten from. | User decision ("shouldn't we delete all the stuff that doesn't belong to this project now?"); the parity trigger was the P4-minus-packaging sweep (reduced-motion audit, reactionNotifs surface, cached-phase engagement kinds). |
 
 ---
 
@@ -479,11 +483,23 @@ re-expression of views, not a feature rebuild.
   flipped to the GPUI binary (user decision, P2.5): `crates/app` stays only as
   the P3 porting reference (first-login no longer needs it); deletion remains
   the P4 formality.
-- **P4 — Cutover.** Binary named `satori`; retire `crates/app`; Flatpak/packaging
-  update; both themes; reduced-motion equivalent.
+- **P4 — Cutover (done, minus packaging).** Binary named `satori-desktop`
+  (D15 superseded the "named `satori`" goal); `crates/app` retired (deleted);
+  both themes live-switchable; reduced-motion equivalent audited — the ensō
+  breath (both login instances) is the app's only animation and honors
+  `prefers-reduced-motion`; the hold toast's undone flash, the rail whisper
+  and the bell dot are state appearances, not motion, nothing to gate. The
+  TypeScript reference retired per D19 (deleted at `a4b09e8`, citations point
+  into git history). P4 sweep extras: the bell's cached phase gained the
+  engagement kinds (7/9735/1018 by `e` tag — a cold start's instant paint no
+  longer waits a beat for the relays) with the relay phase's gates (dislikes,
+  the reactionNotifs pref) applied to it, and reactionNotifs got its settings
+  surface. **Open: Flatpak/packaging update** (held by owner; the keyring
+  decision rides with it).
 
 Port convention: each ported view cites its GTK/TS origin
-(`// TODO(port): <origin> — P<n>`), same discipline as `crates/core`.
+(`// TODO(port): <origin> — P<n>`), same discipline as `crates/core`. Since
+the retirement (D19) those citations point into git history.
 
 ---
 

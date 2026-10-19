@@ -28,11 +28,12 @@ inside the dev container:
 
     podman build -t satori-dev -f Containerfile.dev
     podman run --rm -v "$PWD:/srv:Z" -w /srv satori-dev cargo check --workspace
-    podman run --rm -v "$PWD:/srv:Z" -w /srv satori-dev cargo run -p satori
+    podman run --rm -v "$PWD:/srv:Z" -w /srv satori-dev cargo run -p satori-gpui
 
-`AGENTS.md` covers layout, conventions, and gates. The TypeScript in `src/` + `public/`
-is the frozen reference implementation consulted during the port — it will be removed
-once the port is complete.
+`AGENTS.md` covers layout, conventions, and gates. The TypeScript reference
+implementation (`src/` + `public/`) was retired when the port reached parity —
+its final state lives in git history at commit `a4b09e8`
+(`git show a4b09e8:src/<file>`).
 
 ## License
 

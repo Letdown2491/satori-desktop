@@ -1,17 +1,15 @@
 # AGENTS.md
 
-Satori is being rewritten from a server-rendered web app into a native Linux
-desktop app in Rust. The UI toolkit is GPUI (decision D13); the GTK4/libadwaita
-app remains the working implementation until the GPUI port reaches parity
-(§9.1). The TypeScript app in `src/` + `public/` is the **frozen reference
-implementation** from the original web app: consult it for product behavior,
-not for architecture. The build spec is `DESIGN.md` — read it before working
-in `crates/`.
+Satori is a native Linux desktop app in Rust. The UI toolkit is GPUI (decision
+D13); the old GTK4/libadwaita app and the original TypeScript web app are both
+retired — their code lives in git history only (the TS reference's final state
+is commit `a4b09e8`: `git show a4b09e8:src/<file>`). The build spec is
+`DESIGN.md` — read it before working in `crates/`.
 
 ## Layout
 
 - `crates/core` — Nostr domain layer (relay routing, signing, storage, NIPs).
-  **No UI dependency.** Each module's doc comment names the TS file(s) it ports.
+  **No UI dependency.** Each module's doc comment names the TS file(s) it ported.
 - `crates/app-gpui` — the GPUI binary (`satori-desktop`; package `satori-gpui`):
   the app (P4 cutover pulled forward — `crates/app`, the old GTK binary, was
   deleted; its `TODO(port)` citations now point into git history). Tokens in
@@ -35,17 +33,13 @@ launch with `LD_LIBRARY_PATH=~/.local/lib ./target/debug/satori-desktop`.
 ## Gates
 
 - `cargo check --workspace` clean before any commit.
-- Before asking anyone to test UI behavior: **`cargo build -p satori`** (GTK)
-  or **`cargo build -p satori-gpui`** (GPUI) — clippy/test do NOT produce the
-  binaries; a stale binary has caused a phantom "fixed but still broken"
-  round-trip before.
-- The GPUI binary and the GTK binary cannot run at the same time (LMDB store
-  lock). Swap with care; restore the daily driver afterwards.
-- Don't touch the frozen reference code (`src/` + `public/`) unless explicitly asked;
-  its own gates (`npm run typecheck`) apply only there.
+- Before asking anyone to test UI behavior: **`cargo build -p satori-gpui`** —
+  clippy/test do NOT produce the binary; a stale binary has caused a phantom
+  "fixed but still broken" round-trip before.
 
 ## Conventions
 
 - Rust edition 2024, workspace deps in the root `Cargo.toml`.
-- Ported semantics cite their origin (`// TODO(port): <ts-file> — <milestone>`).
+- Ported semantics cite their origin (`// TODO(port): <ts-file> — <milestone>`);
+  the cited files live in git history (`git show a4b09e8:<path>`).
 - Decisions live in `DESIGN.md` §8 (decision log); add, don't bypass.
