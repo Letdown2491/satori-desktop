@@ -32,6 +32,8 @@ pub struct LoginView {
     /// once at Uri, not per frame).
     qr_uri: Option<String>,
     qr: Option<Arc<Image>>,
+    /// Click-the-URI-to-copy feedback (brief "Copied" swap).
+    copied: bool,
     /// NIP-46 out-of-band approval link (login.rs AuthUrl — GTK printed it
     /// to stderr behind a TODO; here it's a clickable chip).
     auth_url: Option<String>,
@@ -57,18 +59,44 @@ impl LoginView {
             i.placeholder("bunker://…")
         });
         let focus = bunker.read(cx).focus_handle(cx);
-        Self {
+        let mut view = Self {
             core,
             bunker,
             focus,
             waiting: None,
             qr_uri: None,
             qr: None,
+            copied: false,
             auth_url: None,
             error: resume_error.unwrap_or_default(),
             generation: 0,
             autofocused: false,
-        }
+        };
+        view.start_nostrconnect(cx);
+        view
+    }
+
+    /// The nostrconnect handshake runs from the moment the doors show —
+    /// the QR is form furniture, not a flow you start. A fresh URI per
+    /// LoginView (each resume/reject regenerates one).
+    fn start_nostrconnect(&mut self, cx: &mut Context<Self>) {
+        self.generation += 1;
+        let generation = self.generation;
+        self.qr_uri = None;
+        self.qr = None;
+        let rx = self.core.connect_nostrconnect("wss://relay.nip46.com".into());
+        let mut rx = rx;
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                let again = this
+                    .update(cx, |this, cx| this.on_event(ev, generation, cx))
+                    .is_ok_and(|more| more);
+                if !again {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn begin(
@@ -119,6 +147,10 @@ impl LoginView {
             ConnectEvent::Failed(msg) => {
                 self.error = msg;
                 self.waiting = None;
+                // A dead handshake leaves a stale QR on the doors — drop it;
+                // the URI strip now reads "generating…" and re-arms on click.
+                self.qr_uri = None;
+                self.qr = None;
                 self.core.cancel_login();
                 return false;
             }
@@ -141,17 +173,6 @@ impl LoginView {
         );
     }
 
-    /// The nostrconnect door: advertise a fresh handshake on the shared
-    /// NIP-46 relay; the QR fills in when the URI event lands.
-    fn connect_nostrconnect(&mut self, cx: &mut Context<Self>) {
-        let rx = self.core.connect_nostrconnect("wss://relay.nip46.com".into());
-        self.begin(
-            "Waiting for your signer…",
-            "Scan the code with a NIP-46 signer and approve.",
-            rx,
-            cx,
-        );
-    }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
         self.generation += 1; // invalidate the pump: failures stay quiet
@@ -352,26 +373,86 @@ impl Render for LoginView {
                                 .h(px(1.))
                                 .bg(rgb(theme::HAIRLINE))
                                 .into_any_element(),
+                            // The nostrconnect door, always on: the QR is
+                            // generated the moment the doors show — click the
+                            // URI below to copy it into a signer that can't
+                            // scan its own screen.
                             div()
                                 .w_full()
                                 .flex()
+                                .flex_col()
                                 .items_center()
-                                .justify_center()
+                                .gap_2()
                                 .child(
                                     div()
-                                        .id("login-nostrconnect")
+                                        .font_family(theme::SERIF)
+                                        .text_size(px(15.0))
+                                        .child("Scan with your signer"),
+                                )
+                                .child(
+                                    match &qr {
+                                        Some(code) => div()
+                                            .child(img(code.clone()).size(px(240.0)))
+                                            .into_any_element(),
+                                        None => div()
+                                            .child(icons::enso_icon(theme::MUTED, 60.0))
+                                            .with_animation(
+                                                "qr-breath",
+                                                Animation::new(Duration::from_millis(3_400))
+                                                    .repeat(),
+                                                |enso, t| {
+                                                    let phase = 0.5
+                                                        + 0.5 * (t * std::f32::consts::TAU).sin();
+                                                    enso.opacity(0.4 + 0.6 * phase)
+                                                },
+                                            )
+                                            .into_any_element(),
+                                    },
+                                )
+                                .child(
+                                    div()
+                                        .id("qr-uri-copy")
                                         .cursor_pointer()
                                         .p_1()
-                                        .px_3()
+                                        .px_2()
                                         .rounded_sm()
                                         .border_1()
                                         .border_color(rgb(theme::HAIRLINE))
-                                        .text_size(px(13.0))
-                                        .text_color(rgb(theme::VERMILION))
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(theme::MUTED))
+                                        .overflow_x_scroll()
+                                        .max_w(px(360.))
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            this.connect_nostrconnect(cx)
+                                            // Handshake dead (timeout, relay loss)?
+                                            // The click re-arms it.
+                                            if this.qr_uri.is_none() {
+                                                this.start_nostrconnect(cx);
+                                                return;
+                                            }
+                                            let Some(uri) = this.qr_uri.clone() else {
+                                                return;
+                                            };
+                                            cx.write_to_clipboard(
+                                                gpui::ClipboardItem::new_string(uri),
+                                            );
+                                            this.copied = true;
+                                            cx.notify();
+                                            let reset = cx.spawn(async move |this, cx| {
+                                                cx.background_executor()
+                                                    .timer(Duration::from_millis(2_500))
+                                                    .await;
+                                                let _ = this.update(cx, |this, cx| {
+                                                    this.copied = false;
+                                                    cx.notify();
+                                                });
+                                            });
+                                            reset.detach();
                                         }))
-                                        .child("Scan with your signer"),
+                                        .child(match (&qr_uri, self.copied) {
+                                            (_, true) => "Copied — paste it in your signer".to_string(),
+                                            (Some(uri), _) => uri.clone(),
+                                            (None, _) => "generating…".to_string(),
+                                        }),
                                 )
                                 .into_any_element(),
                             div()
@@ -380,8 +461,8 @@ impl Render for LoginView {
                                 .text_color(rgb(theme::MUTED))
                                 .text_align(TextAlign::Center)
                                 .child(
-                                    "Generates a one-time code in the app above — your signer \
-                                     scans it and approves. The key never touches Satori.",
+                                    "Approve in your signer app — the key never touches \
+                                     Satori.",
                                 )
                                 .into_any_element(),
                         ]
