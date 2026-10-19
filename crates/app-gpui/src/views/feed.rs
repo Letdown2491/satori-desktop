@@ -22,7 +22,24 @@ use satori_core::manager::{Core, FeedEvent, FeedRx, Profile, PublishEvent};
 use crate::{icons, media, theme};
 use super::{content, nav::Nav, cards};
 
+/// Which surface a feed pane carries: the timeline (the visible catalog)
+/// or the articles shelf (kind 30023 from the same follows).
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum FeedMode {
+    Timeline,
+    Articles,
+}
+impl FeedMode {
+    pub(crate) fn kinds(&self) -> Vec<Kind> {
+        match self {
+            FeedMode::Timeline => satori_core::store::visible_kinds(),
+            FeedMode::Articles => vec![Kind::Custom(30023)],
+        }
+    }
+}
+
 pub struct Feed {
+    mode: FeedMode,
     core: Arc<Core>,
     notes: Vec<Event>,
     profiles: HashMap<String, Profile>,
@@ -77,6 +94,15 @@ impl EventEmitter<Nav> for Feed {}
 
 impl Feed {
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
+        Self::with_mode(core, FeedMode::Timeline, cx)
+    }
+
+    /// The articles shelf: same follows, same paging, kind 30023 only.
+    pub fn articles(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
+        Self::with_mode(core, FeedMode::Articles, cx)
+    }
+
+    fn with_mode(core: Arc<Core>, mode: FeedMode, cx: &mut Context<Self>) -> Self {
         let feed = Self {
             core,
             notes: vec![],
@@ -93,6 +119,7 @@ impl Feed {
             paging: false,
             snap: None,
             snap_dirty: true,
+            mode,
             note_ids: HashSet::new(),
             last_visible_end: 0,
             deep: false,
@@ -115,7 +142,7 @@ impl Feed {
                 feed.maybe_older(feed.last_visible_end, cx);
             });
         });
-        let boot = feed.core.bootstrap();
+        let boot = feed.core.bootstrap(mode.kinds());
         feed.pump(boot, cx);
         feed
     }
@@ -156,7 +183,7 @@ impl Feed {
             .last()
             .map(|n| n.created_at.as_secs())
             .unwrap_or(0);
-        self.pump(self.core.older(oldest), cx);
+        self.pump(self.core.older(oldest, self.mode.kinds()), cx);
         cx.notify();
     }
 

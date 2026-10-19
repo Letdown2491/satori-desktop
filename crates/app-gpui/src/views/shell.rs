@@ -33,6 +33,8 @@ use super::{
 #[derive(Clone)]
 pub enum Pane {
     Feed(Entity<Feed>),
+    /// The articles shelf — a second Feed entity in articles mode.
+    Articles(Entity<Feed>),
     Thread(Entity<ThreadView>),
     Profile(Entity<ProfileView>),
     Notifications(Entity<NotificationsView>),
@@ -68,6 +70,7 @@ impl Shell {
         let feed = cx.new(|cx| Feed::new(core.clone(), cx));
         cx.subscribe(&feed, |this, _feed, ev: &Nav, cx| match ev {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
+            Nav::OpenArticles => this.open_articles(cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
@@ -97,6 +100,7 @@ impl Shell {
     fn subscribe_nav<V: EventEmitter<Nav> + 'static>(&self, view: &Entity<V>, cx: &mut Context<Self>) {
         cx.subscribe(view, |this, _view, ev: &Nav, cx| match ev {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
+            Nav::OpenArticles => this.open_articles(cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
@@ -121,6 +125,15 @@ impl Shell {
         let view = cx.new(|cx| ProfileView::new(self.core.clone(), who, cx));
         self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Profile(view));
+        cx.notify();
+    }
+
+    /// The articles shelf: a second feed entity, kind 30023 from the same
+    /// follows. It stacks on the timeline (back returns to it).
+    fn open_articles(&mut self, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| Feed::articles(self.core.clone(), cx));
+        self.subscribe_nav(&view, cx);
+        self.stack.push(Pane::Articles(view));
         cx.notify();
     }
 
@@ -234,6 +247,7 @@ impl Shell {
     fn title(&self) -> &'static str {
         match self.stack.last() {
             Some(Pane::Feed(_)) => "Feed",
+            Some(Pane::Articles(_)) => "Articles",
             Some(Pane::Thread(_)) => "Thread",
             Some(Pane::Profile(_)) => "Profile",
             Some(Pane::Notifications(_)) => "Notifications",
@@ -277,6 +291,7 @@ fn tip(label: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'stat
 #[derive(Clone, Copy, PartialEq)]
 enum Spot {
     Feed,
+    Articles,
     Search,
     Notif,
     Compose,
@@ -287,6 +302,7 @@ impl Shell {
     fn active_spot(&self) -> Option<Spot> {
         match self.stack.last() {
             Some(Pane::Feed(_)) => Some(Spot::Feed),
+            Some(Pane::Articles(_)) => Some(Spot::Articles),
             Some(Pane::Search(_)) => Some(Spot::Search),
             Some(Pane::Notifications(_)) => Some(Spot::Notif),
             Some(Pane::Composer(_)) => Some(Spot::Compose),
@@ -305,8 +321,11 @@ impl Shell {
 
     /// The feed pane's scroll-to-top (rail re-click, ensō, the whisper).
     fn feed_to_top(&self, cx: &mut Context<Self>) {
-        if let Some(Pane::Feed(view)) = self.stack.last().cloned() {
-            view.update(cx, |feed, _| feed.scroll_top());
+        match self.stack.last().cloned() {
+            Some(Pane::Feed(view)) | Some(Pane::Articles(view)) => {
+                view.update(cx, |feed, _| feed.scroll_top());
+            }
+            _ => {}
         }
     }
 
@@ -353,6 +372,17 @@ impl Shell {
                         shell.feed_to_top(cx);
                     } else {
                         shell.go_home(cx);
+                    }
+                }),
+            ))
+            .child(self.rail_button(
+                "rail-articles",
+                "Articles",
+                icons::article_icon(ink(active == Some(Spot::Articles))),
+                active == Some(Spot::Articles),
+                cx.listener(move |shell, _, _, cx| {
+                    if shell.active_spot() != Some(Spot::Articles) {
+                        shell.open_articles(cx);
                     }
                 }),
             ))
@@ -573,6 +603,9 @@ impl Render for Shell {
                     if ev.keystroke.key == "/" {
                         shell.open_search(cx);
                     }
+                    if ev.keystroke.key == "a" {
+                        shell.open_articles(cx);
+                    }
                     // No GTK accel — same CSD story: the header Settings seal
                     // needs a keyboard way in.
                     if ev.keystroke.key == "s" {
@@ -610,6 +643,7 @@ impl Render for Shell {
                     .when(depth > 1, |d| d.child(self.title_row(cx)))
                     .child(match pane {
                         Pane::Feed(view) => view.clone().into_any_element(),
+                        Pane::Articles(view) => view.clone().into_any_element(),
                         Pane::Thread(view) => view.clone().into_any_element(),
                         Pane::Profile(view) => view.clone().into_any_element(),
                         Pane::Notifications(view) => view.clone().into_any_element(),
@@ -619,7 +653,8 @@ impl Render for Shell {
                         Pane::Composer(view) => view.clone().into_any_element(),
                     })
                     .when(
-                        self.feed_deep && matches!(pane, Pane::Feed(_)),
+                        self.feed_deep
+                            && matches!(pane, Pane::Feed(_) | Pane::Articles(_)),
                         |d| d.child(self.floating_top(cx)),
                     ),
             )

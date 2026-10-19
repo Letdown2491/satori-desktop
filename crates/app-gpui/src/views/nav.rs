@@ -9,6 +9,8 @@ use nostr::prelude::*;
 pub enum Nav {
     OpenThread(EventId),
     OpenProfile(PublicKey),
+    /// The articles shelf (kind 30023 from the follows).
+    OpenArticles,
     /// The composer, optionally replying to a note.
     OpenComposer(Option<Event>),
     /// The article reader page (markdown).

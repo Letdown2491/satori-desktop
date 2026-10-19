@@ -529,18 +529,24 @@ impl Core {
 
     /// Bootstrap: NIP-65 relay lists, follows, connect reads, first page
     /// (deep fetch for older pagination), own engagement sets, profiles.
-    pub fn bootstrap(self: &Arc<Self>) -> FeedRx {
+    /// Bootstrap the given surface: `visible_kinds()` for the timeline, a
+    /// single kind for a narrow one (articles).
+    pub fn bootstrap(self: &Arc<Self>, kinds: Vec<Kind>) -> FeedRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
-            if let Err(e) = this.bootstrap_inner(&tx).await {
+            if let Err(e) = this.bootstrap_inner(&tx, kinds).await {
                 let _ = tx.send(FeedEvent::Failed(e.to_string()));
             }
         });
         rx
     }
 
-    async fn bootstrap_inner(&self, tx: &mpsc::UnboundedSender<FeedEvent>) -> Result<()> {
+    async fn bootstrap_inner(
+        &self,
+        tx: &mpsc::UnboundedSender<FeedEvent>,
+        kinds: Vec<Kind>,
+    ) -> Result<()> {
         let mut active = self.active().await?;
         let me = active.me();
 
@@ -556,7 +562,7 @@ impl Core {
             .unwrap_or_default();
         if !cached_follows.is_empty() {
             active.follows = cached_follows.clone();
-            let page = self.page_from_store(&active, None).await?;
+            let page = self.page_from_store(&active, None, &kinds).await?;
             let _ = tx.send(FeedEvent::Loaded(page));
         }
         let _ = tx.send(FeedEvent::BootstrapDone);
@@ -610,7 +616,7 @@ impl Core {
             async {
                 if !follows.is_empty() && !warm {
                     let filter = Filter::new()
-                        .kinds(crate::store::visible_kinds())
+                        .kinds(kinds.clone())
                         .authors(follows.clone())
                         .limit(BOOTSTRAP_DEPTH);
                     active.pool.get(filter).await.unwrap_or_default()
@@ -625,7 +631,7 @@ impl Core {
         self.load_own_sets(&active).await;
 
         crate::read_state::advance(|st| st.feed_warm_at = now_secs());
-        let page = self.page_from_store(&active, None).await?;
+        let page = self.page_from_store(&active, None, &kinds).await?;
         let _ = tx.send(FeedEvent::Loaded(page));
         Ok(())
     }
@@ -692,22 +698,26 @@ impl Core {
     }
 
     /// Newest page (home button): relay fetch since the newest known note.
-    pub fn refresh(self: &Arc<Self>) -> FeedRx {
+    pub fn refresh(self: &Arc<Self>, kinds: Vec<Kind>) -> FeedRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
-            if let Err(e) = this.refresh_inner(&tx).await {
+            if let Err(e) = this.refresh_inner(&tx, kinds).await {
                 let _ = tx.send(FeedEvent::Failed(e.to_string()));
             }
         });
         rx
     }
 
-    async fn refresh_inner(&self, tx: &mpsc::UnboundedSender<FeedEvent>) -> Result<()> {
+    async fn refresh_inner(
+        &self,
+        tx: &mpsc::UnboundedSender<FeedEvent>,
+        kinds: Vec<Kind>,
+    ) -> Result<()> {
         let active = self.active().await?;
         let follows = active.follows.clone();
         if follows.is_empty() {
-            return self.bootstrap_inner(tx).await;
+            return self.bootstrap_inner(tx, kinds).await;
         }
         let newest = active
             .pool
@@ -720,7 +730,7 @@ impl Core {
             .map(|e| e.created_at.as_secs())
             .unwrap_or(0);
         let filter = Filter::new()
-            .kinds(crate::store::visible_kinds())
+            .kinds(kinds.clone())
             .authors(follows.clone())
             .since(Timestamp::from(since))
             .limit(100);
@@ -732,7 +742,7 @@ impl Core {
         for ev in fetched {
             let _ = active.pool.store.save(&ev).await;
         }
-        let page = self.page_from_store(&active, None).await?;
+        let page = self.page_from_store(&active, None, &kinds).await?;
         let _ = tx.send(FeedEvent::Loaded(page));
         Ok(())
     }
@@ -741,16 +751,16 @@ impl Core {
     /// relays — strictly older than `until` (the oldest note currently
     /// shown), all visible kinds — and project again. The store stays the
     /// chokepoint; the relays are the reservoir.
-    pub fn older(self: &Arc<Self>, until: u64) -> FeedRx {
+    pub fn older(self: &Arc<Self>, until: u64, kinds: Vec<Kind>) -> FeedRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
             let res: Result<FeedEvent> = async {
                 let active = this.active().await?;
-                let mut notes = this.project_page(&active, Some(until)).await?;
+                let mut notes = this.project_page(&active, Some(until), &kinds).await?;
                 if notes.len() <= PAGE {
                     let filter = Filter::new()
-                        .kinds(crate::store::visible_kinds())
+                        .kinds(kinds.clone())
                         .authors(active.follows.clone())
                         .until(Timestamp::from(until))
                         .limit(TOPUP_DEPTH);
@@ -758,7 +768,7 @@ impl Core {
                     for ev in fetched {
                         let _ = active.pool.store.save(&ev).await;
                     }
-                    notes = this.project_page(&active, Some(until)).await?;
+                    notes = this.project_page(&active, Some(until), &kinds).await?;
                 }
                 let has_more = notes.len() > PAGE;
                 notes.truncate(PAGE);
@@ -816,11 +826,16 @@ impl Core {
 
     /// One page projection: store query (a PAGE+1 window so "has more" is
     /// knowable), then the mutes gate at the chokepoint.
-    async fn project_page(&self, active: &Active, until: Option<u64>) -> Result<Vec<Event>> {
+    async fn project_page(
+        &self,
+        active: &Active,
+        until: Option<u64>,
+        kinds: &Vec<Kind>,
+    ) -> Result<Vec<Event>> {
         let mut notes = active
             .pool
             .store
-            .feed_page(&active.follows, until, PAGE + 1)
+            .feed_page_kinds(&active.follows, until, PAGE + 1, kinds.clone())
             .await
             .map_err(|e| LoginError::Resume(e.to_string()))?;
         {
@@ -830,12 +845,17 @@ impl Core {
         Ok(notes)
     }
 
-    async fn page_from_store(&self, active: &Active, until: Option<u64>) -> Result<FeedPage> {
+    async fn page_from_store(
+        &self,
+        active: &Active,
+        until: Option<u64>,
+        kinds: &Vec<Kind>,
+    ) -> Result<FeedPage> {
         let follows = active.follows.clone();
         let mut notes = active
             .pool
             .store
-            .feed_page(&follows, until, PAGE)
+            .feed_page_kinds(&follows, until, PAGE, kinds.clone())
             .await
             .map_err(|e| LoginError::Resume(e.to_string()))?;
         // Mutes gate here — every feed page passes this chokepoint

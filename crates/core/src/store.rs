@@ -101,13 +101,22 @@ impl Store {
         until: Option<u64>,
         limit: usize,
     ) -> NostrResult<Vec<Event>> {
-        // The projection admits the whole catalog the relays were asked for
-        // (visible_kinds honors the content prefs). The old kinds-1-and-6
-        // filter let bootstrap fetch rich kinds into the store and then
-        // dropped them at the door — polls and articles never reached the
-        // feed's pages.
+        // The whole visible catalog (visible_kinds honors the content prefs).
+        self.feed_page_kinds(authors, until, limit, visible_kinds())
+            .await
+    }
+
+    /// feed_page over an explicit kind set — the articles surface (30023
+    /// only) reads through the same chokepoint with a narrower filter.
+    pub async fn feed_page_kinds(
+        &self,
+        authors: &[PublicKey],
+        until: Option<u64>,
+        limit: usize,
+        kinds: Vec<Kind>,
+    ) -> NostrResult<Vec<Event>> {
         let mut filter = Filter::new()
-            .kinds(visible_kinds())
+            .kinds(kinds)
             .authors(authors.to_vec())
             .limit(limit);
         if let Some(ts) = until {

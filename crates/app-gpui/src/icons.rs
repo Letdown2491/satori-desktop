@@ -117,6 +117,10 @@ pub fn gear_icon(color: u32) -> impl IntoElement {
     icon(gear, color, 20.0)
 }
 
+pub fn article_icon(color: u32) -> impl IntoElement {
+    icon(article, color, 20.0)
+}
+
 pub fn arrow_up_icon(color: u32) -> impl IntoElement {
     icon(arrow_up, color, 16.0)
 }
@@ -205,15 +209,41 @@ fn pen(b: &mut PathBuilder, g: &Grid) {
     b.line_to(g.p(18.3, 9.1));
 }
 
-// Settings: the brush gear — a hub circle wearing eight short spokes.
+// Settings: a proper cog — toothed silhouette (alternating radii) around a
+// hub circle. The sunburst experiment didn't read as "settings".
 fn gear(b: &mut PathBuilder, g: &Grid) {
-    circle(b, g, 12.0, 12.0, 4.2);
-    for i in 0..8 {
-        let a = (i as f32) * std::f32::consts::FRAC_PI_4;
-        let (sin, cos) = a.sin_cos();
-        b.move_to(g.p(12.0 + 6.4 * cos, 12.0 + 6.4 * sin));
-        b.line_to(g.p(12.0 + 8.6 * cos, 12.0 + 8.6 * sin));
+    let n = 8;
+    for i in 0..n {
+        let a0 = (i as f32) * std::f32::consts::FRAC_PI_4;
+        // valley -> tip -> tip -> valley per tooth; consecutive teeth's
+        // valleys connect as the cog's outer valleys.
+        for (da, r) in [(-0.16, 6.6), (-0.09, 8.6), (0.09, 8.6), (0.16, 6.6)] {
+            let a = a0 + da;
+            let pt = g.p(12.0 + r * a.cos(), 12.0 + r * a.sin());
+            if i == 0 && da == -0.16 {
+                b.move_to(pt);
+            } else {
+                b.line_to(pt);
+            }
+        }
     }
+    b.close();
+    circle(b, g, 12.0, 12.0, 3.4);
+}
+
+// The articles mark: a page outline carrying text lines.
+fn article(b: &mut PathBuilder, g: &Grid) {
+    b.move_to(g.p(6.0, 3.5));
+    b.line_to(g.p(18.0, 3.5));
+    b.line_to(g.p(18.0, 20.5));
+    b.line_to(g.p(6.0, 20.5));
+    b.close();
+    b.move_to(g.p(8.8, 8.0));
+    b.line_to(g.p(15.2, 8.0));
+    b.move_to(g.p(8.8, 12.0));
+    b.line_to(g.p(15.2, 12.0));
+    b.move_to(g.p(8.8, 16.0));
+    b.line_to(g.p(13.0, 16.0));
 }
 
 // Back-to-top: shaft + head.
