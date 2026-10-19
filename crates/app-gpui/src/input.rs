@@ -228,7 +228,10 @@ impl Input {
         cx.notify();
     }
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Clicking a field hands IT the caret — every input (note, question,
+        // options) needs no parent to do this for it.
+        window.focus(&self.focus_handle);
         self.is_selecting = true;
         let offset = self.index_for_mouse_position(event.position);
         if event.modifiers.shift {

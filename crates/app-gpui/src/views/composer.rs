@@ -57,7 +57,17 @@ enum Tab {
 
 /// The compose field's resting height, in lines of text: present without
 /// dominating (note.rs composer.rs:114 — the reference's 8 rows grew up).
-const LINES_MIN: f32 = 20.0;
+const LINES_MIN: f32 = 10.0;
+
+/// Wrapped-line estimate for a buffer — the Input element fills its parent
+/// (request_layout relative(1)), so intrinsic growth is computed here:
+/// one line per break, plus a wrap every `width` characters. Slightly
+/// overestimating only adds margin.
+fn est_lines(text: &str, width: f32) -> f32 {
+    text.split('\n')
+        .map(|l| 1.0 + (l.chars().count() as f32 / width).floor())
+        .sum()
+}
 
 pub struct Composer {
     core: Arc<Core>,
@@ -476,7 +486,6 @@ impl Render for Composer {
             window.focus(&self.focus);
         }
         let replying = self.reply_to.is_some();
-        let quote_snap = media::Snapshot::new(cx);
         let quote_prev = self.quote.as_ref().map(|q| {
             let prof = self.core.profile_of(&q.pubkey);
             (
@@ -501,15 +510,18 @@ impl Render for Composer {
         let poll_question = self.poll_question.clone();
         let poll_options = self.poll_options.clone();
         let poll_multi = self.poll_multi;
+        let field_lines = est_lines(input.read(cx).content.as_str(), 72.0);
+        let question_lines =
+            est_lines(&poll_question.read(cx).content, 72.0);
+        let quote_snap = media::Snapshot::new(cx);
 
         div()
             .id("composer")
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &Publish, _, cx| this.post(cx)))
-            .on_click(cx.listener(|this, _, window, _cx| {
-                // Clicking anywhere in the pane hands the caret to the field.
-                window.focus(&this.focus);
-            }))
+            // (No root click hand-off: every Input focuses itself on mouse
+            // down now — a pane-wide handler would steal the caret back
+            // from the poll's question and options.)
             .flex_1()
             .min_h_0()
             .overflow_hidden()
@@ -558,10 +570,10 @@ impl Render for Composer {
                 d.child(
                     div()
                         .id("composer-scroll")
-                        // Twenty quiet lines of breathing room; it grows
+                        // Ten quiet lines of breathing room; it grows
                         // with the text and scrolls when it outgrows the
                         // pane — the window never fills with an empty box.
-                        .min_h(LINES_MIN * window.line_height())
+                        .h(window.line_height() * field_lines.max(LINES_MIN))
                         .max_h_full()
                         .overflow_y_scroll()
                         .border_1()
@@ -592,8 +604,16 @@ impl Render for Composer {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(poll_question)
+                        .child(
+                            // Definite height: the Input fills its parent, so
+                            // an auto-height parent would collapse it to zero.
+                            div()
+                                .h(window.line_height() * question_lines.max(1.6))
+                                .child(poll_question),
+                        )
                         .children(poll_options.iter().enumerate().map(|(i, opt)| {
+                            let opt_lines =
+                                est_lines(&opt.read(cx).content, 60.0);
                             div()
                                 .flex()
                                 .items_center()
@@ -619,6 +639,7 @@ impl Render for Composer {
                                 .child(
                                     div()
                                         .flex_1()
+                                        .h(window.line_height() * (opt_lines + 1.6).max(2.2))
                                         .rounded(px(4.))
                                         .border_1()
                                         .border_color(rgb(theme::hairline()))
