@@ -395,7 +395,18 @@ impl Render for LoginView {
                                 .child(
                                     match &qr {
                                         Some(code) => div()
+                                            .id("qr-open")
+                                            .cursor_pointer()
                                             .child(img(code.clone()).size(px(240.0)))
+                                            // The desktop's nostrconnect:// handler
+                                            // (kumaOS: the built-in signer panel) pops
+                                            // on click; signers without a scheme
+                                            // handler fall back to the copy below.
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if let Some(uri) = this.qr_uri.clone() {
+                                                    cx.open_url(&uri);
+                                                }
+                                            }))
                                             .into_any_element(),
                                         None => div()
                                             .child(icons::enso_icon(theme::MUTED, 60.0))
@@ -464,8 +475,8 @@ impl Render for LoginView {
                                 .text_color(rgb(theme::MUTED))
                                 .text_align(TextAlign::Center)
                                 .child(
-                                    "Approve in your signer app — the key never touches \
-                                     Satori.",
+                                    "Click the code to open your signer, or click the URI \
+                                     to copy it. The key never touches Satori.",
                                 )
                                 .into_any_element(),
                         ]
