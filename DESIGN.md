@@ -1,8 +1,8 @@
 # Satori Desktop — Design & Build Spec
 
 Native Linux desktop rewrite of Satori, a Nostr client, in Rust. The UI toolkit is
-GPUI (Zed) per D13; the GTK4/libadwaita app in `crates/app` is the working
-implementation being ported (§9.1). This document is the
+GPUI (Zed) per D13; the old GTK4/libadwaita app has been retired (§9.1, P4
+pulled forward). This document is the
 build spec: principles → decisions → architecture → milestones. The TypeScript app in
 `src/` + `public/` is the frozen reference implementation; its behavior documents *what*
 the product does, not *how* (the how was shaped by the browser, a constraint the desktop

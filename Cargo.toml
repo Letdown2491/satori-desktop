@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/app", "crates/app-gpui"]
+members = ["crates/core", "crates/app-gpui"]
 
 # D13: gpui 0.2.2 → zed-async-tar → xattr 0.2.3 does not compile on Linux
 # (ENOATTR is macOS-only there); 0.2.3 is the last of its semver line, so the

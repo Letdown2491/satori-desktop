@@ -11,12 +11,11 @@ in `crates/`.
 ## Layout
 
 - `crates/core` — Nostr domain layer (relay routing, signing, storage, NIPs).
-  **No UI dependency** (survived the GTK→GPUI decision untouched). Each
-  module's doc comment names the TS file(s) it ports.
-- `crates/app` — the GTK binary: views, widgets, sumi-e theme. Daily driver
-  until P4 cutover; port from here, don't add new features.
-- `crates/app-gpui` — the GPUI binary (`satori-gpui`): the port target.
-  Tokens in `theme.rs`, stroke-drawn glyphs in `icons.rs`, views in `views/`.
+  **No UI dependency.** Each module's doc comment names the TS file(s) it ports.
+- `crates/app-gpui` — the GPUI binary (`satori-gpui`): the app (P4 cutover
+  pulled forward — `crates/app`, the old GTK binary, was deleted; its
+  `TODO(port)` citations now point into git history). Tokens in `theme.rs`,
+  stroke-drawn glyphs in `icons.rs`, views in `views/`.
 - `vendor/xattr` — one-line Linux compile fix for a gpui 0.2.2 transitive dep
   (D13); wired via `[patch.crates-io]` in the root `Cargo.toml`.
 - `packaging/flatpak` — Flatpak packaging (M5).

@@ -83,6 +83,26 @@ impl ThreadView {
         .detach();
     }
 
+    /// Hydrate names for note authors + mentioned pubkeys (TODO(port):
+    /// content.ts mentionPubkeys) — otherwise mentions degrade to @npub1….
+    fn want_names(&self, notes: &[Event], cx: &mut Context<Self>) {
+        let mut seen = HashSet::new();
+        let missing: Vec<PublicKey> = notes
+            .iter()
+            .flat_map(|n| {
+                let mut pks = vec![n.pubkey];
+                pks.extend(content::mention_pks(&n.content));
+                pks
+            })
+            .filter(|pk| {
+                !self.profiles.contains_key(&pk.to_string()) && seen.insert(pk.to_string())
+            })
+            .collect();
+        if !missing.is_empty() {
+            self.pump(self.core.ensure_profiles(missing), cx);
+        }
+    }
+
     fn on_event(&mut self, ev: FeedEvent, cx: &mut Context<Self>) {
         match ev {
             FeedEvent::One(Some(note), profile) => {
@@ -92,6 +112,7 @@ impl ThreadView {
                 }
                 self.want_media(&note, cx);
                 self.want_quotes(&note, cx);
+                self.want_names(&[note], cx);
             }
             FeedEvent::One(None, _) => self.status = "this note is gone or unreachable".into(),
             FeedEvent::Replies(replies, profiles) => {
@@ -104,6 +125,12 @@ impl ThreadView {
                     self.profiles.insert(p.pubkey.clone(), p);
                 }
                 self.status.clear();
+                self.want_names(&replies, cx);
+            }
+            FeedEvent::Profiles(profiles) => {
+                for p in profiles {
+                    self.profiles.insert(p.pubkey.clone(), p);
+                }
             }
             FeedEvent::Failed(e) => self.status = format!("… {e}"),
             _ => {}
