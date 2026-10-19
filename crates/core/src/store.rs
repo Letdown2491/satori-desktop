@@ -161,6 +161,18 @@ impl Store {
         Ok(events)
     }
 
+    /// Engagement-not-addressing-a-reply candidates for the notifications
+    /// cached phase: reactions (7), zaps (9735), poll votes (1018) whose
+    /// `e` tag targets the note. The cached phase was replies+comments
+    /// only, so a cold start's instant paint missed every zap/reaction/
+    /// vote until the relays answered a beat later.
+    pub async fn engagement_notifs(&self, id: EventId) -> NostrResult<Vec<Event>> {
+        let filter = Filter::new()
+            .kinds([Kind::Reaction, Kind::Custom(9735), Kind::Custom(1018)])
+            .event(id);
+        Ok(self.query(filter).await?.into_iter().collect())
+    }
+
     /// Latest kind-0 metadata for each of the given authors, from the cache.
     pub async fn profiles(&self, authors: &[PublicKey]) -> NostrResult<Vec<Event>> {
         let filter = Filter::new().kind(Kind::Metadata).authors(authors.to_vec());

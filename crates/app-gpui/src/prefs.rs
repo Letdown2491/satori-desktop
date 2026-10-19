@@ -80,6 +80,14 @@ pub fn set_kinds_hidden(kinds: &[u16], hidden: bool) {
     }
 }
 
+/// A top-level bool pref (settings.rs set_pref_bool). Missing = false.
+pub fn get_bool(key: &str) -> bool {
+    read_value(config::files::PREFS)
+        .get(key)
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false)
+}
+
 /// Set a top-level bool pref (settings.rs set_pref_bool).
 pub fn set_bool(key: &str, on: bool) {
     let mut value = read_value(config::files::PREFS);

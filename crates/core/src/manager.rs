@@ -1223,8 +1223,10 @@ impl Core {
                 let ids: Vec<EventId> = my_notes.iter().map(|e| e.id).collect();
 
                 // Instant paint: the store's cached candidates (kind-1
-                // replies AND NIP-22 comments — the Amethyst migration
-                // made 1111 the carrier for non-kind-1 replies).
+                // replies, NIP-22 comments — the Amethyst migration
+                // made 1111 the carrier for non-kind-1 replies — and the
+                // engagement kinds: reactions/zaps/votes by `e` tag).
+                let reaction_notifs = this.reaction_notifs();
                 let mut cached: Vec<Event> = Vec::new();
                 for id in &ids {
                     if let Ok(replies) = active.pool.store.replies(*id).await {
@@ -1233,8 +1235,19 @@ impl Core {
                     if let Ok(comments) = active.pool.store.comments(*id).await {
                         cached.extend(comments);
                     }
+                    if let Ok(engagement) = active.pool.store.engagement_notifs(*id).await {
+                        cached.extend(engagement);
+                    }
                 }
                 cached.retain(|ev| ev.pubkey != me);
+                // The relay phase filters these too — the cached phase
+                // must wear the same gates (a cold start previously showed
+                // a stranger's thumbs-down the relay phase would have
+                // dropped, and reactions when the pref was off).
+                cached.retain(|ev| {
+                    !(u16::from(ev.kind) == 7
+                        && (!reaction_notifs || ev.content.trim() == "-"))
+                });
                 {
                     let muted = this.muted.lock().unwrap();
                     cached.retain(|ev| !muted.contains(&ev.pubkey.to_string()));

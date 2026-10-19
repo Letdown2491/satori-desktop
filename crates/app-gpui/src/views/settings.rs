@@ -44,6 +44,9 @@ pub struct SettingsView {
     // Content: the feed catalog.
     machine_hidden: bool,
     hidden_kinds: Vec<u16>,
+    // Notifications: reactions behind the bell's pref (core reads it
+    // per stream — applies the next time the stream opens).
+    reaction_notifs: bool,
     // Set when the sign-out row is clicked: the pane freezes on "Signing
     // out…" while the shell tears the session down (the whole view is
     // replaced by the login doors a beat later).
@@ -95,6 +98,7 @@ impl SettingsView {
             undo_secs,
             machine_hidden: satori_core::store::machine_notes_hidden(),
             hidden_kinds: prefs::content_hidden(),
+            reaction_notifs: prefs::get_bool("reactionNotifs"),
             signing_out: false,
             me_name: None,
             status: String::new(),
@@ -373,6 +377,12 @@ impl SettingsView {
     fn toggle_machine_notes(&mut self, cx: &mut Context<Self>) {
         self.machine_hidden = !self.machine_hidden;
         prefs::set_bool("machine_notes_hidden", self.machine_hidden);
+        cx.notify();
+    }
+
+    fn toggle_reaction_notifs(&mut self, cx: &mut Context<Self>) {
+        self.reaction_notifs = !self.reaction_notifs;
+        prefs::set_bool("reactionNotifs", self.reaction_notifs);
         cx.notify();
     }
 
@@ -809,6 +819,33 @@ impl Render for SettingsView {
                             this.toggle_kind(&kinds, cx);
                         }))
                 })),
+            )
+            // --- Notifications (the bell's content) --------------------------
+            .child(
+                group(
+                    "Notifications",
+                    "What the bell counts. Applies the next time the stream opens.",
+                )
+                .child(
+                    div()
+                        .id("reaction-notifs-row")
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(13.0))
+                                .text_color(rgb(theme::ink()))
+                                .child("Show reactions in notifications"),
+                        )
+                        .child(toggle("reaction-notifs", self.reaction_notifs))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toggle_reaction_notifs(cx);
+                        })),
+                ),
             )
             // --- Media servers (Blossom, kind 10063) -------------------------
             .child(
