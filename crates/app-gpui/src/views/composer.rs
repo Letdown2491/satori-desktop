@@ -63,6 +63,16 @@ const LINES_MIN: f32 = 10.0;
 /// (request_layout relative(1)), so intrinsic growth is computed here:
 /// one line per break, plus a wrap every `width` characters. Slightly
 /// overestimating only adds margin.
+/// A quiet field label (the settings group title's voice, 12px semibold
+/// muted) — the poll panel's two groups.
+fn poll_label(text: &str) -> gpui::Div {
+    div()
+        .text_size(px(12.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(theme::muted()))
+        .child(text.to_string())
+}
+
 fn est_lines(text: &str, width: f32) -> f32 {
     text.split('\n')
         .map(|l| 1.0 + (l.chars().count() as f32 / width).floor())
@@ -623,6 +633,7 @@ impl Render for Composer {
                         .flex()
                         .flex_col()
                         .gap_2()
+                        .child(poll_label("Question"))
                         .child(
                             // The question wears the same washi box as the
                             // options — an unboxed bare input reads as blank
@@ -638,6 +649,7 @@ impl Render for Composer {
                                 .p_2()
                                 .child(poll_question),
                         )
+                        .child(poll_label("Options"))
                         .children(poll_options.iter().enumerate().map(|(i, opt)| {
                             let opt_lines =
                                 est_lines(&opt.read(cx).content, 60.0).max(1.0);
