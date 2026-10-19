@@ -14,9 +14,12 @@ pub struct ReadState {
     /// Newest following-feed note marked seen (UNIX secs).
     #[serde(default)]
     pub feed: u64,
-    /// Last time the feed store was deep-filled (bootstrap skip marker).
+    /// Last time a surface's store was deep-filled (bootstrap skip marker),
+    /// keyed by the surface's kind set — the joined catalog for the
+    /// timeline, "30023" for the articles shelf. One shared flag would let
+    /// a warm timeline starve a cold shelf's relay deep-fill.
     #[serde(default)]
-    pub feed_warm_at: u64,
+    pub warm_at: std::collections::HashMap<String, u64>,
     /// Newest note seen at the last home view (home-dot marker).
     #[serde(default)]
     pub feed_seen: u64,

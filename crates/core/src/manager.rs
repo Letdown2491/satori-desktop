@@ -604,7 +604,19 @@ impl Core {
         warm_set.push(me);
         active.profiles.warm(warm_set);
 
-        let warm = crate::read_state::load().feed_warm_at > now_secs().saturating_sub(600);
+        // The warm skip is per surface (keyed by kind set) — a timeline
+        // deep-filled five minutes ago says nothing about the articles
+        // shelf's store depth.
+        let warm_key: String = {
+            let mut ks: Vec<u16> = kinds.iter().map(|k| u16::from(*k)).collect();
+            ks.sort();
+            ks.dedup();
+            ks.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(",")
+        };
+        let warm = crate::read_state::load()
+            .warm_at
+            .get(&warm_key)
+            .is_some_and(|t| *t > now_secs().saturating_sub(600));
         let (engagement, _) = tokio::join!(
             async {
                 let mine = Filter::new()
@@ -630,7 +642,9 @@ impl Core {
         }
         self.load_own_sets(&active).await;
 
-        crate::read_state::advance(|st| st.feed_warm_at = now_secs());
+        crate::read_state::advance(|st| {
+            st.warm_at.insert(warm_key, now_secs());
+        });
         let page = self.page_from_store(&active, None, &kinds).await?;
         let _ = tx.send(FeedEvent::Loaded(page));
         Ok(())
