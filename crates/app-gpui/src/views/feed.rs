@@ -382,15 +382,15 @@ fn note_card(
     let handle_like = handle.clone();
     let handle_bookmark = handle.clone();
 
+    // No card box: posts sit directly on the washi, separated by whitespace
+    // alone (sumi-e — the empty space carries the composition).
     div()
         .w_full()
         .flex()
         .flex_col()
         .gap_2()
-        .p_4()
-        .bg(rgb(theme::PANEL))
-        .border_b_1()
-        .border_color(rgb(theme::HAIRLINE))
+        .px_4()
+        .py_3()
         .child(
             div()
                 .flex()

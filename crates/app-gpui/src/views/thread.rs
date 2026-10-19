@@ -212,8 +212,6 @@ fn reply_row(
         .pl(px(indent))
         .pr_4()
         .py_3()
-        .border_b_1()
-        .border_color(rgb(theme::HAIRLINE))
         .child(
             div()
                 .flex()
@@ -311,9 +309,6 @@ impl Render for ThreadView {
                                 .flex_col()
                                 .gap_2()
                                 .p_4()
-                                .border_b_1()
-                                .border_color(rgb(theme::HAIRLINE))
-                                .bg(rgb(theme::PANEL))
                                 .child(
                                     div()
                                         .text_size(px(13.0))

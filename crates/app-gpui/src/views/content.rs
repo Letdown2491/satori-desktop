@@ -657,8 +657,6 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
         .gap_2()
         .px_4()
         .py_3()
-        .border_b_1()
-        .border_color(rgb(theme::HAIRLINE))
         .child(
             div()
                 .flex()

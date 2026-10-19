@@ -31,5 +31,7 @@ pub fn washi() -> gpui::Hsla {
 // host fontconfig fallbacks until the bundled OFL serif (D9) is embedded and
 // registered via `cx.text_system().add_fonts`. A missing family fails silently
 // to a default — check rendering after font changes.
-pub const SANS: &str = "Open Sans";
-pub const SERIF: &str = "Nimbus Roman";
+pub const SANS: &str = "Cantarell";
+// P052: the Palatino face — a book serif with a big x-height, ink on washi
+// (was Nimbus Roman, a Times clone that read cramped at body sizes).
+pub const SERIF: &str = "P052";
