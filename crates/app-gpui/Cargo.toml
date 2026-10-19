@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 
 [[bin]]
-name = "satori-gpui"
+name = "satori-desktop"
 path = "src/main.rs"
 
 [dependencies]

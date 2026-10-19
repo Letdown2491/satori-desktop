@@ -12,10 +12,10 @@ in `crates/`.
 
 - `crates/core` — Nostr domain layer (relay routing, signing, storage, NIPs).
   **No UI dependency.** Each module's doc comment names the TS file(s) it ports.
-- `crates/app-gpui` — the GPUI binary (`satori-gpui`): the app (P4 cutover
-  pulled forward — `crates/app`, the old GTK binary, was deleted; its
-  `TODO(port)` citations now point into git history). Tokens in `theme.rs`,
-  stroke-drawn glyphs in `icons.rs`, views in `views/`.
+- `crates/app-gpui` — the GPUI binary (`satori-desktop`; package `satori-gpui`):
+  the app (P4 cutover pulled forward — `crates/app`, the old GTK binary, was
+  deleted; its `TODO(port)` citations now point into git history). Tokens in
+  `theme.rs`, stroke-drawn glyphs in `icons.rs`, views in `views/`.
 - `vendor/xattr` — one-line Linux compile fix for a gpui 0.2.2 transitive dep
   (D13); wired via `[patch.crates-io]` in the root `Cargo.toml`.
 - `packaging/flatpak` — Flatpak packaging (M5).
@@ -30,7 +30,7 @@ podman run --rm -v "$PWD:/srv:Z" -w /srv satori-dev cargo clippy --workspace
 
 Launching on the host: the bootc host lacks `libxkbcommon-x11` (GTK's Wayland
 backend never needed it). A copy lives at `~/.local/lib/libxkbcommon-x11.so.0`;
-launch with `LD_LIBRARY_PATH=~/.local/lib ./target/debug/satori-gpui`.
+launch with `LD_LIBRARY_PATH=~/.local/lib ./target/debug/satori-desktop`.
 
 ## Gates
 

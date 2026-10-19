@@ -85,7 +85,11 @@ pub async fn fetch_image(url: &str) -> Result<DecodedImage, String> {
             .and_then(|mut f| f.write_all(&body))
             .map_err(|e| e.to_string())?;
         WRITE_COUNT.fetch_add(1, Ordering::Relaxed);
-        if WRITE_COUNT.load(Ordering::Relaxed).is_multiple_of(50) {
+        // Trim cadence vs overshoot: media files average whole MBs, so a
+        // sparse cadence lets the dir balloon between trims (every 50th
+        // write ≈ +150MB observed); every 10th keeps the overshoot to tens
+        // of MB for a stat() pass over a few hundred files.
+        if WRITE_COUNT.load(Ordering::Relaxed).is_multiple_of(10) {
             trim_cache(200 * 1024 * 1024, 150 * 1024 * 1024);
         }
         body

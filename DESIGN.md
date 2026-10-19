@@ -340,10 +340,10 @@ rejected (Blossom only).
 | D11 | Note body: label-runs in feeds, TextView in focused views | Perf vs capability split; revisit with measurements (M1) |
 | D12 | App ID: `io.github.Letdown2491.Satori` (placeholder) | Flathub convention pending a real domain |
 | D13 | **UI toolkit: GPUI (Zed) replaces GTK4/libadwaita.** New `crates/app-gpui` ports the views; `crates/core` is untouched (this is the §1.3 design-for-exit payoff — the domain layer never knew about GTK). GTK app (`crates/app`) stays the daily driver until the GPUI build reaches parity, then is retired. | A one-screen spike (feed + note cards + stroke-drawn glyphs, real session/relays through `crates/core`) was convincing where arguments weren't: GPU rendering makes the sumi-e identity easier (glyphs painted as raw paths at any scale, no SVG/CSS toolchain), scrolling and text feel alive, and the whole UI stack is pure Rust. Accepted costs, recorded honestly: gpui 0.2.2 needs a vendored one-line patch to compile on Linux (xattr/ENOATTR, `vendor/xattr`); its published API already diverges from Zed main (API churn risk); silent failure modes (a render bug shows a blank window, not a warning); no CSS theming — sumi-e tokens become Rust constants (§5 tokens port to `theme.rs`). GPUI rules learned in the spike: never read an entity during its own render (panic) — snapshot data into item closures; `list()` has no intrinsic height — give it `.h_full()`; tokio receivers await fine on gpui's executor (the `drain` seam ports as-is). |
+| D14 | **Perf/memory posture after the P3 review (measured on the GPUI binary):** the *decoded-image* cache is bounded (256 entries / 768 MB decoded RGBA, oldest-first eviction, re-decode from the sha256 disk cache on re-entry) — decoded pixels are the only truly unbounded RAM sink a timeline can produce. The Feed render keeps a snapshot (`Arc`-held) rebuilt once per data change, not per frame — `cx.notify()` fires for every profile resolution and image arrival, so per-frame deep copies of the notes vec/profile map were the frame-budget leak. The media *disk* cache trim runs every 10th write (a 50-write cadence overshot its 200 MB cap by ~150 MB — files average whole MBs). Deliberately NOT bounded: the in-memory notes vec (~1 KB/note; a 10k-note session ≈ 10 MB, and capping the oldest end would fight endless scroll for a trivial win) and the LMDB event store on disk (~25 MB after months of use; it is the cold-start reservoir — `bootstrap_inner` paints page 1 from it instantly, and pruning it would trade that instant paint for nothing). Idle CPU (~6% of a core, evenly across tokio workers + main) is relay-pool keepalive + the 90s bell poll; accepted. | `/proc` RSS/CPU sampling of the running app plus a static audit of the hot paths; media-cache dir measured at 327 MB against its 200 MB cap (trim cadence), LMDB at 25 MB (decisively small). |
+| D15 | **The GPUI binary is named `satori-desktop`** (package stays `satori-gpui`). | User preference during P4 prep; the P4 "binary named `satori`" goal is superseded. |
 
 ---
-
-## 9. Milestones
 
 - **M0 — Skeleton walks.** Workspace builds in container; window opens with sumi-e
   theme (both palettes); bunker login connects and subscribes; read-only following feed
@@ -414,7 +414,7 @@ re-expression of views, not a feature rebuild.
   3.4s period, `Root` window view swaps doors→shell on approval, Esc cancels
   a running flow; NIP-46 auth URLs are clickable chips — an improvement over
   the GTK TODO). Verified live via a sandboxed instance
-  (`XDG_DATA_HOME=/tmp/… satori-gpui` — `data_dir()` already honors XDG, so
+  (`XDG_DATA_HOME=/tmp/… satori-desktop` — `data_dir()` already honors XDG, so
   isolated stores need no new env var; that's the dev-stories seam too).
   Login-layout gotchas recorded: gpui percent-height children collapse in
   content-sized chains (give input wrappers a definite height); an
