@@ -556,7 +556,10 @@ impl Element for InputElement {
 
         let empty = content.is_empty();
         let text_color = if empty {
-            hsla(0., 0., 0.5, 0.35) // placeholder wash
+            // Placeholder wash: the field's own ink, rested — visible on
+            // either paper (the fixed gray was invisible at night).
+            let c = style.color;
+            hsla(c.h, c.s, c.l, 0.45)
         } else {
             style.color
         };

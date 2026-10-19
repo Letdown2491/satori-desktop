@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    actions, div, prelude::*, px, rgb, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    Global, Render, Window,
+    actions, div, img, prelude::*, px, rgb, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    Global, Render, SharedString, Window,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, PublishEvent};
@@ -42,6 +42,9 @@ struct Attachment {
     name: String,
     content_type: String,
     bytes: Vec<u8>,
+    /// The tile preview: the ORIGINAL encoded bytes handed to gpui (it
+    /// decodes on its own asset thread) — the note's gallery, live.
+    image: Option<gpui::Image>,
 }
 
 pub struct Composer {
@@ -65,9 +68,9 @@ impl Composer {
         let input = cx.new(|cx| {
             let i = Input::new(cx);
             if reply_to.is_some() {
-                i.placeholder("Write a reply…")
+                i.placeholder("Write a reply — ctrl-enter sends it.")
             } else {
-                i.placeholder("Speak. The post holds for a few seconds.")
+                i.placeholder("Speak. The post holds a few seconds — ctrl-enter sends it.")
             }
         });
         let focus = input.read(cx).focus_handle(cx);
@@ -123,14 +126,24 @@ impl Composer {
                         _ => continue,
                     };
                     match std::fs::read(&path) {
-                        Ok(bytes) => this.attachments.push(Attachment {
-                            name: path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default(),
-                            content_type: content_type.into(),
-                            bytes,
-                        }),
+                        Ok(bytes) => {
+                            let format = match content_type {
+                                "image/png" => gpui::ImageFormat::Png,
+                                "image/jpeg" => gpui::ImageFormat::Jpeg,
+                                "image/webp" => gpui::ImageFormat::Webp,
+                                _ => gpui::ImageFormat::Gif,
+                            };
+                            let image = gpui::Image::from_bytes(format, bytes.clone());
+                            this.attachments.push(Attachment {
+                                name: path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default(),
+                                content_type: content_type.into(),
+                                bytes,
+                                image: Some(image),
+                            })
+                        }
                         Err(e) => this.status = format!("couldn't read {}: {e}", path.display()),
                     }
                 }
@@ -311,22 +324,20 @@ impl Render for Composer {
             .text_color(rgb(theme::ink()))
             .gap_2()
             .p_4()
-            .child(div().text_size(px(13.)).text_color(rgb(theme::muted())).child(
-                if replying {
-                    "Reply".to_string()
-                } else {
-                    String::new()
-                },
-            ))
             .child(
                 div()
                     .id("composer-scroll")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgb(theme::hairline()))
+                    .bg(rgb(theme::panel()))
+                    .p_2()
                     .child(input),
             )
-            .child(self.attachment_row())
+            .child(self.attachment_row(cx))
             .child(match (undo, posting) {
                 (Some(secs), _) => div()
                     .flex()
@@ -391,27 +402,67 @@ impl Render for Composer {
 }
 
 impl Composer {
-    fn attachment_row(&self) -> impl IntoElement {
-        let names: Vec<String> = self
-            .attachments
-            .iter()
-            .map(|a| a.name.clone())
-            .collect();
+    fn attachment_row(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tiles = self.attachments.len();
         div()
             .w_full()
             .flex()
             .flex_wrap()
             .gap_2()
-            .children(names.into_iter().map(|name| {
+            .children(self.attachments.iter().enumerate().map(|(i, a)| {
+                let remove = cx.listener(move |this, _, _, cx| {
+                    if !this.posting {
+                        this.attachments.remove(i);
+                        cx.notify();
+                    }
+                });
                 div()
-                    .px_2()
-                    .py_1()
-                    .rounded(px(3.))
-                    .border_1()
-                    .border_color(rgb(theme::hairline()))
-                    .text_size(px(11.5))
-                    .text_color(rgb(theme::muted()))
-                    .child(name)
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .size(px(72.))
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(rgb(theme::hairline()))
+                            .overflow_hidden()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(rgb(theme::panel()))
+                            .child(match &a.image {
+                                Some(image) => img(std::sync::Arc::new(image.clone()))
+                                    .size_full()
+                                    .object_fit(gpui::ObjectFit::Cover)
+                                    .into_any_element(),
+                                None => div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme::muted()))
+                                    .child("…")
+                                    .into_any_element(),
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("rm-att-{i}")))
+                            .cursor_pointer()
+                            .text_size(px(11.))
+                            .text_color(rgb(theme::muted()))
+                            .on_click(remove)
+                            .when(i < tiles, |d| {
+                                d.child(format!("× {}", truncate_name(&a.name)))
+                            }),
+                    )
             }))
     }
+}
+
+/// Trim a file name to a tile label without splitting a glyph.
+fn truncate_name(name: &str) -> String {
+    if name.chars().count() <= 18 {
+        return name.to_string();
+    }
+    let cut: String = name.chars().take(15).collect();
+    format!("{cut}…")
 }

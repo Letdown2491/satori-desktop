@@ -646,10 +646,12 @@ fn note_card(
     let ev_for_profile = ev.clone();
     let ev_for_like = ev.clone();
     let ev_for_bookmark = ev.clone();
+    let ev_for_reply = ev.clone();
     let handle_open = handle.clone();
     let handle_profile = handle.clone();
     let handle_like = handle.clone();
     let handle_bookmark = handle.clone();
+    let handle_reply = handle.clone();
 
     // No card box: posts sit directly on the washi, separated by whitespace
     // alone (sumi-e — the empty space carries the composition).
@@ -726,7 +728,20 @@ fn note_card(
                 .flex()
                 .gap_5()
                 .items_center()
-                .child(icons::bubble_icon(theme::muted()))
+                // The reply door (thread.rs reply-to): opens the composer
+                // carrying this note as the parent.
+                .child(
+                    div()
+                        .id(SharedString::from(format!("reply-{idx}")))
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            let ev = ev_for_reply.clone();
+                            handle_reply.update(cx, |_, cx| {
+                                cx.emit(Nav::OpenComposer(Some(ev)));
+                            });
+                        })
+                        .child(icons::bubble_icon(theme::muted())),
+                )
                 .child(
                     div()
                         .id(SharedString::from(format!("like-{idx}")))
