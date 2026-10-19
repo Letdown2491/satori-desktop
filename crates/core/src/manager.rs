@@ -441,12 +441,15 @@ impl Core {
         if let NostrConnectUri::Client { metadata, .. } = &mut uri {
             metadata.description = Some("A quiet Nostr reader.".to_string());
         }
-        let _ = tx.send(ConnectEvent::Uri(uri.to_string()));
+        let uri_str = uri.to_string();
+        eprintln!("[core] nostrconnect uri ready: {} chars", uri_str.len());
+        let _ = tx.send(ConnectEvent::Uri(uri_str));
 
         let connect = Arc::new(
             NostrConnect::new(uri, client_keys.clone(), LOGIN_TIMEOUT, None)
                 .map_err(|e| LoginError::Connect(e.to_string()))?,
         );
+        eprintln!("[core] nostrconnect: client built, awaiting signer…");
         *self.pending.lock().unwrap() = Some(Arc::clone(&connect));
 
         let user_pk = connect

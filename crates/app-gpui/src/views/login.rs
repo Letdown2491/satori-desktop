@@ -86,8 +86,11 @@ impl LoginView {
         self.qr = None;
         let rx = self.core.connect_nostrconnect("wss://relay.nip46.com".into());
         let mut rx = rx;
+        eprintln!("[login] nostrconnect pump armed");
         cx.spawn(async move |this, cx| {
+            eprintln!("[login] nostrconnect pump first poll");
             while let Some(ev) = rx.recv().await {
+                eprintln!("[login] pump got event");
                 let again = this
                     .update(cx, |this, cx| this.on_event(ev, generation, cx))
                     .is_ok_and(|more| more);
@@ -519,4 +522,28 @@ fn qr_image(uri: &str) -> Option<Arc<Image>> {
         .write_to(&mut png, image::ImageFormat::Png)
         .ok()?;
     Some(Arc::new(Image::from_bytes(ImageFormat::Png, png.into_inner())))
+}
+
+#[cfg(test)]
+mod scratch {
+    use super::*;
+
+    #[test]
+    fn uri_and_qr_generate() {
+        let keys = nostr::prelude::Keys::generate();
+        use nostr::prelude::*;
+        let uri = NostrConnectUri::client(
+            keys.public_key(),
+            [RelayUrl::parse("wss://relay.nip46.com").unwrap()],
+            "Satori",
+        );
+        let s = uri.to_string();
+        println!("uri len={} starts={}", s.len(), &s[..40]);
+        let code = qrcode::QrCode::new(s.as_bytes());
+        match code {
+            Ok(c) => println!("qr ok, width={}", c.width()),
+            Err(e) => println!("QR ERR: {e}"),
+        }
+        assert!(qr_image(&s).is_some(), "qr_image returned None");
+    }
 }
