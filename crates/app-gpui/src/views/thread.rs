@@ -36,6 +36,7 @@ impl EventEmitter<Nav> for ThreadView {}
 
 impl ThreadView {
     pub fn new(core: Arc<Core>, id: EventId, cx: &mut Context<Self>) -> Self {
+        crate::theme::watch(cx); // repaint on theme change
         let view = Self {
             core,
             anchor: None,
@@ -254,13 +255,13 @@ fn reply_row(
                     div()
                         .text_size(px(12.5))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::INK))
+                        .text_color(rgb(theme::ink()))
                         .child(name),
                 )
                 .child(
                     div()
                         .text_size(px(11.5))
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::muted()))
                         .child(time),
                 ),
         )
@@ -291,14 +292,14 @@ fn reply_row(
                         .items_center()
                         .gap_1()
                         .text_size(px(11.5))
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::muted()))
                         .on_click(move |_, _, cx| {
                             let ev = ev_for_reply.clone();
                             reply_handle.update(cx, |_view, cx| {
                                 cx.emit(Nav::OpenComposer(Some(ev)));
                             });
                         })
-                        .child(icons::bubble_icon(theme::MUTED))
+                        .child(icons::bubble_icon(theme::muted()))
                         .child("Reply"),
                 ),
         )
@@ -346,7 +347,7 @@ impl Render for ThreadView {
                                     div()
                                         .text_size(px(13.0))
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(theme::INK))
+                                        .text_color(rgb(theme::ink()))
                                         .child(self.name_for(&note)),
                                 )
                                 .child(content::body(
@@ -371,14 +372,14 @@ impl Render for ThreadView {
                                                 .items_center()
                                                 .gap_1()
                                                 .text_size(px(11.5))
-                                                .text_color(rgb(theme::MUTED))
+                                                .text_color(rgb(theme::muted()))
                                                 .on_click(move |_, _, cx| {
                                                     let ev = anchor_reply.clone();
                                                     reply_all_handle.update(cx, |_view, cx| {
                                                         cx.emit(Nav::OpenComposer(Some(ev)));
                                                     });
                                                 })
-                                                .child(icons::bubble_icon(theme::MUTED))
+                                                .child(icons::bubble_icon(theme::muted()))
                                                 .child("Reply"),
                                         ),
                                 )
@@ -388,7 +389,7 @@ impl Render for ThreadView {
                             .w_full()
                             .max_w(px(content::COL_W))
                             .p_4()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::muted()))
                             .child(status.clone())
                             .into_any_element(),
                     })
@@ -397,7 +398,7 @@ impl Render for ThreadView {
                             .w_full()
                             .max_w(px(content::COL_W))
                             .p_4()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::muted()))
                             .child(if status.is_empty() {
                                 "No replies yet.".to_string()
                             } else {

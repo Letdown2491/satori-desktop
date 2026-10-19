@@ -684,7 +684,7 @@ impl Element for InputElement {
                                 ),
                                 size(px(2.), lh),
                             ),
-                            rgb(theme::VERMILION),
+                            rgb(theme::vermilion()),
                         ));
                     }
                     break;

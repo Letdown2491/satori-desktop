@@ -33,6 +33,7 @@ impl EventEmitter<Nav> for ArticleView {}
 
 impl ArticleView {
     pub fn new(core: Arc<Core>, ev: Event, cx: &mut Context<Self>) -> Self {
+        crate::theme::watch(cx); // repaint on theme change
         let data = article::parse(&ev).unwrap_or_else(|| article::ArticleData {
             title: "Untitled".into(),
             summary: String::new(),
@@ -144,7 +145,7 @@ fn render_block(
                 .text_size(px(size))
                 .line_height(relative(1.2))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(theme::INK))
+                .text_color(rgb(theme::ink()))
                 .child(text);
             block_item(head, 8.0).into_any_element()
         }
@@ -154,7 +155,7 @@ fn render_block(
                 .pl_3()
                 .py_1()
                 .border_l_2()
-                .border_color(rgb(theme::HAIRLINE))
+                .border_color(rgb(theme::hairline()))
                 .child(md_flow(&text, 14.0, true, ctx, handle));
             block_item(q, 14.0).into_any_element()
         }
@@ -175,7 +176,7 @@ fn render_block(
                             div()
                                 .font_family(theme::SERIF)
                                 .text_size(px(15.0))
-                                .text_color(rgb(theme::MUTED))
+                                .text_color(rgb(theme::muted()))
                                 .child(marker),
                         )
                         .child(md_flow(&li, 15.0, false, ctx, handle)),
@@ -190,11 +191,11 @@ fn render_block(
                 .w_full()
                 .p_3()
                 .rounded(px(4.))
-                .bg(rgb(theme::PANEL))
+                .bg(rgb(theme::panel()))
                 .font_family(theme::MONO)
                 .text_size(px(12.5))
                 .line_height(relative(1.35))
-                .text_color(rgb(theme::INK))
+                .text_color(rgb(theme::ink()))
                 .child(text);
             block_item(div().w_full().child(code), 14.0).into_any_element()
         }
@@ -207,7 +208,7 @@ fn render_block(
                 .w_full()
                 .py_1()
                 .border_b_1()
-                .border_color(rgb(theme::HAIRLINE));
+                .border_color(rgb(theme::hairline()));
             block_item(rule, 14.0).into_any_element()
         }
         markdown::Block::Image { url } => {
@@ -243,9 +244,9 @@ fn md_flow(
                 .text_size(px(if span.code { size * 0.88 } else { size }))
                 .line_height(relative(1.2))
                 .text_color(rgb(if quiet || is_link {
-                    theme::MUTED
+                    theme::muted()
                 } else {
-                    theme::INK
+                    theme::ink()
                 }))
                 .when(span.bold, |d| d.font_weight(FontWeight::BOLD))
                 .when(span.italic, |d| d.italic())
@@ -304,8 +305,8 @@ fn image_tile(url: &str, snap: &media::Snapshot) -> Div {
         .overflow_hidden()
         .rounded(px(4.))
         .border_1()
-        .border_color(rgb(theme::HAIRLINE))
-        .bg(rgb(theme::PANEL));
+        .border_color(rgb(theme::hairline()))
+        .bg(rgb(theme::panel()));
     match png {
         Some(png) => frame.child(img(png).size_full()),
         None => frame,
@@ -374,7 +375,7 @@ impl Render for ArticleView {
                                         .text_size(px(30.0))
                                         .line_height(relative(1.2))
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(theme::INK))
+                                        .text_color(rgb(theme::ink()))
                                         .child(title.clone()),
                                     12.0,
                                 )
@@ -396,11 +397,11 @@ impl Render for ArticleView {
                                                 .items_baseline()
                                                 .gap_2()
                                                 .text_size(px(12.5))
-                                                .text_color(rgb(theme::MUTED))
+                                                .text_color(rgb(theme::muted()))
                                                 .child(
                                                     div()
                                                         .font_weight(FontWeight::SEMIBOLD)
-                                                        .text_color(rgb(theme::INK))
+                                                        .text_color(rgb(theme::ink()))
                                                         .child(author.clone()),
                                                 )
                                                 .children(

@@ -280,9 +280,9 @@ pub fn avatar(snap: &Snapshot, url: &str, name: &str, size_px: f32) -> AnyElemen
         .overflow_hidden()
         .flex_none()
         .size(px(size_px))
-        .bg(rgb(theme::PANEL))
+        .bg(rgb(theme::panel()))
         .border_1()
-        .border_color(rgb(theme::HAIRLINE));
+        .border_color(rgb(theme::hairline()));
     match snap.png(url).filter(|_| !url.is_empty()) {
         // The img paints its own quad — the disc's rounding doesn't clip it,
         // so the photo wears the same circle itself.
@@ -300,7 +300,7 @@ pub fn avatar(snap: &Snapshot, url: &str, name: &str, size_px: f32) -> AnyElemen
                     .items_center()
                     .justify_center()
                     .text_size(px(size_px * 0.45))
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(theme::muted()))
                     .child(initial),
             )
             .into_any_element()

@@ -53,6 +53,7 @@ impl Focusable for LoginView {
 
 impl LoginView {
     pub fn new(core: Arc<Core>, resume_error: Option<String>, cx: &mut Context<Self>) -> Self {
+        crate::theme::watch(cx); // repaint on theme change
         let bunker = cx.new(|cx| {
             let mut i = Input::new(cx);
             i.multiline = false; // Enter submits, no newline
@@ -217,8 +218,8 @@ impl Render for LoginView {
             // Window root, not a pane: a definite size, so the doors center.
             .size_full()
             .overflow_hidden()
-            .bg(rgb(theme::WASHI))
-            .text_color(rgb(theme::INK))
+            .bg(rgb(theme::washi()))
+            .text_color(rgb(theme::ink()))
             .font_family(theme::SANS)
             .flex()
             .justify_center()
@@ -246,7 +247,7 @@ impl Render for LoginView {
                                     .into_any_element()
                             } else {
                                 div()
-                                    .child(icons::enso_icon(theme::INK, 120.0))
+                                    .child(icons::enso_icon(theme::ink(), 120.0))
                                     .with_animation(
                                         "enso-breath",
                                         Animation::new(Duration::from_millis(3_400)).repeat(),
@@ -267,7 +268,7 @@ impl Render for LoginView {
                                 .into_any_element(),
                             div()
                                 .text_size(px(12.0))
-                                .text_color(rgb(theme::MUTED))
+                                .text_color(rgb(theme::muted()))
                                 .child(hint)
                                 .into_any_element(),
                             // The URI in the clear, for signers that can't
@@ -277,7 +278,7 @@ impl Render for LoginView {
                                     div()
                                         .id("qr-uri")
                                         .text_size(px(11.0))
-                                        .text_color(rgb(theme::MUTED))
+                                        .text_color(rgb(theme::muted()))
                                         .overflow_x_scroll()
                                         .max_w(px(360.))
                                         .child(uri)
@@ -291,7 +292,7 @@ impl Render for LoginView {
                                         .id("login-auth-url")
                                         .cursor_pointer()
                                         .text_size(px(12.0))
-                                        .text_color(rgb(theme::LIVE))
+                                        .text_color(rgb(theme::live()))
                                         .overflow_x_scroll()
                                         .max_w(px(360.))
                                         .on_click(move |_, _, cx| cx.open_url(&open))
@@ -305,7 +306,7 @@ impl Render for LoginView {
                                 .p_1()
                                 .px_2()
                                 .text_size(px(13.0))
-                                .text_color(rgb(theme::MUTED))
+                                .text_color(rgb(theme::muted()))
                                 .on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))
                                 .child("Cancel")
                                 .into_any_element(),
@@ -321,21 +322,21 @@ impl Render for LoginView {
                             div()
                                 .w_full()
                                 .text_size(px(12.0))
-                                .text_color(rgb(theme::MUTED))
+                                .text_color(rgb(theme::muted()))
                                 .text_align(TextAlign::Center)
                                 .child("A quiet Nostr client. Your key never has to touch it.")
                                 .into_any_element(),
                             div()
                                 .w_full()
                                 .h(px(1.))
-                                .bg(rgb(theme::HAIRLINE))
+                                .bg(rgb(theme::hairline()))
                                 .into_any_element(),
                             div()
                                 .when(!error.is_empty(), |d| {
                                     d.child(
                                         div()
                                             .text_size(px(12.0))
-                                            .text_color(rgb(theme::ERR))
+                                            .text_color(rgb(theme::err()))
                                             .text_align(TextAlign::Center)
                                             .child(error),
                                     )
@@ -354,7 +355,7 @@ impl Render for LoginView {
                                         .p_1()
                                         .px_2()
                                         .text_size(px(13.0))
-                                        .text_color(rgb(theme::VERMILION))
+                                        .text_color(rgb(theme::vermilion()))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.connect_bunker(cx)
                                         }))
@@ -364,7 +365,7 @@ impl Render for LoginView {
                             div()
                                 .w_full()
                                 .text_size(px(11.0))
-                                .text_color(rgb(theme::MUTED))
+                                .text_color(rgb(theme::muted()))
                                 .text_align(TextAlign::Center)
                                 .child(
                                     "Sign in with a remote signer (NIP-46). The app holds \
@@ -374,7 +375,7 @@ impl Render for LoginView {
                             div()
                                 .w_full()
                                 .h(px(1.))
-                                .bg(rgb(theme::HAIRLINE))
+                                .bg(rgb(theme::hairline()))
                                 .into_any_element(),
                             // The nostrconnect door, always on: the QR is
                             // generated the moment the doors show — click the
@@ -409,7 +410,7 @@ impl Render for LoginView {
                                             }))
                                             .into_any_element(),
                                         None => div()
-                                            .child(icons::enso_icon(theme::MUTED, 60.0))
+                                            .child(icons::enso_icon(theme::muted(), 60.0))
                                             .with_animation(
                                                 "qr-breath",
                                                 Animation::new(Duration::from_millis(3_400))
@@ -431,9 +432,9 @@ impl Render for LoginView {
                                         .px_2()
                                         .rounded_sm()
                                         .border_1()
-                                        .border_color(rgb(theme::HAIRLINE))
+                                        .border_color(rgb(theme::hairline()))
                                         .text_size(px(11.0))
-                                        .text_color(rgb(theme::MUTED))
+                                        .text_color(rgb(theme::muted()))
                                         .overflow_x_scroll()
                                         .max_w(px(360.))
                                         .on_click(cx.listener(|this, _, _, cx| {
@@ -472,7 +473,7 @@ impl Render for LoginView {
                             div()
                                 .w_full()
                                 .text_size(px(11.0))
-                                .text_color(rgb(theme::MUTED))
+                                .text_color(rgb(theme::muted()))
                                 .text_align(TextAlign::Center)
                                 .child(
                                     "Click the code to open your signer, or click the URI \
@@ -497,9 +498,9 @@ fn field(input: Entity<Input>) -> impl IntoElement {
         .px_2()
         .pt_1()
         .rounded_sm()
-        .bg(rgb(theme::PANEL))
+        .bg(rgb(theme::panel()))
         .border_1()
-        .border_color(rgb(theme::HAIRLINE))
+        .border_color(rgb(theme::hairline()))
         .child(input)
 }
 

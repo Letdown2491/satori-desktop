@@ -61,6 +61,7 @@ impl EventEmitter<Nav> for Composer {}
 
 impl Composer {
     pub fn new(core: Arc<Core>, reply_to: Option<Event>, cx: &mut Context<Self>) -> Self {
+        crate::theme::watch(cx); // repaint on theme change
         let input = cx.new(|cx| {
             let i = Input::new(cx);
             if reply_to.is_some() {
@@ -307,10 +308,10 @@ impl Render for Composer {
             .flex()
             .flex_col()
             .font_family(theme::SANS)
-            .text_color(rgb(theme::INK))
+            .text_color(rgb(theme::ink()))
             .gap_2()
             .p_4()
-            .child(div().text_size(px(13.)).text_color(rgb(theme::MUTED)).child(
+            .child(div().text_size(px(13.)).text_color(rgb(theme::muted())).child(
                 if replying {
                     "Reply".to_string()
                 } else {
@@ -332,7 +333,7 @@ impl Render for Composer {
                     .items_center()
                     .gap_3()
                     .text_size(px(12.5))
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(theme::muted()))
                     .child(format!("publishing in {secs}s"))
                     .child(
                         div()
@@ -342,7 +343,7 @@ impl Render for Composer {
                             .py_1()
                             .rounded(px(4.))
                             .border_1()
-                            .border_color(rgb(theme::HAIRLINE))
+                            .border_color(rgb(theme::hairline()))
                             .on_click(cx.listener(|this, _, _, cx| this.undo_now(cx)))
                             .child("Undo"),
                     ),
@@ -357,7 +358,7 @@ impl Render for Composer {
                             .px_3()
                             .py_1()
                             .text_size(px(13.))
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::muted()))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.pick_attachments(cx);
                             }))
@@ -371,9 +372,9 @@ impl Render for Composer {
                             .py_1()
                             .rounded(px(4.))
                             .border_1()
-                            .border_color(rgb(theme::VERMILION))
+                            .border_color(rgb(theme::vermilion()))
                             .text_size(px(13.5))
-                            .text_color(rgb(theme::VERMILION))
+                            .text_color(rgb(theme::vermilion()))
                             .on_click(cx.listener(|this, _, _, cx| this.post(cx)))
                             .child(if replying { "Reply" } else { "Publish" }),
                     ),
@@ -382,7 +383,7 @@ impl Render for Composer {
                 d.child(
                     div()
                         .text_size(px(12.))
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::muted()))
                         .child(status),
                 )
             })
@@ -407,9 +408,9 @@ impl Composer {
                     .py_1()
                     .rounded(px(3.))
                     .border_1()
-                    .border_color(rgb(theme::HAIRLINE))
+                    .border_color(rgb(theme::hairline()))
                     .text_size(px(11.5))
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(theme::muted()))
                     .child(name)
             }))
     }

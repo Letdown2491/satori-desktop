@@ -84,6 +84,7 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
+        crate::theme::watch(cx); // repaint on theme change
         let feed = cx.new(|cx| Feed::new(core.clone(), cx));
         cx.subscribe(&feed, |this, _feed, ev: &Nav, cx| match ev {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
@@ -96,6 +97,7 @@ impl Shell {
                 cx.notify();
             }
             Nav::Pop => this.back(cx),
+            Nav::SetTheme(dark) => this.set_theme(*dark, cx),
             Nav::SignOut => this.sign_out(cx),
         })
         .detach();
@@ -173,9 +175,21 @@ impl Shell {
                 cx.notify();
             }
             Nav::Pop => this.back(cx),
+            Nav::SetTheme(dark) => this.set_theme(*dark, cx),
             Nav::SignOut => this.sign_out(cx),
         })
         .detach();
+    }
+
+    /// Live palette switch (settings.rs SetTheme): persist the pref,
+    /// select, and wake every watching view (theme.rs ThemeSignal).
+    fn set_theme(&mut self, dark: bool, cx: &mut Context<Self>) {
+        let mut p = crate::prefs::load();
+        p.dark = Some(dark);
+        crate::prefs::save(&p);
+        theme::select(if dark { theme::DARK } else { theme::LIGHT });
+        cx.set_global(theme::ThemeSignal);
+        cx.notify();
     }
 
     fn open_thread(&mut self, id: EventId, cx: &mut Context<Self>) {
@@ -366,8 +380,8 @@ impl Render for Tip {
             .px_2()
             .py_1()
             .rounded(px(3.0))
-            .bg(rgb(theme::INK))
-            .text_color(rgb(theme::WASHI))
+            .bg(rgb(theme::ink()))
+            .text_color(rgb(theme::washi()))
             .text_size(px(11.5))
             .font_family(theme::SANS)
             .child(self.label)
@@ -425,7 +439,7 @@ impl Shell {
 
     fn rail(&mut self, cx: &mut Context<Self>) -> Div {
         let active = self.active_spot();
-        let ink = |on: bool| if on { theme::INK } else { theme::MUTED };
+        let ink = |on: bool| if on { theme::ink() } else { theme::muted() };
         let feed_active = active == Some(Spot::Feed);
 
         // The avatar's snapshot memoized on the media epoch — Snapshot::new
@@ -519,7 +533,7 @@ impl Shell {
                                 .right(px(-1.))
                                 .size(px(6.))
                                 .rounded_full()
-                                .bg(rgb(theme::VERMILION)),
+                                .bg(rgb(theme::vermilion())),
                         )
                     }),
                 active == Some(Spot::Notif),
@@ -544,7 +558,7 @@ impl Shell {
             .child(self.rail_button(
                 "rail-compose",
                 "Compose",
-                icons::pen_icon(theme::VERMILION),
+                icons::pen_icon(theme::vermilion()),
                 active == Some(Spot::Compose),
                 cx.listener(move |shell, _, _, cx| {
                     // Never clobber an open composer (its draft is live).
@@ -583,7 +597,7 @@ impl Shell {
                         .bottom(px(11.0))
                         .w(px(2.0))
                         .rounded_full()
-                        .bg(rgb(theme::VERMILION)),
+                        .bg(rgb(theme::vermilion())),
                 )
             })
             .child(glyph)
@@ -606,7 +620,7 @@ impl Shell {
                     .id("back")
                     .cursor_pointer()
                     .text_size(px(13.0))
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(theme::muted()))
                     .on_click(cx.listener(|shell, _, _, cx| shell.back(cx)))
                     .child("‹ Back"),
             )
@@ -614,7 +628,7 @@ impl Shell {
                 div()
                     .flex_1()
                     .text_size(px(13.0))
-                    .text_color(rgb(theme::INK))
+                    .text_color(rgb(theme::ink()))
                     .child(self.title()),
             )
     }
@@ -631,8 +645,8 @@ impl Shell {
             .rounded_full()
             .cursor_pointer()
             .border_1()
-            .border_color(rgb(theme::HAIRLINE))
-            .bg(rgb(theme::WASHI))
+            .border_color(rgb(theme::hairline()))
+            .bg(rgb(theme::washi()))
             .flex()
             .items_center()
             .justify_center()
@@ -642,7 +656,7 @@ impl Shell {
                 shell.feed_deep = false;
                 cx.notify();
             }))
-            .child(icons::arrow_up_icon(theme::MUTED))
+            .child(icons::arrow_up_icon(theme::muted()))
     }
 }
 
@@ -727,8 +741,8 @@ impl Render for Shell {
                 }
             }))
             .size_full()
-            .bg(rgb(theme::WASHI))
-            .text_color(rgb(theme::INK))
+            .bg(rgb(theme::washi()))
+            .text_color(rgb(theme::ink()))
             .font_family(theme::SANS)
             // The rail + content row. The pair is centered as a group —
             // the rail stands to the left of the reading column, not glued

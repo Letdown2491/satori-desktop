@@ -34,6 +34,7 @@ impl EventEmitter<Nav> for SearchView {}
 
 impl SearchView {
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
+        crate::theme::watch(cx); // repaint on theme change
         let input = cx.new(|cx| {
             let mut i = Input::new(cx);
             i.multiline = false; // Enter runs the question, no newline
@@ -170,8 +171,8 @@ impl Render for SearchView {
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .bg(rgb(theme::WASHI))
-            .text_color(rgb(theme::INK))
+            .bg(rgb(theme::washi()))
+            .text_color(rgb(theme::ink()))
             .font_family(theme::SANS)
             .flex()
             .flex_col()
@@ -193,9 +194,9 @@ impl Render for SearchView {
                             .px_2()
                             .py_1()
                             .rounded_sm()
-                            .bg(rgb(theme::PANEL))
+                            .bg(rgb(theme::panel()))
                             .border_1()
-                            .border_color(rgb(theme::HAIRLINE))
+                            .border_color(rgb(theme::hairline()))
                             .child(input),
                     )
                     .child(
@@ -205,7 +206,7 @@ impl Render for SearchView {
                             .px_2()
                             .py_1()
                             .text_size(px(13.0))
-                            .text_color(rgb(theme::VERMILION))
+                            .text_color(rgb(theme::vermilion()))
                             .on_click(cx.listener(|this, _, _, cx| this.run(cx)))
                             .child("Search"),
                     ),
@@ -214,7 +215,7 @@ impl Render for SearchView {
                 div()
                     .px_4()
                     .text_size(px(12.0))
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(theme::muted()))
                     .when(!status.is_empty(), |d| d.child(status)),
             ))
             .child(

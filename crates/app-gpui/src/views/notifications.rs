@@ -86,6 +86,7 @@ impl NotificationsView {
     /// the GTK page's fetch-on-show hook. Opening also marks seen: the
     /// pre-visit high-water splits the page into New / Earlier.
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
+        crate::theme::watch(cx); // repaint on theme change
         let prev = satori_core::read_state::load().notif;
         core.mark_notifications_seen();
         let view = Self {
@@ -282,7 +283,7 @@ fn notif_whisper<V: EventEmitter<Nav> + 'static>(
                 let mut kids = vec![div()
                     .text_size(px(12.0))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(theme::INK))
+                    .text_color(rgb(theme::ink()))
                     .child(label)
                     .into_any_element()];
                 if let Some(snippet) = snippet {
@@ -291,7 +292,7 @@ fn notif_whisper<V: EventEmitter<Nav> + 'static>(
                             .font_family(theme::SERIF)
                             .italic()
                             .text_size(px(12.5))
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::muted()))
                             .child(snippet)
                             .into_any_element(),
                     );
@@ -359,7 +360,7 @@ fn notif_card(
                         .flex_1()
                         .text_size(px(13.0))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::INK))
+                        .text_color(rgb(theme::ink()))
                         .on_click(move |_, _, cx| {
                             let ev = ev_for_profile.clone();
                             handle_profile.update(cx, |_, cx| cx.emit(Nav::OpenProfile(ev.pubkey)));
@@ -369,7 +370,7 @@ fn notif_card(
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::muted()))
                         .child(time),
                 ),
         );
@@ -380,7 +381,7 @@ fn notif_card(
     }
     let action_line = div()
         .text_size(px(13.0))
-        .text_color(rgb(theme::MUTED))
+        .text_color(rgb(theme::muted()))
         .child(action_word(t, ev));
     let handle_body = handle.clone();
     let open_block = match open {
@@ -446,8 +447,8 @@ impl Render for NotificationsView {
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .bg(rgb(theme::WASHI))
-            .text_color(rgb(theme::INK))
+            .bg(rgb(theme::washi()))
+            .text_color(rgb(theme::ink()))
             .font_family(theme::SANS)
             .flex()
             .flex_col()
@@ -462,7 +463,7 @@ impl Render for NotificationsView {
                             .w_full()
                             .max_w(px(content::COL_W))
                             .p_8()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::muted()))
                             .child(if status.is_empty() {
                                 "Nothing new. Sit quietly.".to_string()
                             } else {
@@ -479,7 +480,7 @@ impl Render for NotificationsView {
                                     .pt_3()
                                     .text_size(px(12.0))
                                     .font_family(theme::SERIF)
-                                    .text_color(rgb(theme::MUTED))
+                                    .text_color(rgb(theme::muted()))
                                     .child(text.to_string())
                                     .into_any_element(),
                                 Some(Row::Note(ev, t)) => notif_card(

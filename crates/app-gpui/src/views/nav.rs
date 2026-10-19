@@ -10,6 +10,9 @@ pub enum Nav {
     /// Settings asked for a sign-out; the shell clears the session and
     /// hands the window back to the login doors.
     SignOut,
+    /// Settings picked a palette (true = dark). The shell persists the
+    /// pref, selects the palette and signals the watchers (theme.rs).
+    SetTheme(bool),
     OpenThread(EventId),
     OpenProfile(PublicKey),
     /// The composer, optionally replying to a note.

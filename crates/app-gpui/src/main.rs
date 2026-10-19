@@ -107,6 +107,13 @@ fn main() {
         // Shared decoded-image cache (media.rs) — avatars, tiles and the
         // lightbox all key off it.
         cx.default_global::<media::Cache>();
+        // Palette before the first frame (prefs dark; None follows the
+        // desktop — the portal read lands with the reduced-motion work;
+        // until then None keeps the night paper).
+        match crate::prefs::load().dark {
+            Some(false) => crate::theme::select(crate::theme::LIGHT),
+            _ => {}
+        }
         let core = Arc::new(Core::new());
         let (session, err) = core.init();
         if err.is_some() {

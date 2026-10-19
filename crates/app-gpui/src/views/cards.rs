@@ -67,7 +67,7 @@ pub fn row_body(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> 
 fn kicker(text: &str) -> Div {
     div()
         .text_size(px(11.0))
-        .text_color(rgb(theme::MUTED))
+        .text_color(rgb(theme::muted()))
         .child(text.to_string())
 }
 
@@ -76,7 +76,7 @@ fn serif_title(text: &str, size: f32) -> Div {
         .w_full()
         .font_family(theme::SERIF)
         .text_size(px(size))
-        .text_color(rgb(theme::INK))
+        .text_color(rgb(theme::ink()))
         .child(text.to_string())
 }
 
@@ -84,7 +84,7 @@ fn meta_line(text: impl Into<String>) -> Div {
     div()
         .w_full()
         .text_size(px(12.0))
-        .text_color(rgb(theme::MUTED))
+        .text_color(rgb(theme::muted()))
         .child(text.into())
 }
 
@@ -112,12 +112,12 @@ fn seal(id: String, label: &str, color: u32, engaged: bool) -> gpui::Stateful<gp
         .rounded_full()
         .border_1()
         .border_color(rgb(if engaged {
-            theme::VERMILION
+            theme::vermilion()
         } else {
-            theme::HAIRLINE
+            theme::hairline()
         }))
         .text_size(px(12.0))
-        .text_color(rgb(if engaged { theme::VERMILION } else { color }))
+        .text_color(rgb(if engaged { theme::vermilion() } else { color }))
         .child(label.to_string())
 }
 
@@ -232,7 +232,7 @@ fn poll_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> Div
                 .w_full()
                 .rounded(px(3.))
                 .overflow_hidden()
-                .bg(rgb(theme::WASHI))
+                .bg(rgb(theme::washi()))
                 .when(!ballot && total > 0 && pct > 0.0, |d| {
                     d.child(
                         div()
@@ -241,7 +241,7 @@ fn poll_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> Div
                             .bottom_0()
                             .left_0()
                             .w(relative(pct))
-                            .bg(rgb(theme::HAIRLINE)),
+                            .bg(rgb(theme::hairline())),
                     )
                 })
                 .child(
@@ -258,20 +258,20 @@ fn poll_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> Div
                                 .rounded_full()
                                 .border_1()
                                 .border_color(rgb(if picked {
-                                    theme::VERMILION
+                                    theme::vermilion()
                                 } else {
-                                    theme::MUTED
+                                    theme::muted()
                                 }))
                                 .bg(rgb(if picked {
-                                    theme::VERMILION
+                                    theme::vermilion()
                                 } else {
-                                    theme::WASHI
+                                    theme::washi()
                                 })),
                         )
                         .child(
                             div()
                                 .text_size(px(13.0))
-                                .text_color(rgb(theme::INK))
+                                .text_color(rgb(theme::ink()))
                                 .child(label.clone()),
                         )
                         .when(!ballot && total > 0, |d| {
@@ -281,7 +281,7 @@ fn poll_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> Div
                                     .flex()
                                     .justify_end()
                                     .text_size(px(11.0))
-                                    .text_color(rgb(theme::MUTED))
+                                    .text_color(rgb(theme::muted()))
                                     .child(format!("{count}")),
                             )
                         }),
@@ -297,7 +297,7 @@ fn poll_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> Div
                 .w_full()
                 .flex()
                 .justify_end()
-                .child(seal(format!("vote-{}", ev.id), "Vote", theme::LIVE, false).on_click(
+                .child(seal(format!("vote-{}", ev.id), "Vote", theme::live(), false).on_click(
                     move |_, _, cx| {
                         cx.stop_propagation();
                         let ev = ev_for_vote.clone();
@@ -341,7 +341,7 @@ fn article_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) ->
         div()
             .w_full()
             .text_size(px(13.0))
-            .text_color(rgb(theme::MUTED))
+            .text_color(rgb(theme::muted()))
             .child(summary),
     );
     if let Some(ts) = data.published_at {
@@ -357,7 +357,7 @@ fn article_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) ->
             .cursor_pointer()
             .font_family(theme::SERIF)
             .text_size(px(14.0))
-            .text_color(rgb(theme::MUTED))
+            .text_color(rgb(theme::muted()))
             .underline()
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();
@@ -384,7 +384,7 @@ fn classified_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState)
             .gap_2()
             .child(serif_title(&data.title, 16.0).flex_1())
             .when(data.status.as_deref() == Some("sold"), |d| {
-                d.child(badge("Sold", theme::VERMILION))
+                d.child(badge("Sold", theme::vermilion()))
             }),
     );
     if let Some(price) = &data.price {
@@ -392,7 +392,7 @@ fn classified_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState)
             div()
                 .font_family(theme::SERIF)
                 .text_size(px(15.0))
-                .text_color(rgb(theme::VERMILION))
+                .text_color(rgb(theme::vermilion()))
                 .child(price.clone()),
         );
     }
@@ -441,7 +441,7 @@ fn repo_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
             div()
                 .w_full()
                 .text_size(px(13.0))
-                .text_color(rgb(theme::MUTED))
+                .text_color(rgb(theme::muted()))
                 .child(data.description.clone()),
         );
     }
@@ -458,11 +458,11 @@ fn repo_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
                         .flex_1()
                         .min_w_0()
                         .text_size(px(12.0))
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::muted()))
                         .child(url.clone()),
                 )
                 .child(
-                    seal(format!("copy-{}-{url}", ev.id), "Copy", theme::MUTED, false).on_click(
+                    seal(format!("copy-{}-{url}", ev.id), "Copy", theme::muted(), false).on_click(
                         move |_, _, cx| {
                             cx.stop_propagation();
                             cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
@@ -498,7 +498,7 @@ fn wiki_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
             div()
                 .w_full()
                 .text_size(px(13.0))
-                .text_color(rgb(theme::MUTED))
+                .text_color(rgb(theme::muted()))
                 .child(summary.clone()),
         );
     }
@@ -516,7 +516,7 @@ fn wiki_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
                     .font_family(theme::SERIF)
                     .text_size(px(15.0))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(theme::INK))
+                    .text_color(rgb(theme::ink()))
                     .child(h.to_string()),
             );
             continue;
@@ -531,7 +531,7 @@ fn wiki_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
                     .font_family(theme::SERIF)
                     .text_size(px(13.5))
                     .line_height(relative(1.2))
-                    .text_color(rgb(theme::INK))
+                    .text_color(rgb(theme::ink()))
                     .when(span.bold, |d| d.font_weight(FontWeight::SEMIBOLD))
                     .child(span.text),
             );
@@ -558,7 +558,7 @@ fn calendar_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) ->
             div()
                 .w_full()
                 .text_size(px(13.0))
-                .text_color(rgb(theme::INK))
+                .text_color(rgb(theme::ink()))
                 .child(data.description.clone()),
         );
     }
@@ -576,7 +576,7 @@ fn calendar_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) ->
             seal(
                 format!("rsvp-{}-{status}", ev.id),
                 label,
-                theme::MUTED,
+                theme::muted(),
                 my_rsvp.as_deref() == Some(status),
             )
             .on_click(move |_, _, cx| {
@@ -640,11 +640,11 @@ fn highlight_card(ev: &Event, ctx: &Body, _feed: &Entity<Feed>, _st: &CardState)
         div()
             .w_full()
             .border_l_2()
-            .border_color(rgb(theme::VERMILION))
+            .border_color(rgb(theme::vermilion()))
             .pl_3()
             .font_family(theme::SERIF)
             .text_size(px(14.0))
-            .text_color(rgb(theme::INK))
+            .text_color(rgb(theme::ink()))
             .child(text)
     };
     match marked {
@@ -657,7 +657,7 @@ fn highlight_card(ev: &Event, ctx: &Body, _feed: &Entity<Feed>, _st: &CardState)
                     .child(before.trim_start().to_string())
                     .child(
                         div()
-                            .text_color(rgb(theme::VERMILION))
+                            .text_color(rgb(theme::vermilion()))
                             .font_weight(gpui::FontWeight::BOLD)
                             .child(data.content.clone()),
                     )
@@ -673,7 +673,7 @@ fn highlight_card(ev: &Event, ctx: &Body, _feed: &Entity<Feed>, _st: &CardState)
                     div()
                         .w_full()
                         .text_size(px(12.0))
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::muted()))
                         .child(context.clone()),
                 );
             }

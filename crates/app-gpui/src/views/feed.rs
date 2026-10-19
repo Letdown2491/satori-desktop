@@ -103,6 +103,7 @@ impl EventEmitter<Nav> for Feed {}
 
 impl Feed {
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
+        crate::theme::watch(cx); // repaint on theme change
         Self::with_mode(core, FeedMode::Timeline, cx)
     }
 
@@ -673,7 +674,7 @@ fn note_card(
                         .flex_1()
                         .text_size(px(13.0))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::INK))
+                        .text_color(rgb(theme::ink()))
                         .on_click(move |_, _, cx| {
                             let ev = ev_for_profile.clone();
                             handle_profile.update(cx, |_feed, cx| {
@@ -685,7 +686,7 @@ fn note_card(
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::muted()))
                         .child(time),
                 ),
         )
@@ -725,7 +726,7 @@ fn note_card(
                 .flex()
                 .gap_5()
                 .items_center()
-                .child(icons::bubble_icon(theme::MUTED))
+                .child(icons::bubble_icon(theme::muted()))
                 .child(
                     div()
                         .id(SharedString::from(format!("like-{idx}")))
@@ -735,9 +736,9 @@ fn note_card(
                             handle_like.update(cx, |feed, _| feed.toggle_like(&ev));
                         })
                         .child(icons::heart_icon(if engaged {
-                            theme::VERMILION
+                            theme::vermilion()
                         } else {
-                            theme::MUTED
+                            theme::muted()
                         })),
                 )
                 .child(
@@ -749,9 +750,9 @@ fn note_card(
                             handle_bookmark.update(cx, |feed, cx| feed.toggle_bookmark(&ev, cx));
                         })
                         .child(icons::bookmark_icon(if saved {
-                            theme::VERMILION
+                            theme::vermilion()
                         } else {
-                            theme::MUTED
+                            theme::muted()
                         })),
                 ),
         )
@@ -797,8 +798,8 @@ impl Render for Feed {
             .overflow_hidden()
             // (The 16px top band lives in the shell's content column —
             // every page wears the same padding.)
-            .bg(rgb(theme::WASHI))
-            .text_color(rgb(theme::INK))
+            .bg(rgb(theme::washi()))
+            .text_color(rgb(theme::ink()))
             .font_family(theme::SANS)
             .flex()
             .flex_col()
@@ -810,9 +811,9 @@ impl Render for Feed {
                         .px_4()
                         .py_2()
                         .text_size(px(12.0))
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::muted()))
                         .border_b_1()
-                        .border_color(rgb(theme::HAIRLINE))
+                        .border_color(rgb(theme::hairline()))
                         .child(status),
                 )
             })
@@ -831,9 +832,9 @@ impl Render for Feed {
                         .py_1p5()
                         .rounded_full()
                         .border_1()
-                        .border_color(rgb(theme::HAIRLINE))
+                        .border_color(rgb(theme::hairline()))
                         .text_size(px(12.0))
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::muted()))
                         .on_click(move |_, _, cx| {
                             handle.update(cx, |feed, cx| {
                                 feed.live_new = 0;
@@ -862,7 +863,7 @@ impl Render for Feed {
                             .w_full()
                             .max_w(px(content::COL_W))
                             .p_8()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::muted()))
                             .child("Nothing here yet — the relays are still answering.")
                             .into_any_element()
                     } else {
@@ -947,7 +948,7 @@ fn repost_card(
                 .px_4()
                 .py_3()
                 .text_size(px(12.0))
-                .text_color(rgb(theme::MUTED))
+                .text_color(rgb(theme::muted()))
                 .child(format!("{name} boosted"))
         },
         |note| {
@@ -968,7 +969,7 @@ fn repost_card(
                         .child(
                             div()
                                 .text_size(px(12.0))
-                                .text_color(rgb(theme::MUTED))
+                                .text_color(rgb(theme::muted()))
                                 .child(format!("{name} boosted · {time}")),
                         ),
                 )
@@ -1051,13 +1052,13 @@ fn reply_whisper(
                     div()
                         .text_size(px(12.0))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::INK))
+                        .text_color(rgb(theme::ink()))
                         .child(format!("↳ replying to {name}")),
                     div()
                         .font_family(theme::SERIF)
                         .italic()
                         .text_size(px(12.5))
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::muted()))
                         .child(snippet.clone()),
                 ]
                 .into_iter()
@@ -1067,13 +1068,13 @@ fn reply_whisper(
                     vec![div()
                         .text_size(px(12.0))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::INK))
+                        .text_color(rgb(theme::ink()))
                         .child(format!("↳ replying to {name}"))
                         .into_any_element()]
                 }
                 _ => vec![div()
                     .text_size(px(12.0))
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(theme::muted()))
                     .child("↳ reply")
                     .into_any_element()],
             })
@@ -1102,7 +1103,7 @@ fn end_cap(paging: bool, more: bool) -> Div {
                 .font_family(theme::SERIF)
                 .text_size(px(13.0))
                 .line_height(relative(1.2))
-                .text_color(rgb(theme::MUTED))
+                .text_color(rgb(theme::muted()))
                 .child(words.to_string()),
         )
 }

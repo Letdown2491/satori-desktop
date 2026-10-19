@@ -33,6 +33,7 @@ impl EventEmitter<Nav> for ProfileView {}
 
 impl ProfileView {
     pub fn new(core: Arc<Core>, who: PublicKey, cx: &mut Context<Self>) -> Self {
+        crate::theme::watch(cx); // repaint on theme change
         let view = Self {
             following: core.is_following(&who),
             who,
@@ -179,8 +180,8 @@ impl Render for ProfileView {
                     .flex_col()
                     .items_center()
                     .border_b_1()
-                    .border_color(rgb(theme::HAIRLINE))
-                    .bg(rgb(theme::PANEL))
+                    .border_color(rgb(theme::hairline()))
+                    .bg(rgb(theme::panel()))
                     .child(
                         div()
                             .w(px(content::COL_W))
@@ -203,7 +204,7 @@ impl Render for ProfileView {
                                         div()
                                             .text_size(px(17.0))
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(theme::INK))
+                                            .text_color(rgb(theme::ink()))
                                             .child(name),
                                     ),
                             )
@@ -231,11 +232,11 @@ impl Render for ProfileView {
                                         });
                                     })
                                     .when(following, |d| {
-                                        d.text_color(rgb(theme::MUTED))
+                                        d.text_color(rgb(theme::muted()))
                                             .child("Following")
                                     })
                                     .when(!following, |d| {
-                                        d.text_color(rgb(theme::VERMILION))
+                                        d.text_color(rgb(theme::vermilion()))
                                             .child("Follow")
                                     }),
                             ),
@@ -245,7 +246,7 @@ impl Render for ProfileView {
                             div()
                                 .font_family(theme::SERIF)
                                 .text_size(px(14.0))
-                                .text_color(rgb(theme::MUTED))
+                                .text_color(rgb(theme::muted()))
                                 .child(about),
                         )
                     }),
@@ -262,7 +263,7 @@ impl Render for ProfileView {
                             .w_full()
                             .max_w(px(content::COL_W))
                             .p_4()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::muted()))
                             .child(if self.status.is_empty() {
                                 "No notes here yet.".to_string()
                             } else {
@@ -286,11 +287,11 @@ impl Render for ProfileView {
                                 .px_4()
                                 .py_3()
                                 .border_b_1()
-                                .border_color(rgb(theme::HAIRLINE))
+                                .border_color(rgb(theme::hairline()))
                                 .child(
                                     div()
                                         .text_size(px(11.5))
-                                        .text_color(rgb(theme::MUTED))
+                                        .text_color(rgb(theme::muted()))
                                         .child(time),
                                 )
                                 .child(

@@ -323,7 +323,7 @@ fn word(text: String) -> Div {
         // P052's own line box is huge (URW vertical metrics); pin the pitch
         // or every wrapped line reads double-spaced.
         .line_height(relative(1.2))
-        .text_color(rgb(theme::INK))
+        .text_color(rgb(theme::ink()))
         .child(text)
 }
 
@@ -342,7 +342,7 @@ pub(crate) fn token_el<V: EventEmitter<Nav> + 'static>(
             .font_family(theme::SERIF)
             .text_size(px(15.0))
             .line_height(relative(1.2))
-            .text_color(rgb(theme::MUTED))
+            .text_color(rgb(theme::muted()))
             .underline()
     };
     match tok {
@@ -496,7 +496,7 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
                     .id(seg_id("mention", trimmed))
                     .cursor_pointer()
                     .text_size(px(13.5))
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(theme::muted()))
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         seg_handle.update(cx, |_, cx| cx.emit(Nav::OpenProfile(pk)));
@@ -526,7 +526,7 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
             _ => body = body.child(
                 div()
                     .text_size(px(11.5))
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(theme::muted()))
                     .child("…"),
             ),
         }
@@ -555,7 +555,7 @@ pub(crate) fn link_row(url: &str) -> AnyElement {
         .id(seg_id("link", url))
         .cursor_pointer()
         .text_size(px(13.5))
-        .text_color(rgb(theme::MUTED))
+        .text_color(rgb(theme::muted()))
         .underline()
         .on_click(move |_, _, cx| cx.open_url(&target))
         .child(display_url(url))
@@ -575,8 +575,8 @@ fn video_tile(url: &str, poster: Option<&str>, w: Option<f32>, h: f32, ctx: &Bod
         .overflow_hidden()
         .rounded(px(4.))
         .border_1()
-        .border_color(rgb(theme::HAIRLINE))
-        .bg(rgb(theme::PANEL))
+        .border_color(rgb(theme::hairline()))
+        .bg(rgb(theme::panel()))
         .map(|d| match w {
             Some(w) => d.w(px(w)),
             None => d.w_full(),
@@ -601,7 +601,7 @@ fn video_tile(url: &str, poster: Option<&str>, w: Option<f32>, h: f32, ctx: &Bod
                             .items_center()
                             .justify_center()
                             .text_size(px(30.0))
-                            .text_color(rgb(theme::VERMILION))
+                            .text_color(rgb(theme::vermilion()))
                             .child("▶"),
                     ),
             )
@@ -617,13 +617,13 @@ fn video_tile(url: &str, poster: Option<&str>, w: Option<f32>, h: f32, ctx: &Bod
                     .child(
                         div()
                             .text_size(px(18.0))
-                            .text_color(rgb(theme::VERMILION))
+                            .text_color(rgb(theme::vermilion()))
                             .child("▶"),
                     )
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(theme::muted()))
                             .underline()
                             .child(display_url(url)),
                     ),
@@ -782,8 +782,8 @@ fn media_tile<V: EventEmitter<Nav> + 'static>(
         .overflow_hidden()
         .rounded(px(4.))
         .border_1()
-        .border_color(rgb(theme::HAIRLINE))
-        .bg(rgb(theme::PANEL))
+        .border_color(rgb(theme::hairline()))
+        .bg(rgb(theme::panel()))
         .map(|d| match w {
             Some(w) => d.w(px(w)),
             None => d.w_full(),
@@ -807,7 +807,7 @@ fn media_tile<V: EventEmitter<Nav> + 'static>(
                     .items_center()
                     .justify_center()
                     .text_size(px(11.))
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(theme::muted()))
                     .child("…"),
             )
             .into_any_element(),
@@ -840,7 +840,7 @@ fn embed_card<V: EventEmitter<Nav> + 'static>(
         .pl_3()
         .py_1()
         .border_l_2()
-        .border_color(rgb(theme::HAIRLINE))
+        .border_color(rgb(theme::hairline()))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             handle.update(cx, |_, cx| cx.emit(Nav::OpenThread(id)))
@@ -854,13 +854,13 @@ fn embed_card<V: EventEmitter<Nav> + 'static>(
                     div()
                         .text_size(px(12.0))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::INK))
+                        .text_color(rgb(theme::ink()))
                         .child(e.name.clone()),
                 )
                 .child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::muted()))
                         .child(rel_time(e.event.created_at.as_secs())),
                 ),
         )
@@ -868,7 +868,7 @@ fn embed_card<V: EventEmitter<Nav> + 'static>(
             div()
                 .font_family(theme::SERIF)
                 .text_size(px(13.5))
-                .text_color(rgb(theme::MUTED))
+                .text_color(rgb(theme::muted()))
                 .child(text),
         )
         .into_any_element()
@@ -923,7 +923,7 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
                         .flex_1()
                         .text_size(px(13.0))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::INK))
+                        .text_color(rgb(theme::ink()))
                         .on_click(move |_, _, cx| {
                             let ev = ev_for_profile.clone();
                             handle_profile.update(cx, |_, cx| cx.emit(Nav::OpenProfile(ev.pubkey)));
@@ -933,7 +933,7 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(theme::MUTED))
+                        .text_color(rgb(theme::muted()))
                         .child(time),
                 ),
         )
