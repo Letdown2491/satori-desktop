@@ -617,6 +617,10 @@ impl Core {
             .warm_at
             .get(&warm_key)
             .is_some_and(|t| *t > now_secs().saturating_sub(600));
+        // Only a deep fetch that actually RAN earns the stamp — stamping a
+        // skipped bootstrap would let a surface opened every few minutes
+        // defer its fill forever.
+        let ran_deep = !follows.is_empty() && !warm;
         let (engagement, fetched) = tokio::join!(
             async {
                 let mine = Filter::new()
@@ -646,11 +650,20 @@ impl Core {
         for ev in engagement {
             let _ = active.pool.store.save(&ev).await;
         }
+        // The deep fetch lands in the store like every other network yield
+        // (refresh_inner and older's top-up save theirs) — it used to be
+        // logged and DROPPED, so a fresh surface (the articles shelf) kept
+        // painting only whatever older/refresh had happened to carry.
+        for ev in fetched {
+            let _ = active.pool.store.save(&ev).await;
+        }
         self.load_own_sets(&active).await;
 
-        crate::read_state::advance(|st| {
-            st.warm_at.insert(warm_key, now_secs());
-        });
+        if ran_deep {
+            crate::read_state::advance(|st| {
+                st.warm_at.insert(warm_key, now_secs());
+            });
+        }
         let page = self.page_from_store(&active, None, &kinds).await?;
         eprintln!("[core] bootstrap page: {} notes", page.notes.len());
         let _ = tx.send(FeedEvent::Loaded(page));
