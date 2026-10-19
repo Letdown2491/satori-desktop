@@ -201,8 +201,19 @@ impl Composer {
             }
 
             // Publish: pictures when there are imetas, notes otherwise.
+            // Reply routing follows Amethyst's migration rule: kind-1 roots
+            // keep kind-1 replies + NIP-10 tags (every client reads those);
+            // every other root (articles, pictures, highlights…) goes out as
+            // a NIP-22 kind-1111 comment with scope tags.
             let mut rx = if !imetas.is_empty() {
                 core.post_picture(String::new(), text, imetas, None)
+            } else if reply.as_ref().is_some_and(|r| u16::from(r.kind) != 1) {
+                let r = reply.expect("checked");
+                core.comment(
+                    text,
+                    satori_core::nip::comment::CommentTarget::for_event(&r),
+                    Some(r),
+                )
             } else {
                 core.post_note(text, reply)
             };

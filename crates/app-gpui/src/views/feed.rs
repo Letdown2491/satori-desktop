@@ -851,20 +851,13 @@ fn reply_whisper(
     }
     let (parent_id, _relays) = nip10::reply_parent(ev)?;
     let parent = parents.get(&parent_id);
-    let label = match parent {
-        Some(p) => {
-            let name = profiles
-                .get(&p.author)
-                .map(|pr| pr.display())
-                .unwrap_or_else(|| format!("{}…", &p.author[..8]));
-            if p.snippet.is_empty() {
-                format!("↳ replying to {name}")
-            } else {
-                format!("↳ replying to {name}: {}", p.snippet)
-            }
-        }
-        None => "↳ reply".to_string(),
-    };
+    let name = parent.as_ref().map(|p| {
+        profiles
+            .get(&p.author)
+            .map(|pr| pr.display())
+            .unwrap_or_else(|| format!("{}…", &p.author[..8]))
+    });
+    let snippet = parent.and_then(|p| (!p.snippet.is_empty()).then(|| p.snippet.clone()));
     let parent_for_open = parent_id.clone();
     let handle = handle.clone();
     Some(
@@ -872,8 +865,9 @@ fn reply_whisper(
             .id(SharedString::from(format!("reply-{idx}")))
             .cursor_pointer()
             .pl(px(36.0)) // under the note's avatar column
-            .text_size(px(12.0))
-            .text_color(rgb(theme::MUTED))
+            .flex()
+            .flex_col()
+            .gap_0p5()
             .on_click(move |_, _, cx| {
                 let id = parent_for_open.clone();
                 handle.update(cx, |_feed, cx| {
@@ -882,7 +876,40 @@ fn reply_whisper(
                     }
                 });
             })
-            .child(label)
+            // Two voices, no box: the addressed name in ink, the parent's
+            // words in serif italic beneath — the quoted speaker gets their
+            // own texture (sumi-e: whitespace and weight, not rules).
+            .children(match (&name, &snippet) {
+                (Some(name), Some(snippet)) => vec![
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme::INK))
+                        .child(format!("↳ replying to {name}")),
+                    div()
+                        .font_family(theme::SERIF)
+                        .italic()
+                        .text_size(px(12.5))
+                        .text_color(rgb(theme::MUTED))
+                        .child(snippet.clone()),
+                ]
+                .into_iter()
+                .map(|d| d.into_any_element())
+                .collect::<Vec<_>>(),
+                (Some(name), None) => {
+                    vec![div()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme::INK))
+                        .child(format!("↳ replying to {name}"))
+                        .into_any_element()]
+                }
+                _ => vec![div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(theme::MUTED))
+                    .child("↳ reply")
+                    .into_any_element()],
+            })
             .into_any_element(),
     )
 }

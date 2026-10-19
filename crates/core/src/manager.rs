@@ -1858,12 +1858,27 @@ impl Core {
                 for ev in active.pool.get(filter).await.unwrap_or_default() {
                     let _ = active.pool.store.save(&ev).await;
                 }
-                let replies = active
+                let mut replies = active
                     .pool
                     .store
                     .replies(id)
                     .await
                     .map_err(|e| LoginError::Resume(e.to_string()))?;
+                // NIP-22 comments addressing the note (Amethyst replies to
+                // non-kind-1 roots as 1111; comments-on-comments nest under
+                // their parents through the same `e` tag). Store first, then
+                // a relay top-up, then merge into one threaded set.
+                for ev in active.pool.store.comments(id).await.unwrap_or_default() {
+                    replies.push(ev);
+                }
+                let comment_filter = Filter::new().kind(Kind::Custom(1111)).event(id).limit(200);
+                for ev in active.pool.get(comment_filter).await.unwrap_or_default() {
+                    let _ = active.pool.store.save(&ev).await;
+                    replies.push(ev);
+                }
+                let mut seen: HashSet<EventId> = HashSet::new();
+                replies.retain(|e| seen.insert(e.id));
+                replies.sort_by_key(|e| e.created_at.as_secs());
                 let authors: Vec<PublicKey> = replies.iter().map(|e| e.pubkey).collect();
                 let cached = active
                     .pool

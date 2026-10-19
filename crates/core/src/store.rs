@@ -141,6 +141,15 @@ impl Store {
         Ok(events)
     }
 
+    /// NIP-22 comments addressing the event (kind 1111, any `e` tag —
+    /// parent or root scope). Oldest first.
+    pub async fn comments(&self, id: EventId) -> NostrResult<Vec<Event>> {
+        let filter = Filter::new().kind(Kind::Custom(1111)).event(id);
+        let mut events: Vec<Event> = self.query(filter).await?.into_iter().collect();
+        events.sort_by_key(|e| e.created_at.as_secs());
+        Ok(events)
+    }
+
     /// Latest kind-0 metadata for each of the given authors, from the cache.
     pub async fn profiles(&self, authors: &[PublicKey]) -> NostrResult<Vec<Event>> {
         let filter = Filter::new().kind(Kind::Metadata).authors(authors.to_vec());
