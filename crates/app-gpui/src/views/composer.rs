@@ -66,7 +66,7 @@ impl Composer {
             if reply_to.is_some() {
                 i.placeholder("Write a reply…")
             } else {
-                i.placeholder("Speak. The seal holds it for a few seconds.")
+                i.placeholder("Speak. The post holds for a few seconds.")
             }
         });
         let focus = input.read(cx).focus_handle(cx);
@@ -322,7 +322,7 @@ impl Render for Composer {
                     .gap_3()
                     .text_size(px(12.5))
                     .text_color(rgb(theme::MUTED))
-                    .child(format!("the seal holds — posting in {secs}s"))
+                    .child(format!("publishing in {secs}s"))
                     .child(
                         div()
                             .id("undo")
@@ -364,7 +364,7 @@ impl Render for Composer {
                             .text_size(px(13.5))
                             .text_color(rgb(theme::VERMILION))
                             .on_click(cx.listener(|this, _, _, cx| this.post(cx)))
-                            .child(if replying { "Seal reply" } else { "Seal" }),
+                            .child(if replying { "Reply" } else { "Publish" }),
                     ),
             })
             .when(!status.is_empty(), |d| {

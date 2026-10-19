@@ -392,6 +392,17 @@ impl Shell {
                 }),
             ))
             // Compose speaks (it broadcasts) — the pen wears vermilion.
+                        .child(self.rail_button(
+                "rail-settings",
+                "Settings",
+                icons::gear_icon(ink(active == Some(Spot::Settings))),
+                active == Some(Spot::Settings),
+                cx.listener(move |shell, _, _, cx| {
+                    if shell.active_spot() != Some(Spot::Settings) {
+                        shell.open_settings(cx);
+                    }
+                }),
+            ))
             .child(self.rail_button(
                 "rail-compose",
                 "Compose",
@@ -401,17 +412,6 @@ impl Shell {
                     // Never clobber an open composer (its draft is live).
                     if shell.active_spot() != Some(Spot::Compose) {
                         shell.open_composer(None, cx);
-                    }
-                }),
-            ))
-            .child(self.rail_button(
-                "rail-settings",
-                "Settings",
-                icons::gear_icon(ink(active == Some(Spot::Settings))),
-                active == Some(Spot::Settings),
-                cx.listener(move |shell, _, _, cx| {
-                    if shell.active_spot() != Some(Spot::Settings) {
-                        shell.open_settings(cx);
                     }
                 }),
             ))
@@ -459,6 +459,9 @@ impl Shell {
             .items_center()
             .gap_3()
             .px_4()
+            // Title ink at ~28px — level with the feed's first note (the
+            // column's 16px band + 10 here ≈ 26px text box, ~2px leading).
+            .pt(px(10.0))
             .pb(px(4.0))
             .child(
                 div()
