@@ -36,11 +36,11 @@ pub fn save(prefs: &Prefs) {
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
     let mut value = raw;
-    if let Ok(overlay) = serde_json::to_value(prefs) {
-        if let (Some(dst), Some(src)) = (value.as_object_mut(), overlay.as_object()) {
-            for (k, v) in src {
-                dst.insert(k.clone(), v.clone());
-            }
+    if let Ok(overlay) = serde_json::to_value(prefs)
+        && let (Some(dst), Some(src)) = (value.as_object_mut(), overlay.as_object())
+    {
+        for (k, v) in src {
+            dst.insert(k.clone(), v.clone());
         }
     }
     let Ok(body) = serde_json::to_string_pretty(&value) else {

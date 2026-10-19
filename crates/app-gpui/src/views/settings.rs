@@ -337,7 +337,7 @@ impl SettingsView {
                         Ok(()) => this.set_status("Backup saved".into(), false),
                         Err(_) => this.set_status("Could not write backup".into(), true),
                     },
-                    None => return, // cancelled
+                    None => {} // cancelled
                 });
             }
         })

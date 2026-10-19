@@ -429,7 +429,19 @@ re-expression of views, not a feature rebuild.
   Prefs struct, so saving any pref wiped `content_hidden` from prefs.json —
   save is now a read-modify-write merge in both crates. Verified live against
   the real store: catalog/undo toggles, seconds field, media add/remove;
-  publish buttons left to the user (they broadcast).* Daily driver
+  publish buttons left to the user (they broadcast). Rich cards done —
+  cards.rs ports `card_for`'s dispatch: video/podcast wear honest
+  play/listen links (GPUI has no media pipeline; nothing fetched until
+  asked), polls render NIP-68 tallies with a working ballot
+  (core.poll_vote), calendar events get RSVP pills (core.rsvp, kind
+  31925), articles get kicker/title/summary (the markdown reader is its
+  own port), plus classified/repo/wiki/highlight. Found and fixed a
+  feed-list wedge while testing: on_event called `list.reset()` on every
+  FeedEvent, and gpui's List drops all scroll input while a reset is
+  pending — a busy feed (profiles resolving) ate the wheel mid-scroll
+  and left the pane permanently blank. Reset now only when the note
+  count changes. Verified under stress: scroll-during-bootstrap-storm,
+  60-tick deep scroll, rapid return to top.* Daily driver
   flipped to the GPUI binary (user decision, P2.5): `crates/app` stays only as
   the P3 porting reference (first-login no longer needs it); deletion remains
   the P4 formality.

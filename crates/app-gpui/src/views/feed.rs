@@ -2,8 +2,8 @@
 //!
 //! TODO(port): crates/app/src/feed.rs + note_card.rs (and src/feed.js) — P0.
 //! Read-only following feed with optimistic like; the receiver-pumping seam is
-//! the GPUI twin of `bridge.rs`'s `drain`. Text notes only so far — rich cards
-//! land in P2/P3 per §9.1.
+//! the GPUI twin of `bridge.rs`'s `drain`. Rich cards for the manifest
+//! registry kinds render via cards.rs (P3).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -19,7 +19,7 @@ use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile, PublishEvent};
 
 use crate::{icons, media, theme};
-use super::{content, nav::Nav};
+use super::{content, nav::Nav, cards};
 
 pub struct Feed {
     core: Arc<Core>,
@@ -28,6 +28,12 @@ pub struct Feed {
     liked: HashSet<String>,
     bookmarked: HashSet<String>,
     quotes: content::Quotes,
+    // Rich-card interaction state (cards.rs): poll tallies + ballots, and
+    // my RSVP per calendar event.
+    poll_tallies: HashMap<EventId, Vec<(String, u32)>>,
+    poll_sel: HashMap<EventId, Vec<String>>,
+    voted: HashSet<EventId>,
+    rsvped: HashMap<EventId, String>,
     status: String,
     list: ListState,
 }
@@ -43,6 +49,10 @@ impl Feed {
             liked: HashSet::new(),
             bookmarked: HashSet::new(),
             quotes: HashMap::new(),
+            poll_tallies: HashMap::new(),
+            poll_sel: HashMap::new(),
+            voted: HashSet::new(),
+            rsvped: HashMap::new(),
             status: "connecting to the relays…".into(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
@@ -64,6 +74,7 @@ impl Feed {
     }
 
     fn on_event(&mut self, ev: FeedEvent, cx: &mut Context<Self>) {
+        let before = self.notes.len();
         match ev {
             FeedEvent::Loaded(page) => {
                 self.absorb(page.notes, page.profiles, cx);
@@ -76,7 +87,15 @@ impl Feed {
             FeedEvent::Failed(e) => self.status = format!("… {e}"),
             _ => {}
         }
-        self.list.reset(self.notes.len());
+        // Reset only when the item count changed: gpui's List drops every
+        // scroll event while a reset is pending, so resetting on profile
+        // resolutions (constant during a busy feed) ate wheel input mid-scroll
+        // and wedged the pane blank. Appends still reset (the list learns the
+        // new count); same-height patches don't need it (list.rs: "elements
+        // outside the scrolled area do not change their height").
+        if self.notes.len() != before {
+            self.list.reset(self.notes.len());
+        }
         cx.notify();
     }
 
@@ -88,9 +107,8 @@ impl Feed {
     ) {
         self.absorb_profiles(profiles, cx);
         for note in notes {
-            // TODO(port): note_card.rs renders all kinds via the manifest
-            // registry; the GPUI port covers text + picture notes (P2).
-            if note.kind != Kind::TextNote && note.kind != Kind::Custom(20) {
+            // Registry kinds render as rich cards (cards.rs card_for port).
+            if note.kind != Kind::TextNote && !cards::is_feed_kind(note.kind) {
                 continue;
             }
             if self.notes.iter().any(|n| n.id == note.id) {
@@ -98,6 +116,9 @@ impl Feed {
             }
             self.want_images(&note, cx);
             self.want_quotes(&note, cx);
+            if note.kind == Kind::Custom(1068) {
+                self.want_poll(&note, cx);
+            }
             self.notes.push(note);
         }
         self.notes.sort_by_key(|n| std::cmp::Reverse(n.created_at));
@@ -168,6 +189,102 @@ impl Feed {
             let rx = self.core.event_by_id_dech32(&bech);
             self.pump_quote(bech, rx, cx);
         }
+    }
+
+    /// Tallies for a poll card (cards.rs poll_card): core drains the kind
+    /// 1018 votes; the id rides the pump closure (PollVotes carries none).
+    fn want_poll(&mut self, note: &Event, cx: &mut Context<Self>) {
+        if self.poll_tallies.contains_key(&note.id) {
+            return;
+        }
+        // Reserve so re-renders don't re-request while loading.
+        self.poll_tallies.insert(note.id, vec![]);
+        let id = note.id;
+        let mut rx = self.core.poll_votes(id);
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                if let FeedEvent::PollVotes(t) = ev {
+                    let _ = this.update(cx, |this, cx| {
+                        this.poll_tallies.insert(id, t);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Ballot selection (cards.rs poll_card): replace for single-choice,
+    /// toggle for multiple.
+    pub(crate) fn toggle_poll_sel(&mut self, ev: &Event, opt: String, multiple: bool, cx: &mut Context<Self>) {
+        let sel = self.poll_sel.entry(ev.id).or_default();
+        if sel.contains(&opt) {
+            sel.retain(|o| *o != opt);
+        } else if multiple {
+            sel.push(opt);
+        } else {
+            *sel = vec![opt];
+        }
+        cx.notify();
+    }
+
+    /// Cast the ballot: publish the vote (kind 1018), mark voted on commit,
+    /// re-drain the tallies.
+    pub(crate) fn cast_vote(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        let Some(opts) = self.poll_sel.get(&ev.id).cloned() else {
+            return;
+        };
+        if opts.is_empty() {
+            return;
+        }
+        let id = ev.id;
+        let mut rx = self.core.poll_vote(ev, opts);
+        cx.spawn(async move |this, cx| {
+            while let Some(pv) = rx.recv().await {
+                if let PublishEvent::Committed { .. } = pv {
+                    let _ = this.update(cx, |this, cx| {
+                        this.voted.insert(id);
+                        // Fresh tally including our own vote.
+                        let mut rx = this.core.poll_votes(id);
+                        cx.spawn(async move |this, cx| {
+                            while let Some(ev) = rx.recv().await {
+                                if let FeedEvent::PollVotes(t) = ev {
+                                    let _ = this.update(cx, |this, cx| {
+                                        this.poll_tallies.insert(id, t);
+                                        cx.notify();
+                                    });
+                                }
+                            }
+                        })
+                        .detach();
+                        cx.notify();
+                    });
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// RSVP to a calendar event (NIP-52 kind 31925) — engaged on commit.
+    pub(crate) fn send_rsvp(&mut self, ev: &Event, status: &'static str, cx: &mut Context<Self>) {
+        let id = ev.id;
+        let mut rx = self.core.rsvp(ev, status);
+        cx.spawn(async move |this, cx| {
+            while let Some(pv) = rx.recv().await {
+                if let PublishEvent::Committed { .. } = pv {
+                    let _ = this.update(cx, |this, cx| {
+                        this.rsvped.insert(id, status.into());
+                        cx.notify();
+                    });
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
     }
 
     /// Queue the profile picture fetch (core's guarded, disk-cached path).
@@ -242,6 +359,7 @@ fn note_card(
     bookmarked: &HashSet<String>,
     media: &media::Snapshot,
     quotes: &content::Quotes,
+    cards: &cards::CardState,
     handle: Entity<Feed>,
 ) -> impl IntoElement {
     // TODO(port): note_card.rs layout — P0 minimal card; name fallback chain
@@ -312,10 +430,11 @@ fn note_card(
                     let ev = ev_for_open.clone();
                     handle_open.update(cx, |_feed, cx| cx.emit(Nav::OpenThread(ev.id)));
                 })
-                .child(content::body(
+                .child(cards::row_body(
                     ev,
                     &content::Body { media, quotes, profiles },
-                    handle,
+                    &handle,
+                    cards,
                 )),
         )
         .child(
@@ -409,11 +528,17 @@ impl Render for Feed {
                         let liked = self.liked.clone();
                         let bookmarked = self.bookmarked.clone();
                         let quotes = self.quotes.clone();
+                        let cards = cards::CardState {
+                            poll_tallies: self.poll_tallies.clone(),
+                            poll_sel: self.poll_sel.clone(),
+                            voted: self.voted.clone(),
+                            rsvped: self.rsvped.clone(),
+                        };
                         list(self.list.clone(), move |idx, _w, _cx| {
                             match notes.get(idx) {
                                 Some(ev) => note_card(
                                     idx, ev, &profiles, &liked, &bookmarked, &media, &quotes,
-                                    handle.clone(),
+                                    &cards, handle.clone(),
                                 )
                                 .into_any_element(),
                                 None => div().into_any_element(),

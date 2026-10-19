@@ -421,7 +421,7 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
 }
 
 /// Schemeless, truncated link row for URLs that aren't media.
-fn link_row(url: &str) -> AnyElement {
+pub(crate) fn link_row(url: &str) -> AnyElement {
     let target = url.to_string();
     div()
         .id(seg_id("link", url))
@@ -471,7 +471,7 @@ fn video_card(url: &str) -> AnyElement {
 /// The gallery section: single image sized by its dim aspect (media_picture:
 /// height = width·h/w clamped to 560), several images as a horizontal strip
 /// (cards.rs gallery), every tile opening the lightbox.
-fn media_section<V: EventEmitter<Nav> + 'static>(
+pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
     urls: &[String],
     dims: &HashMap<String, Option<(u32, u32)>>,
     ctx: &Body,

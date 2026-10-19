@@ -35,11 +35,11 @@ pub fn save(prefs: &Prefs) {
     // (the GTK save had exactly that bug: toggling the undo window erased the
     // feed catalog's hidden kinds).
     let mut value = read_value(config::files::PREFS);
-    if let Ok(overlay) = serde_json::to_value(prefs) {
-        if let (Some(dst), Some(src)) = (value.as_object_mut(), overlay.as_object()) {
-            for (k, v) in src {
-                dst.insert(k.clone(), v.clone());
-            }
+    if let Ok(overlay) = serde_json::to_value(prefs)
+        && let (Some(dst), Some(src)) = (value.as_object_mut(), overlay.as_object())
+    {
+        for (k, v) in src {
+            dst.insert(k.clone(), v.clone());
         }
     }
     let Ok(body) = serde_json::to_string_pretty(&value) else {
