@@ -3,8 +3,9 @@
 //! Port of the web app's at-rest posture (`src/store.ts` kept the NIP-46
 //! transport secret in a 0600 sessions.json): here the Secret Service is the
 //! primary store (DESIGN.md D2), and the file fallback preserves the 0600
-//! convention for systems without one. The user's master key never lives here
-//! unless they explicitly chose nsec login (D2: opt-in).
+//! convention for systems without one. The master key never lives here —
+//! D17 removed the nsec login door; the `NSEC` slot survives only so the
+//! test fixture's local mode can read old session files.
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;

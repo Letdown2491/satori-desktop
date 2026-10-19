@@ -21,9 +21,10 @@ and Buddhist/Taoist philosophy. These are not decoration — each one dictates a
 
 ### 1.1 Cypherpunk — privacy as default, verification as law
 
-- **Key custody**: the app never requires your private key. Primary sign-in is a NIP-46
-  bunker. A local key is an explicit opt-in, sealed in the Secret Service, never in a
-  plain config file.
+- **Key custody**: the app never requires — never touches — your private key (D17).
+  Sign-in is NIP-46 only: a `bunker://` paste or a `nostrconnect://` QR, both holding
+  only an ephemeral transport secret. (The D2-era local-key opt-in is removed; the
+  core's local-mode code survives to read old session files.)
 - **Verify everything locally**: every event (including zap receipts, gift wraps, seals,
   deletions) is signature-checked client-side. Relays are untrusted pipes.
 - **No telemetry. No analytics. No counts.** Nothing about the user leaves the machine
@@ -57,8 +58,11 @@ timeouts; `h-optimistic` → mutate-then-reconcile.
 
 ### 1.3 The uncarved block — design for exit, leave out what can be left out
 
-- **Feeds end.** The caught-up ensō clearing with a Zen quote, deliberate "view older"
-  batches, no infinite refill, no algorithms, no read-state anxiety mechanics.
+- **The feed runs to the end of your history, then rests.** Endless scroll
+  top-ups from the relays until the store runs dry (user decision, P3 — over
+  the GTK app's deliberate "view older" batches, which made catching up a
+  chore); the caught-up ensō clearing still marks the bottom. No algorithms,
+  no read-state anxiety mechanics.
 - **The undo window is the breath before speech**: posts are held N seconds (default 5,
   max 30) before publishing, restart-safe, with a server-side backstop commit.
 - **Quiet by default**: reactions off, no like/repost counters, dots instead of badges,
@@ -75,9 +79,9 @@ timeouts; `h-optimistic` → mutate-then-reconcile.
 |---|---|
 | Relay pool policies: outbox routing (NIP-65 set-cover ≤70 relays, ≤2/author), adaptive budgets, latency EWMA profiles, read-dead detection, seen-on memory, NIP-42 auth, NIP-40 expiry, NIP-09 tombstones | **Port** (core crate; nostr-sdk primitives underneath) |
 | Manifest registry + kind handlers + action vocabulary + surfaces | **Port as `KindHandler` trait** (§6.1) |
-| All content cards (note, picture, video, article, poll, calendar, classified, podcast, highlight, wiki, repo, comment, custom NIP, fallback) | **Port** as GTK widgets |
+| All content cards (note, picture, video, article, poll, calendar, classified, podcast, highlight, wiki, repo, comment, custom NIP, fallback) | **Port** — built on GTK, re-expressed as gpui views/cards.rs (P3) |
 | Undo window, scheduled sweep, drafts + NIP-37 sync, filters, content prefs, list backup, bookmark/mute/pin/follow, NIP-17 DMs, NIP-50 search, NIP-11 relay info/browse, Blossom upload, media proxy + NIP-B7 hash healing, SSRF guards, Tor modes | **Port** |
-| Sumi-e design language | **Port** as GTK CSS provider (§5) |
+| Sumi-e design language | **Port** — GTK CSS provider first, now Rust token constants (§5, `theme.rs`) |
 | NIP-46 bunker client | **Use nostr-connect crate** (nostr-sdk) |
 | NWC (NIP-47) | **Deferred** with wallet (nostr-sdk `nwc` crate when built) |
 | NIP-07 / hext.js / sign-and-resubmit seam / batch chains / `H-Nostr-Sign` protocol | **Deleted** — existed only because the key lived in the browser |
@@ -145,9 +149,11 @@ Flatpak-safe XDG paths (`~/.local/share/satori/` inside the sandbox):
   `relay-latency.json`, `relay-info.json`, `relay-favorites.json`, `engagement.json`,
   `deletions.json`, `profiles.json`.
 - `media-cache/` — avatar/media blob cache (LRU, size-capped), keyed by sha256.
-- Secrets: bunker transport secret + local nsec (opt-in) in the **Secret Service**
-  (`keyring` crate; Flatpak permission `--talk-name=org.freedesktop.secrets`). File
-  fallback 0600 only if the service is absent.
+- Secrets: the bunker transport secret only (D17 — no master key in the app),
+  stored Secret-Service-first via the `keyring` crate (2s deadline; the
+  keyring path can block on niri sessions without gnome-keyring), 0600-file
+  fallback. What rides with P4 packaging is the sandbox permission
+  (`--talk-name=org.freedesktop.secrets`).
 
 **Decision:** decrypted DMs are memory-only (LRU ~8000 entries). No plaintext DMs on
 disk, unlike the web app's bunker path.
@@ -193,6 +199,13 @@ disk, unlike the web app's bunker path.
 
 ## 5. UI design language ("sumi-e ink on washi")
 
+*(The token table below is the GTK-era spec, carried verbatim into
+`theme.rs` — values match both palettes. The mechanics around it changed in
+the P4 cutover: tokens are Rust constants in `crates/app-gpui/src/theme.rs`,
+live-switchable via `ThemeSignal`, not a CSS provider; glyphs are
+`PathBuilder` strokes in `icons.rs`, not icon files. §5.2's faces were
+replaced in the P3 polish pass — see below.)*
+
 ### 5.1 Tokens (GTK CSS `@define-color`, both themes)
 
 | Token | Light (`sumi-e`) | Dark (`sumi-e-dark`) |
@@ -218,8 +231,11 @@ not accent-colored. Hover washes: `text @ 5%` alpha.
 - **Display serif** (h1, article titles, blockquotes, DM peer names, empty-state quotes):
   bundle an OFL serif (default choice: **Source Serif 4**) — the web stack
   (Iowan/Palatino/Georgia) does not exist on Linux.
+  *(P3 polish, as built: **P052** — the Palatino clone, big x-height — for
+  body serif; Nimbus Roman read cramped at 13px.)*
 - **UI text**: system sans (Adwaita Sans), 15px body, 1.6 line-height; pre-wrap semantics
-  for note bodies.
+  for note bodies. *(As built: **Cantarell** at 12–13.5px — the desktop reads
+  denser than the web.)*
 - **Monospace**: Adwaita Mono for npubs, invoices, clone URLs.
 
 ### 5.3 Shell

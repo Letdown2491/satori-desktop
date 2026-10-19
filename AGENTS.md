@@ -22,9 +22,12 @@ is commit `a4b09e8`: `git show a4b09e8:src/<file>`). The build spec is
 
 ```
 podman build -t satori-dev -f Containerfile.dev
-podman run --rm -v "$PWD:/srv:Z" -w /srv satori-dev cargo check --workspace
-podman run --rm -v "$PWD:/srv:Z" -w /srv satori-dev cargo clippy --workspace
+podman run --rm -v satori-cargo:/usr/local/cargo -v "$PWD:/srv:Z" -w /srv satori-dev cargo check --workspace
+podman run --rm -v satori-cargo:/usr/local/cargo -v "$PWD:/srv:Z" -w /srv satori-dev cargo clippy --workspace
 ```
+
+(The cargo cache lives in the `satori-cargo` volume — builds stay warm across
+container runs.)
 
 Launching on the host: the bootc host lacks `libxkbcommon-x11` (GTK's Wayland
 backend never needed it). A copy lives at `~/.local/lib/libxkbcommon-x11.so.0`;
