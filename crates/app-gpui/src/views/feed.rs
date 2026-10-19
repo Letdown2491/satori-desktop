@@ -17,7 +17,8 @@ use gpui::{
     ListOffset, ListScrollEvent, ListState, Render, SharedString, Window, Div,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, FeedRx, Profile, PublishEvent};
+use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile, PublishEvent};
+use satori_core::nip::nip10;
 
 use crate::{icons, media, theme};
 use super::{content, nav::Nav, cards};
@@ -43,6 +44,10 @@ pub struct Feed {
     core: Arc<Core>,
     notes: Vec<Event>,
     profiles: HashMap<String, Profile>,
+    /// Reply parents (nip10) resolved for the context whisper: parent id →
+    /// author + snippet. `parents_asked` keeps misses from re-requesting.
+    parents: HashMap<String, ParentNote>,
+    parents_asked: HashSet<String>,
     liked: HashSet<String>,
     bookmarked: HashSet<String>,
     quotes: content::Quotes,
@@ -82,6 +87,7 @@ pub struct Feed {
 struct FeedSnap {
     notes: std::sync::Arc<Vec<Event>>,
     profiles: std::sync::Arc<HashMap<String, Profile>>,
+    parents: std::sync::Arc<HashMap<String, ParentNote>>,
     liked: std::sync::Arc<HashSet<String>>,
     bookmarked: std::sync::Arc<HashSet<String>>,
     quotes: std::sync::Arc<content::Quotes>,
@@ -107,6 +113,8 @@ impl Feed {
             core,
             notes: vec![],
             profiles: HashMap::new(),
+            parents: HashMap::new(),
+            parents_asked: HashSet::new(),
             liked: HashSet::new(),
             bookmarked: HashSet::new(),
             quotes: HashMap::new(),
@@ -217,6 +225,7 @@ impl Feed {
         match ev {
             FeedEvent::Loaded(page) => {
                 self.absorb(page.notes, page.profiles, cx);
+                self.want_parents(cx);
                 self.status.clear();
                 self.has_more = true;
             }
@@ -225,6 +234,7 @@ impl Feed {
                 self.paging = false;
                 let old = self.notes.len();
                 self.absorb(page.notes, page.profiles, cx);
+                self.want_parents(cx);
                 if self.notes.len() > old {
                     // Appends keep the reader's place: reset() clears the
                     // scroll anchor and would yank the pane to the top,
@@ -245,6 +255,12 @@ impl Feed {
                 }
             }
             FeedEvent::Profiles(profiles) => self.absorb_profiles(profiles, cx),
+            FeedEvent::Parents(p) => {
+                // Height-changing patches (the whisper appears) — the list
+                // re-measures; no reset, the anchor survives small shifts.
+                self.parents.extend(p);
+                cx.notify();
+            }
             FeedEvent::Failed(e) => {
                 self.status = format!("… {e}");
                 // A failed round trip must not wedge the end cap.
@@ -312,6 +328,43 @@ impl Feed {
             let rx = self.core.ensure_profiles(missing);
             self.pump(rx, cx);
         }
+    }
+
+    /// Collect the page's unresolved reply parents and ask core for them
+    /// (store first, one by-id relay trip for the misses). Capped per ask.
+    fn want_parents(&mut self, cx: &mut Context<Self>) {
+        let mut ids: Vec<String> = Vec::new();
+        for note in &self.notes {
+            if let Some((id, _relays)) = nip10::reply_parent(note) {
+                if self.parents.contains_key(&id) || self.parents_asked.contains(&id) {
+                    continue;
+                }
+                self.parents_asked.insert(id.clone());
+                ids.push(id);
+                if ids.len() >= 60 {
+                    break;
+                }
+            }
+        }
+        if ids.is_empty() {
+            return;
+        }
+        let rx = self.core.load_parents(ids);
+        let mut rx = rx;
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                let live = this
+                    .update(cx, |f, cx| {
+                        f.on_event(ev, cx);
+                        true // keep draining until the channel closes
+                    })
+                    .unwrap_or(false);
+                if !live {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn absorb_profiles(&mut self, profiles: Vec<Profile>, cx: &mut Context<Self>) {
@@ -537,6 +590,7 @@ fn note_card(
     idx: usize,
     ev: &Event,
     profiles: &HashMap<String, Profile>,
+    parents: &HashMap<String, ParentNote>,
     liked: &HashSet<String>,
     bookmarked: &HashSet<String>,
     media: &media::Snapshot,
@@ -603,6 +657,12 @@ fn note_card(
                         .child(time),
                 ),
         )
+        // The reply context (nip10.ts replyContext, option B): the parent's
+        // author + a snippet, fetched by id once and cached in the feed.
+        // A whisper, not a box — one muted line with the elbow glyph; click
+        // opens the parent's thread (the thread pane anchors by id, so this
+        // works even before the parent resolves).
+        .children(reply_whisper(idx, ev, parents, profiles, &handle))
         .child(
             // Clicking the note body opens its thread (nav via the shell).
             div()
@@ -681,6 +741,7 @@ impl Render for Feed {
             self.snap = Some(FeedSnap {
                 notes: std::sync::Arc::new(self.notes.clone()),
                 profiles: std::sync::Arc::new(self.profiles.clone()),
+                parents: std::sync::Arc::new(self.parents.clone()),
                 liked: std::sync::Arc::new(self.liked.clone()),
                 bookmarked: std::sync::Arc::new(self.bookmarked.clone()),
                 quotes: std::sync::Arc::new(self.quotes.clone()),
@@ -744,6 +805,7 @@ impl Render for Feed {
                         // handlers touch the entity, later, legally. Arc clones.
                         let notes = snap.notes.clone();
                         let profiles = snap.profiles.clone();
+                        let parents = snap.parents.clone();
                         let liked = snap.liked.clone();
                         let bookmarked = snap.bookmarked.clone();
                         let quotes = snap.quotes.clone();
@@ -754,8 +816,8 @@ impl Render for Feed {
                         list(self.list.clone(), move |idx, _w, _cx| {
                             match notes.get(idx) {
                                 Some(ev) => note_card(
-                                    idx, ev, &profiles, &liked, &bookmarked, &media, &quotes,
-                                    &cards, handle.clone(),
+                                    idx, ev, &profiles, &parents, &liked, &bookmarked, &media,
+                                    &quotes, &cards, handle.clone(),
                                 )
                                 .into_any_element(),
                                 None => end_cap(paging, has_more).into_any_element(),
@@ -770,6 +832,59 @@ impl Render for Feed {
                     }),
             )
     }
+}
+
+/// The reply-context whisper: `↳ replying to Name — snippet…`, clickable to
+/// the parent's thread. None for non-replies (nip10: quotes/mentions don't
+/// count). The name resolves through the same profile map as the header.
+fn reply_whisper(
+    idx: usize,
+    ev: &Event,
+    parents: &HashMap<String, ParentNote>,
+    profiles: &HashMap<String, Profile>,
+    handle: &Entity<Feed>,
+) -> Option<gpui::AnyElement> {
+    // Replies are a kind-1 concern; articles/highlights carry their own
+    // context headers and comment parents are NIP-22 (not on this feed).
+    if u16::from(ev.kind) != 1 {
+        return None;
+    }
+    let (parent_id, _relays) = nip10::reply_parent(ev)?;
+    let parent = parents.get(&parent_id);
+    let label = match parent {
+        Some(p) => {
+            let name = profiles
+                .get(&p.author)
+                .map(|pr| pr.display())
+                .unwrap_or_else(|| format!("{}…", &p.author[..8]));
+            if p.snippet.is_empty() {
+                format!("↳ replying to {name}")
+            } else {
+                format!("↳ replying to {name}: {}", p.snippet)
+            }
+        }
+        None => "↳ reply".to_string(),
+    };
+    let parent_for_open = parent_id.clone();
+    let handle = handle.clone();
+    Some(
+        div()
+            .id(SharedString::from(format!("reply-{idx}")))
+            .cursor_pointer()
+            .pl(px(36.0)) // under the note's avatar column
+            .text_size(px(12.0))
+            .text_color(rgb(theme::MUTED))
+            .on_click(move |_, _, cx| {
+                let id = parent_for_open.clone();
+                handle.update(cx, |_feed, cx| {
+                    if let Ok(event_id) = EventId::from_hex(&id) {
+                        cx.emit(Nav::OpenThread(event_id));
+                    }
+                });
+            })
+            .child(label)
+            .into_any_element(),
+    )
 }
 
 /// The list's last row: the round-trip note while paging, the caught-up seal

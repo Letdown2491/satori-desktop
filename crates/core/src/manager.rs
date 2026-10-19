@@ -68,6 +68,9 @@ pub enum FeedEvent {
     One(Option<Event>, Option<Profile>),
     /// Refresh found nothing newer — quiet feedback, no list churn.
     NothingNew,
+    /// Resolved reply parents for the timeline's context whisper: parent
+    /// event id → author + snippet. Misses resolve on a later ask.
+    Parents(std::collections::HashMap<String, ParentNote>),
     /// Poll tallies: (option id, count) over each voter's latest ballot.
     PollVotes(Vec<(String, u32)>),
     /// Comments on a target, oldest first + profiles.
@@ -130,6 +133,32 @@ impl Active {
 pub struct FeedPage {
     pub notes: Vec<Event>,
     pub profiles: Vec<Profile>,
+}
+
+/// A reply's parent, for the timeline context whisper: author + a plain
+/// one-liner from the parent's content.
+#[derive(Debug, Clone)]
+pub struct ParentNote {
+    pub author: String,
+    pub snippet: String,
+}
+
+/// Plain-text one-liner: whitespace collapsed, `nostr:` refs ellipsized,
+/// capped at ~140 chars.
+fn parent_snippet(content: &str) -> String {
+    let mut words: Vec<&str> = Vec::new();
+    for w in content.split_whitespace() {
+        if w.starts_with("nostr:") {
+            words.push("…");
+        } else {
+            words.push(w);
+        }
+    }
+    let mut s = words.join(" ");
+    if s.chars().count() > 140 {
+        s = s.chars().take(140).collect::<String>() + "…";
+    }
+    s
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1554,6 +1583,63 @@ impl Core {
     }
 
     /// Resolve one event by id (repost targets); None if unknown everywhere.
+    /// Batch-resolve reply parents (the timeline's context whisper): store
+    /// first, then one by-id relay round trip for the misses. Emits
+    /// FeedEvent::Parents with whatever resolved — misses (deleted parents,
+    /// relay gaps) just don't resolve, and the whisper degrades.
+    pub fn load_parents(self: &Arc<Self>, ids: Vec<String>) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let mut resolved: std::collections::HashMap<String, ParentNote> =
+                std::collections::HashMap::new();
+            let _: Result<()> = async {
+                let active = this.active().await?;
+                let want: Vec<EventId> = ids
+                    .iter()
+                    .filter_map(|h| EventId::from_hex(h).ok())
+                    .collect();
+                if want.is_empty() {
+                    return Ok(());
+                }
+                let mut events: Vec<Event> = Vec::new();
+                for id in &want {
+                    if let Some(ev) = active.pool.store.event_by_id(*id).await.ok().flatten() {
+                        events.push(ev);
+                    }
+                }
+                let have: HashSet<EventId> = events.iter().map(|e| e.id).collect();
+                let missing: Vec<EventId> =
+                    want.iter().filter(|id| !have.contains(id)).cloned().collect();
+                if !missing.is_empty() {
+                    let n = missing.len();
+                    let fetched = active
+                        .pool
+                        .get(Filter::new().ids(missing).limit(n as usize))
+                        .await
+                        .unwrap_or_default();
+                    for ev in &fetched {
+                        let _ = active.pool.store.save(ev).await;
+                    }
+                    events.extend(fetched);
+                }
+                for ev in events {
+                    let snippet = parent_snippet(&ev.content);
+                    resolved.insert(
+                        ev.id.to_string(),
+                        ParentNote { author: ev.pubkey.to_string(), snippet },
+                    );
+                }
+                Ok(())
+            }
+            .await;
+            if !resolved.is_empty() {
+                let _ = tx.send(FeedEvent::Parents(resolved));
+            }
+        });
+        rx
+    }
+
     pub fn event_by_id(self: &Arc<Self>, id: EventId) -> FeedRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);

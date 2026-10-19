@@ -21,6 +21,7 @@ pub mod calendar;
 pub mod classified;
 pub mod comment;
 pub mod highlight;
+pub mod nip10;
 pub mod imeta;
 pub mod podcast;
 pub mod poll;
