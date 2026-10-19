@@ -47,9 +47,22 @@ struct Attachment {
     image: Option<gpui::Image>,
 }
 
+/// The compose tab: a note (kind 1) or a poll (NIP-88, kind 1068).
+/// Replies carry no tabs — they're notes/comments by nature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Note,
+    Poll,
+}
+
 pub struct Composer {
     core: Arc<Core>,
     input: Entity<Input>,
+    tab: Tab,
+    /// Poll tab: the question, the options (min two), multiple-choices.
+    poll_question: Entity<Input>,
+    poll_options: Vec<Entity<Input>>,
+    poll_multi: bool,
     /// @-mentions: the pubkeys whose p tags ride the publish (content
     /// keeps the human-readable @Name).
     mentions: Vec<PublicKey>,
@@ -91,9 +104,18 @@ impl Composer {
         // @-mention detection: watch the buffer, find an active `@token`.
         cx.observe(&input, |this, _input, cx| this.detect_mention(cx))
             .detach();
+        let poll_question =
+            cx.new(|cx| Input::new(cx).placeholder("Ask."));
+        let poll_options = (0..2)
+            .map(|_| cx.new(|cx| Input::new(cx)))
+            .collect();
         Self {
             core,
             input,
+            tab: Tab::Note,
+            poll_question,
+            poll_options,
+            poll_multi: false,
             mentions: vec![],
             suggest: vec![],
             mention_token: None,
@@ -228,6 +250,75 @@ impl Composer {
         self.suggest.clear();
         self.mention_token = None;
         cx.notify();
+    }
+
+    /// Switch tabs (note / poll): buffers keep their text; the mention
+    /// strip belongs to the note buffer.
+    fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        if self.tab != tab {
+            self.tab = tab;
+            self.suggest.clear();
+            self.mention_token = None;
+            cx.notify();
+        }
+    }
+
+    /// The poll publish: question + at least two options (NIP-88).
+    /// No attachments, no mentions, no draft — v1 keeps the surface small.
+    fn post_poll(&mut self, cx: &mut Context<Self>) {
+        let question = self.poll_question.read(cx).content.trim().to_string();
+        let options: Vec<String> = self
+            .poll_options
+            .iter()
+            .map(|e| e.read(cx).content.trim().to_string())
+            .filter(|o| !o.is_empty())
+            .collect();
+        if question.is_empty() || options.len() < 2 {
+            self.status = "a poll needs a question and two options".into();
+            cx.notify();
+            return;
+        }
+        self.posting = true;
+        self.status.clear();
+        cx.notify();
+        let core = self.core.clone();
+        let mut rx = core.post_poll(question, options, self.poll_multi, None);
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    PublishEvent::Held { token, hold_secs, .. } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.undo = Some((token, hold_secs));
+                            cx.notify();
+                        });
+                    }
+                    PublishEvent::Undone { .. } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.undo = None;
+                            this.posting = false;
+                            this.status = "undone — nothing was sent".into();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    PublishEvent::Committed { .. } => {
+                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                        return;
+                    }
+                    PublishEvent::Failed { error, .. } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.posting = false;
+                            this.undo = None;
+                            this.status = format!("failed: {error}");
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .detach();
     }
 
     fn post(&mut self, cx: &mut Context<Self>) {
@@ -370,8 +461,12 @@ impl Composer {
 }
 
 impl Focusable for Composer {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        if self.tab == Tab::Poll {
+            self.poll_question.read(cx).focus_handle(cx)
+        } else {
+            self.focus.clone()
+        }
     }
 }
 
@@ -387,6 +482,10 @@ impl Render for Composer {
         let input = self.input.clone();
         let posting = self.posting;
         let suggest = self.suggest.clone();
+        let tab = self.tab;
+        let poll_question = self.poll_question.clone();
+        let poll_options = self.poll_options.clone();
+        let poll_multi = self.poll_multi;
 
         div()
             .id("composer")
@@ -405,19 +504,153 @@ impl Render for Composer {
             .text_color(rgb(theme::ink()))
             .gap_2()
             .p_4()
-            .child(
-                div()
-                    .id("composer-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(rgb(theme::hairline()))
-                    .bg(rgb(theme::panel()))
-                    .p_2()
-                    .child(input),
-            )
+            .when(!replying && tab == Tab::Note, |d| {
+                d.child(
+                    div()
+                        .id("composer-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(rgb(theme::hairline()))
+                        .bg(rgb(theme::panel()))
+                        .p_2()
+                        .child(input),
+                )
+            })
+            .when(!replying && tab == Tab::Poll, |d| {
+                d.child(
+                    div()
+                        .id("poll-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .rounded(px(6.))
+                                .border_1()
+                                .border_color(rgb(theme::hairline()))
+                                .bg(rgb(theme::panel()))
+                                .p_2()
+                                .child(poll_question),
+                        )
+                        .children(poll_options.iter().enumerate().map(|(i, opt)| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .rounded(px(6.))
+                                        .border_1()
+                                        .border_color(rgb(theme::hairline()))
+                                        .bg(rgb(theme::panel()))
+                                        .p_2()
+                                        .child(opt.clone()),
+                                )
+                                .when(i >= 2, |d| {
+                                    d.child(
+                                        div()
+                                            .id(SharedString::from(format!("rm-opt-{i}")))
+                                            .cursor_pointer()
+                                            .text_size(px(13.))
+                                            .text_color(rgb(theme::muted()))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if !this.posting && this.poll_options.len() > 2 {
+                                                    this.poll_options.remove(i);
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .child("×"),
+                                    )
+                                })
+                        }))
+                        .child(
+                            div()
+                                .id("add-option")
+                                .cursor_pointer()
+                                .text_size(px(12.5))
+                                .text_color(rgb(theme::muted()))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if !this.posting && this.poll_options.len() < 6 {
+                                        this.poll_options.push(cx.new(|inner| Input::new(inner)));
+                                        cx.notify();
+                                    }
+                                }))
+                                .child("+ add option"),
+                        )
+                        .child(
+                            div()
+                                .id("poll-multi")
+                                .cursor_pointer()
+                                .text_size(px(12.5))
+                                .text_color(rgb(if poll_multi {
+                                    theme::vermilion()
+                                } else {
+                                    theme::muted()
+                                }))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.poll_multi = !this.poll_multi;
+                                    cx.notify();
+                                }))
+                                .child(if poll_multi {
+                                    "multiple choices ✓"
+                                } else {
+                                    "multiple choices"
+                                }),
+                        ),
+                )
+            })
+            .when(!replying, |d| {
+                // The tabs: quiet text, the active one in ink.
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .text_size(px(13.))
+                        .child(
+                            div()
+                                .id("tab-note")
+                                .cursor_pointer()
+                                .text_color(rgb(if tab == Tab::Note {
+                                    theme::ink()
+                                } else {
+                                    theme::muted()
+                                }))
+                                .when(tab == Tab::Note, |d| {
+                                    d.font_weight(gpui::FontWeight::SEMIBOLD)
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_tab(Tab::Note, cx)
+                                }))
+                                .child("Note"),
+                        )
+                        .child(div().text_color(rgb(theme::hairline())).child("·"))
+                        .child(
+                            div()
+                                .id("tab-poll")
+                                .cursor_pointer()
+                                .text_color(rgb(if tab == Tab::Poll {
+                                    theme::ink()
+                                } else {
+                                    theme::muted()
+                                }))
+                                .when(tab == Tab::Poll, |d| {
+                                    d.font_weight(gpui::FontWeight::SEMIBOLD)
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_tab(Tab::Poll, cx)
+                                }))
+                                .child("Poll"),
+                        ),
+                )
+            })
             .when(!suggest.is_empty(), |d| {
                 d.child(
                     div()
@@ -443,7 +676,7 @@ impl Render for Composer {
                         })),
                 )
             })
-            .child(self.attachment_row(cx))
+            .when(tab == Tab::Note, |d| d.child(self.attachment_row(cx)))
             .child(match (undo, posting) {
                 (Some(secs), _) => div()
                     .flex()

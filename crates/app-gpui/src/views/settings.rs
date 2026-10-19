@@ -147,19 +147,18 @@ impl SettingsView {
                         this.core.clone().ensure_profiles(vec![me])
                     })
                     .expect("settings alive");
-                while let Some(ev) = rx.recv().await {
-                    if let FeedEvent::Profiles(ps) = ev {
-                        if let Some(p) = ps.into_iter().find(|p| p.pubkey == me_hex) {
-                            let _ = this.update(cx, |this, cx| {
-                                let name = p.display();
-                                this.me_name =
-                                    (!name.is_empty() && name != me_hex).then_some(name);
-                                cx.notify();
-                            });
-                            return;
-                        }
-                    }
-                    break;
+                // One event per ask (the debouncer resolves once); any
+                // miss waits out the 2s and retries — never a busy loop.
+                if let Some(FeedEvent::Profiles(ps)) = rx.recv().await
+                    && let Some(p) = ps.into_iter().find(|p| p.pubkey == me_hex)
+                {
+                    let _ = this.update(cx, |this, cx| {
+                        let name = p.display();
+                        this.me_name =
+                            (!name.is_empty() && name != me_hex).then_some(name);
+                        cx.notify();
+                    });
+                    return;
                 }
                 cx.background_executor().timer(Duration::from_secs(2)).await;
             }

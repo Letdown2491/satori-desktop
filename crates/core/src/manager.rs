@@ -2207,6 +2207,93 @@ impl Core {
         Ok(())
     }
 
+    /// A random 9-char option id (nip88.ts generateOptionId): xorshift off
+    /// the clock and the option index — no rand dep for nine chars.
+    fn poll_option_id(n: usize) -> String {
+        const ID_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+        let mut seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0)
+            ^ (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let mut id = String::new();
+        for _ in 0..9 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            id.push(ID_CHARS[(seed % ID_CHARS.len() as u64) as usize] as char);
+        }
+        id
+    }
+
+    /// Publish a NIP-88 poll (kind:1068): question in content, `option`
+    /// tags with random 9-char ids, polltype, optional endsAt (seconds
+    /// from now) + relay hints. nip88.ts buildPollTags shape. Same undo
+    /// hold as notes.
+    pub fn post_poll(
+        self: &Arc<Self>,
+        question: String,
+        options: Vec<String>,
+        multi: bool,
+        ends_in_secs: Option<u64>,
+    ) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                const ID_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+                let mut tag_list: Vec<Tag> = Vec::new();
+                for (n, label) in options.iter().enumerate() {
+                    tag_list.push(Tag::custom(
+                        "option",
+                        [Self::poll_option_id(n), label.as_str().to_string()],
+                    ));
+                }
+                tag_list.push(Tag::custom(
+                    "polltype",
+                    [if multi { "multiplechoice" } else { "singlechoice" }],
+                ));
+                if let Some(secs) = ends_in_secs {
+                    let ends_at = Timestamp::now().as_secs() + secs;
+                    tag_list.push(Tag::custom("endsAt", [ends_at.to_string()]));
+                }
+                for url in &active.read_relays {
+                    tag_list.push(Tag::custom("relay", [url.as_str()]));
+                }
+                let unsigned = UnsignedEvent::new(
+                    active.me(),
+                    Timestamp::now(),
+                    Kind::Custom(1068),
+                    tag_list,
+                    question,
+                );
+                let signed = active.signer.sign_event(unsigned).await?;
+                match active.undo.hold_duration() {
+                    Some(hold) => {
+                        let token = this.hold_seq.fetch_add(1, Ordering::SeqCst);
+                        let _ = tx.send(PublishEvent::Held {
+                            token,
+                            event: signed.clone(),
+                            hold_secs: hold.as_secs(),
+                        });
+                        this.hold_and_commit(Arc::new(active.clone()), token, signed, hold, tx.clone())
+                            .await;
+                    }
+                    None => Self::commit(&active, &signed, &tx).await?,
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
+    }
+
     /// Post a NIP-68 picture (kind:20). `imeta` carries one or more full NIP-92
     /// imeta tags (from `upload::blossom_upload_all`) — a picture needs at least
     /// one. Same undo window as notes. Port of `publish.ts signPicture`.

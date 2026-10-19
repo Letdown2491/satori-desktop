@@ -142,18 +142,15 @@ impl Shell {
                     })
                     .expect("shell alive");
                 // One resolution per ask (the debouncer drops the waiter
-                // after its single send).
-                while let Some(ev) = rx.recv().await {
-                    if let FeedEvent::Profiles(ps) = ev {
-                        if let Some(p) = ps.into_iter().find(|p| p.pubkey == me_hex) {
-                            let _ = this.update(cx, |shell, cx| {
-                                shell.me_profile = Some(p);
-                                cx.notify();
-                            });
-                            return;
-                        }
-                    }
-                    break;
+                // after its single send); a miss waits out the 2s, retries.
+                if let Some(FeedEvent::Profiles(ps)) = rx.recv().await
+                    && let Some(p) = ps.into_iter().find(|p| p.pubkey == me_hex)
+                {
+                    let _ = this.update(cx, |shell, cx| {
+                        shell.me_profile = Some(p);
+                        cx.notify();
+                    });
+                    return;
                 }
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(2))
