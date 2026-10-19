@@ -174,7 +174,6 @@ impl Feed {
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(_) => continue, // lagged: still true that there's news
-                    Err(_) => continue, // lagged: still true that there's news
                 }
             }
         })
@@ -969,7 +968,7 @@ impl Render for Feed {
                         list(self.list.clone(), move |idx, _w, _cx| {
                             match notes.get(idx) {
                                 Some(ev) if u16::from(ev.kind) == 6 => repost_card(
-                                    ev, &profiles, &parents, &media, &quotes, &cards,
+                                    ev, &profiles,  &media, &quotes, &cards,
                                     handle.clone(),
                                 )
                                 .into_any_element(),
@@ -1007,7 +1006,6 @@ fn repost_inner(ev: &Event) -> Option<Event> {
 fn repost_card(
     ev: &Event,
     profiles: &HashMap<String, Profile>,
-    parents: &HashMap<String, ParentNote>,
     media: &media::Snapshot,
     quotes: &content::Quotes,
     cards: &cards::CardState,

@@ -16,7 +16,7 @@ use gpui::{
 use nostr::prelude::*;
 use satori_core::manager::{Core, Profile, PublishEvent};
 
-use crate::{input::Input, theme};
+use crate::{input::Input, media, theme};
 use super::nav::Nav;
 
 actions!(composer, [Publish]);
@@ -54,6 +54,10 @@ enum Tab {
     Note,
     Poll,
 }
+
+/// The compose field's resting height, in lines of text: present without
+/// dominating (note.rs composer.rs:114 — the reference's 8 rows grew up).
+const LINES_MIN: f32 = 20.0;
 
 pub struct Composer {
     core: Arc<Core>,
@@ -472,10 +476,11 @@ impl Render for Composer {
             window.focus(&self.focus);
         }
         let replying = self.reply_to.is_some();
+        let quote_snap = media::Snapshot::new(cx);
         let quote_prev = self.quote.as_ref().map(|q| {
+            let prof = self.core.profile_of(&q.pubkey);
             (
-                self.core
-                    .profile_of(&q.pubkey)
+                prof.as_ref()
                     .map(|p| p.display())
                     .unwrap_or_else(|| format!("{}…", &q.pubkey.to_string()[..8])),
                 q.content
@@ -483,8 +488,9 @@ impl Render for Composer {
                     .collect::<Vec<_>>()
                     .join(" ")
                     .chars()
-                    .take(140)
+                    .take(240)
                     .collect::<String>(),
+                prof.map(|p| p.picture).unwrap_or_default(),
             )
         });
         let status = self.status.clone();
@@ -513,23 +519,36 @@ impl Render for Composer {
             .text_color(rgb(theme::ink()))
             .gap_2()
             .p_4()
-            .when_some(quote_prev, |d, (name, snippet)| {
-                // The quoted note, whispered: name + the first 140 chars.
-                // No box — the whitespace and the voice change carry it.
+            .when_some(quote_prev, |d, (name, snippet, picture)| {
+                // The quoted note as a card: the same frame a quote wears
+                // out in the feed, so the composer answers "quoting WHOM,
+                // about WHAT" before a word is typed.
                 d.child(
                     div()
                         .flex_col()
-                        .gap_0p5()
+                        .gap_1()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(rgb(theme::hairline()))
+                        .bg(rgb(theme::washi()))
+                        .p_2()
                         .child(
                             div()
-                                .text_size(px(12.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(theme::ink()))
-                                .child(name),
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(media::avatar(&quote_snap, &picture, &name, 20.0))
+                                .child(
+                                    div()
+                                        .text_size(px(12.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(theme::ink()))
+                                        .child(name),
+                                ),
                         )
                         .child(
                             div()
-                                .text_size(px(12.5))
+                                .text_size(px(13.))
                                 .text_color(rgb(theme::muted()))
                                 .child(snippet),
                         ),
@@ -539,8 +558,11 @@ impl Render for Composer {
                 d.child(
                     div()
                         .id("composer-scroll")
-                        .flex_1()
-                        .min_h_0()
+                        // Twenty quiet lines of breathing room; it grows
+                        // with the text and scrolls when it outgrows the
+                        // pane — the window never fills with an empty box.
+                        .min_h(LINES_MIN * window.line_height())
+                        .max_h_full()
                         .overflow_y_scroll()
                         .border_1()
                         .border_color(rgb(theme::hairline()))
@@ -557,7 +579,9 @@ impl Render for Composer {
                 d.child(
                     div()
                         .id("poll-scroll")
-                        .flex_1()
+                        // Content-sized: the panel is as tall as the poll,
+                        // not as tall as the window (scrolls when it must).
+                        .max_h_full()
                         .min_h_0()
                         .overflow_y_scroll()
                         .rounded_b(px(6.))
@@ -574,6 +598,24 @@ impl Render for Composer {
                                 .flex()
                                 .items_center()
                                 .gap_2()
+                                // The choice mark says what kind of poll this
+                                // is before the toggle needs reading: a ring
+                                // picks one, a square picks many.
+                                .child(if poll_multi {
+                                    div()
+                                        .size(px(13.))
+                                        .rounded(px(3.))
+                                        .border_1()
+                                        .border_color(rgb(theme::hairline()))
+                                        .flex_shrink_0()
+                                } else {
+                                    div()
+                                        .size(px(13.))
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(rgb(theme::hairline()))
+                                        .flex_shrink_0()
+                                })
                                 .child(
                                     div()
                                         .flex_1()
@@ -589,7 +631,7 @@ impl Render for Composer {
                                         div()
                                             .id(SharedString::from(format!("rm-opt-{i}")))
                                             .cursor_pointer()
-                                            .text_size(px(13.))
+                                            .text_size(px(14.))
                                             .text_color(rgb(theme::muted()))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 if !this.posting && this.poll_options.len() > 2 {
@@ -605,6 +647,10 @@ impl Render for Composer {
                             div()
                                 .id("add-option")
                                 .cursor_pointer()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .pl(px(21.))
                                 .text_size(px(12.5))
                                 .text_color(rgb(theme::muted()))
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -613,18 +659,33 @@ impl Render for Composer {
                                         cx.notify();
                                     }
                                 }))
-                                .child("+ add option"),
+                                .child("+ add another option"),
                         )
                         .child(
                             div()
                                 .id("poll-multi")
                                 .cursor_pointer()
+                                .flex()
+                                .items_center()
+                                .gap_2()
                                 .text_size(px(12.5))
                                 .text_color(rgb(if poll_multi {
                                     theme::vermilion()
                                 } else {
                                     theme::muted()
                                 }))
+                                .child(
+                                    div()
+                                        .size(px(13.))
+                                        .rounded(px(3.))
+                                        .border_1()
+                                        .border_color(rgb(if poll_multi {
+                                            theme::vermilion()
+                                        } else {
+                                            theme::hairline()
+                                        }))
+                                        .flex_shrink_0(),
+                                )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.poll_multi = !this.poll_multi;
                                     cx.notify();
