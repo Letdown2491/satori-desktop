@@ -253,7 +253,9 @@ impl Input {
         cx.notify();
     }
 
-    fn cursor_offset(&self) -> usize {
+    /// The caret's byte offset in `content` (pub: the composer's
+    /// @-mention detection reads it).
+    pub fn cursor_offset(&self) -> usize {
         if self.selection_reversed {
             self.selected_range.start
         } else {

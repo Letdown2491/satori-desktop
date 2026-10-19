@@ -1012,6 +1012,38 @@ impl Core {
         self.profiles_mem.lock().unwrap().get(&pk.to_string()).cloned()
     }
 
+    /// @-mention candidates for the composer: the people you follow whose
+    /// cached name (or pubkey hex) matches the typed handle. Profiles not
+    /// yet in the cache match only by hex — the profiles service fills the
+    /// rest as the feed loads them.
+    pub fn mention_candidates(&self, query: &str) -> Vec<Profile> {
+        let follows: Vec<PublicKey> = {
+            let held = self.active.lock().unwrap();
+            held.as_ref().map(|a| a.follows.clone()).unwrap_or_default()
+        };
+        let q = query.to_lowercase();
+        follows
+            .iter()
+            .filter(|pk| pk.to_string() != self.active_pubkey())
+            .filter_map(|pk| self.profile_of(pk))
+            .filter(|p| {
+                q.is_empty()
+                    || p.name.to_lowercase().contains(&q)
+                    || p.pubkey.to_lowercase().contains(&q)
+            })
+            .take(8)
+            .collect()
+    }
+
+    fn active_pubkey(&self) -> String {
+        self.active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|a| a.session.pubkey.clone())
+            .unwrap_or_default()
+    }
+
     /// One page projection: store query (a PAGE+1 window so "has more" is
     /// knowable), then the mutes gate at the chokepoint.
     /// NIP-09 render filter: drop events their own author deleted (a
@@ -1534,6 +1566,7 @@ impl Core {
         content: String,
         target: crate::nip::comment::CommentTarget,
         parent: Option<Event>,
+        mentions: Vec<PublicKey>,
     ) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
@@ -1544,6 +1577,18 @@ impl Core {
                     Some(p) => crate::nip::comment::reply_tags(p, &target),
                     None => target.root_tags(),
                 };
+                let mut seen_p: Vec<String> = tags
+                    .iter()
+                    .filter(|t| t.as_slice().first().map(String::as_str) == Some("p"))
+                    .filter_map(|t| t.as_slice().get(1).cloned())
+                    .collect();
+                for who in mentions {
+                    let hex = who.to_string();
+                    if hex != active.me().to_string() && !seen_p.contains(&hex) {
+                        seen_p.push(hex.clone());
+                        tags.push(Tag::public_key(who));
+                    }
+                }
                 tags.push(Tag::custom("client", ["satori-desktop"]));
                 let unsigned =
                     UnsignedEvent::new(active.me(), Timestamp::now(), Kind::Custom(1111), tags, content);
@@ -2069,11 +2114,16 @@ impl Core {
 
     /// Post a note (optionally a NIP-10 reply). Signed, then held for the undo
     /// window with a backstop commit; events stream on the channel.
-    pub fn post_note(self: &Arc<Self>, content: String, reply_to: Option<Event>) -> PublishRx {
+    pub fn post_note(
+        self: &Arc<Self>,
+        content: String,
+        reply_to: Option<Event>,
+        mentions: Vec<PublicKey>,
+    ) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
-            let res = this.post_note_inner(&tx, content, reply_to).await;
+            let res = this.post_note_inner(&tx, content, reply_to, mentions).await;
             if let Err(e) = res {
                 let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
             }
@@ -2086,6 +2136,7 @@ impl Core {
         tx: &mpsc::UnboundedSender<PublishEvent>,
         content: String,
         reply_to: Option<Event>,
+        mentions: Vec<PublicKey>,
     ) -> Result<()> {
         let active = self.active().await?;
         let me = active.me();
@@ -2116,6 +2167,20 @@ impl Core {
             if root != parent.id {
                 // Root author belongs in p too when different (NIP-10).
                 tags.push(Tag::custom("p", [root.to_string()]));
+            }
+        }
+        // @-mentions (NIP-10 p tags — what fires notifications). The
+        // parent's own p's (root/parent authors) take precedence.
+        let mut seen_p: Vec<String> = tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(String::as_str) == Some("p"))
+            .filter_map(|t| t.as_slice().get(1).cloned())
+            .collect();
+        for who in mentions {
+            let hex = who.to_string();
+            if hex != me.to_string() && !seen_p.contains(&hex) {
+                seen_p.push(hex.clone());
+                tags.push(Tag::public_key(who));
             }
         }
         let unsigned = UnsignedEvent::new(

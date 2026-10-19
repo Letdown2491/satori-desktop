@@ -14,7 +14,7 @@ use gpui::{
     Global, Render, SharedString, Window,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, PublishEvent};
+use satori_core::manager::{Core, Profile, PublishEvent};
 
 use crate::{input::Input, theme};
 use super::nav::Nav;
@@ -50,6 +50,13 @@ struct Attachment {
 pub struct Composer {
     core: Arc<Core>,
     input: Entity<Input>,
+    /// @-mentions: the pubkeys whose p tags ride the publish (content
+    /// keeps the human-readable @Name).
+    mentions: Vec<PublicKey>,
+    /// The live @-suggestions (strip open when non-empty) + the token
+    /// being completed.
+    suggest: Vec<Profile>,
+    mention_token: Option<String>,
     reply_to: Option<Event>,
     attachments: Vec<Attachment>,
     posting: bool,
@@ -81,9 +88,15 @@ impl Composer {
         {
             input.update(cx, |i, cx| i.set_text(&text, cx));
         }
+        // @-mention detection: watch the buffer, find an active `@token`.
+        cx.observe(&input, |this, _input, cx| this.detect_mention(cx))
+            .detach();
         Self {
             core,
             input,
+            mentions: vec![],
+            suggest: vec![],
+            mention_token: None,
             reply_to,
             attachments: vec![],
             posting: false,
@@ -153,6 +166,70 @@ impl Composer {
         .detach();
     }
 
+    /// The @-token under the caret, if any: `@handle` with no whitespace
+    /// between the @ and the cursor.
+    fn mention_under_caret(&self, cx: &mut Context<Self>) -> Option<String> {
+        let i = self.input.read(cx);
+        let text = &i.content;
+        let cursor = i.cursor_offset().min(text.len());
+        let before = &text[..cursor];
+        let at = before.rfind('@')?;
+        let token = &before[at + 1..];
+        (token.len() <= 30 && !token.contains(char::is_whitespace))
+            .then(|| token.to_string())
+    }
+
+    fn detect_mention(&mut self, cx: &mut Context<Self>) {
+        let token = self.mention_under_caret(cx);
+        match &token {
+            Some(q) if !q.is_empty() => {
+                let candidates = self.core.mention_candidates(q);
+                if candidates.is_empty() {
+                    self.mention_token = None;
+                    self.suggest.clear();
+                } else {
+                    self.mention_token = Some(q.clone());
+                    self.suggest = candidates;
+                }
+            }
+            _ => {
+                self.mention_token = None;
+                self.suggest.clear();
+            }
+        }
+        cx.notify();
+    }
+
+    /// A suggestion was picked: replace the @token in the buffer with the
+    /// chosen name, remember the pubkey for the p tags.
+    fn pick_mention(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(profile) = self.suggest.get(idx).cloned() else {
+            return;
+        };
+        if let Some(q) = self.mention_token.clone() {
+            let i = self.input.read(cx);
+            let text = i.content.clone();
+            let cursor = i.cursor_offset().min(text.len());
+            let needle = format!("@{q}");
+            let at = text[..cursor].rfind(&needle).unwrap_or(cursor);
+            let mut next = String::with_capacity(text.len());
+            next.push_str(&text[..at]);
+            next.push_str(&format!("@{} ", profile.display()));
+            next.push_str(&text[cursor..]);
+            drop(i);
+            self.input.update(cx, |i, cx| i.set_text(&next, cx));
+        }
+        let pk_hex = profile.pubkey.clone();
+        if let Ok(pk) = PublicKey::from_hex(&pk_hex)
+            && !self.mentions.contains(&pk)
+        {
+            self.mentions.push(pk);
+        }
+        self.suggest.clear();
+        self.mention_token = None;
+        cx.notify();
+    }
+
     fn post(&mut self, cx: &mut Context<Self>) {
         if self.posting {
             return;
@@ -173,6 +250,7 @@ impl Composer {
             cx.default_global::<Draft>().0 = None;
         }
         let core = self.core.clone();
+        let this_mentions = std::mem::take(&mut self.mentions);
         let atts: Vec<(String, Vec<u8>)> = self
             .attachments
             .iter()
@@ -219,6 +297,7 @@ impl Composer {
             // keep kind-1 replies + NIP-10 tags (every client reads those);
             // every other root (articles, pictures, highlights…) goes out as
             // a NIP-22 kind-1111 comment with scope tags.
+            let mentions = this_mentions;
             let mut rx = if !imetas.is_empty() {
                 core.post_picture(String::new(), text, imetas, None)
             } else if reply.as_ref().is_some_and(|r| u16::from(r.kind) != 1) {
@@ -227,9 +306,10 @@ impl Composer {
                     text,
                     satori_core::nip::comment::CommentTarget::for_event(&r),
                     Some(r),
+                    mentions,
                 )
             } else {
-                core.post_note(text, reply)
+                core.post_note(text, reply, mentions)
             };
             while let Some(ev) = rx.recv().await {
                 match ev {
@@ -306,6 +386,7 @@ impl Render for Composer {
         let undo = self.undo.map(|(_, secs)| secs);
         let input = self.input.clone();
         let posting = self.posting;
+        let suggest = self.suggest.clone();
 
         div()
             .id("composer")
@@ -337,6 +418,31 @@ impl Render for Composer {
                     .p_2()
                     .child(input),
             )
+            .when(!suggest.is_empty(), |d| {
+                d.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .children(suggest.iter().enumerate().map(|(i, p)| {
+                            div()
+                                .id(SharedString::from(format!("mention-{i}")))
+                                .cursor_pointer()
+                                .px_2()
+                                .py_0p5()
+                                .rounded(px(3.))
+                                .border_1()
+                                .border_color(rgb(theme::hairline()))
+                                .text_size(px(12.))
+                                .text_color(rgb(theme::ink()))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.pick_mention(i, cx);
+                                }))
+                                .child(format!("@{}", p.display()))
+                        })),
+                )
+            })
             .child(self.attachment_row(cx))
             .child(match (undo, posting) {
                 (Some(secs), _) => div()
