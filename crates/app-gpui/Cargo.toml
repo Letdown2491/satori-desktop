@@ -22,4 +22,7 @@ unicode-segmentation = "1"
 qrcode = { workspace = true }
 # File picker for the composer's attachments (xdg-desktop-portal backend).
 rfd = "0.15"
+# The appearance portal (color-scheme, prefers-reduced-motion) — one
+# ReadOne pair at startup, blocking (desktop.rs).
+zbus = { version = "5", default-features = false, features = ["blocking", "tokio"] }
 tokio = { workspace = true }

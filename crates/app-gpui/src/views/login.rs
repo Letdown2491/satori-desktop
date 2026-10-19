@@ -15,7 +15,7 @@ use gpui::{
 use satori_core::manager::{ConnectEvent, ConnectRx, Core};
 use std::time::Duration;
 
-use crate::{icons, input::Input, theme};
+use crate::{desktop, icons, input::Input, theme};
 
 /// Login outcome — the root drops the login view and mounts the shell.
 pub enum Login {
@@ -246,9 +246,14 @@ impl Render for LoginView {
                                     .rounded_sm()
                                     .into_any_element()
                             } else {
-                                div()
-                                    .child(icons::enso_icon(theme::ink(), 120.0))
-                                    .with_animation(
+                                // Reduced motion (the portal's
+                                // prefers-reduced-motion): the ensō sits
+                                // still — one mark, no breath.
+                                let enso = icons::enso_icon(theme::ink(), 120.0);
+                                if desktop::Desktop::get(cx).reduced_motion {
+                                    div().child(enso).into_any_element()
+                                } else {
+                                    div().child(enso).with_animation(
                                         "enso-breath",
                                         Animation::new(Duration::from_millis(3_400)).repeat(),
                                         |enso, t| {
@@ -259,6 +264,8 @@ impl Render for LoginView {
                                             enso.opacity(0.4 + 0.6 * phase)
                                         },
                                     )
+                                    .into_any_element()
+                                }
                                     .into_any_element()
                             },
                             div()
@@ -409,19 +416,32 @@ impl Render for LoginView {
                                                 }
                                             }))
                                             .into_any_element(),
-                                        None => div()
-                                            .child(icons::enso_icon(theme::muted(), 60.0))
-                                            .with_animation(
-                                                "qr-breath",
-                                                Animation::new(Duration::from_millis(3_400))
+                                        None => {
+                                            let enso =
+                                                icons::enso_icon(theme::muted(), 60.0);
+                                            let enso = if desktop::Desktop::get(cx)
+                                                .reduced_motion
+                                            {
+                                                div().child(enso).into_any_element()
+                                            } else {
+                                                div().child(enso).with_animation(
+                                                    "qr-breath",
+                                                    Animation::new(Duration::from_millis(
+                                                        3_400,
+                                                    ))
                                                     .repeat(),
-                                                |enso, t| {
-                                                    let phase = 0.5
-                                                        + 0.5 * (t * std::f32::consts::TAU).sin();
-                                                    enso.opacity(0.4 + 0.6 * phase)
-                                                },
-                                            )
-                                            .into_any_element(),
+                                                    |enso, t| {
+                                                        let phase = 0.5
+                                                            + 0.5
+                                                                * (t * std::f32::consts::TAU)
+                                                                    .sin();
+                                                        enso.opacity(0.4 + 0.6 * phase)
+                                                    },
+                                                )
+                                                .into_any_element()
+                                            };
+                                            enso
+                                        }
                                     },
                                 )
                                 .child(

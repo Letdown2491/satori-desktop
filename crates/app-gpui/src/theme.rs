@@ -6,8 +6,6 @@
 //! (`select` writes it, `ThemeSignal`'s gpui-global effects wake every
 //! watching view). Fonts stay constants — both palettes share them.
 
-use gpui::rgb;
-
 use std::sync::RwLock;
 
 /// The token contract. u32 RGB — callsites say `rgb(theme::ink())`.

@@ -3,6 +3,7 @@
 //!
 //! NOTE: shares the LMDB store with the GTK app — run one at a time until P4.
 
+mod desktop;
 mod icons;
 mod input;
 mod media;
@@ -107,13 +108,18 @@ fn main() {
         // Shared decoded-image cache (media.rs) — avatars, tiles and the
         // lightbox all key off it.
         cx.default_global::<media::Cache>();
-        // Palette before the first frame (prefs dark; None follows the
-        // desktop — the portal read lands with the reduced-motion work;
-        // until then None keeps the night paper).
-        match crate::prefs::load().dark {
+        // The desktop's appearance (portal): the system scheme the `dark:
+        // None` pref follows, and the reduced-motion flag the login
+        // screen's breathing ensō honors. One blocking round trip, before
+        // the first frame.
+        let desktop = crate::desktop::probe();
+        // Palette before the first frame: the pref wins; unset follows the
+        // desktop's color-scheme (falls back to the night paper).
+        match crate::prefs::load().dark.or(desktop.dark) {
             Some(false) => crate::theme::select(crate::theme::LIGHT),
             _ => {}
         }
+        cx.set_global(desktop);
         let core = Arc::new(Core::new());
         let (session, err) = core.init();
         if err.is_some() {
