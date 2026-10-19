@@ -13,6 +13,7 @@ use std::{collections::HashMap, hash::{Hash, Hasher}};
 use gpui::{div, img, prelude::*, px, relative, rgb, AnyElement, Div, Entity, EventEmitter, FontWeight, ObjectFit, SharedString};
 use nostr::prelude::*;
 use satori_core::manager::Profile;
+use satori_core::nip::article;
 use satori_core::nip::imeta::{self, ImageMeta};
 
 use crate::{media, theme};
@@ -131,6 +132,16 @@ impl MediaAsset {
 /// derived from the id), pictures, and extension-less blossom candidates.
 pub fn media_assets(ev: &Event) -> Vec<MediaAsset> {
     let mut out: Vec<MediaAsset> = Vec::new();
+    // NIP-23: an article's cover rides the `image` tag, not the content and
+    // not imeta — without it no fetch is ever queued and the card's media
+    // frame stays an empty panel (article.ts header image). First, so the
+    // cover leads the reading order.
+    if u16::from(ev.kind) == 30023
+        && let Some(cover) = article::parse(ev).and_then(|d| d.image)
+        && !cover.is_empty()
+    {
+        out.push(MediaAsset::Picture { url: cover });
+    }
     for m in imeta::parse(ev) {
         if m.url.is_empty() {
             continue;
