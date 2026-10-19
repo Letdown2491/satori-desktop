@@ -331,7 +331,8 @@ fn article_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) ->
     if let Some(img) = &data.image {
         let mut dims: HashMap<String, Option<(u32, u32)>> = HashMap::new();
         dims.insert(img.clone(), None);
-        if let Some(cover) = content::media_section(std::slice::from_ref(img), &dims, ctx, feed) {
+        let asset = content::MediaAsset::Picture { url: img.clone() };
+        if let Some(cover) = content::media_section(std::slice::from_ref(&asset), &dims, ctx, feed) {
             card = card.child(cover);
         }
     }
@@ -417,7 +418,12 @@ fn classified_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState)
             .into_iter()
             .filter_map(|m| m.dim.map(|d| (m.url, Some(d))))
             .collect();
-        if let Some(gallery) = content::media_section(&data.images, &dims, ctx, feed) {
+        let assets: Vec<content::MediaAsset> = data
+            .images
+            .iter()
+            .map(|u| content::MediaAsset::Picture { url: u.clone() })
+            .collect();
+        if let Some(gallery) = content::media_section(&assets, &dims, ctx, feed) {
             card = card.child(gallery);
         }
     }

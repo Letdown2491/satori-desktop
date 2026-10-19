@@ -108,27 +108,96 @@ fn is_video_url(url: &str) -> bool {
     matches!(path_ext(url).as_deref(), Some("mp4" | "webm" | "mov" | "mkv" | "m4v"))
 }
 
-/// Every media URL a note carries: imeta-tagged pictures plus standalone
-/// links in the text (NIP-68 posts from clients that skip imeta). Standalone
-/// links *without* a path extension are candidates too — blossom blobs are
-/// content-addressed — and degrade to plain links when the fetch doesn't
-/// decode (media.rs remembers the failure). Videos are excluded (play-cards).
-pub fn media_urls(ev: &Event) -> Vec<String> {
-    let mut out: Vec<String> = imeta::parse(ev)
-        .into_iter()
-        .map(|m| m.url)
-        .filter(|u| !u.is_empty())
-        .collect();
+/// One entry of the media section, in reading order: a picture (lightbox
+/// tile) or a video (poster tile that opens the browser — GPUI has no video
+/// pipeline, so nothing is fetched but the poster).
+#[derive(Clone)]
+pub enum MediaAsset {
+    Picture { url: String },
+    Video { url: String, poster: Option<String> },
+}
+impl MediaAsset {
+    fn url(&self) -> &str {
+        match self {
+            MediaAsset::Picture { url } => url,
+            MediaAsset::Video { url, .. } => url,
+        }
+    }
+}
+
+/// The note's media in reading order: imeta-tagged items (a `video/*` mime
+/// or extension makes it a video; its NIP-92 `image` attr is the poster),
+/// then standalone text links — blossom video URLs, YouTube links (thumbnail
+/// derived from the id), pictures, and extension-less blossom candidates.
+pub fn media_assets(ev: &Event) -> Vec<MediaAsset> {
+    let mut out: Vec<MediaAsset> = Vec::new();
+    for m in imeta::parse(ev) {
+        if m.url.is_empty() {
+            continue;
+        }
+        let video = m.mime.as_deref().is_some_and(|m| m.starts_with("video/"))
+            || is_video_url(&m.url);
+        out.push(if video {
+            MediaAsset::Video { url: m.url, poster: m.poster }
+        } else {
+            MediaAsset::Picture { url: m.url }
+        });
+    }
     for para in ev.content.split('\n') {
-        if let Some(Seg::Link(url)) = standalone(para)
-            && !is_video_url(&url)
-            && (is_image_url(&url) || path_ext(&url).is_none())
-            && !out.contains(&url)
-        {
-            out.push(url);
+        if let Some(Seg::Link(url)) = standalone(para) {
+            let asset = if let Some(thumb) = youtube_thumb(&url) {
+                MediaAsset::Video { url: url.clone(), poster: Some(thumb) }
+            } else if is_video_url(&url) {
+                MediaAsset::Video { url: url.clone(), poster: None }
+            } else if is_image_url(&url) || path_ext(&url).is_none() {
+                MediaAsset::Picture { url: url.clone() }
+            } else {
+                continue;
+            };
+            if !out.iter().any(|a| a.url() == &url) {
+                out.push(asset);
+            }
         }
     }
     out
+}
+
+/// Every url worth fetching for this event: the pictures plus video posters
+/// (NIP-92 `image` attrs, YouTube thumbnails). Video files themselves are
+/// never fetched — the tile opens the browser.
+pub fn media_urls(ev: &Event) -> Vec<String> {
+    media_assets(ev)
+        .into_iter()
+        .filter_map(|a| match a {
+            MediaAsset::Picture { url } => Some(url),
+            MediaAsset::Video { poster, .. } => poster,
+        })
+        .collect()
+}
+
+/// The thumbnail for a YouTube link (watch?v=, youtu.be/, shorts/) —
+/// mqdefault: always present, 16:9, no letterbox bars.
+fn youtube_thumb(url: &str) -> Option<String> {
+    let id = if let Some(rest) = url
+        .strip_prefix("https://youtu.be/")
+        .or_else(|| url.strip_prefix("http://youtu.be/"))
+    {
+        rest.split(['?', '/', '&', '#']).next()?
+    } else if let Some((_, qs)) = url.split_once("youtube.com/watch")
+        && let Some((_, v)) = qs.split_once("v=")
+    {
+        v.split('&').next()?
+    } else if let Some((_, rest)) = url.split_once("youtube.com/shorts/") {
+        rest.split(['?', '/', '#']).next()?
+    } else {
+        return None;
+    };
+    let id: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(11)
+        .collect();
+    (id.len() == 11).then(|| format!("https://img.youtube.com/vi/{id}/mqdefault.jpg"))
 }
 
 /// Standalone note/nevent references in reading order (quote embed
@@ -380,8 +449,9 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
             // section below; a link the cache couldn't decode (a blossom
             // page, say) degrades back to a plain link row here.
             Some(Seg::Link(url)) => {
-                if is_video_url(&url) {
-                    body = push_block(body, &mut run).child(video_card(&url));
+                if is_video_url(&url) || youtube_thumb(&url).is_some() {
+                    // The gallery section below renders the video tile
+                    // (poster + play overlay, opens the browser).
                 } else if ctx.media.not_media(&url) || !(is_image_url(&url) || path_ext(&url).is_none()) {
                     body = push_block(body, &mut run).child(link_row(&url));
                 }
@@ -413,10 +483,11 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
     }
     body = push_block(body, &mut run);
 
-    // Media section (content.ts): one image full-width by its aspect; several
-    // as a horizontal strip; tiles open the lightbox.
+    // Media section (content.ts): pictures and videos in reading order — one
+    // item full-width by its aspect, several as a horizontal strip; picture
+    // tiles open the lightbox, video tiles open the browser.
     if !murls.is_empty()
-        && let Some(section) = media_section(&murls, &dims, ctx, &handle)
+        && let Some(section) = media_section(&media_assets(ev), &dims, ctx, &handle)
     {
         body = body.child(section);
     }
@@ -464,92 +535,189 @@ pub(crate) fn link_row(url: &str) -> AnyElement {
         .into_any_element()
 }
 
-/// Video play-card: GPUI has no video pipeline, so the link wears one —
-/// glyph, display text, opens in the browser.
-fn video_card(url: &str) -> AnyElement {
+/// Video tile: the poster frame wearing a play mark when the cache has one
+/// (NIP-92 `image`, YouTube thumbnail), a quiet play-row while it loads or
+/// when there's nothing to show. Click opens the video in the browser —
+/// GPUI has no video pipeline, so nothing auto-plays.
+fn video_tile(url: &str, poster: Option<&str>, w: Option<f32>, h: f32, ctx: &Body) -> AnyElement {
     let target = url.to_string();
-    div()
-        .id(seg_id("video", url))
+    let frame = div()
+        .id(seg_id("video-tile", url))
         .cursor_pointer()
-        .w_full()
-        .flex()
-        .items_center()
-        .gap_2()
-        .px_3()
-        .py_2()
+        .flex_none()
+        .overflow_hidden()
         .rounded(px(4.))
         .border_1()
         .border_color(rgb(theme::HAIRLINE))
         .bg(rgb(theme::PANEL))
-        .on_click(move |_, _, cx| cx.open_url(&target))
-        .child(
-            div()
-                .text_size(px(14.0))
-                .text_color(rgb(theme::VERMILION))
-                .child("▶"),
-        )
-        .child(
-            div()
-                .text_size(px(13.5))
-                .text_color(rgb(theme::MUTED))
-                .underline()
-                .child(display_url(url)),
-        )
-        .into_any_element()
+        .map(|d| match w {
+            Some(w) => d.w(px(w)),
+            None => d.w_full(),
+        })
+        .h(px(h))
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            cx.open_url(&target);
+        });
+    match poster.and_then(|p| ctx.media.png(p)) {
+        Some(png) => frame
+            .child(
+                div()
+                    .relative()
+                    .size_full()
+                    .child(img(png).w_full().h_full().object_fit(ObjectFit::Contain))
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(30.0))
+                            .text_color(rgb(theme::VERMILION))
+                            .child("▶"),
+                    ),
+            )
+            .into_any_element(),
+        None => frame
+            .child(
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(18.0))
+                            .text_color(rgb(theme::VERMILION))
+                            .child("▶"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme::MUTED))
+                            .underline()
+                            .child(display_url(url)),
+                    ),
+            )
+            .into_any_element(),
+    }
 }
 
 /// The gallery section: single image sized by its dim aspect (media_picture:
 /// height = width·h/w clamped to 560), several images as a horizontal strip
 /// (cards.rs gallery), every tile opening the lightbox.
 pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
-    urls: &[String],
+    assets: &[MediaAsset],
     dims: &HashMap<String, Option<(u32, u32)>>,
     ctx: &Body,
     handle: &Entity<V>,
 ) -> Option<AnyElement> {
-    let visible: Vec<(usize, &String)> = urls
+    // Pictures vanish when their fetch failed (media.rs remembers); videos
+    // never do — a failed poster degrades to the quiet play-row.
+    let visible: Vec<MediaAsset> = assets
         .iter()
-        .enumerate()
-        .filter(|(_, u)| !ctx.media.not_media(u))
+        .filter(|a| match a {
+            MediaAsset::Picture { url } => !ctx.media.not_media(url),
+            MediaAsset::Video { .. } => true,
+        })
+        .cloned()
         .collect();
     if visible.is_empty() {
         return None;
     }
 
+    // The lightbox walks pictures only.
+    let pictures: Vec<String> = visible
+        .iter()
+        .filter_map(|a| match a {
+            MediaAsset::Picture { url } => Some(url.clone()),
+            MediaAsset::Video { .. } => None,
+        })
+        .collect();
+
     if visible.len() == 1 {
-        let (i, url) = visible[0];
-        // Height from the picture's true aspect at full card width (~COL_W
+        // Height from the item's true aspect at full card width (~COL_W
         // minus card padding): imeta dim when the author sent one, otherwise
-        // the decoded size once the fetch lands. Only a picture we've never
+        // the decoded size once the fetch lands. Only an item we've never
         // seen wears the provisional box (ObjectFit::Contain letterboxes it
         // until the aspect arrives with the bytes).
         let width = COL_W - 32.0;
-        let aspect = dim_or(ctx.media, url, dims.get(url).copied().flatten());
-        let height = aspect.map_or(360.0, |(w, h)| {
-            if w > 0 {
-                (width * h as f32 / w as f32).clamp(80.0, 560.0)
-            } else {
-                360.0
-            }
+        let height = |url: &str, poster: Option<&str>, provisional: f32| {
+            let aspect =
+                dim_or(ctx.media, poster.unwrap_or(url), dims.get(url).copied().flatten());
+            aspect.map_or(provisional, |(w, h)| {
+                if w > 0 {
+                    (width * h as f32 / w as f32).clamp(80.0, 560.0)
+                } else {
+                    provisional
+                }
+            })
+        };
+        return Some(match &visible[0] {
+            MediaAsset::Picture { url } => media_tile(
+                url,
+                None,
+                height(url, None, 360.0),
+                pictures,
+                0,
+                ctx,
+                handle,
+            )
+            .into_any_element(),
+            MediaAsset::Video { url, poster } => video_tile(
+                url,
+                poster.as_deref(),
+                None,
+                height(url, poster.as_deref(), 360.0),
+                ctx,
+            )
+            .into_any_element(),
         });
-        return Some(
-            media_tile(url, None, height, urls.to_vec(), i, ctx, handle)
-                .into_any_element(),
-        );
     }
 
-    let id = seg_id("strip", &urls.join("|"));
+    let id = seg_id(
+        "strip",
+        &visible.iter().map(|a| a.url()).collect::<Vec<_>>().join("|"),
+    );
     let mut strip = div().id(id).w_full().overflow_x_scroll().flex().gap_2();
-    for (i, url) in visible {
-        let aspect = dim_or(ctx.media, url, dims.get(url).copied().flatten());
-        let height = aspect.map_or(480.0, |(w, h)| {
-            if w > 0 {
-                (560.0 * h as f32 / w as f32).clamp(240.0, 480.0)
-            } else {
-                480.0
+    let mut pic_idx = 0;
+    for asset in visible {
+        match asset {
+            MediaAsset::Picture { url } => {
+                let aspect = dim_or(ctx.media, &url, dims.get(&url).copied().flatten());
+                let height = aspect.map_or(480.0, |(w, h)| {
+                    if w > 0 {
+                        (560.0 * h as f32 / w as f32).clamp(240.0, 480.0)
+                    } else {
+                        480.0
+                    }
+                });
+                strip = strip.child(media_tile(
+                    &url, Some(560.0), height, pictures.clone(), pic_idx, ctx, handle,
+                ));
+                pic_idx += 1;
             }
-        });
-        strip = strip.child(media_tile(url, Some(560.0), height, urls.to_vec(), i, ctx, handle));
+            MediaAsset::Video { url, poster } => {
+                // The imeta dim describes the video itself; the poster (when
+                // there is one) shares its aspect.
+                let aspect = dims
+                    .get(&url)
+                    .copied()
+                    .flatten()
+                    .filter(|d| d.0 > 0)
+                    .or_else(|| poster.as_deref().and_then(|p| ctx.media.size(p)));
+                let height = aspect.map_or(480.0, |(w, h)| {
+                    if w > 0 {
+                        (560.0 * h as f32 / w as f32).clamp(240.0, 480.0)
+                    } else {
+                        480.0
+                    }
+                });
+                strip = strip.child(video_tile(&url, poster.as_deref(), Some(560.0), height, ctx));
+            }
+        }
     }
     Some(strip.into_any_element())
 }

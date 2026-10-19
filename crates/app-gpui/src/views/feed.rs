@@ -49,6 +49,10 @@ pub struct Feed {
     /// Mirror of `notes` ids — dedupe was an O(n) scan per incoming note
     /// (O(n·m) per bootstrap batch); now a hash lookup.
     note_ids: HashSet<EventId>,
+    /// The scroll stream's last visible end — remembered so a page landing
+    /// while the reader idles at the end cap can chain the next one (the
+    /// scroll handler only fires on wheel ticks, which stop at the cap).
+    last_visible_end: usize,
     list: ListState,
 }
 
@@ -87,6 +91,7 @@ impl Feed {
             snap: None,
             snap_dirty: true,
             note_ids: HashSet::new(),
+            last_visible_end: 0,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
         // Endless scroll: the list's own scroll stream orders the next page
@@ -94,7 +99,10 @@ impl Feed {
         // runs on &mut App; WeakEntity::update accepts that.
         let this = cx.entity().downgrade();
         feed.list.set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
-            let _ = this.update(cx, |feed, cx| feed.maybe_older(ev.visible_range.end, cx));
+            let _ = this.update(cx, |feed, cx| {
+                feed.last_visible_end = ev.visible_range.end;
+                feed.maybe_older(feed.last_visible_end, cx);
+            });
         });
         let boot = feed.core.bootstrap();
         feed.pump(boot, cx);
@@ -108,8 +116,12 @@ impl Feed {
 
     /// Near the bottom, order the next older page. The scroll handler calls
     /// this on every wheel tick — `paging` keeps it one round trip at a time.
+    /// The lookahead is generous (a third of a page): the order goes out
+    /// while the reader is still several screens away, so the relay round
+    /// trip (up to READ_BUDGET) overlaps reading instead of parking the
+    /// reader at the end cap.
     fn maybe_older(&mut self, visible_end: usize, cx: &mut Context<Self>) {
-        const LOOKAHEAD: usize = 6;
+        const LOOKAHEAD: usize = 12;
         if !self.has_more || self.paging || self.notes.is_empty() {
             return;
         }
@@ -172,6 +184,15 @@ impl Feed {
                     reflow = Reflow::Append(old);
                 } else {
                     reflow = Reflow::None;
+                }
+                // Chain: if the reader is (still) at the end cap — the scroll
+                // handler fired its last wheel tick before this page existed —
+                // order the next page now instead of waiting for a tick
+                // that may never come. Pages served from the store are
+                // near-instant, so a dry-spell relay trip deepens the store
+                // once and the chain runs free afterwards.
+                if self.has_more {
+                    self.maybe_older(self.last_visible_end, cx);
                 }
             }
             FeedEvent::Profiles(profiles) => self.absorb_profiles(profiles, cx),
