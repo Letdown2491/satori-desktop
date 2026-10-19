@@ -141,6 +141,17 @@ impl Store {
         Ok(events)
     }
 
+    /// Kind-5 delete requests from the given authors (NIP-09). Synced
+    /// alongside the feed kinds (deletions are rare); the render filter
+    /// matches their `e` tags against displayed events.
+    pub async fn deletions(&self, authors: &[PublicKey]) -> NostrResult<Vec<Event>> {
+        let filter = Filter::new()
+            .kind(Kind::EventDeletion)
+            .authors(authors.to_vec())
+            .limit(1000);
+        Ok(self.query(filter).await?.into_iter().collect())
+    }
+
     /// NIP-22 comments addressing the event (kind 1111, any `e` tag —
     /// parent or root scope). Oldest first.
     pub async fn comments(&self, id: EventId) -> NostrResult<Vec<Event>> {

@@ -295,6 +295,13 @@ impl Feed {
             if note.kind != Kind::TextNote && !cards::is_feed_kind(note.kind) {
                 continue;
             }
+            // Amethyst's repost guard: a repost is not content of its own —
+            // if the boosted kind has no card here, the row never renders
+            // (a kind-6 payload is the original event's JSON; raw text
+            // would leak it).
+            if u16::from(note.kind) == 6 && repost_inner(&note).is_none() {
+                continue;
+            }
             if self.note_ids.contains(&note.id) {
                 continue;
             }
@@ -815,6 +822,11 @@ impl Render for Feed {
                         let has_more = self.has_more;
                         list(self.list.clone(), move |idx, _w, _cx| {
                             match notes.get(idx) {
+                                Some(ev) if u16::from(ev.kind) == 6 => repost_card(
+                                    ev, &profiles, &parents, &media, &quotes, &cards,
+                                    handle.clone(),
+                                )
+                                .into_any_element(),
                                 Some(ev) => note_card(
                                     idx, ev, &profiles, &parents, &liked, &bookmarked, &media,
                                     &quotes, &cards, handle.clone(),
@@ -832,6 +844,102 @@ impl Render for Feed {
                     }),
             )
     }
+}
+
+/// The boosted event inside a kind-6 payload (NIP-18: the content is the
+/// original event's JSON). Only kinds with a card here pass the guard.
+fn repost_inner(ev: &Event) -> Option<Event> {
+    let inner = serde_json::from_str::<Event>(&ev.content).ok()?;
+    (inner.kind == Kind::TextNote || cards::is_feed_kind(inner.kind)).then_some(inner)
+}
+
+/// A repost row (NIP-18 kind 6): the reposter in the header slot, the
+/// boosted note's card as the body. No action row — the boosted note
+/// carries its own engagement where it was posted; clicking the body
+/// opens the note (thread, or reader for articles).
+fn repost_card(
+    ev: &Event,
+    profiles: &HashMap<String, Profile>,
+    parents: &HashMap<String, ParentNote>,
+    media: &media::Snapshot,
+    quotes: &content::Quotes,
+    cards: &cards::CardState,
+    handle: Entity<Feed>,
+) -> impl IntoElement {
+    let key = ev.pubkey.to_string();
+    let name = profiles
+        .get(&key)
+        .map(|p| p.display())
+        .unwrap_or_else(|| format!("{}…", &key[..8]));
+    let picture = profiles
+        .get(&key)
+        .map(|p| p.picture.clone())
+        .unwrap_or_default();
+    let time = rel_time(ev.created_at.as_secs());
+    let inner = repost_inner(ev);
+    let open = inner.clone();
+    let open_handle = handle.clone();
+    inner.map_or_else(
+        || {
+            // The absorb guard keeps these out of the list; a defensive
+            // quiet line in case one slips through a race.
+            div()
+                .w_full()
+                .px_4()
+                .py_3()
+                .text_size(px(12.0))
+                .text_color(rgb(theme::MUTED))
+                .child(format!("{name} boosted"))
+        },
+        |note| {
+            let is_article = u16::from(note.kind) == 30023;
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .px_4()
+                .py_3()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(media::avatar(media, &picture, &name, 28.0))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(rgb(theme::MUTED))
+                                .child(format!("{name} boosted · {time}")),
+                        ),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("repost-{}", ev.id.to_string())))
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            let note = open.clone().expect("inner held");
+                            open_handle.update(cx, |_feed, cx| {
+                                if is_article {
+                                    cx.emit(Nav::OpenArticle(note.clone()));
+                                } else {
+                                    cx.emit(Nav::OpenThread(note.id));
+                                }
+                            });
+                        })
+                        .child(cards::row_body(
+                            &note,
+                            &content::Body {
+                                media,
+                                quotes,
+                                profiles,
+                            },
+                            &handle,
+                            cards,
+                        )),
+                )
+        },
+    )
 }
 
 /// The reply-context whisper: `↳ replying to Name — snippet…`, clickable to

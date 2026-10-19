@@ -722,7 +722,7 @@ impl Core {
         // skipped bootstrap would let a surface opened every few minutes
         // defer its fill forever.
         let ran_deep = !follows.is_empty() && !warm;
-        let (engagement, fetched) = tokio::join!(
+        let (engagement, fetched, dels) = tokio::join!(
             async {
                 let mine = Filter::new()
                     .author(me)
@@ -745,6 +745,19 @@ impl Core {
                     );
                     Default::default()
                 }
+            },
+            // Deletions ride along (NIP-09): rare, follows-scoped, needed
+            // before the render filter can drop what they cover.
+            async {
+                if !follows.is_empty() && !warm {
+                    let filter = Filter::new()
+                        .kind(Kind::EventDeletion)
+                        .authors(follows.clone())
+                        .limit(500);
+                    active.pool.get(filter).await.unwrap_or_default()
+                } else {
+                    Default::default()
+                }
             }
         );
         eprintln!("[core] deep fetch: {} events", fetched.len());
@@ -756,6 +769,9 @@ impl Core {
         // logged and DROPPED, so a fresh surface (the articles shelf) kept
         // painting only whatever older/refresh had happened to carry.
         for ev in fetched {
+            let _ = active.pool.store.save(&ev).await;
+        }
+        for ev in dels {
             let _ = active.pool.store.save(&ev).await;
         }
         self.load_own_sets(&active).await;
@@ -877,6 +893,15 @@ impl Core {
         for ev in fetched {
             let _ = active.pool.store.save(&ev).await;
         }
+        // Deletions ride along (NIP-09) — a follow's kind-5s since the
+        // newest note cover everything the refresh window can carry.
+        let del_filter = Filter::new()
+            .kind(Kind::EventDeletion)
+            .authors(follows.clone())
+            .since(Timestamp::from(since.saturating_sub(86400)));
+        for ev in active.pool.get(del_filter).await.unwrap_or_default() {
+            let _ = active.pool.store.save(&ev).await;
+        }
         let page = self.page_from_store(&active, None, &kinds).await?;
         eprintln!("[core] bootstrap page: {} notes", page.notes.len());
         let _ = tx.send(FeedEvent::Loaded(page));
@@ -902,6 +927,15 @@ impl Core {
                         .limit(TOPUP_DEPTH);
                     let fetched = active.pool.get(filter).await.unwrap_or_default();
                     for ev in fetched {
+                        let _ = active.pool.store.save(&ev).await;
+                    }
+                    // Deletions ride along (NIP-09).
+                    let del_filter = Filter::new()
+                        .kind(Kind::EventDeletion)
+                        .authors(active.follows.clone())
+                        .until(Timestamp::from(until))
+                        .limit(500);
+                    for ev in active.pool.get(del_filter).await.unwrap_or_default() {
                         let _ = active.pool.store.save(&ev).await;
                     }
                     notes = this.project_page(&active, Some(until), &kinds).await?;
@@ -962,6 +996,32 @@ impl Core {
 
     /// One page projection: store query (a PAGE+1 window so "has more" is
     /// knowable), then the mutes gate at the chokepoint.
+    /// NIP-09 render filter: drop events their own author deleted (a
+    /// kind-5 `e` tag from the deleted event's pubkey). A stranger's
+    /// kind-5 can't delete your notes, so the author must match.
+    async fn drop_deleted(&self, active: &Active, mut notes: Vec<Event>) -> Vec<Event> {
+        if notes.is_empty() {
+            return notes;
+        }
+        let dels = active
+            .pool
+            .store
+            .deletions(&active.follows)
+            .await
+            .unwrap_or_default();
+        if dels.is_empty() {
+            return notes;
+        }
+        let mut deleted: HashSet<(PublicKey, EventId)> = HashSet::new();
+        for d in &dels {
+            for id in d.tags.clone().event_ids() {
+                deleted.insert((d.pubkey, id));
+            }
+        }
+        notes.retain(|ev| !deleted.contains(&(ev.pubkey, ev.id)));
+        notes
+    }
+
     async fn project_page(
         &self,
         active: &Active,
@@ -978,7 +1038,7 @@ impl Core {
             let muted = self.muted.lock().unwrap();
             notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
         }
-        Ok(notes)
+        Ok(self.drop_deleted(active, notes).await)
     }
 
     async fn page_from_store(
@@ -994,12 +1054,13 @@ impl Core {
             .feed_page_kinds(&follows, until, PAGE, kinds.clone())
             .await
             .map_err(|e| LoginError::Resume(e.to_string()))?;
-        // Mutes gate here — every feed page passes this chokepoint
-        // (pool.ts: NIP-09/NIP-40 consume-at-the-chokepoint role).
+        // Mutes + deletions gate here — every feed page passes this
+        // chokepoint (pool.ts: NIP-09/NIP-40 consume-at-the-chokepoint role).
         {
             let muted = self.muted.lock().unwrap();
             notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
         }
+        notes = self.drop_deleted(active, notes).await;
         let profiles = Self::profiles_for(active, &notes).await;
         self.absorb_profiles(&profiles);
         for p in &profiles {
@@ -1875,6 +1936,29 @@ impl Core {
                 for ev in active.pool.get(comment_filter).await.unwrap_or_default() {
                     let _ = active.pool.store.save(&ev).await;
                     replies.push(ev);
+                }
+                // Deletions (NIP-09), targeted by id — replies come from
+                // beyond the follows, so the sync can't cover them. Only a
+                // delete from the reply's own author counts.
+                let reply_ids: Vec<EventId> = replies.iter().map(|e| e.id).collect();
+                if !reply_ids.is_empty() {
+                    let mut del_filter = Filter::new().kind(Kind::EventDeletion).limit(200);
+                    for id in reply_ids {
+                        del_filter = del_filter.event(id);
+                    }
+                    let dels = active.pool.get(del_filter).await.unwrap_or_default();
+                    for d in &dels {
+                        let _ = active.pool.store.save(d).await;
+                    }
+                    if !dels.is_empty() {
+                        let mut deleted: HashSet<(PublicKey, EventId)> = HashSet::new();
+                        for d in &dels {
+                            for id in d.tags.clone().event_ids() {
+                                deleted.insert((d.pubkey, id));
+                            }
+                        }
+                        replies.retain(|e| !deleted.contains(&(e.pubkey, e.id)));
+                    }
                 }
                 let mut seen: HashSet<EventId> = HashSet::new();
                 replies.retain(|e| seen.insert(e.id));
