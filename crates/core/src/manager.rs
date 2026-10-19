@@ -214,6 +214,10 @@ impl Profile {
 
 pub struct Core {
     rt: tokio::runtime::Runtime,
+    /// Hold-state mirror (Held/Committed/Undone/Failed) for the shell's
+    /// undo toast — the composer pops on Held, so the toast must outlive
+    /// it. subscribe_hold().
+    hold_tx: tokio::sync::broadcast::Sender<PublishEvent>,
     active: Mutex<Option<Active>>,
     pending: Mutex<Option<Arc<NostrConnect>>>,
     hold_seq: AtomicU64,
@@ -260,6 +264,7 @@ impl Core {
             profiles_mem: Mutex::new(std::collections::HashMap::new()),
             holds: Mutex::new(std::collections::HashMap::new()),
             live: tokio::sync::broadcast::Sender::new(64),
+            hold_tx: tokio::sync::broadcast::Sender::new(16),
             live_on: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -1593,8 +1598,30 @@ impl Core {
                 let unsigned =
                     UnsignedEvent::new(active.me(), Timestamp::now(), Kind::Custom(1111), tags, content);
                 let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit(&active, &signed, &tx).await?;
-                let _ = active.pool.store.save(&signed).await;
+                // Same undo window as notes (the reply toast is the note
+                // toast — one seam, hold_and_commit).
+                match active.undo.hold_duration() {
+                    Some(hold) => {
+                        let token = this.hold_seq.fetch_add(1, Ordering::SeqCst);
+                        let _ = tx.send(PublishEvent::Held {
+                            token,
+                            event: signed.clone(),
+                            hold_secs: hold.as_secs(),
+                        });
+                        this.hold_and_commit(
+                            Arc::new(active.clone()),
+                            token,
+                            signed,
+                            hold,
+                            tx.clone(),
+                        )
+                        .await;
+                    }
+                    None => {
+                        Self::commit(&active, &signed, &tx).await?;
+                        let _ = active.pool.store.save(&signed).await;
+                    }
+                }
                 Ok(())
             }
             .await;
@@ -2541,18 +2568,22 @@ impl Core {
     ) {
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
         self.holds.lock().unwrap().insert(token, cancel_tx);
+        self.mirror_hold(&PublishEvent::Held { token, event: event.clone(), hold_secs: hold.as_secs() });
         tokio::spawn({
             let core = Arc::clone(self);
             async move {
                 tokio::select! {
                     _ = tokio::time::sleep(hold + crate::undo::BACKSTOP_GRACE) => {
                         if let Err(e) = Self::commit(&active, &event, &tx).await {
+                            core.mirror_hold(&PublishEvent::Failed { token, error: e.to_string() });
                             let _ = tx.send(PublishEvent::Failed { token, error: e.to_string() });
                         } else {
+                            core.mirror_hold(&PublishEvent::Committed { token });
                             let _ = tx.send(PublishEvent::Committed { token });
                         }
                     }
                     _ = cancel_rx => {
+                        core.mirror_hold(&PublishEvent::Undone { token });
                         let _ = tx.send(PublishEvent::Undone { token });
                     }
                 }
@@ -2797,6 +2828,17 @@ impl Core {
     /// every open pane keeps its own receiver.
     pub fn subscribe_live(&self) -> tokio::sync::broadcast::Receiver<Live> {
         self.live.subscribe()
+    }
+
+    /// The hold-state mirror for the shell's undo toast (Held → countdown,
+    /// Committed/Undone/Failed → clear). The composer pops on Held, so the
+    /// toast outlives it — subscribe once at shell creation.
+    pub fn subscribe_hold(&self) -> tokio::sync::broadcast::Receiver<PublishEvent> {
+        self.hold_tx.subscribe()
+    }
+
+    fn mirror_hold(&self, ev: &PublishEvent) {
+        let _ = self.hold_tx.send(ev.clone());
     }
 
     /// ONE persistent subscription per session, three filters: fresh posts

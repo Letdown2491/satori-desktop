@@ -3,7 +3,7 @@
 //! TODO(port): crates/app/src/composer.rs (Adw dialog) — P2. Same write path:
 //! attachments upload through `blossom_upload` one by one, then the note goes
 //! out via `post_note` (text/reply) or `post_picture` (kind 20 with imetas),
-//! and the undo window surfaces as an inline row while Held. Draft semantics
+//! pops on Held — the countdown toast lives in the shell. Draft semantics
 //! match the GTK composer: a top-level compose restores whatever was stashed,
 //! and closing with un-published text stashes it again (replies get neither).
 
@@ -73,8 +73,6 @@ pub struct Composer {
     reply_to: Option<Event>,
     attachments: Vec<Attachment>,
     posting: bool,
-    /// (undo token, hold_secs) while the signed note waits out its window.
-    undo: Option<(u64, u64)>,
     status: String,
     autofocused: bool,
     focus: FocusHandle,
@@ -114,7 +112,6 @@ impl Composer {
             reply_to,
             attachments: vec![],
             posting: false,
-            undo: None,
             status: String::new(),
             autofocused: false,
             focus,
@@ -278,15 +275,17 @@ impl Composer {
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.recv().await {
                 match ev {
-                    PublishEvent::Held { token, hold_secs, .. } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.undo = Some((token, hold_secs));
-                            cx.notify();
-                        });
+                    // Held → the pane pops NOW (publish.ts: the composer
+                    // closes and a toast floats the countdown over the
+                    // feed). The pump dies with the pane; core finishes the
+                    // window regardless — the shell's subscribe_hold toast
+                    // carries Undo and the outcome.
+                    PublishEvent::Held { .. } => {
+                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                        return;
                     }
                     PublishEvent::Undone { .. } => {
                         let _ = this.update(cx, |this, cx| {
-                            this.undo = None;
                             this.posting = false;
                             this.status = "undone — nothing was sent".into();
                             cx.notify();
@@ -300,7 +299,6 @@ impl Composer {
                     PublishEvent::Failed { error, .. } => {
                         let _ = this.update(cx, |this, cx| {
                             this.posting = false;
-                            this.undo = None;
                             this.status = format!("failed: {error}");
                             cx.notify();
                         });
@@ -396,17 +394,19 @@ impl Composer {
             };
             while let Some(ev) = rx.recv().await {
                 match ev {
-                    PublishEvent::Held { token, hold_secs, .. } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.undo = Some((token, hold_secs));
-                            cx.notify();
-                        });
+                    // Held → the pane pops NOW (publish.ts: the composer
+                    // closes and a toast floats the countdown over the
+                    // feed). The pump dies with the pane; core finishes the
+                    // window regardless — the shell's subscribe_hold toast
+                    // carries Undo and the outcome.
+                    PublishEvent::Held { .. } => {
+                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                        return;
                     }
                     PublishEvent::Undone { .. } => {
                         let _ = this.update(cx, |this, cx| {
                             // Kept on the stack with a quiet word — the draft
                             // is still there if the user wants it.
-                            this.undo = None;
                             this.posting = false;
                             this.status = "undone — nothing was sent".into();
                             cx.notify();
@@ -420,7 +420,6 @@ impl Composer {
                     PublishEvent::Failed { error, .. } => {
                         let _ = this.update(cx, |this, cx| {
                             this.posting = false;
-                            this.undo = None;
                             this.status = format!("failed: {error}");
                             cx.notify();
                         });
@@ -433,19 +432,12 @@ impl Composer {
         .detach();
     }
 
-    fn undo_now(&mut self, cx: &mut Context<Self>) {
-        if let Some((token, _)) = self.undo {
-            self.core.undo(token);
-        }
-        cx.notify();
-    }
-
     /// Stash candidate, GTK close-handler semantics (composer.rs:509): the
     /// whole buffer of a top-level compose that never sent — possibly empty,
     /// so closing empty clears a stale draft. None = don't touch the draft
     /// (replies, a send in flight, an undo window pending).
     pub fn draft_candidate(&self, cx: &App) -> Option<String> {
-        if self.reply_to.is_some() || self.posting || self.undo.is_some() {
+        if self.reply_to.is_some() || self.posting {
             return None;
         }
         Some(self.input.read(cx).content.trim().to_string())
@@ -470,7 +462,6 @@ impl Render for Composer {
         }
         let replying = self.reply_to.is_some();
         let status = self.status.clone();
-        let undo = self.undo.map(|(_, secs)| secs);
         let input = self.input.clone();
         let posting = self.posting;
         let suggest = self.suggest.clone();
@@ -684,27 +675,7 @@ impl Render for Composer {
                 )
             })
             .when(tab == Tab::Note, |d| d.child(self.attachment_row(cx)))
-            .child(match (undo, posting) {
-                (Some(secs), _) => div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .text_size(px(12.5))
-                    .text_color(rgb(theme::muted()))
-                    .child(format!("publishing in {secs}s"))
-                    .child(
-                        div()
-                            .id("undo")
-                            .cursor_pointer()
-                            .px_3()
-                            .py_1()
-                            .rounded(px(4.))
-                            .border_1()
-                            .border_color(rgb(theme::hairline()))
-                            .on_click(cx.listener(|this, _, _, cx| this.undo_now(cx)))
-                            .child("Undo"),
-                    ),
-                _ => div()
+            .child(div()
                     .flex()
                     .items_center()
                     .justify_between()
@@ -733,9 +704,14 @@ impl Render for Composer {
                             .text_size(px(13.5))
                             .text_color(rgb(theme::vermilion()))
                             .on_click(cx.listener(|this, _, _, cx| this.post(cx)))
-                            .child(if replying { "Reply" } else { "Publish" }),
-                    ),
-            })
+                            .child(if posting {
+                                "…"
+                            } else if replying {
+                                "Reply"
+                            } else {
+                                "Publish"
+                            }),
+            ))
             .when(!status.is_empty(), |d| {
                 d.child(
                     div()

@@ -230,6 +230,10 @@ fn reply_row(
     handle: Entity<ThreadView>,
 ) -> impl IntoElement {
     let time = super::feed::rel_time(ev.created_at.as_secs());
+    let picture = profiles
+        .get(&ev.pubkey.to_string())
+        .map(|p| p.picture.clone())
+        .unwrap_or_default();
     let ev_for_click = ev.clone();
     let ev_for_reply = ev.clone();
     let open_handle = handle.clone();
@@ -249,14 +253,21 @@ fn reply_row(
         .child(
             div()
                 .flex()
-                .items_baseline()
+                .items_center()
                 .justify_between()
                 .child(
                     div()
-                        .text_size(px(12.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::ink()))
-                        .child(name),
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(media::avatar(media, &picture, &name, 24.0))
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(theme::ink()))
+                                .child(name),
+                        ),
                 )
                 .child(
                     div()
@@ -345,10 +356,26 @@ impl Render for ThreadView {
                                 .p_4()
                                 .child(
                                     div()
-                                        .text_size(px(13.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(theme::ink()))
-                                        .child(self.name_for(&note)),
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(media::avatar(
+                                            &media,
+                                            &self
+                                                .profiles
+                                                .get(&note.pubkey.to_string())
+                                                .map(|p| p.picture.clone())
+                                                .unwrap_or_default(),
+                                            &self.name_for(&note),
+                                            28.0,
+                                        ))
+                                        .child(
+                                            div()
+                                                .text_size(px(13.0))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(theme::ink()))
+                                                .child(self.name_for(&note)),
+                                        ),
                                 )
                                 .child(content::body(
                                     &note,

@@ -15,7 +15,7 @@ use gpui::{
     AnyView, ObjectFit, Render, SharedString, Stateful, Window,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, Profile};
+use satori_core::manager::{Core, FeedEvent, Profile, PublishEvent};
 
 use crate::{icons, media, theme};
 use super::{
@@ -53,6 +53,15 @@ pub enum ShellEvent {
     SignedOut,
 }
 
+/// State of the shell's undo toast: the held token + its deadline, or the
+/// terminal whisper (undone) / sticky error.
+struct HoldToast {
+    token: u64,
+    deadline: std::time::Instant,
+    undone: bool,
+    err: Option<String>,
+}
+
 pub struct Shell {
     core: Arc<Core>,
     focus: FocusHandle,
@@ -65,6 +74,10 @@ pub struct Shell {
     /// The lightbox overlay — full-screen image viewer over any pane
     /// (lightbox.rs: Esc/‹/› keys, click closes).
     lightbox: Option<(Vec<String>, usize)>,
+    /// The undo window's floating toast (compose.ts undo-toast): the
+    /// composer pops on Held, so the countdown lives HERE, over any pane.
+    /// Undone flashes briefly; a Failed error sticks until the next try.
+    hold: Option<HoldToast>,
     /// Bell dot: anything newer than the read-state high-water? Polled every
     /// 90s like the GTK shell (poll_notif); cleared when the pane opens.
     notif_unread: bool,
@@ -107,6 +120,7 @@ impl Shell {
             focused_once: false,
             refocus: false,
             lightbox: None,
+            hold: None,
             notif_unread: false,
             feed_deep: false,
             stack: vec![],
@@ -287,6 +301,102 @@ impl Shell {
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(_) => continue,
+                    Err(_) => continue,
+                }
+            }
+        })
+        .detach();
+        // The undo window's toast: the composer pops on Held, so the
+        // countdown floats here — over the feed, like the reference's
+        // bottom toast. Undo calls core.undo(token); outcomes resolve it.
+        let mut hold_rx = self.core.subscribe_hold();
+        cx.spawn(async move |this, cx| {
+            loop {
+                match hold_rx.recv().await {
+                    Ok(PublishEvent::Held { token, hold_secs, .. }) => {
+                        let _ = this.update(cx, |shell, cx| {
+                            shell.hold = Some(HoldToast {
+                                token,
+                                deadline: std::time::Instant::now()
+                                    + std::time::Duration::from_secs(hold_secs),
+                                undone: false,
+                                err: None,
+                            });
+                            cx.notify();
+                        });
+                        // One tick a second keeps the countdown honest; it
+                        // dies when the toast resolves.
+                        let weak = this.clone();
+                        cx.spawn(async move |cx| {
+                            loop {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_secs(1))
+                                    .await;
+                                let alive = weak
+                                    .update(cx, |shell, cx| {
+                                        let running = shell
+                                            .hold
+                                            .as_ref()
+                                            .is_some_and(|h| !h.undone && h.err.is_none());
+                                        if running {
+                                            cx.notify();
+                                        }
+                                        running
+                                    })
+                                    .unwrap_or(false);
+                                if !alive {
+                                    break;
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                    Ok(PublishEvent::Committed { .. }) => {
+                        let _ = this.update(cx, |shell, cx| {
+                            shell.hold = None;
+                            cx.notify();
+                        });
+                    }
+                    Ok(PublishEvent::Undone { .. }) => {
+                        let _ = this.update(cx, |shell, cx| {
+                            if let Some(h) = shell.hold.as_mut() {
+                                h.undone = true;
+                            }
+                            cx.notify();
+                        });
+                        // The undone whisper clears itself.
+                        let weak = this.clone();
+                        cx.spawn(async move |cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(2500))
+                                .await;
+                            let _ = weak.update(cx, |shell, cx| {
+                                if shell.hold.as_ref().is_some_and(|h| h.undone) {
+                                    shell.hold = None;
+                                    cx.notify();
+                                }
+                            });
+                        })
+                        .detach();
+                    }
+                    Ok(PublishEvent::Failed { error, .. }) => {
+                        let _ = this.update(cx, |shell, cx| {
+                            match shell.hold.as_mut() {
+                                Some(h) => h.err = Some(error),
+                                None => {
+                                    shell.hold = Some(HoldToast {
+                                        token: 0,
+                                        deadline: std::time::Instant::now(),
+                                        undone: false,
+                                        err: Some(error),
+                                    })
+                                }
+                            }
+                            cx.notify();
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(_) => continue,
                 }
             }
@@ -782,8 +892,73 @@ impl Render for Shell {
                         |d| d.child(self.floating_top(cx)),
                     ),
             )
+            .when(self.hold.is_some(), |d| d.child(self.hold_toast(cx)))
             .when_some(self.lightbox.clone(), |d, (urls, idx)| {
                 d.child(lightbox_overlay(&urls, idx, cx))
+            })
+    }
+}
+
+impl Shell {
+    /// The undo-window toast: floats bottom-center over any pane —
+    /// countdown + Undo while held, a brief "undone" whisper, a sticky
+    /// failure line (cleared by the next publish).
+    fn hold_toast(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let held = self.hold.as_ref().unwrap();
+        let text = if let Some(e) = &held.err {
+            format!("failed: {e}")
+        } else if held.undone {
+            "undone — nothing was sent".to_string()
+        } else {
+            let left = held
+                .deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs();
+            format!("publishing in {}s", left.max(1))
+        };
+        div()
+            .absolute()
+            .left(px(0.))
+            .right(px(0.))
+            .bottom(px(16.))
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgb(theme::hairline()))
+                    .bg(rgb(theme::panel()))
+                    .px_4()
+                    .py_2()
+                    .text_size(px(12.5))
+                    .text_color(rgb(theme::muted()))
+                    .child(text)
+                    .when(held.undone || held.err.is_some(), |d| d), // shape only
+            )
+            .when(!held.undone && held.err.is_none(), |d| {
+                d.child(
+                    div()
+                        .id("hold-undo")
+                        .cursor_pointer()
+                        .px_2()
+                        .py(px(2.))
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(rgb(theme::vermilion()))
+                        .text_color(rgb(theme::vermilion()))
+                        .text_size(px(12.5))
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            if let Some(h) = shell.hold.as_ref() {
+                                shell.core.undo(h.token);
+                            }
+                            cx.notify();
+                        }))
+                        .child("Undo"),
+                )
             })
     }
 }
