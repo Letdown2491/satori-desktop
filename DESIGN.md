@@ -461,7 +461,14 @@ re-expression of views, not a feature rebuild.
   scroll anchor and yanks the reader to the top; the anchor survives a
   non-overlapping splice. Live-verified: scrolled 36 minutes → 5 weeks
   deep through appended pages with the view holding still, images
-  loading at depth, mentions hydrating to @names mid-scroll. Daily driver
+  loading at depth, mentions hydrating to @names mid-scroll. Article
+  reader done — markdown.rs ports the GTK blocks parser; the Pango
+  inline half became styled spans the word flow renders (GPUI has no
+  markup strings); the reader pane resolves entities like note bodies
+  and the Read seal opens it (the shell quiets its keys while reading —
+  a reading surface is a text surface). Wiki bodies render inline like
+  the GTK card's AsciiDoc subset. Article comments (NIP-22) stay with
+  the GTK original for now. Daily driver
   flipped to the GPUI binary (user decision, P2.5): `crates/app` stays only as
   the P3 porting reference (first-login no longer needs it); deletion remains
   the P4 formality.
