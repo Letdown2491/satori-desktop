@@ -666,6 +666,9 @@ impl Render for Feed {
             .flex_1()
             .min_h_0()
             .overflow_hidden()
+            // The stream breathes: a quiet band of washi above the first
+            // note (static — it doesn't scroll away with the content).
+            .pt(px(16.0))
             .bg(rgb(theme::WASHI))
             .text_color(rgb(theme::INK))
             .font_family(theme::SANS)
