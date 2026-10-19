@@ -21,11 +21,20 @@ use crate::theme;
 
 pub type Png = Arc<Image>;
 
+/// A cached image and its decoded pixel size — the size drives the frame's
+/// aspect when imeta never said (media_tile used to guess one height for
+/// everything, so portrait and landscape wore the same box).
+#[derive(Clone)]
+pub struct CachedImage {
+    pub png: Png,
+    pub size: (u32, u32),
+}
+
 /// Render-time view of the shared cache (D13 rule: snapshot, don't read
 /// entities during render — globals are snapshotted the same way).
 #[derive(Clone, Default)]
 pub struct Snapshot {
-    ready: HashMap<String, Png>,
+    ready: HashMap<String, CachedImage>,
     not_media: HashSet<String>,
 }
 
@@ -46,7 +55,12 @@ impl Snapshot {
     }
 
     pub fn png(&self, url: &str) -> Option<Png> {
-        self.ready.get(url).cloned()
+        self.ready.get(url).map(|c| c.png.clone())
+    }
+
+    /// Decoded (w, h) — None until the fetch lands.
+    pub fn size(&self, url: &str) -> Option<(u32, u32)> {
+        self.ready.get(url).map(|c| c.size)
     }
 
     pub fn not_media(&self, url: &str) -> bool {
@@ -54,17 +68,17 @@ impl Snapshot {
     }
 }
 
-type Cb = Box<dyn FnOnce(Option<Png>, &mut gpui::AsyncApp)>;
+type Cb = Box<dyn FnOnce(Option<CachedImage>, &mut gpui::AsyncApp)>;
 
 enum Entry {
     /// Fetch in flight; the joiners' callbacks fire on completion.
     Loading(Vec<Cb>),
-    Ready(Png),
+    Ready(CachedImage),
     NotMedia,
 }
 
 impl Entry {
-    fn ready(&self) -> Option<Png> {
+    fn ready(&self) -> Option<CachedImage> {
         match self {
             Entry::Ready(png) => Some(png.clone()),
             _ => None,
@@ -77,14 +91,18 @@ impl Entry {
 pub struct Cache(std::cell::RefCell<HashMap<String, Entry>>);
 impl gpui::Global for Cache {}
 
-/// Encode core's decoded RGBA as PNG bytes for gpui's image pipeline.
-pub fn png_from_rgba(d: &DecodedImage) -> Option<Png> {
+/// Encode core's decoded RGBA as PNG bytes for gpui's image pipeline,
+/// keeping the decoded size for aspect-correct frames.
+pub fn png_from_rgba(d: &DecodedImage) -> Option<CachedImage> {
     let img = image::RgbaImage::from_raw(d.width, d.height, d.rgba.clone())?;
     let mut out = Vec::new();
     image::DynamicImage::ImageRgba8(img)
         .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
         .ok()?;
-    Some(Arc::new(Image::from_bytes(ImageFormat::Png, out)))
+    Some(CachedImage {
+        png: Arc::new(Image::from_bytes(ImageFormat::Png, out)),
+        size: (d.width, d.height),
+    })
 }
 
 /// Fetch one image through core and hand the PNG to every interested view.
@@ -95,7 +113,7 @@ pub fn fetch<V: 'static>(
     core: &Arc<Core>,
     url: String,
     cx: &mut gpui::Context<V>,
-    apply: impl Fn(&mut V, String, Option<Png>, &mut gpui::Context<V>) + 'static,
+    apply: impl Fn(&mut V, String, Option<CachedImage>, &mut gpui::Context<V>) + 'static,
 ) {
     let handle = cx.entity();
     let apply = Arc::new(apply);
@@ -103,7 +121,7 @@ pub fn fetch<V: 'static>(
         let handle = handle.clone();
         let apply = apply.clone();
         let url2 = url.clone();
-        move |res: Option<Png>, app: &mut gpui::AsyncApp| {
+        move |res: Option<CachedImage>, app: &mut gpui::AsyncApp| {
             let _ = handle.update(app, |view, cx| apply(view, url2.clone(), res, cx));
         }
     };
@@ -111,13 +129,13 @@ pub fn fetch<V: 'static>(
     enum Action {
         Start,
         Joined,
-        Now(Option<Png>),
+        Now(Option<CachedImage>),
     }
     let action = {
         let mut cache = cx.global_mut::<Cache>().0.borrow_mut();
         match cache.entry(url.clone()) {
             std::collections::hash_map::Entry::Occupied(mut e) => match e.get_mut() {
-                Entry::Ready(png) => Action::Now(Some(png.clone())),
+                Entry::Ready(c) => Action::Now(Some(c.clone())),
                 Entry::NotMedia => Action::Now(None),
                 Entry::Loading(cbs) => {
                     cbs.push(Box::new(deliver));
@@ -149,7 +167,7 @@ pub fn fetch<V: 'static>(
                     .update(|app| {
                         let mut cache = app.global_mut::<Cache>().0.borrow_mut();
                         let st = png.as_ref().map_or(Entry::NotMedia, |p| {
-                            Entry::Ready(Png::clone(p))
+                            Entry::Ready(CachedImage::clone(p))
                         });
                         match cache.remove(&url) {
                             Some(Entry::Loading(cbs)) => {

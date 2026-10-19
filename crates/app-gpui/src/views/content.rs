@@ -518,13 +518,20 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
 
     if visible.len() == 1 {
         let (i, url) = visible[0];
-        let dim = dims.get(url).copied().flatten();
-        // Height from the dim aspect at full card width (~COL_W minus card
-        // padding); ObjectFit::Cover absorbs the difference on other widths.
-        let height = match dim {
-            Some((w, h)) if w > 0 => ((COL_W - 32.0) * h as f32 / w as f32).clamp(80.0, 560.0),
-            _ => 360.0,
-        };
+        // Height from the picture's true aspect at full card width (~COL_W
+        // minus card padding): imeta dim when the author sent one, otherwise
+        // the decoded size once the fetch lands. Only a picture we've never
+        // seen wears the provisional box (ObjectFit::Contain letterboxes it
+        // until the aspect arrives with the bytes).
+        let width = COL_W - 32.0;
+        let aspect = dim_or(ctx.media, url, dims.get(url).copied().flatten());
+        let height = aspect.map_or(360.0, |(w, h)| {
+            if w > 0 {
+                (width * h as f32 / w as f32).clamp(80.0, 560.0)
+            } else {
+                360.0
+            }
+        });
         return Some(
             media_tile(url, None, height, urls.to_vec(), i, ctx, handle)
                 .into_any_element(),
@@ -534,9 +541,30 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
     let id = seg_id("strip", &urls.join("|"));
     let mut strip = div().id(id).w_full().overflow_x_scroll().flex().gap_2();
     for (i, url) in visible {
-        strip = strip.child(media_tile(url, Some(560.0), 480.0, urls.to_vec(), i, ctx, handle));
+        let aspect = dim_or(ctx.media, url, dims.get(url).copied().flatten());
+        let height = aspect.map_or(480.0, |(w, h)| {
+            if w > 0 {
+                (560.0 * h as f32 / w as f32).clamp(240.0, 480.0)
+            } else {
+                480.0
+            }
+        });
+        strip = strip.child(media_tile(url, Some(560.0), height, urls.to_vec(), i, ctx, handle));
     }
     Some(strip.into_any_element())
+}
+
+/// The frame aspect for a media url: the author's imeta dim first, the
+/// decoded size once the bytes land, else nothing yet.
+fn dim_or(
+    media: &media::Snapshot,
+    url: &str,
+    dim: Option<(u32, u32)>,
+) -> Option<(u32, u32)> {
+    match dim {
+        Some(d) if d.0 > 0 => Some(d),
+        _ => media.size(url).filter(|d| d.0 > 0),
+    }
 }
 
 /// One gallery tile: the picture when the shared cache has it, a quiet

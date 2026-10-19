@@ -260,9 +260,15 @@ impl ArticleView {
 /// semantics, fed by the shared cache.
 fn image_tile(url: &str, snap: &media::Snapshot) -> impl IntoElement {
     let png = snap.png(url);
+    // Aspect-correct once the bytes are in (reading column ~660 minus
+    // padding); a provisional box until then.
+    let height = snap
+        .size(url)
+        .filter(|(w, _)| *w > 0)
+        .map_or(360.0, |(w, h)| (628.0 * h as f32 / w as f32).clamp(80.0, 560.0));
     let frame = div()
         .w_full()
-        .h(px(360.0))
+        .h(px(height))
         .flex_none()
         .overflow_hidden()
         .rounded(px(4.))
