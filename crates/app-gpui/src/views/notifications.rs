@@ -332,9 +332,11 @@ fn notif_card(
     // Clicking opens the conversation: the parent's thread when there is
     // one (your note's thread, for a reply), else the note itself. A
     // profile zap has no thread to open.
-    let open: Option<EventId> = parent_id
-        .as_ref()
-        .and_then(|p| EventId::from_hex(p).ok())
+    // The reference links a notice to the thread ROOT, never the immediate
+    // parent — a reply-to-a-reply lands in the root's conversation.
+    let open: Option<EventId> = satori_core::nip::nip10::reply_root(ev)
+        .and_then(|(id, _)| EventId::from_hex(&id).ok())
+        .or_else(|| parent_id.as_ref().and_then(|p| EventId::from_hex(p).ok()))
         .or_else(|| matches!(t, NotifType::Reply | NotifType::Mention).then_some(ev.id));
     let ev_for_profile = ev.clone();
     let handle_profile = handle.clone();

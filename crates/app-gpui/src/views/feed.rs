@@ -708,11 +708,16 @@ fn note_card(
                     handle_open.update(cx, |_feed, cx| {
                         // Articles open the reader (the card body is the
                         // door — the "Read" seal is a second one, for the
-                        // summary card's tail). Everything else threads.
+                        // summary card's tail). Everything else threads —
+                        // at the conversation's ROOT when the note is a
+                        // reply (the reference never links the parent).
                         if u16::from(ev.kind) == 30023 {
                             cx.emit(Nav::OpenArticle(ev.clone()));
                         } else {
-                            cx.emit(Nav::OpenThread(ev.id));
+                            let root = satori_core::nip::nip10::reply_root(&ev)
+                                .and_then(|(id, _)| EventId::from_hex(&id).ok())
+                                .unwrap_or(ev.id);
+                            cx.emit(Nav::OpenThread(root));
                         }
                     });
                 })
@@ -998,7 +1003,10 @@ fn repost_card(
                                 if is_article {
                                     cx.emit(Nav::OpenArticle(note.clone()));
                                 } else {
-                                    cx.emit(Nav::OpenThread(note.id));
+                                    let root = satori_core::nip::nip10::reply_root(&note)
+                                        .and_then(|(id, _)| EventId::from_hex(&id).ok())
+                                        .unwrap_or(note.id);
+                                    cx.emit(Nav::OpenThread(root));
                                 }
                             });
                         })

@@ -282,7 +282,17 @@ fn reply_row(
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     let ev = ev_for_click.clone();
-                    open_handle.update(cx, |_view, cx| cx.emit(Nav::OpenThread(ev.id)));
+                    // A reply opens the conversation at its ROOT (the
+                    // reference never links the immediate parent) — unless
+                    // we're already reading that root's thread.
+                    open_handle.update(cx, |view, cx| {
+                        let root = satori_core::nip::nip10::reply_root(&ev)
+                            .and_then(|(id, _)| EventId::from_hex(&id).ok())
+                            .unwrap_or(ev.id);
+                        if view.anchor.as_ref().map(|a| a.id) != Some(root) {
+                            cx.emit(Nav::OpenThread(root));
+                        }
+                    });
                 })
                 .child(content::body(
                     ev,
