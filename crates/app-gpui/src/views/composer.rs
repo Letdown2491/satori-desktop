@@ -85,14 +85,7 @@ impl EventEmitter<Nav> for Composer {}
 impl Composer {
     pub fn new(core: Arc<Core>, reply_to: Option<Event>, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
-        let input = cx.new(|cx| {
-            let i = Input::new(cx);
-            if reply_to.is_some() {
-                i.placeholder("Write a reply — ctrl-enter sends it.")
-            } else {
-                i.placeholder("Speak. The post holds a few seconds — ctrl-enter sends it.")
-            }
-        });
+        let input = cx.new(|cx| Input::new(cx));
         let focus = input.read(cx).focus_handle(cx);
         // Draft restore: a top-level compose reopens with whatever was typed
         // and closed before (composer.rs:114 — the take spends the stash).
@@ -104,8 +97,7 @@ impl Composer {
         // @-mention detection: watch the buffer, find an active `@token`.
         cx.observe(&input, |this, _input, cx| this.detect_mention(cx))
             .detach();
-        let poll_question =
-            cx.new(|cx| Input::new(cx).placeholder("Ask."));
+        let poll_question = cx.new(|cx| Input::new(cx));
         let poll_options = (0..2)
             .map(|_| cx.new(|cx| Input::new(cx)))
             .collect();
@@ -504,40 +496,40 @@ impl Render for Composer {
             .text_color(rgb(theme::ink()))
             .gap_2()
             .p_4()
-            .when(!replying && tab == Tab::Note, |d| {
+            .when(tab == Tab::Note, |d| {
                 d.child(
                     div()
                         .id("composer-scroll")
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
-                        .rounded(px(6.))
                         .border_1()
                         .border_color(rgb(theme::hairline()))
                         .bg(rgb(theme::panel()))
                         .p_2()
+                        // Tabs on top square the box's shoulders; a reply
+                        // (no tabs) keeps the full rounding.
+                        .when(replying, |d| d.rounded(px(6.)))
+                        .when(!replying, |d| d.rounded_b(px(6.)))
                         .child(input),
                 )
             })
-            .when(!replying && tab == Tab::Poll, |d| {
+            .when(tab == Tab::Poll, |d| {
                 d.child(
                     div()
                         .id("poll-scroll")
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
+                        .rounded_b(px(6.))
+                        .border_1()
+                        .border_color(rgb(theme::hairline()))
+                        .bg(rgb(theme::panel()))
+                        .p_3()
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(
-                            div()
-                                .rounded(px(6.))
-                                .border_1()
-                                .border_color(rgb(theme::hairline()))
-                                .bg(rgb(theme::panel()))
-                                .p_2()
-                                .child(poll_question),
-                        )
+                        .child(poll_question)
                         .children(poll_options.iter().enumerate().map(|(i, opt)| {
                             div()
                                 .flex()
@@ -546,10 +538,10 @@ impl Render for Composer {
                                 .child(
                                     div()
                                         .flex_1()
-                                        .rounded(px(6.))
+                                        .rounded(px(4.))
                                         .border_1()
                                         .border_color(rgb(theme::hairline()))
-                                        .bg(rgb(theme::panel()))
+                                        .bg(rgb(theme::washi()))
                                         .p_2()
                                         .child(opt.clone()),
                                 )
@@ -606,18 +598,19 @@ impl Render for Composer {
                         ),
                 )
             })
+            // The tabs ride the box's top edge: the active one wears the
+            // panel's wash and frame (no bottom border — the 1px overlap
+            // sands the seam into the field below).
             .when(!replying, |d| {
-                // The tabs: quiet text, the active one in ink.
                 d.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .text_size(px(13.))
+                    div().flex().gap_1().pl_2().mb(px(-1.))
                         .child(
                             div()
                                 .id("tab-note")
                                 .cursor_pointer()
+                                .px_3()
+                                .py_1()
+                                .text_size(px(13.))
                                 .text_color(rgb(if tab == Tab::Note {
                                     theme::ink()
                                 } else {
@@ -625,17 +618,25 @@ impl Render for Composer {
                                 }))
                                 .when(tab == Tab::Note, |d| {
                                     d.font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .bg(rgb(theme::panel()))
+                                        .rounded_t(px(6.))
+                                        .border_t_1()
+                                        .border_l_1()
+                                        .border_r_1()
+                                        .border_color(rgb(theme::hairline()))
                                 })
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.set_tab(Tab::Note, cx)
                                 }))
                                 .child("Note"),
                         )
-                        .child(div().text_color(rgb(theme::hairline())).child("·"))
                         .child(
                             div()
                                 .id("tab-poll")
                                 .cursor_pointer()
+                                .px_3()
+                                .py_1()
+                                .text_size(px(13.))
                                 .text_color(rgb(if tab == Tab::Poll {
                                     theme::ink()
                                 } else {
@@ -643,6 +644,12 @@ impl Render for Composer {
                                 }))
                                 .when(tab == Tab::Poll, |d| {
                                     d.font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .bg(rgb(theme::panel()))
+                                        .rounded_t(px(6.))
+                                        .border_t_1()
+                                        .border_l_1()
+                                        .border_r_1()
+                                        .border_color(rgb(theme::hairline()))
                                 })
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.set_tab(Tab::Poll, cx)
