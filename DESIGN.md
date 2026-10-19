@@ -447,7 +447,21 @@ re-expression of views, not a feature rebuild.
   itself; posts lose their card boxes (no panel bg, no hairline rules)
   and separate by whitespace alone, in feed, compact cards, thread
   replies and anchor note; type moved to P052 (Palatino) for body serif
-  (Nimbus Roman read cramped) and Cantarell for UI chrome. Daily driver
+  (Nimbus Roman read cramped) and Cantarell for UI chrome. Endless
+  timeline (user decision — over the GTK app's deliberate "view older"
+  batches): the feed projects through `store::feed_page`, which had
+  been hardcoding kinds 1+6 — bootstrap fetched the whole visible
+  catalog into the store and the projection dropped it at the door, so
+  polls and articles never reached a page; `core.older` now tops up
+  from the relays when the store runs dry (the web app's
+  until-pagination — `fetchRoutedPage` semantics, the "M2" TODO that
+  never landed), and the feed orders pages from the list's scroll
+  stream (near-bottom, one round trip at a time). gpui fact: list
+  appends must go through `splice`, not `reset` — reset clears the
+  scroll anchor and yanks the reader to the top; the anchor survives a
+  non-overlapping splice. Live-verified: scrolled 36 minutes → 5 weeks
+  deep through appended pages with the view holding still, images
+  loading at depth, mentions hydrating to @names mid-scroll. Daily driver
   flipped to the GPUI binary (user decision, P2.5): `crates/app` stays only as
   the P3 porting reference (first-login no longer needs it); deletion remains
   the P4 formality.
