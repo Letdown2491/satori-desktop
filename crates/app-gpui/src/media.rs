@@ -12,7 +12,7 @@ use std::{
     sync::Arc,
 };
 
-use gpui::{div, img, prelude::*, px, rgb, AnyElement, Image, ImageFormat};
+use gpui::{div, img, prelude::*, px, rgb, AnyElement, App, Image, ImageFormat, ImageSource};
 use satori_core::manager::Core;
 use satori_core::media::DecodedImage;
 
@@ -117,28 +117,37 @@ impl Default for Cache {
 }
 impl gpui::Global for Cache {}
 
-/// Decoded-entry caps: 256 images / 768MB of decoded RGBA.
-const CACHE_MAX_ENTRIES: usize = 256;
-const CACHE_MAX_BYTES: u64 = 768 * 1024 * 1024;
+/// Decoded-entry caps: 128 images / 256MB of decoded RGBA (the disk cache
+/// is the reservoir; eviction only costs a re-decode on scroll-back).
+const CACHE_MAX_ENTRIES: usize = 128;
+const CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 impl Cache {
     /// Oldest-first eviction past the caps. Loading entries rotate to the
     /// back (they're transient); Ready/NotMedia drop. Bounded passes.
-    fn evict(&self) {
+    /// Takes cx: gpui's own asset cache NEVER evicts — fetch_asset inserts
+    /// the decoded RenderImage and nothing removes it — so ours must evict
+    /// gpui's decoded copy too, or every photo ever seen stays in RAM as
+    /// RGBA for the whole session (measured: 400+MB anon after an evening
+    /// of scrolling; the timeline leak was gpui's cache, not ours). The
+    /// evicted handles come back to the caller — remove_asset needs the
+    /// App, and the cache borrow must be dead first.
+    fn evict(&self) -> Vec<Png> {
         // The round count borrows `order`; the temporary must be dropped
         // BEFORE the loop — a `for _ in 0..self.order.borrow().len()`
         // keeps the borrow alive across the whole loop and the
         // `borrow_mut()` inside panics (RefCell already borrowed). It
         // fired the first time the cache crossed its caps.
+        let mut dropped: Vec<Png> = Vec::new();
         let rounds = self.order.borrow().len() * 2;
         for _ in 0..rounds {
             let over =
                 self.map.borrow().len() > CACHE_MAX_ENTRIES || self.bytes.get() > CACHE_MAX_BYTES;
             if !over {
-                return;
+                break;
             }
             let Some(url) = self.order.borrow_mut().pop_front() else {
-                return;
+                break;
             };
             let loading = matches!(self.map.borrow().get(&url), Some(Entry::Loading(_)));
             if loading {
@@ -149,9 +158,11 @@ impl Cache {
                 let (w, h) = c.size;
                 self.bytes
                     .set(self.bytes.get().saturating_sub(w as u64 * h as u64 * 4));
+                dropped.push(c.png);
             }
             self.epoch.set(self.epoch.get() + 1);
         }
+        dropped
     }
 }
 
@@ -260,7 +271,13 @@ pub fn fetch<V: 'static>(
                             }
                         };
                         drop(map);
-                        cache.evict();
+                        // Evict OUTSIDE the cache borrow; gpui's decoded
+                        // copies go with the entries (the asset cache never
+                        // evicts on its own — that was the RAM leak).
+                        let dropped = cache.evict();
+                        for png in dropped {
+                            ImageSource::Image(png).remove_asset(app);
+                        }
                         cbs_out
                     })
                     .unwrap_or_default();
