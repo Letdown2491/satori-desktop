@@ -10,7 +10,7 @@
 
 use std::{collections::HashMap, hash::{Hash, Hasher}};
 
-use gpui::{div, img, prelude::*, px, rgb, AnyElement, Div, Entity, EventEmitter, FontWeight, ObjectFit, SharedString};
+use gpui::{div, img, prelude::*, px, relative, rgb, AnyElement, Div, Entity, EventEmitter, FontWeight, ObjectFit, SharedString};
 use nostr::prelude::*;
 use satori_core::manager::Profile;
 use satori_core::nip::imeta::{self, ImageMeta};
@@ -165,7 +165,7 @@ fn display_url(url: &str) -> String {
 // --- word-flow tokens ------------------------------------------------------
 
 /// One whitespace token inside a paragraph.
-enum Tok {
+pub(crate) enum Tok {
     /// npub/nprofile mention.
     Mention(PublicKey),
     /// note1/nevent1 reference, resolved to its event id.
@@ -179,12 +179,12 @@ enum Tok {
 
 /// Punctuation that commonly hugs a token ("(see nostr:nevent1…).") — split
 /// off so the link stays clean and the punctuation stays text.
-fn split_trailing(token: &str) -> (&str, &str) {
+pub(crate) fn split_trailing(token: &str) -> (&str, &str) {
     let core = token.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}', '"', '”']);
     (&token[..core.len()], &token[core.len()..])
 }
 
-fn classify_token(core: &str) -> Tok {
+pub(crate) fn classify_token(core: &str) -> Tok {
     let bech = core.strip_prefix("nostr:").unwrap_or(core);
     if let Ok(n) = Nip19::from_bech32(bech) {
         return match n {
@@ -224,12 +224,15 @@ fn word(text: String) -> Div {
     div()
         .font_family(theme::SERIF)
         .text_size(px(15.0))
+        // P052's own line box is huge (URW vertical metrics); pin the pitch
+        // or every wrapped line reads double-spaced.
+        .line_height(relative(1.2))
         .text_color(rgb(theme::INK))
         .child(text)
 }
 
 /// One clickable word-flow token (link / mention / ref).
-fn token_el<V: EventEmitter<Nav> + 'static>(
+pub(crate) fn token_el<V: EventEmitter<Nav> + 'static>(
     tok: Tok,
     punct: &str,
     n: usize,
@@ -242,6 +245,7 @@ fn token_el<V: EventEmitter<Nav> + 'static>(
             .cursor_pointer()
             .font_family(theme::SERIF)
             .text_size(px(15.0))
+            .line_height(relative(1.2))
             .text_color(rgb(theme::MUTED))
             .underline()
     };
@@ -270,7 +274,7 @@ fn token_el<V: EventEmitter<Nav> + 'static>(
                     cx.stop_propagation();
                     handle.update(cx, |_, cx| cx.emit(Nav::OpenProfile(pk)));
                 })
-                .child(label);
+                .child(format!("@{label}"));
             with_punct(el, punct)
         }
         Tok::NoteRef(id) => {
@@ -348,9 +352,22 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
         .collect();
     let murls = media_urls(ev);
 
+    // Paragraph rhythm follows the TS renderer's pre-wrap semantics
+    // (TODO(port): src/render/content.ts — `.content` is pre-wrap): a single
+    // newline breaks the line tight (no paragraph gap); only blank lines
+    // separate paragraphs. Consecutive lines collect into one block.
+    let mut run: Vec<AnyElement> = Vec::new();
+    fn push_block(body: Div, run: &mut Vec<AnyElement>) -> Div {
+        match run.len() {
+            0 => body,
+            1 => body.child(run.remove(0)),
+            _ => body.child(div().w_full().flex().flex_col().children(run.drain(..))),
+        }
+    }
     for para in ev.content.split('\n') {
         let trimmed = para.trim();
         if trimmed.is_empty() {
+            body = push_block(body, &mut run);
             continue;
         }
         // Quote refs fold out of the text into embed cards below (content.ts
@@ -358,18 +375,17 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
         if standalone_ref(trimmed).is_some() {
             continue;
         }
-        let el: AnyElement = match standalone(trimmed) {
+        match standalone(trimmed) {
             // A paragraph that is one link: media folds into the gallery
             // section below; a link the cache couldn't decode (a blossom
             // page, say) degrades back to a plain link row here.
             Some(Seg::Link(url)) => {
                 if is_video_url(&url) {
-                    video_card(&url)
+                    body = push_block(body, &mut run).child(video_card(&url));
                 } else if ctx.media.not_media(&url) || !(is_image_url(&url) || path_ext(&url).is_none()) {
-                    link_row(&url)
-                } else {
-                    continue;
+                    body = push_block(body, &mut run).child(link_row(&url));
                 }
+                // else: a media URL — the gallery section below renders it.
             }
             Some(Seg::User(pk)) => {
                 let key = pk.to_string();
@@ -379,7 +395,7 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
                     .map(|p| p.display())
                     .unwrap_or_else(|| short_bech32(&key));
                 let seg_handle = handle.clone();
-                div()
+                let el = div()
                     .id(seg_id("mention", trimmed))
                     .cursor_pointer()
                     .text_size(px(13.5))
@@ -388,13 +404,14 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
                         cx.stop_propagation();
                         seg_handle.update(cx, |_, cx| cx.emit(Nav::OpenProfile(pk)));
                     })
-                    .child(label)
-                    .into_any_element()
+                    .child(format!("@{label}"))
+                    .into_any_element();
+                run.push(el);
             }
-            None => word_flow(para, ctx, &handle).into_any_element(),
+            None => run.push(word_flow(para, ctx, &handle).into_any_element()),
         };
-        body = body.child(el);
     }
+    body = push_block(body, &mut run);
 
     // Media section (content.ts): one image full-width by its aspect; several
     // as a horizontal strip; tiles open the lightbox.
@@ -418,6 +435,19 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
     }
 
     body
+}
+
+/// Pubkeys mentioned inline (nostr:npub / nprofile entities), so a pane can
+/// hydrate their profiles before render — otherwise a mention degrades to
+/// @npub1… (TODO(port): content.ts mentionPubkeys).
+pub(crate) fn mention_pks(content: &str) -> Vec<PublicKey> {
+    content
+        .split_whitespace()
+        .filter_map(|tok| match classify_token(split_trailing(tok).0) {
+            Tok::Mention(pk) => Some(pk),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Schemeless, truncated link row for URLs that aren't media.

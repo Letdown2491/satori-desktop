@@ -35,3 +35,5 @@ pub const SANS: &str = "Cantarell";
 // P052: the Palatino face — a book serif with a big x-height, ink on washi
 // (was Nimbus Roman, a Times clone that read cramped at body sizes).
 pub const SERIF: &str = "P052";
+
+pub const MONO: &str = "Noto Sans Mono";

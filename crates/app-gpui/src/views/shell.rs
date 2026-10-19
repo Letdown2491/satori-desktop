@@ -23,6 +23,7 @@ use super::{
     nav::Nav,
     notifications::NotificationsView,
     profile::ProfileView,
+    reader::ArticleView,
     search::SearchView,
     settings::SettingsView,
     thread::ThreadView,
@@ -35,6 +36,7 @@ pub enum Pane {
     Notifications(Entity<NotificationsView>),
     Search(Entity<SearchView>),
     Settings(Entity<SettingsView>),
+    Article(Entity<ArticleView>),
     Composer(Entity<Composer>),
 }
 
@@ -63,6 +65,7 @@ impl Shell {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
+            Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
             Nav::Pop => this.back(cx),
         })
@@ -86,6 +89,7 @@ impl Shell {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
+            Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
             Nav::Pop => this.back(cx),
         })
@@ -93,8 +97,6 @@ impl Shell {
     }
 
     fn open_thread(&mut self, id: EventId, cx: &mut Context<Self>) {
-        // TODO(port): crates/app/src/thread.rs thread_page_by_id — flat replies
-        // done; reply nesting (nest_replies, depth <= 3) still pending.
         let view = cx.new(|cx| ThreadView::new(self.core.clone(), id, cx));
         self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Thread(view));
@@ -112,6 +114,13 @@ impl Shell {
         let view = cx.new(|cx| Composer::new(self.core.clone(), reply_to, cx));
         self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Composer(view));
+        cx.notify();
+    }
+
+    fn open_article(&mut self, ev: Event, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| ArticleView::new(self.core.clone(), ev, cx));
+        self.subscribe_nav(&view, cx);
+        self.stack.push(Pane::Article(view));
         cx.notify();
     }
 
@@ -216,6 +225,7 @@ impl Shell {
             Some(Pane::Notifications(_)) => "Notifications",
             Some(Pane::Search(_)) => "Search",
             Some(Pane::Settings(_)) => "Settings",
+            Some(Pane::Article(_)) => "Read",
             Some(Pane::Composer(_)) => "Compose",
             None => "Satori",
         }
@@ -322,6 +332,7 @@ impl Render for Shell {
                 let composing = matches!(
                     shell.stack.last(),
                     Some(Pane::Composer(_)) | Some(Pane::Search(_)) | Some(Pane::Settings(_))
+                    | Some(Pane::Article(_))
                 );
                 if !ev.keystroke.modifiers.modified() && !composing {
                     if ev.keystroke.key == "n" {
@@ -396,6 +407,7 @@ impl Render for Shell {
                 Pane::Notifications(view) => view.clone().into_any_element(),
                 Pane::Search(view) => view.clone().into_any_element(),
                 Pane::Settings(view) => view.clone().into_any_element(),
+                Pane::Article(view) => view.clone().into_any_element(),
                 Pane::Composer(view) => view.clone().into_any_element(),
             })
             .when_some(self.lightbox.clone(), |d, (urls, idx)| {

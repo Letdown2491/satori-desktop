@@ -11,6 +11,8 @@ pub enum Nav {
     OpenProfile(PublicKey),
     /// The composer, optionally replying to a note.
     OpenComposer(Option<Event>),
+    /// The article reader page (markdown).
+    OpenArticle(Event),
     /// The lightbox overlay: full-screen image viewer (lightbox.rs), the
     /// URL list plus the starting index.
     OpenLightbox(Vec<String>, usize),

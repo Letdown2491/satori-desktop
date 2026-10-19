@@ -10,13 +10,16 @@
 
 use std::collections::{HashMap, HashSet};
 
-use gpui::{div, prelude::*, px, relative, rgb, ClipboardItem, Div, Entity, SharedString};
+use gpui::{
+    div, prelude::*, px, relative, rgb, ClipboardItem, Div, Entity, FontWeight, SharedString,
+};
 use nostr::prelude::*;
 use satori_core::nip::{article, calendar, classified, highlight, imeta, poll, repo, wiki, podcast};
 
-use crate::theme;
+use crate::{markdown, theme};
 use super::content::{self, Body};
 use super::feed::{rel_time, Feed};
+use super::nav::Nav;
 
 /// Read-only card state, cloned out of the feed each frame (the list closure
 /// outlives the &self borrow).
@@ -350,8 +353,24 @@ fn article_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) ->
     if let Some(ts) = data.published_at {
         card = card.child(meta_line(rel_time(ts)));
     }
-    // TODO(port): the Read seal opens the article reader page (markdown,
-    // crates/app/src/article.rs); the feed card stops at the summary.
+    // The Read seal opens the reader page (markdown). Quiet on purpose —
+    // a serif word, underlined, the only door out of the summary.
+    let ev_for_read = ev.clone();
+    let read = feed.downgrade();
+    card = card.child(
+        div()
+            .id(SharedString::from(format!("read-{}", ev.id.to_string())))
+            .cursor_pointer()
+            .font_family(theme::SERIF)
+            .text_size(px(14.0))
+            .text_color(rgb(theme::MUTED))
+            .underline()
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                let _ = read.update(cx, |_, cx| cx.emit(Nav::OpenArticle(ev_for_read.clone())));
+            })
+            .child("Read"),
+    );
     card
 }
 
@@ -484,7 +503,42 @@ fn wiki_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
                 .child(summary.clone()),
         );
     }
-    // TODO(port): the wiki body (the GTK card links out to a reader).
+    // The body inline — the GTK card renders its AsciiDoc subset in place
+    // (== headings, **bold** pairs; asciidoc_line).
+    for line in data.content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(h) = line.strip_prefix("== ") {
+            card = card.child(
+                div()
+                    .w_full()
+                    .font_family(theme::SERIF)
+                    .text_size(px(15.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme::INK))
+                    .child(h.to_string()),
+            );
+            continue;
+        }
+        let mut row = div().w_full().flex().flex_wrap().gap_1();
+        for span in markdown::spans(line) {
+            if span.text.is_empty() {
+                continue;
+            }
+            row = row.child(
+                div()
+                    .font_family(theme::SERIF)
+                    .text_size(px(13.5))
+                    .line_height(relative(1.2))
+                    .text_color(rgb(theme::INK))
+                    .when(span.bold, |d| d.font_weight(FontWeight::SEMIBOLD))
+                    .child(span.text),
+            );
+        }
+        card = card.child(row);
+    }
     card
 }
 
