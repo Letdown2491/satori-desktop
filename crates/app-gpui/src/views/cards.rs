@@ -34,36 +34,29 @@ pub struct CardState {
 /// Kinds the feed carries beyond text notes (cards.rs `card_for` / the
 /// manifest registry). Picture notes (20) render through the normal body.
 pub fn is_feed_kind(kind: Kind) -> bool {
+    // Compare by NUMBER: the nostr crate parses some of these as named
+    // variants (30023 = Kind::LongFormTextNote), so `Kind::Custom(30023)`
+    // patterns never match a parsed event — filters (serialized by number)
+    // matched, cards silently didn't. Numbers are variant-proof.
     matches!(
-        kind,
-        Kind::Custom(20)
-            | Kind::Custom(21)
-            | Kind::Custom(22)
-            | Kind::Custom(54)
-            | Kind::Custom(1068)
-            | Kind::Custom(30023)
-            | Kind::Custom(30402)
-            | Kind::Custom(30617)
-            | Kind::Custom(30818)
-            | Kind::Custom(31922)
-            | Kind::Custom(31923)
-            | Kind::Custom(9802)
+        u16::from(kind),
+        20 | 21 | 22 | 54 | 1068 | 30023 | 30402 | 30617 | 30818 | 31922 | 31923 | 9802
     )
 }
 
 /// The row body: a rich card for registry kinds, the normal text pipeline
 /// otherwise (cards.rs `card_for`'s `_ => note_card`).
 pub fn row_body(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> Div {
-    match ev.kind {
-        Kind::Custom(21) | Kind::Custom(22) => video_card(ev, ctx, feed),
-        Kind::Custom(54) => podcast_card(ev, ctx, feed),
-        Kind::Custom(1068) => poll_card(ev, ctx, feed, st),
-        Kind::Custom(30023) => article_card(ev, ctx, feed, st),
-        Kind::Custom(30402) => classified_card(ev, ctx, feed, st),
-        Kind::Custom(30617) => repo_card(ev, ctx, feed),
-        Kind::Custom(30818) => wiki_card(ev, ctx, feed),
-        Kind::Custom(31922) | Kind::Custom(31923) => calendar_card(ev, ctx, feed, st),
-        Kind::Custom(9802) => highlight_card(ev, ctx, feed, st),
+    match u16::from(ev.kind) {
+        21 | 22 => video_card(ev, ctx, feed),
+        54 => podcast_card(ev, ctx, feed),
+        1068 => poll_card(ev, ctx, feed, st),
+        30023 => article_card(ev, ctx, feed, st),
+        30402 => classified_card(ev, ctx, feed, st),
+        30617 => repo_card(ev, ctx, feed),
+        30818 => wiki_card(ev, ctx, feed),
+        31922 | 31923 => calendar_card(ev, ctx, feed, st),
+        9802 => highlight_card(ev, ctx, feed, st),
         _ => content::body(ev, ctx, feed.clone()),
     }
 }

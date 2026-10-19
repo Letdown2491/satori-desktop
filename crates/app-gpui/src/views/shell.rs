@@ -70,7 +70,6 @@ impl Shell {
         let feed = cx.new(|cx| Feed::new(core.clone(), cx));
         cx.subscribe(&feed, |this, _feed, ev: &Nav, cx| match ev {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
-            Nav::OpenArticles => this.open_articles(cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
@@ -100,7 +99,6 @@ impl Shell {
     fn subscribe_nav<V: EventEmitter<Nav> + 'static>(&self, view: &Entity<V>, cx: &mut Context<Self>) {
         cx.subscribe(view, |this, _view, ev: &Nav, cx| match ev {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
-            Nav::OpenArticles => this.open_articles(cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),

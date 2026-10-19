@@ -183,17 +183,28 @@ impl Store {
 /// moves, bots), never human discussion. The {/[ lead keeps prose that
 /// merely CONTAINS JSON. Built-in default; user can switch it in Settings →
 /// Content (machine_notes_hidden in prefs.json, default true).
+///
+/// Same class, desktop addition: a kind:1 whose entire content is a bare
+/// PROFILE ref (npub/nprofile) — client follow-stamps carry no words and
+/// rendered as near-blank cards. Event refs (note/nevent) are real quotes
+/// and stay; profile refs are mentions, and a mention to nobody is noise.
 pub fn is_machine_note(ev: &Event) -> bool {
     if ev.kind != Kind::TextNote {
         return false;
     }
     let t = ev.content.trim();
-    if t.len() < 2 || (!t.starts_with('{') && !t.starts_with('[')) {
+    if t.len() < 2 {
         return false;
     }
-    serde_json::from_str::<serde_json::Value>(t)
-        .map(|v| v.is_object() || v.is_array())
-        .unwrap_or(false)
+    if t.starts_with('{') || t.starts_with('[') {
+        return serde_json::from_str::<serde_json::Value>(t)
+            .map(|v| v.is_object() || v.is_array())
+            .unwrap_or(false);
+    }
+    // One whitespace-free profile token, `nostr:` scheme or bare.
+    t.chars().all(|c| !c.is_whitespace())
+        && Nip19::from_bech32(t.strip_prefix("nostr:").unwrap_or(t))
+            .is_ok_and(|n| matches!(n, Nip19::Pubkey(_) | Nip19::Profile(_)))
 }
 
 /// The pref, read once per page (not per event).

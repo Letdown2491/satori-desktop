@@ -284,7 +284,7 @@ impl Feed {
             }
             self.want_images(&note, cx);
             self.want_quotes(&note, cx);
-            if note.kind == Kind::Custom(1068) {
+            if u16::from(note.kind) == 1068 {
                 self.want_poll(&note, cx);
             }
             self.note_ids.insert(note.id);

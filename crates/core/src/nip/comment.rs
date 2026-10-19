@@ -103,7 +103,7 @@ pub enum CommentTarget {
 
 impl CommentTarget {
     pub fn for_event(ev: &Event) -> CommentTarget {
-        if u16::from(ev.kind) >= 30000 && ev.kind != Kind::Custom(9802) {
+        if u16::from(ev.kind) >= 30000 && u16::from(ev.kind) != 9802 {
             // Addressable: prefer the address (survives edits).
             let d = ev
                 .tags

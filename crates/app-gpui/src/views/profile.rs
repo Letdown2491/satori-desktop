@@ -77,7 +77,7 @@ impl ProfileView {
                 self.notes = page
                     .notes
                     .into_iter()
-                    .filter(|n| n.kind == Kind::TextNote || n.kind == Kind::Custom(20))
+                    .filter(|n| n.kind == Kind::TextNote || u16::from(n.kind) == 20)
                     .collect();
                 for note in self.notes.clone() {
                     self.want_media(&note, cx);

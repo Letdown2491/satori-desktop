@@ -617,7 +617,7 @@ impl Core {
             .warm_at
             .get(&warm_key)
             .is_some_and(|t| *t > now_secs().saturating_sub(600));
-        let (engagement, _) = tokio::join!(
+        let (engagement, fetched) = tokio::join!(
             async {
                 let mine = Filter::new()
                     .author(me)
@@ -633,10 +633,16 @@ impl Core {
                         .limit(BOOTSTRAP_DEPTH);
                     active.pool.get(filter).await.unwrap_or_default()
                 } else {
+                    eprintln!(
+                        "[core] deep fetch skipped: follows_empty={} warm={}",
+                        follows.is_empty(),
+                        warm
+                    );
                     Default::default()
                 }
             }
         );
+        eprintln!("[core] deep fetch: {} events", fetched.len());
         for ev in engagement {
             let _ = active.pool.store.save(&ev).await;
         }
@@ -646,6 +652,7 @@ impl Core {
             st.warm_at.insert(warm_key, now_secs());
         });
         let page = self.page_from_store(&active, None, &kinds).await?;
+        eprintln!("[core] bootstrap page: {} notes", page.notes.len());
         let _ = tx.send(FeedEvent::Loaded(page));
         Ok(())
     }
@@ -757,6 +764,7 @@ impl Core {
             let _ = active.pool.store.save(&ev).await;
         }
         let page = self.page_from_store(&active, None, &kinds).await?;
+        eprintln!("[core] bootstrap page: {} notes", page.notes.len());
         let _ = tx.send(FeedEvent::Loaded(page));
         Ok(())
     }
