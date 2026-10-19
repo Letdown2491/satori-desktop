@@ -39,6 +39,9 @@ pub enum ConnectEvent {
     Waiting,
     /// An out-of-band auth_url approval (NIP-46); open it in a browser.
     AuthUrl(String),
+    /// The nostrconnect:// URI to advertise (QR in the UI) — client-initiated
+    /// NIP-46; the signer scans it and approves.
+    Uri(String),
     Approved(PublicKey),
     Failed(String),
 }
@@ -398,15 +401,18 @@ impl Core {
         Ok(pk)
     }
 
-    // --- nsec login (opt-in local key) ----------------------------------------
-
-    /// Import an nsec/hex secret. One-shot resolution through the same event
-    /// stream as the bunker flow (Approved | Failed).
-    pub fn login_nsec(self: &Arc<Self>, secret: String) -> ConnectRx {
+    /// nostrconnect login (NIP-46, client-initiated): generate a fresh
+    /// transport keypair and advertise it as a QR'd nostrconnect:// URI on
+    /// the shared NIP-46 relay — the signer scans and approves. The URI goes
+    /// down the same stream first (ConnectEvent::Uri); from approval on,
+    /// this is the bunker flow (transport key in BUNKER_CLIENT_SECRET,
+    /// session mode Bunker — resume rebuilds a bunker:// URI).
+    pub fn connect_nostrconnect(self: &Arc<Self>, relay: String) -> ConnectRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
-            match this.login_nsec_inner(&secret).await {
+            let _ = tx.send(ConnectEvent::Waiting);
+            match this.connect_nostrconnect_inner(&relay, &tx).await {
                 Ok(pk) => {
                     let _ = tx.send(ConnectEvent::Approved(pk));
                 }
@@ -418,18 +424,65 @@ impl Core {
         rx
     }
 
-    async fn login_nsec_inner(&self, secret: &str) -> Result<PublicKey> {
-        let keys = signer::parse_local_secret(secret)?;
-        let pk = keys.public_key();
+    async fn connect_nostrconnect_inner(
+        &self,
+        relay: &str,
+        tx: &mpsc::UnboundedSender<ConnectEvent>,
+    ) -> Result<PublicKey> {
+        let client_keys = Keys::generate();
+        // The metadata the signer shows at approval time. url/icons stay
+        // unset until the app has hosted art — both optional per NIP-46.
+        let mut uri = NostrConnectUri::client(
+            client_keys.public_key(),
+            [RelayUrl::parse(relay)
+                .map_err(|e| LoginError::InvalidBunkerUri(e.to_string()))?],
+            "Satori",
+        );
+        if let NostrConnectUri::Client { metadata, .. } = &mut uri {
+            metadata.description = Some("A quiet Nostr reader.".to_string());
+        }
+        let _ = tx.send(ConnectEvent::Uri(uri.to_string()));
 
-        secrets::store(secrets::NSEC, &keys.secret_key().display_secret().to_string()).await?;
-        let session = Session { pubkey: pk.to_string(), mode: SessionMode::Local };
+        let connect = Arc::new(
+            NostrConnect::new(uri, client_keys.clone(), LOGIN_TIMEOUT, None)
+                .map_err(|e| LoginError::Connect(e.to_string()))?,
+        );
+        *self.pending.lock().unwrap() = Some(Arc::clone(&connect));
+
+        let user_pk = connect
+            .get_public_key_async()
+            .await
+            .map_err(|e| LoginError::Connect(e.to_string()))?;
+        let remote = match connect
+            .bunker_uri()
+            .await
+            .map_err(|e| LoginError::Connect(e.to_string()))?
+        {
+            NostrConnectUri::Bunker { remote_signer_public_key, .. } => {
+                remote_signer_public_key.to_string()
+            }
+            _ => unreachable!("bunker_uri returns the Bunker variant"),
+        };
+        let relays: Vec<String> = connect.relays().iter().map(|r| r.to_string()).collect();
+
+        secrets::store(
+            secrets::BUNKER_CLIENT_SECRET,
+            &client_keys.secret_key().display_secret().to_string(),
+        )
+        .await?;
+        let session = Session {
+            pubkey: user_pk.to_string(),
+            mode: SessionMode::Bunker { remote, relays },
+        };
         session::save(&session)?;
 
         let active = self.build_active(&session).await?;
         *self.active.lock().unwrap() = Some(active);
-        Ok(pk)
+        *self.pending.lock().unwrap() = None;
+        Ok(user_pk)
     }
+
+
 
     // --- resume machinery ------------------------------------------------------
 
@@ -2377,6 +2430,25 @@ fn parse_list_event(plain: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
+/// Test-only local-key login — the user-facing nsec door is gone (D17: the
+/// app never handles the master key), but the logout/re-login flow tests
+/// still need a way in.
+#[cfg(test)]
+impl Core {
+    async fn login_nsec_inner(&self, secret: &str) -> Result<PublicKey> {
+        let keys = signer::parse_local_secret(secret)?;
+        let pk = keys.public_key();
+
+        secrets::store(secrets::NSEC, &keys.secret_key().display_secret().to_string()).await?;
+        let session = Session { pubkey: pk.to_string(), mode: SessionMode::Local };
+        session::save(&session)?;
+
+        let active = self.build_active(&session).await?;
+        *self.active.lock().unwrap() = Some(active);
+        Ok(pk)
+    }
+}
+
 mod tests {
     use super::*;
     use std::sync::Arc;
