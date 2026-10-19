@@ -227,7 +227,11 @@ impl Render for SearchView {
                         list(self.list.clone(), move |idx, _w, _cx| {
                             match results.get(idx) {
                                 Some(ev) => content::compact_card(
-                                    idx, "search", ev, &profiles, &media, &quotes, handle.clone(),
+                                    idx,
+                                    "search",
+                                    ev,
+                                    None,
+                                    &profiles, &media, &quotes, handle.clone(),
                                 ),
                                 None => div().into_any_element(),
                             }

@@ -1188,9 +1188,13 @@ impl Core {
                     .saturating_sub(7 * 86400);
 
                 // Mentions (#p=me) and replies (#e=my notes): PARALLEL.
+                let mut mention_kinds = vec![Kind::TextNote, Kind::Custom(1111)];
+                if this.reaction_notifs() {
+                    mention_kinds.push(Kind::Reaction);
+                }
                 let mention_q = Box::pin(active.pool.get(
                     Filter::new()
-                        .kinds([Kind::TextNote, Kind::Custom(1111)])
+                        .kinds(mention_kinds)
                         .pubkeys([me])
                         .since(Timestamp::from(since))
                         .limit(200),
@@ -1206,16 +1210,35 @@ impl Core {
                             .limit(200),
                     )))
                 };
-                let (mentions_res, replies_res) = tokio::join!(mention_q, async {
+                let poll_ids: Vec<EventId> = my_notes
+                    .iter()
+                    .filter(|e| u16::from(e.kind) == 1068)
+                    .map(|e| e.id)
+                    .collect();
+                let vote_q = Box::pin(async {
+                    if poll_ids.is_empty() {
+                        return Default::default();
+                    }
+                    let mut f = Filter::new()
+                        .kind(Kind::Custom(1018))
+                        .since(Timestamp::from(since))
+                        .limit(200);
+                    for id in poll_ids {
+                        f = f.event(id);
+                    }
+                    active.pool.get(f).await.unwrap_or_default()
+                });
+                let (mentions_res, replies_res, votes_res) = tokio::join!(mention_q, async {
                     match reply_q {
                         Some(q) => q.await.unwrap_or_default(),
                         None => Default::default(),
                     }
-                });
+                }, vote_q);
                 let mine_events: Vec<Event> = mentions_res
                     .into_iter()
                     .flat_map(|set| set.into_iter())
                     .chain(replies_res)
+                    .chain(votes_res)
                     .collect();
                 for ev in &mine_events {
                     let _ = active.pool.store.save(ev).await;
@@ -1265,6 +1288,16 @@ impl Core {
             }
         });
         rx
+    }
+
+    /// The "Show reactions in notifications" pref (prefs.json
+    /// reactionNotifs, default off — render/settings.ts PREF_LABELS).
+    fn reaction_notifs(&self) -> bool {
+        std::fs::read_to_string(crate::config::state_file(crate::config::files::PREFS))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|v| v.get("reactionNotifs").and_then(|b| b.as_bool()))
+            .unwrap_or(false)
     }
 
     /// Opening the notifications page advances the high-water (monotonic).

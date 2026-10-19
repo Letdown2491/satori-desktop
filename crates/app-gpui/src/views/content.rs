@@ -882,6 +882,7 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
     idx: usize,
     tag: &str,
     ev: &Event,
+    action: Option<&str>,
     profiles: &HashMap<String, Profile>,
     media: &media::Snapshot,
     quotes: &Quotes,
@@ -934,6 +935,7 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
                     div()
                         .text_size(px(12.0))
                         .text_color(rgb(theme::MUTED))
+                        .children(action.map(|a| format!("· {a}")))
                         .child(time),
                 ),
         )

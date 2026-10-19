@@ -13,11 +13,42 @@ use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
 use crate::{media, theme};
 use super::{content, nav::Nav};
 
+/// What the event did to you (notifications.ts `add`): a comment is always
+/// a reply; kind 1 splits by whether it carries an `e` tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotifType {
+    Reply,
+    Mention,
+    Reaction,
+    PollVote,
+}
+
+fn notif_type(ev: &Event) -> NotifType {
+    match u16::from(ev.kind) {
+        7 => NotifType::Reaction,
+        1018 => NotifType::PollVote,
+        1111 => NotifType::Reply,
+        _ => {
+            let has_e = ev.tags.iter().any(|t| t.as_slice().first().map(String::as_str) == Some("e"));
+            if has_e { NotifType::Reply } else { NotifType::Mention }
+        }
+    }
+}
+
+fn action_word(t: NotifType) -> &'static str {
+    match t {
+        NotifType::Reply => "replied",
+        NotifType::Mention => "mentioned you",
+        NotifType::Reaction => "reacted",
+        NotifType::PollVote => "voted in your poll",
+    }
+}
+
 /// One list row: a section label (New / Earlier) or a notification card.
 #[derive(Clone)]
 enum Row {
     Label(&'static str),
-    Note(Event),
+    Note(Event, NotifType),
 }
 
 pub struct NotificationsView {
@@ -146,7 +177,10 @@ fn sectioned(prev: u64, notifs: &[Event]) -> Vec<Row> {
                 _ => None,
             };
             let label = label.map(Row::Label);
-            label.into_iter().chain(std::iter::once(Row::Note(n.clone())))
+            label
+                .into_iter()
+                .chain(std::iter::once(Row::Note(n.clone(), notif_type(n))))
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -201,8 +235,15 @@ impl Render for NotificationsView {
                                     .text_color(rgb(theme::MUTED))
                                     .child(text.to_string())
                                     .into_any_element(),
-                                Some(Row::Note(ev)) => content::compact_card(
-                                    idx, "notif", ev, &profiles, &media, &quotes, handle.clone(),
+                                Some(Row::Note(ev, t)) => content::compact_card(
+                                    idx,
+                                    "notif",
+                                    ev,
+                                    Some(action_word(*t)),
+                                    &profiles,
+                                    &media,
+                                    &quotes,
+                                    handle.clone(),
                                 ),
                                 None => div().into_any_element(),
                             }
