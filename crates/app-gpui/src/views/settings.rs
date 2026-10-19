@@ -47,6 +47,9 @@ pub struct SettingsView {
     // out…" while the shell tears the session down (the whole view is
     // replaced by the login doors a beat later).
     signing_out: bool,
+    // The signed-in identity, resolved name for the Session row (the short
+    // npub stands in until the profile lands).
+    me_name: Option<String>,
     // Toast equivalent (the pane has no header seal to hang one on).
     status: String,
     status_err: bool,
@@ -90,10 +93,12 @@ impl SettingsView {
             machine_hidden: satori_core::store::machine_notes_hidden(),
             hidden_kinds: prefs::content_hidden(),
             signing_out: false,
+            me_name: None,
             status: String::new(),
             status_err: false,
         };
         view.pump_feed(core.fetch_media_servers(), cx);
+        view.pump_me(cx);
         // The pane is a projection — bootstrap may still be landing the
         // NIP-65 (settings.rs catch-up poll: 30 × 800ms).
         cx.spawn(async move |this, cx| {
@@ -120,6 +125,44 @@ impl SettingsView {
     }
 
     // --- pumps --------------------------------------------------------------
+
+    /// The signed-in profile's name for the Session row. The profiles
+    /// service resolves a miss once, so retry like the rail avatar does —
+    /// though this pane opens long after connect, so it usually lands
+    /// first try.
+    fn pump_me(&self, cx: &mut Context<Self>) {
+        let Some(me) = satori_core::session::load()
+            .and_then(|s| PublicKey::from_str(&s.pubkey).ok())
+        else {
+            return;
+        };
+        let me_hex = me.to_string();
+        cx.spawn(async move |this, cx| {
+            for _ in 0..5 {
+                let mut rx = this
+                    .update(cx, |this, _| {
+                        this.core.clone().ensure_profiles(vec![me])
+                    })
+                    .expect("settings alive");
+                while let Some(ev) = rx.recv().await {
+                    if let FeedEvent::Profiles(ps) = ev {
+                        if let Some(p) = ps.into_iter().find(|p| p.pubkey == me_hex) {
+                            let _ = this.update(cx, |this, cx| {
+                                let name = p.display();
+                                this.me_name =
+                                    (!name.is_empty() && name != me_hex).then_some(name);
+                                cx.notify();
+                            });
+                            return;
+                        }
+                    }
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+            }
+        })
+        .detach();
+    }
 
     fn pump_feed(&self, mut rx: satori_core::manager::FeedRx, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
@@ -592,10 +635,10 @@ impl Render for SettingsView {
                                 .flex_1()
                                 .text_size(px(13.0))
                                 .text_color(rgb(theme::INK))
-                                .child(format!(
-                                    "Signed in as {}",
-                                    self.me_npub_short(),
-                                )),
+                                .child(match &self.me_name {
+                                    Some(name) => format!("Signed in as {name}"),
+                                    None => format!("Signed in as {}", self.me_npub_short()),
+                                }),
                         )
                         .child(
                             div()

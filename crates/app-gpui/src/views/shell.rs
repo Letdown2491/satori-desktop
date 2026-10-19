@@ -125,23 +125,37 @@ impl Shell {
         shell
     }
 
-    /// One ensure_profiles pump for the rail avatar; the profile lands once
-    /// and the memoized snapshot picks it up on the epoch bump.
+    /// One ensure_profiles pump for the rail avatar. The profiles service
+    /// resolves a miss exactly once — and this pump fires at Shell::new, a
+    /// beat before the relays connect, so the first ask usually misses.
+    /// Retry (2s apart, ~30s ceiling) until the profile lands.
     fn want_avatar(&self, cx: &mut Context<Self>) {
         let Some(me) = self.me else { return };
         let me_hex = me.to_string();
-        let mut rx = self.core.clone().ensure_profiles(vec![me]);
         cx.spawn(async move |this, cx| {
-            while let Some(ev) = rx.recv().await {
-                if let FeedEvent::Profiles(ps) = ev {
-                    let hit = ps.into_iter().find(|p| p.pubkey == me_hex);
-                    if let Some(p) = hit {
-                        let _ = this.update(cx, |shell, cx| {
-                            shell.me_profile = Some(p);
-                            cx.notify();
-                        });
+            for _ in 0..15 {
+                let mut rx = this
+                    .update(cx, |shell, _| {
+                        shell.core.clone().ensure_profiles(vec![me])
+                    })
+                    .expect("shell alive");
+                // One resolution per ask (the debouncer drops the waiter
+                // after its single send).
+                while let Some(ev) = rx.recv().await {
+                    if let FeedEvent::Profiles(ps) = ev {
+                        if let Some(p) = ps.into_iter().find(|p| p.pubkey == me_hex) {
+                            let _ = this.update(cx, |shell, cx| {
+                                shell.me_profile = Some(p);
+                                cx.notify();
+                            });
+                            return;
+                        }
                     }
+                    break;
                 }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(2))
+                    .await;
             }
         })
         .detach();
