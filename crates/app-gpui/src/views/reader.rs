@@ -1,11 +1,12 @@
 //! Article reader page — the markdown port (TODO(port): crates/app/src/cards.rs
 //! `article_reader` — the GTK reader pushed an adw page; here it's a pane).
-//! Title, author line, header image, then the markdown blocks: paragraphs
-//! through the word flow (entities resolve, markdown styles ride along),
-//! headings, quotes, lists, code, rules, own-line images. The blocks ride a
-//! `list` (the feed's scroll machinery — plain overflow divs don't take wheel
-//! input), one item per block, built from data inside the item closure.
-//! Comments (NIP-22) stay with the GTK original for now — no comments yet.
+//! Head: title, byline (avatar, author, published, reading time), cover.
+//! Then the markdown blocks: paragraphs through the word flow (entities
+//! resolve, markdown styles ride along), headings, quotes, ordered/unordered
+//! lists, code, rules, own-line images. The blocks ride a `list` (the feed's
+//! scroll machinery — plain overflow divs don't take wheel input), one item
+//! per block, built from data inside the item closure. Comments (NIP-22)
+//! stay with the GTK original for now — no comments section yet.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -69,14 +70,14 @@ impl ArticleView {
         }
     }
 
-    /// Queue fetches for the header image + every own-line image in the body.
+    /// Queue fetches for the cover + every own-line image in the body.
     fn want_media(&self, cx: &mut Context<Self>) {
         let mut urls = content::media_urls(&self.ev);
         if let Some(image) = &self.data.image {
             urls.push(image.clone());
         }
         for block in markdown::blocks(&self.ev.content) {
-            if let markdown::Block::Image(url) = block {
+            if let markdown::Block::Image { url } = block {
                 urls.push(url);
             }
         }
@@ -134,8 +135,9 @@ fn render_block(
             block_item(md_flow(&text, 15.0, false, ctx, handle), 14.0).into_any_element()
         }
         markdown::Block::Heading(level, text) => {
-            // The GTK sizes: 28000/23000/19000 Pango units.
-            let size = [24.0, 20.0, 17.0][(level - 1).clamp(0, 2)];
+            // The GTK sizes: 28000/23000/19000 Pango units for 1/2/3; the
+            // deeper levels step down toward body size.
+            let size = [24.0, 20.0, 17.0, 15.5, 14.5, 14.0][(level - 1).clamp(0, 5)];
             let head = div()
                 .w_full()
                 .font_family(theme::SERIF)
@@ -156,9 +158,14 @@ fn render_block(
                 .child(md_flow(&text, 14.0, true, ctx, handle));
             block_item(q, 14.0).into_any_element()
         }
-        markdown::Block::List(items) => {
+        markdown::Block::List { items, ordered } => {
             let mut list_el = div().w_full().flex().flex_col().gap_1();
-            for li in items {
+            for (n, li) in items.into_iter().enumerate() {
+                let marker = if ordered {
+                    format!("{}.", n + 1)
+                } else {
+                    "·".to_string()
+                };
                 list_el = list_el.child(
                     div()
                         .w_full()
@@ -169,7 +176,7 @@ fn render_block(
                                 .font_family(theme::SERIF)
                                 .text_size(px(15.0))
                                 .text_color(rgb(theme::MUTED))
-                                .child("·"),
+                                .child(marker),
                         )
                         .child(md_flow(&li, 15.0, false, ctx, handle)),
                 );
@@ -191,6 +198,10 @@ fn render_block(
                 .child(text);
             block_item(div().w_full().child(code), 14.0).into_any_element()
         }
+        markdown::Block::Break => {
+            // An author's own <br>: a quiet spacer, not a rule.
+            block_item(div().w_full().h(px(6.0)), 0.0).into_any_element()
+        }
         markdown::Block::Rule => {
             let rule = div()
                 .w_full()
@@ -199,7 +210,7 @@ fn render_block(
                 .border_color(rgb(theme::HAIRLINE));
             block_item(rule, 14.0).into_any_element()
         }
-        markdown::Block::Image(url) => {
+        markdown::Block::Image { url } => {
             block_item(image_tile(&url, ctx.media), 14.0).into_any_element()
         }
     }
@@ -218,6 +229,12 @@ fn md_flow(
 ) -> Div {
     let mut flow = div().w_full().flex().flex_wrap().gap_1();
     for span in markdown::spans(para) {
+        // A <br> span: a full-width spacer — flex-wrap pushes the rest of
+        // the flow to the next line (the web's literal line break).
+        if span.br {
+            flow = flow.child(div().w_full().h(px(2.0)));
+            continue;
+        }
         let is_link = span.link.is_some();
         let label = span.text.clone();
         let styled = |text: String| {
@@ -304,9 +321,17 @@ impl Render for ArticleView {
         // Data the item closure rebuilds elements from (AnyElement isn't
         // Clone — the thread pane's closure does the same dance).
         let title = self.data.title.clone();
-        let author = self.name_for(&self.ev.pubkey);
+        let author_pk = self.ev.pubkey;
+        let author = self.name_for(&author_pk);
+        let author_pic = self
+            .profiles
+            .get(&author_pk.to_string())
+            .map(|p| p.picture.clone())
+            .unwrap_or_default();
         let published = self.data.published_at.map(super::feed::rel_time);
-        let cover = self.data.image.clone();
+        // Reading time at ~220 wpm (content.ts's readingMinutes rate).
+        let minutes = self.ev.content.split_whitespace().count() / 220 + 1;
+        let cover = content::article_cover(&self.ev);
         let blocks = markdown::blocks(&self.ev.content);
         let profiles = self.profiles.clone();
         let media = media_snap;
@@ -325,49 +350,86 @@ impl Render for ArticleView {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .items_center()
-            .child(list(self.list.clone(), move |idx, _w, _cx| {
-                let body_ctx = content::Body {
-                    media: &media,
-                    quotes: &quotes,
-                    profiles: &profiles,
-                };
-                match idx {
-                    0 => block_item(
-                        div()
-                            .w_full()
-                            .font_family(theme::SERIF)
-                            .text_size(px(30.0))
-                            .line_height(relative(1.2))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(theme::INK))
-                            .child(title.clone()),
-                        10.0,
-                    )
-                    .into_any_element(),
-                    1 => block_item(
-                        div()
-                            .flex()
-                            .items_baseline()
-                            .gap_2()
-                            .text_size(px(12.5))
-                            .text_color(rgb(theme::MUTED))
-                            .child(author.clone())
-                            .children(published.clone().map(|t| format!("· {t}"))),
-                        18.0,
-                    )
-                    .into_any_element(),
-                    2 if cover.is_some() => {
-                        block_item(image_tile(cover.as_deref().unwrap_or(""), &media), 18.0)
-                            .into_any_element()
-                    }
-                    i => render_block(
-                        blocks[i - head_count].clone(),
-                        i - head_count,
-                        &body_ctx,
-                        &handle,
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        // list() has no intrinsic height — it must be told to
+                        // fill its container or it lays out at 0px and paints
+                        // nothing (the feed carries the same comment).
+                        list(self.list.clone(), move |idx, _w, _cx| {
+                            let body_ctx = content::Body {
+                                media: &media,
+                                quotes: &quotes,
+                                profiles: &profiles,
+                            };
+                            match idx {
+                                0 => block_item(
+                                    div()
+                                        .w_full()
+                                        .font_family(theme::SERIF)
+                                        .text_size(px(30.0))
+                                        .line_height(relative(1.2))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(theme::INK))
+                                        .child(title.clone()),
+                                    12.0,
+                                )
+                                .into_any_element(),
+                                1 => block_item(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(media::avatar(
+                                            &media,
+                                            &author_pic,
+                                            &author,
+                                            28.0,
+                                        ))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_baseline()
+                                                .gap_2()
+                                                .text_size(px(12.5))
+                                                .text_color(rgb(theme::MUTED))
+                                                .child(
+                                                    div()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(rgb(theme::INK))
+                                                        .child(author.clone()),
+                                                )
+                                                .children(
+                                                    published
+                                                        .clone()
+                                                        .map(|t| format!("· {t}")),
+                                                )
+                                                .child(format!("· {minutes} min read")),
+                                        ),
+                                    18.0,
+                                )
+                                .into_any_element(),
+                                2 if cover.is_some() => block_item(
+                                    image_tile(cover.as_deref().unwrap_or(""), &media),
+                                    18.0,
+                                )
+                                .into_any_element(),
+                                i => render_block(
+                                    blocks[i - head_count].clone(),
+                                    i - head_count,
+                                    &body_ctx,
+                                    &handle,
+                                ),
+                            }
+                        })
+                        .w_full()
+                        .max_w(px(660.0))
+                        .h_full(),
                     ),
-                }
-            }))
+            )
     }
 }

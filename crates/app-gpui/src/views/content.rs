@@ -130,6 +130,22 @@ impl MediaAsset {
 /// or extension makes it a video; its NIP-92 `image` attr is the poster),
 /// then standalone text links — blossom video URLs, YouTube links (thumbnail
 /// derived from the id), pictures, and extension-less blossom candidates.
+/// The article's cover, wherever the author put it: the NIP-23 `image` tag
+/// first, then the first imeta/content picture (some clients skip the tag —
+/// article.ts header image).
+pub fn article_cover(ev: &Event) -> Option<String> {
+    if let Some(d) = article::parse(ev)
+        && let Some(img) = d.image
+        && !img.is_empty()
+    {
+        return Some(img);
+    }
+    media_assets(ev).iter().find_map(|a| match a {
+        MediaAsset::Picture { url } => Some(url.clone()),
+        _ => None,
+    })
+}
+
 pub fn media_assets(ev: &Event) -> Vec<MediaAsset> {
     let mut out: Vec<MediaAsset> = Vec::new();
     // NIP-23: an article's cover rides the `image` tag, not the content and

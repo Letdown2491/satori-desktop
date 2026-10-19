@@ -321,7 +321,7 @@ fn article_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) ->
         return fallback(ev, ctx, feed);
     };
     let mut card = div().w_full().flex().flex_col().gap_2();
-    if let Some(img) = &data.image {
+    if let Some(img) = content::article_cover(ev) {
         let mut dims: HashMap<String, Option<(u32, u32)>> = HashMap::new();
         dims.insert(img.clone(), None);
         let asset = content::MediaAsset::Picture { url: img.clone() };
