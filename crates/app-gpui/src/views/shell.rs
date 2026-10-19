@@ -19,6 +19,7 @@ use satori_core::manager::{Core, FeedEvent};
 use crate::{icons, media, theme};
 use super::{
     composer::{Draft, Composer},
+    content,
     feed::Feed,
     nav::Nav,
     notifications::NotificationsView,
@@ -303,9 +304,11 @@ impl Shell {
             .gap_1()
             // The ensō: home. Same as the feed mark, drawn heavier.
             .child(self.rail_button(
+                // The ensō is the logo that happens to lead home — it never
+                // wears the active tick.
                 "rail-home",
                 icons::enso_icon(ink(feed_active), 22.0),
-                feed_active,
+                false,
                 cx.listener(move |shell, _, _, cx| {
                     if feed_active {
                         shell.feed_to_top(cx);
@@ -548,16 +551,21 @@ impl Render for Shell {
             .bg(rgb(theme::WASHI))
             .text_color(rgb(theme::INK))
             .font_family(theme::SANS)
-            // The rail + content row. The rail sits outside every pane's
+            // The rail + content row. The pair is centered as a group —
+            // the rail stands to the left of the reading column, not glued
+            // to the window edge. The rail sits outside every pane's
             // scroll container, so anchoring is free; the deep panes carry
             // their back+title row above the pane (the feed carries none).
             .flex()
             .flex_row()
+            .items_start()
+            .justify_center()
             .child(self.rail(cx))
             .child(
                 div()
                     .relative()
                     .flex_1()
+                    .max_w(px(content::COL_W))
                     .min_w_0()
                     .h_full()
                     .flex()
