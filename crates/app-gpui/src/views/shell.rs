@@ -6,6 +6,7 @@
 //! ported as a root key-down listener (gpui actions land with the composer in
 //! P2, when there are more keys to bind).
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use gpui::{
@@ -14,7 +15,7 @@ use gpui::{
     AnyView, ObjectFit, Render, SharedString, Stateful, Window,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent};
+use satori_core::manager::{Core, FeedEvent, Profile};
 
 use crate::{icons, media, theme};
 use super::{
@@ -44,6 +45,14 @@ pub enum Pane {
     Composer(Entity<Composer>),
 }
 
+/// Shell-to-root events. The root subscribes at both shell-creation sites
+/// (startup session resume and Login::Approved) — today only the sign-out
+/// handoff, which swaps the window back to the login doors.
+#[derive(Debug)]
+pub enum ShellEvent {
+    SignedOut,
+}
+
 pub struct Shell {
     core: Arc<Core>,
     focus: FocusHandle,
@@ -63,6 +72,14 @@ pub struct Shell {
     /// back-to-top whisper only shows once the reader is well below the top.
     feed_deep: bool,
     stack: Vec<Pane>,
+    /// The signed-in identity: the rail's top mark is the user's avatar
+    /// (replacing the ensō as the home glyph).
+    me: Option<PublicKey>,
+    me_profile: Option<Profile>,
+    /// Snapshot memo for the one rail avatar (media::Snapshot::new clones the
+    /// cache map — not per-frame work).
+    rail_snap: Option<media::Snapshot>,
+    rail_epoch: u64,
 }
 
 impl Shell {
@@ -79,6 +96,7 @@ impl Shell {
                 cx.notify();
             }
             Nav::Pop => this.back(cx),
+            Nav::SignOut => this.sign_out(cx),
         })
         .detach();
         let mut shell = Self {
@@ -90,10 +108,43 @@ impl Shell {
             notif_unread: false,
             feed_deep: false,
             stack: vec![],
+            me: None,
+            me_profile: None,
+            rail_snap: None,
+            rail_epoch: 0,
         };
         shell.stack.push(Pane::Feed(feed));
+        // The rail avatar: session pubkey synchronously, profile via the
+        // usual ensure_profiles pump (name/picture arrive from the store or
+        // the relays a beat later).
+        shell.me = satori_core::session::load()
+            .map(|s| s.pubkey)
+            .and_then(|hex| PublicKey::from_str(&hex).ok());
+        shell.want_avatar(cx);
         shell.watch_notif(cx);
         shell
+    }
+
+    /// One ensure_profiles pump for the rail avatar; the profile lands once
+    /// and the memoized snapshot picks it up on the epoch bump.
+    fn want_avatar(&self, cx: &mut Context<Self>) {
+        let Some(me) = self.me else { return };
+        let me_hex = me.to_string();
+        let mut rx = self.core.clone().ensure_profiles(vec![me]);
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                if let FeedEvent::Profiles(ps) = ev {
+                    let hit = ps.into_iter().find(|p| p.pubkey == me_hex);
+                    if let Some(p) = hit {
+                        let _ = this.update(cx, |shell, cx| {
+                            shell.me_profile = Some(p);
+                            cx.notify();
+                        });
+                    }
+                }
+            }
+        })
+        .detach();
     }
 
     fn subscribe_nav<V: EventEmitter<Nav> + 'static>(&self, view: &Entity<V>, cx: &mut Context<Self>) {
@@ -108,6 +159,7 @@ impl Shell {
                 cx.notify();
             }
             Nav::Pop => this.back(cx),
+            Nav::SignOut => this.sign_out(cx),
         })
         .detach();
     }
@@ -151,8 +203,16 @@ impl Shell {
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         let view = cx.new(|cx| SettingsView::new(self.core.clone(), cx));
+        self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Settings(view));
         cx.notify();
+    }
+
+    /// Settings' sign-out row: clear the session + secrets, then hand the
+    /// window back to the login doors (Root swaps on SignedOut).
+    fn sign_out(&mut self, cx: &mut Context<Self>) {
+        self.core.sign_out();
+        cx.emit(ShellEvent::SignedOut);
     }
 
     /// The notifications pane. Opening marks seen (the view constructor does
@@ -327,10 +387,25 @@ impl Shell {
         }
     }
 
-    fn rail(&self, cx: &mut Context<Self>) -> Div {
+    fn rail(&mut self, cx: &mut Context<Self>) -> Div {
         let active = self.active_spot();
         let ink = |on: bool| if on { theme::INK } else { theme::MUTED };
         let feed_active = active == Some(Spot::Feed);
+
+        // The avatar's snapshot memoized on the media epoch — Snapshot::new
+        // clones the cache map, so it must not run per frame.
+        let epoch = media::generation(cx);
+        if self.rail_snap.is_none() || self.rail_epoch != epoch {
+            self.rail_snap = Some(media::Snapshot::new(cx));
+            self.rail_epoch = epoch;
+        }
+        let (me_pic, me_name) = match (&self.me_profile, self.me) {
+            (Some(p), _) => (p.picture.clone(), p.display()),
+            (None, Some(pk)) => (String::new(), format!("{}…", &pk.to_string()[..8])),
+            _ => (String::new(), "You".to_string()),
+        };
+        let me_avatar =
+            media::avatar(self.rail_snap.as_ref().unwrap(), &me_pic, &me_name, 26.0);
 
         div()
             .flex_none()
@@ -343,13 +418,12 @@ impl Shell {
             // avatar (16px page band + 12px note-card padding).
             .pt(px(19.0))
             .gap_1()
-            // The ensō: home. Same as the feed mark, drawn heavier.
+            // The user's avatar is the home mark now (it replaced the ensō);
+            // like the ensō it never wears the active tick.
             .child(self.rail_button(
-                // The ensō is the logo that happens to lead home — it never
-                // wears the active tick.
                 "rail-home",
                 "Home",
-                icons::enso_icon(ink(feed_active), 22.0),
+                me_avatar,
                 false,
                 cx.listener(move |shell, _, _, cx| {
                     if feed_active {
@@ -536,6 +610,8 @@ impl Shell {
     }
 }
 
+impl EventEmitter<ShellEvent> for Shell {}
+
 impl Focusable for Shell {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus.clone()
@@ -545,6 +621,9 @@ impl Focusable for Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let depth = self.stack.len();
+        // Built before the pane borrow: rail() takes &mut self (snapshot
+        // memo), and `pane` holds the stack for the rest of the render.
+        let rail = self.rail(cx);
         let pane = self.stack.last().unwrap();
         if !self.focused_once || self.refocus {
             self.focused_once = true;
@@ -624,7 +703,7 @@ impl Render for Shell {
             .flex_row()
             .items_start()
             .justify_center()
-            .child(self.rail(cx))
+            .child(rail)
             .child(
                 div()
                     .relative()

@@ -7,6 +7,9 @@
 use nostr::prelude::*;
 
 pub enum Nav {
+    /// Settings asked for a sign-out; the shell clears the session and
+    /// hands the window back to the login doors.
+    SignOut,
     OpenThread(EventId),
     OpenProfile(PublicKey),
     /// The composer, optionally replying to a note.

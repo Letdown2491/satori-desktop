@@ -221,6 +221,16 @@ impl Core {
     /// failure reason (shown on the login page — silent resume failures are
     /// how users get lost). The bunker signer is rebuilt from the transport
     /// secret without user interaction.
+    /// Sign out: forget the session file + both secret-store entries
+    /// (logout must not leave residue) and drop the in-memory Active — the
+    /// next login rebuilds it exactly as a fresh process would.
+    pub fn sign_out(&self) {
+        crate::session::clear();
+        crate::secrets::delete(crate::secrets::NSEC);
+        crate::secrets::delete(crate::secrets::BUNKER_CLIENT_SECRET);
+        *self.active.lock().unwrap() = None;
+    }
+
     pub fn init(&self) -> (Option<Session>, Option<String>) {
         let Some(session) = session::load() else {
             return (None, None); // first run — not an error

@@ -22,7 +22,7 @@ use satori_core::manager::Core;
 use crate::{
     input::bind_input_keys,
     views::{
-        composer::bind_composer_keys, login::{Login, LoginView}, shell::Shell,
+        composer::bind_composer_keys, login::{Login, LoginView}, shell::{Shell, ShellEvent},
     },
 };
 
@@ -43,7 +43,11 @@ impl Root {
         cx: &mut Context<Self>,
     ) -> Self {
         let (login, shell) = match session {
-            true => (None, Some(cx.new(|cx| Shell::new(core.clone(), cx)))),
+            true => {
+                let shell = cx.new(|cx| Shell::new(core.clone(), cx));
+                Self::watch_shell(shell.clone(), cx);
+                (None, Some(shell))
+            }
             false => {
                 // Resume failures surface on the doors — the user must know
                 // why they're back here (login.rs set_resume_error).
@@ -53,12 +57,30 @@ impl Root {
         if let Some(login) = login.clone() {
             cx.subscribe(&login, |this, _, _: &Login, cx| {
                 this.login = None;
-                this.shell = Some(cx.new(|cx| Shell::new(this.core.clone(), cx)));
+                let shell = cx.new(|cx| Shell::new(this.core.clone(), cx));
+                Self::watch_shell(shell.clone(), cx);
+                this.shell = Some(shell);
                 cx.notify();
             })
             .detach();
         }
         Self { core, login, shell }
+    }
+
+    /// Shell-to-root subscription: sign-out clears the core (done by the
+    /// shell before it emits) and the window returns to the login doors.
+    fn watch_shell(
+        shell: Entity<Shell>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe(&shell, |this, _, ev: &ShellEvent, cx| match ev {
+            ShellEvent::SignedOut => {
+                this.shell = None;
+                this.login = Some(cx.new(|cx| LoginView::new(this.core.clone(), None, cx)));
+                cx.notify();
+            }
+        })
+        .detach();
     }
 }
 

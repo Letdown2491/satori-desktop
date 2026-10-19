@@ -13,9 +13,16 @@ use gpui::{
     div, prelude::*, px, rgb, App, Context, Div, Entity, FocusHandle, Focusable, KeyDownEvent,
     Render, SharedString, Stateful, Window,
 };
+use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, PublishEvent};
 
+use std::str::FromStr;
+
+use gpui::EventEmitter;
+
 use crate::{input::Input, prefs, theme};
+
+use super::nav::Nav;
 
 pub struct SettingsView {
     core: Arc<Core>,
@@ -36,6 +43,10 @@ pub struct SettingsView {
     // Content: the feed catalog.
     machine_hidden: bool,
     hidden_kinds: Vec<u16>,
+    // Set when the sign-out row is clicked: the pane freezes on "Signing
+    // out…" while the shell tears the session down (the whole view is
+    // replaced by the login doors a beat later).
+    signing_out: bool,
     // Toast equivalent (the pane has no header seal to hang one on).
     status: String,
     status_err: bool,
@@ -78,6 +89,7 @@ impl SettingsView {
             undo_secs,
             machine_hidden: satori_core::store::machine_notes_hidden(),
             hidden_kinds: prefs::content_hidden(),
+            signing_out: false,
             status: String::new(),
             status_err: false,
         };
@@ -161,6 +173,18 @@ impl SettingsView {
         })
         .detach();
         cx.notify();
+    }
+
+    /// The signed-in identity, short npub form for the Session row.
+    fn me_npub_short(&self) -> String {
+        satori_core::session::load()
+            .and_then(|s| PublicKey::from_str(&s.pubkey).ok())
+            .and_then(|pk| {
+                pk.to_bech32()
+                    .ok()
+                    .map(|full| format!("{}…", &full[..12]))
+            })
+            .unwrap_or_else(|| "unknown key".to_string())
     }
 
     fn set_status(&mut self, msg: String, err: bool) {
@@ -512,6 +536,8 @@ fn muted(text: impl Into<String>) -> Div {
         .child(text.into())
 }
 
+impl EventEmitter<Nav> for SettingsView {}
+
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let relays = self.relays.clone();
@@ -548,6 +574,48 @@ impl Render for SettingsView {
             .overflow_y_scroll()
             .flex()
             .flex_col()
+            // --- Session (identity + sign out) ------------------------------
+            .child(
+                group(
+                    "Session",
+                    "The key stays in this device's secret store until you sign out.",
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(13.0))
+                                .text_color(rgb(theme::INK))
+                                .child(format!(
+                                    "Signed in as {}",
+                                    self.me_npub_short(),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .id("sign-out")
+                                .cursor_pointer()
+                                .text_size(px(13.0))
+                                .text_color(rgb(theme::VERMILION))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.emit(Nav::SignOut);
+                                    this.signing_out = true;
+                                    cx.notify();
+                                }))
+                                .when(
+                                    self.signing_out,
+                                    |d| d.text_color(rgb(theme::MUTED)).child("Signing out…"),
+                                )
+                                .when(!self.signing_out, |d| d.child("Sign out")),
+                        ),
+                ),
+            )
             // --- Composing (the undo window) --------------------------------
             .child(
                 group(
