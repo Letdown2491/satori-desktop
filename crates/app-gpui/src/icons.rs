@@ -63,6 +63,47 @@ fn bookmark(b: &mut PathBuilder, g: &Grid) {
     b.close();
 }
 
+// NIP-18: the repost cycle — two arrows chasing each other (feather repeat,
+// arcs straightened for the stroke grid).
+fn repost(b: &mut PathBuilder, g: &Grid) {
+    // top arrowhead, right-pointing
+    b.move_to(g.p(17.0, 1.5));
+    b.line_to(g.p(21.0, 5.5));
+    b.line_to(g.p(17.0, 9.5));
+    // top path: from the left rail, over the shoulder, out to the arrow
+    b.move_to(g.p(3.0, 11.5));
+    b.line_to(g.p(3.0, 9.5));
+    b.curve_to(g.p(7.0, 5.5), g.p(3.0, 7.2));
+    b.line_to(g.p(21.0, 5.5));
+    // bottom arrowhead, left-pointing
+    b.move_to(g.p(7.0, 22.5));
+    b.line_to(g.p(3.0, 18.5));
+    b.line_to(g.p(7.0, 14.5));
+    // bottom path: mirror
+    b.move_to(g.p(21.0, 12.5));
+    b.line_to(g.p(21.0, 14.5));
+    b.curve_to(g.p(17.0, 18.5), g.p(21.0, 16.8));
+    b.line_to(g.p(3.0, 18.5));
+}
+
+// NIP-18: the quote — a doubled quotation mark, bowl and tail, outline.
+fn quote(b: &mut PathBuilder, g: &Grid) {
+    // left mark: bowl (three sides) + tail sweeping down-left
+    b.move_to(g.p(9.5, 6.5));
+    b.line_to(g.p(4.5, 6.5));
+    b.line_to(g.p(4.5, 11.5));
+    b.line_to(g.p(9.0, 11.5));
+    b.curve_to(g.p(8.8, 14.5), g.p(7.5, 16.3));
+    b.line_to(g.p(4.5, 17.5));
+    // right mark: shifted +9
+    b.move_to(g.p(18.5, 6.5));
+    b.line_to(g.p(13.5, 6.5));
+    b.line_to(g.p(13.5, 11.5));
+    b.line_to(g.p(18.0, 11.5));
+    b.curve_to(g.p(17.8, 14.5), g.p(16.5, 16.3));
+    b.line_to(g.p(13.5, 17.5));
+}
+
 /// A stroke-drawn glyph on the 24-unit grid — the GPUI twin of a symbolic SVG.
 /// All outline, no fill, per the icon rule.
 pub fn icon(glyph: Glyph, color: u32, size_px: f32) -> impl IntoElement {
@@ -94,6 +135,14 @@ pub fn bubble_icon(color: u32) -> impl IntoElement {
 
 pub fn bookmark_icon(color: u32) -> impl IntoElement {
     icon(bookmark, color, 17.0)
+}
+
+pub fn repost_icon(color: u32) -> impl IntoElement {
+    icon(repost, color, 17.0)
+}
+
+pub fn quote_icon(color: u32) -> impl IntoElement {
+    icon(quote, color, 17.0)
 }
 
 /// Rail glyphs at rail size (icons.rs rail pass — the sidebar icons).

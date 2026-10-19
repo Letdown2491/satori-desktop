@@ -17,6 +17,8 @@ pub enum Nav {
     OpenProfile(PublicKey),
     /// The composer, optionally replying to a note.
     OpenComposer(Option<Event>),
+    /// The composer quoting a note (NIP-18 quote repost).
+    OpenQuote(Event),
     /// The article reader page (markdown).
     OpenArticle(Event),
     /// The lightbox overlay: full-screen image viewer (lightbox.rs), the

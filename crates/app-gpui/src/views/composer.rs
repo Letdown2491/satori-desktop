@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use gpui::{
     actions, div, img, prelude::*, px, rgb, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    Global, Render, SharedString, Window,
+    FontWeight, Global, Render, SharedString, Window,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, Profile, PublishEvent};
@@ -71,6 +71,9 @@ pub struct Composer {
     suggest: Vec<Profile>,
     mention_token: Option<String>,
     reply_to: Option<Event>,
+    /// The NIP-18 quote: folded into the content + a q tag at publish; the
+    /// preview above the field says what's being quoted.
+    quote: Option<Event>,
     attachments: Vec<Attachment>,
     posting: bool,
     status: String,
@@ -81,13 +84,19 @@ pub struct Composer {
 impl EventEmitter<Nav> for Composer {}
 
 impl Composer {
-    pub fn new(core: Arc<Core>, reply_to: Option<Event>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        core: Arc<Core>,
+        reply_to: Option<Event>,
+        quote: Option<Event>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         let input = cx.new(|cx| Input::new(cx));
         let focus = input.read(cx).focus_handle(cx);
         // Draft restore: a top-level compose reopens with whatever was typed
         // and closed before (composer.rs:114 — the take spends the stash).
-        if reply_to.is_none()
+        // A quote compose carries the quote, so it skips the stash too.
+        if reply_to.is_none() && quote.is_none()
             && let Some(text) = draft_take(cx).filter(|t| !t.trim().is_empty())
         {
             input.update(cx, |i, cx| i.set_text(&text, cx));
@@ -110,6 +119,7 @@ impl Composer {
             suggest: vec![],
             mention_token: None,
             reply_to,
+            quote,
             attachments: vec![],
             posting: false,
             status: String::new(),
@@ -324,6 +334,7 @@ impl Composer {
         self.posting = true;
         self.status.clear();
         let reply = self.reply_to.clone();
+        let quote = self.quote.clone();
         // A top-level publish consumes the buffer: the draft is spent
         // (composer.rs:476). If the send fails, `draft_text` re-stashes on
         // close.
@@ -390,7 +401,7 @@ impl Composer {
                     mentions,
                 )
             } else {
-                core.post_note(text, reply, mentions)
+                core.post_note(text, reply, mentions, quote)
             };
             while let Some(ev) = rx.recv().await {
                 match ev {
@@ -437,7 +448,7 @@ impl Composer {
     /// so closing empty clears a stale draft. None = don't touch the draft
     /// (replies, a send in flight, an undo window pending).
     pub fn draft_candidate(&self, cx: &App) -> Option<String> {
-        if self.reply_to.is_some() || self.posting {
+        if self.reply_to.is_some() || self.quote.is_some() || self.posting {
             return None;
         }
         Some(self.input.read(cx).content.trim().to_string())
@@ -461,6 +472,21 @@ impl Render for Composer {
             window.focus(&self.focus);
         }
         let replying = self.reply_to.is_some();
+        let quote_prev = self.quote.as_ref().map(|q| {
+            (
+                self.core
+                    .profile_of(&q.pubkey)
+                    .map(|p| p.display())
+                    .unwrap_or_else(|| format!("{}…", &q.pubkey.to_string()[..8])),
+                q.content
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .take(140)
+                    .collect::<String>(),
+            )
+        });
         let status = self.status.clone();
         let input = self.input.clone();
         let posting = self.posting;
@@ -487,6 +513,28 @@ impl Render for Composer {
             .text_color(rgb(theme::ink()))
             .gap_2()
             .p_4()
+            .when_some(quote_prev, |d, (name, snippet)| {
+                // The quoted note, whispered: name + the first 140 chars.
+                // No box — the whitespace and the voice change carry it.
+                d.child(
+                    div()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(theme::ink()))
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(rgb(theme::muted()))
+                                .child(snippet),
+                        ),
+                )
+            })
             .when(tab == Tab::Note, |d| {
                 d.child(
                     div()

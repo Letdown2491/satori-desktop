@@ -102,7 +102,8 @@ impl Shell {
         cx.subscribe(&feed, |this, _feed, ev: &Nav, cx| match ev {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
-            Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
+            Nav::OpenComposer(reply) => this.open_composer(reply.clone(), None, cx),
+            Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
             Nav::FeedDeep(deep) => {
@@ -178,7 +179,8 @@ impl Shell {
         cx.subscribe(view, |this, _view, ev: &Nav, cx| match ev {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
-            Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
+            Nav::OpenComposer(reply) => this.open_composer(reply.clone(), None, cx),
+            Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
             Nav::FeedDeep(deep) => {
@@ -226,8 +228,13 @@ impl Shell {
         cx.notify();
     }
 
-    fn open_composer(&mut self, reply_to: Option<Event>, cx: &mut Context<Self>) {
-        let view = cx.new(|cx| Composer::new(self.core.clone(), reply_to, cx));
+    fn open_composer(
+        &mut self,
+        reply_to: Option<Event>,
+        quote: Option<Event>,
+        cx: &mut Context<Self>,
+    ) {
+        let view = cx.new(|cx| Composer::new(self.core.clone(), reply_to, quote, cx));
         self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Composer(view));
         cx.notify();
@@ -670,7 +677,7 @@ impl Shell {
                 cx.listener(move |shell, _, _, cx| {
                     // Never clobber an open composer (its draft is live).
                     if shell.active_spot() != Some(Spot::Compose) {
-                        shell.open_composer(None, cx);
+                        shell.open_composer(None, None, cx);
                     }
                 }),
             ))
@@ -824,7 +831,7 @@ impl Render for Shell {
                 );
                 if !ev.keystroke.modifiers.modified() && !composing {
                     if ev.keystroke.key == "n" {
-                        shell.open_composer(None, cx);
+                        shell.open_composer(None, None, cx);
                     }
                     // No GTK accel — the header seals are unclickable when the
                     // window is CSD-tiled (§9.1 finding), so the keyboard is

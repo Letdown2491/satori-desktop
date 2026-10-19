@@ -183,6 +183,15 @@ impl Store {
         Ok(self.query(filter).await?.into_iter().collect())
     }
 
+    /// The user's own reposts (NIP-18 kinds 6 + 16).
+    pub async fn own_reposts(&self, author: PublicKey) -> NostrResult<Vec<Event>> {
+        let filter = Filter::new()
+            .author(author)
+            .kinds([Kind::Repost, Kind::Custom(16)])
+            .limit(5000);
+        Ok(self.query(filter).await?.into_iter().collect())
+    }
+
     /// Fetch one event by id (repost target resolution).
     pub async fn event_by_id(&self, id: EventId) -> NostrResult<Option<Event>> {
         self.db.event_by_id(&id).await

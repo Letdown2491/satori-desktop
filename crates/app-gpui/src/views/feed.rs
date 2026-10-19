@@ -53,6 +53,7 @@ pub struct Feed {
     live_new: usize,
     liked: HashSet<String>,
     bookmarked: HashSet<String>,
+    reposted: HashSet<String>,
     quotes: content::Quotes,
     // Rich-card interaction state (cards.rs): poll tallies + ballots, and
     // my RSVP per calendar event.
@@ -93,6 +94,7 @@ struct FeedSnap {
     parents: std::sync::Arc<HashMap<String, ParentNote>>,
     liked: std::sync::Arc<HashSet<String>>,
     bookmarked: std::sync::Arc<HashSet<String>>,
+    reposted: std::sync::Arc<HashSet<String>>,
     quotes: std::sync::Arc<content::Quotes>,
     cards: std::sync::Arc<cards::CardState>,
     media: std::sync::Arc<media::Snapshot>,
@@ -114,14 +116,15 @@ impl Feed {
 
     fn with_mode(core: Arc<Core>, mode: FeedMode, cx: &mut Context<Self>) -> Self {
         let feed = Self {
+            liked: core.liked_set(),
+            bookmarked: core.bookmarked_set(),
+            reposted: core.reposted_set(),
             core,
             notes: vec![],
             profiles: HashMap::new(),
             parents: HashMap::new(),
             parents_asked: HashSet::new(),
             live_new: 0,
-            liked: HashSet::new(),
-            bookmarked: HashSet::new(),
             quotes: HashMap::new(),
             poll_tallies: HashMap::new(),
             poll_sel: HashMap::new(),
@@ -575,6 +578,35 @@ impl Feed {
         });
     }
 
+    /// Optimistic repost (NIP-18 kind 6): the glyph flips vermilion now, the
+    /// event waits out the undo window in core (the shell's toast carries
+    /// Undo), and a failure — or an undo — rolls the glyph back.
+    fn toggle_repost(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        let id = ev.id.to_string();
+        if !self.reposted.insert(id.clone()) {
+            return;
+        }
+        self.touch();
+        let mut rx = self.core.repost(ev);
+        cx.spawn(async move |this, cx| {
+            while let Some(pv) = rx.recv().await {
+                match pv {
+                    PublishEvent::Failed { .. } | PublishEvent::Undone { .. } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.reposted.remove(&id);
+                            this.status = "repost didn't go through — try again".into();
+                            this.touch();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Optimistic bookmark (private kind:10003 list) — engaged at once,
     /// rolled back if core reports the publish failed.
     fn toggle_bookmark(&mut self, ev: &Event, cx: &mut Context<Self>) {
@@ -626,6 +658,7 @@ fn note_card(
     parents: &HashMap<String, ParentNote>,
     liked: &HashSet<String>,
     bookmarked: &HashSet<String>,
+    reposted: &HashSet<String>,
     media: &media::Snapshot,
     quotes: &content::Quotes,
     cards: &cards::CardState,
@@ -642,16 +675,21 @@ fn note_card(
     let time = rel_time(ev.created_at.as_secs());
     let engaged = liked.contains(&ev.id.to_string());
     let saved = bookmarked.contains(&ev.id.to_string());
+    let shared = reposted.contains(&ev.id.to_string());
     let ev_for_open = ev.clone();
     let ev_for_profile = ev.clone();
     let ev_for_like = ev.clone();
     let ev_for_bookmark = ev.clone();
     let ev_for_reply = ev.clone();
+    let ev_for_repost = ev.clone();
+    let ev_for_quote = ev.clone();
     let handle_open = handle.clone();
     let handle_profile = handle.clone();
     let handle_like = handle.clone();
     let handle_bookmark = handle.clone();
     let handle_reply = handle.clone();
+    let handle_repost = handle.clone();
+    let handle_quote = handle.clone();
 
     // No card box: posts sit directly on the washi, separated by whitespace
     // alone (sumi-e — the empty space carries the composition).
@@ -763,6 +801,32 @@ fn note_card(
                 )
                 .child(
                     div()
+                        .id(SharedString::from(format!("repost-{idx}")))
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            let ev = ev_for_repost.clone();
+                            handle_repost.update(cx, |feed, cx| feed.toggle_repost(&ev, cx));
+                        })
+                        .child(icons::repost_icon(if shared {
+                            theme::vermilion()
+                        } else {
+                            theme::muted()
+                        })),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("quote-{idx}")))
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            let ev = ev_for_quote.clone();
+                            handle_quote.update(cx, |_, cx| {
+                                cx.emit(Nav::OpenQuote(ev));
+                            });
+                        })
+                        .child(icons::quote_icon(theme::muted())),
+                )
+                .child(
+                    div()
                         .id(SharedString::from(format!("bookmark-{idx}")))
                         .cursor_pointer()
                         .on_click(move |_, _, cx| {
@@ -797,6 +861,7 @@ impl Render for Feed {
                 parents: std::sync::Arc::new(self.parents.clone()),
                 liked: std::sync::Arc::new(self.liked.clone()),
                 bookmarked: std::sync::Arc::new(self.bookmarked.clone()),
+                reposted: std::sync::Arc::new(self.reposted.clone()),
                 quotes: std::sync::Arc::new(self.quotes.clone()),
                 cards: std::sync::Arc::new(cards::CardState {
                     poll_tallies: self.poll_tallies.clone(),
@@ -894,6 +959,7 @@ impl Render for Feed {
                         let profiles = snap.profiles.clone();
                         let parents = snap.parents.clone();
                         let liked = snap.liked.clone();
+                        let reposted = snap.reposted.clone();
                         let bookmarked = snap.bookmarked.clone();
                         let quotes = snap.quotes.clone();
                         let cards = snap.cards.clone();
@@ -908,7 +974,8 @@ impl Render for Feed {
                                 )
                                 .into_any_element(),
                                 Some(ev) => note_card(
-                                    idx, ev, &profiles, &parents, &liked, &bookmarked, &media,
+                                    idx, ev, &profiles, &parents, &liked, &bookmarked,
+                                    &reposted, &media,
                                     &quotes, &cards, handle.clone(),
                                 )
                                 .into_any_element(),

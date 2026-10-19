@@ -227,6 +227,8 @@ pub struct Core {
     pool: Mutex<Option<Arc<Pool>>>,
     /// Own reactions: target event id (hex) → engaged.
     own_liked: Mutex<HashSet<String>>,
+    /// Own reposts (NIP-18 kind 6/16) — same shape as own_liked.
+    own_reposted: Mutex<HashSet<String>>,
     own_bookmarked: Mutex<HashSet<String>>,
     /// Muted authors (pubkey hex) — NIP-51 kind:10000, content encrypted.
     muted: Mutex<HashSet<String>>,
@@ -259,6 +261,7 @@ impl Core {
             hold_seq: AtomicU64::new(1),
             pool: Mutex::new(None),
             own_liked: Mutex::new(HashSet::new()),
+            own_reposted: Mutex::new(HashSet::new()),
             own_bookmarked: Mutex::new(HashSet::new()),
             muted: Mutex::new(HashSet::new()),
             profiles_mem: Mutex::new(std::collections::HashMap::new()),
@@ -324,6 +327,7 @@ impl Core {
         secrets::delete(secrets::BUNKER_CLIENT_SECRET);
         secrets::delete(secrets::NSEC);
         self.own_liked.lock().unwrap().clear();
+        self.own_reposted.lock().unwrap().clear();
         self.own_bookmarked.lock().unwrap().clear();
         self.muted.lock().unwrap().clear();
         eprintln!("[core] logout");
@@ -347,6 +351,21 @@ impl Core {
     /// projection — DESIGN.md §1.2).
     pub fn is_liked(&self, event_id: &EventId) -> bool {
         self.own_liked.lock().unwrap().contains(&event_id.to_string())
+    }
+
+    /// The engagement sets, for a view's session snapshot (feed.rs seeds its
+    /// optimistic sets from these at construction — after a restart the
+    /// glyphs still read engaged).
+    pub fn liked_set(&self) -> HashSet<String> {
+        self.own_liked.lock().unwrap().clone()
+    }
+
+    pub fn bookmarked_set(&self) -> HashSet<String> {
+        self.own_bookmarked.lock().unwrap().clone()
+    }
+
+    pub fn reposted_set(&self) -> HashSet<String> {
+        self.own_reposted.lock().unwrap().clone()
     }
 
     pub fn is_bookmarked(&self, event_id: &EventId) -> bool {
@@ -749,7 +768,12 @@ impl Core {
             async {
                 let mine = Filter::new()
                     .author(me)
-                    .kinds([Kind::Reaction, Kind::Custom(10003)])
+                    .kinds([
+                        Kind::Reaction,
+                        Kind::Repost,
+                        Kind::Custom(16),
+                        Kind::Custom(10003),
+                    ])
                     .limit(2000);
                 active.pool.get(mine).await.unwrap_or_default()
             },
@@ -819,6 +843,17 @@ impl Core {
             for ev in reactions {
                 if let Some(target) = ev.tags.clone().event_ids().next() {
                     liked.insert(target.to_string());
+                }
+            }
+        }
+
+        // Own reposts (kind 6 and its generic cousin 16): the e-tag IS the
+        // target.
+        if let Ok(reposts) = active.pool.store.own_reposts(me).await {
+            let mut rp = self.own_reposted.lock().unwrap();
+            for ev in reposts {
+                if let Some(target) = ev.tags.clone().event_ids().next() {
+                    rp.insert(target.to_string());
                 }
             }
         }
@@ -1735,7 +1770,9 @@ impl Core {
         rx
     }
 
-    /// Repost (NIP-18 kind:6).
+    /// Repost (NIP-18): kind 6 for notes, kind 16 + a `k` tag for anything
+    /// else — and the same undo window as every publish (hold_and_commit;
+    /// the shell's toast carries the countdown and the Undo).
     pub fn repost(self: &Arc<Self>, target: &Event) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
@@ -1743,23 +1780,47 @@ impl Core {
         self.rt.spawn(async move {
             let res: Result<()> = async {
                 let active = this.active().await?;
+                let note = u16::from(target.kind) == 1;
+                let mut tags = vec![Tag::event(target.id), Tag::public_key(target.pubkey)];
+                if !note {
+                    tags.push(Tag::custom("k", [u16::from(target.kind).to_string()]));
+                }
                 let unsigned = UnsignedEvent::new(
                     active.me(),
                     Timestamp::now(),
-                    Kind::Repost,
-                    [Tag::event(target.id), Tag::public_key(target.pubkey)],
+                    if note { Kind::Repost } else { Kind::Custom(16) },
+                    tags,
                     format!("nostr:{}", target.id.to_bech32().unwrap_or_default()),
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit(&active, &signed, &tx).await?;
-                let _ = active.pool.store.save(&signed).await;
+                match active.undo.hold_duration() {
+                    Some(hold) => {
+                        let token = this.hold_seq.fetch_add(1, Ordering::SeqCst);
+                        let _ = tx.send(PublishEvent::Held {
+                            token,
+                            event: signed.clone(),
+                            hold_secs: hold.as_secs(),
+                        });
+                        this.hold_and_commit(
+                            Arc::new(active.clone()),
+                            token,
+                            signed,
+                            hold,
+                            tx.clone(),
+                        )
+                        .await;
+                    }
+                    None => {
+                        Self::commit(&active, &signed, &tx).await?;
+                        let _ = active.pool.store.save(&signed).await;
+                        let _ = tx.send(PublishEvent::Committed { token: 0 });
+                    }
+                }
                 Ok(())
             }
             .await;
             if let Err(e) = res {
                 let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
         });
         rx
@@ -2139,18 +2200,22 @@ impl Core {
 
     // --- write path ---------------------------------------------------------------
 
-    /// Post a note (optionally a NIP-10 reply). Signed, then held for the undo
-    /// window with a backstop commit; events stream on the channel.
+    /// Post a note — a NIP-10 reply, a NIP-18 quote, or plain. Signed, then
+    /// held for the undo window with a backstop commit; events stream on
+    /// the channel.
     pub fn post_note(
         self: &Arc<Self>,
         content: String,
         reply_to: Option<Event>,
         mentions: Vec<PublicKey>,
+        quote: Option<Event>,
     ) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
-            let res = this.post_note_inner(&tx, content, reply_to, mentions).await;
+            let res = this
+                .post_note_inner(&tx, content, reply_to, mentions, quote)
+                .await;
             if let Err(e) = res {
                 let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
             }
@@ -2164,10 +2229,26 @@ impl Core {
         content: String,
         reply_to: Option<Event>,
         mentions: Vec<PublicKey>,
+        quote: Option<Event>,
     ) -> Result<()> {
         let active = self.active().await?;
         let me = active.me();
         let mut tags: Vec<Tag> = Vec::new();
+        // The NIP-18 quote rides FIRST: a q tag (id, relay hint, author) and
+        // the nostr: reference folded into the text the reader sees.
+        let content = if let Some(q) = &quote {
+            tags.push(Tag::custom(
+                "q",
+                [
+                    q.id.to_string(),
+                    String::new(),
+                    q.pubkey.to_string(),
+                ],
+            ));
+            format!("{}\n\nnostr:{}", content, q.id.to_bech32().unwrap_or_default())
+        } else {
+            content
+        };
         if let Some(parent) = &reply_to {
             // NIP-10 marked tags; root = parent's root if marked, else parent itself.
             let mut root_id: Option<EventId> = None;
