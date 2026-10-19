@@ -250,12 +250,34 @@ impl Shell {
     /// Bell-dot poll, every 90s (shell.rs poll_notif): one notifications()
     /// drain, kept until the NotifDot verdict.
     fn watch_notif(&self, cx: &mut Context<Self>) {
+        // The live subscription is the first line (instant); this poll is
+        // only a correctness net for a dead stream — 15 minutes, and the
+        // full notifications computation it runs is why it must be rare.
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
-                    .timer(std::time::Duration::from_secs(90))
+                    .timer(std::time::Duration::from_secs(900))
                     .await;
                 let _ = this.update(cx, |shell, cx| shell.check_notif_dot(cx));
+            }
+        })
+        .detach();
+        // Push: any reply/mention tagging me lights the bell at once.
+        let mut live_rx = self.core.subscribe_live();
+        cx.spawn(async move |this, cx| {
+            loop {
+                match live_rx.recv().await {
+                    Ok(satori_core::manager::Live::Mention) => {
+                        let _ = this.update(cx, |shell, cx| {
+                            shell.notif_unread = true;
+                            cx.notify();
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(_) => continue,
+                    Err(_) => continue,
+                }
             }
         })
         .detach();

@@ -22,3 +22,4 @@ unicode-segmentation = "1"
 qrcode = { workspace = true }
 # File picker for the composer's attachments (xdg-desktop-portal backend).
 rfd = "0.15"
+tokio = { workspace = true }

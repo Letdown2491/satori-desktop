@@ -5220,6 +5220,7 @@ name = "satori-core"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "futures-util",
  "image",
  "keyring",
  "nostr",
@@ -5248,6 +5249,7 @@ dependencies = [
  "satori-core",
  "serde",
  "serde_json",
+ "tokio",
  "unicode-segmentation",
 ]
 

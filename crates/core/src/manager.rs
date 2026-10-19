@@ -135,6 +135,17 @@ pub struct FeedPage {
     pub profiles: Vec<Profile>,
 }
 
+/// A push signal off the live subscription (one persistent sub per session,
+/// three filters). Live signaling, not the live timeline — nothing renders
+/// until a view asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Live {
+    /// A reply or mention tagging me (#p) — light the bell.
+    Mention,
+    /// A fresh post from a follow — bump the timeline's new-notes pill.
+    Post,
+}
+
 /// A reply's parent, for the timeline context whisper: author + a plain
 /// one-liner from the parent's content.
 #[derive(Debug, Clone)]
@@ -219,6 +230,10 @@ pub struct Core {
     profiles_mem: Mutex<std::collections::HashMap<String, Profile>>,
     /// Live undo holds: token → cancel signal.
     holds: Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>>,
+    /// Push signals off the live subscription (shell bell, feed pills).
+    live: tokio::sync::broadcast::Sender<Live>,
+    /// The live sub starts once per process (bootstrap runs per surface).
+    live_on: std::sync::atomic::AtomicBool,
 }
 
 impl Default for Core {
@@ -244,6 +259,8 @@ impl Core {
             muted: Mutex::new(HashSet::new()),
             profiles_mem: Mutex::new(std::collections::HashMap::new()),
             holds: Mutex::new(std::collections::HashMap::new()),
+            live: tokio::sync::broadcast::Sender::new(64),
+            live_on: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -699,6 +716,7 @@ impl Core {
         if let Some(a) = self.active.lock().unwrap().as_mut() {
             a.follows = follows.clone();
         }
+        self.start_live(kinds.clone()).await;
 
         // Profiles + engagement + deep fetch: parallel, none block paint.
         let mut warm_set = follows.clone();
@@ -2561,6 +2579,75 @@ impl Core {
             }
         });
         rx
+    }
+
+    /// Listen for push signals (bell dot, new-notes pill). Broadcast —
+    /// every open pane keeps its own receiver.
+    pub fn subscribe_live(&self) -> tokio::sync::broadcast::Receiver<Live> {
+        self.live.subscribe()
+    }
+
+    /// ONE persistent subscription per session, three filters: fresh posts
+    /// from follows (timeline pill), #p me (bell — every NIP-10/NIP-22 reply
+    /// tags the parent author), kind-5 deletions (render filter). First-seen
+    /// events route to broadcast signals; everything saves to the store.
+    /// Follows are snapshotted at start — a mid-session follow change rides
+    /// the next refresh's fetches until the next session.
+    async fn start_live(&self, kinds: Vec<Kind>) {
+        use futures_util::StreamExt as _;
+        if self.live_on.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let Ok(active) = self.active().await else { return };
+        let pool = active.pool.clone();
+        let live = self.live.clone();
+        let me = active.me();
+        let follows = active.follows.clone();
+        self.rt.spawn(async move {
+            let now = Timestamp::now();
+            let filters = vec![
+                Filter::new()
+                    .kinds(kinds.clone())
+                    .authors(follows.clone())
+                    .since(now),
+                Filter::new()
+                    .kinds([Kind::TextNote, Kind::Custom(1111)])
+                    .pubkey(me)
+                    .since(now),
+                Filter::new()
+                    .kind(Kind::EventDeletion)
+                    .authors(follows.clone())
+                    .since(now),
+            ];
+            let Ok(output) = pool.client().subscribe(filters).await else {
+                eprintln!("[core] live: subscribe failed");
+                return;
+            };
+            let mut notifications = pool.client().notifications();
+            while let Some(n) = notifications.next().await {
+                let event = match n {
+                    nostr_sdk::client::ClientNotification::Event { subscription_id, event, .. }
+                        if output.id() == &subscription_id =>
+                    {
+                        *event
+                    }
+                    nostr_sdk::client::ClientNotification::Shutdown => break,
+                    _ => continue,
+                };
+                let _ = pool.store.save(&event).await;
+                let sig = if u16::from(event.kind) == 5 {
+                    None // deletions ride the store; the render filter sees them
+                } else if event.tags.clone().public_keys().any(|pk| pk == me) {
+                    Some(Live::Mention)
+                } else {
+                    Some(Live::Post)
+                };
+                if let Some(sig) = sig {
+                    let _ = live.send(sig);
+                }
+            }
+            eprintln!("[core] live stream ended (relay disconnects resume via fetches)");
+        });
     }
 
     async fn active(&self) -> Result<Active> {

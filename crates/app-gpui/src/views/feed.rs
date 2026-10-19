@@ -17,7 +17,7 @@ use gpui::{
     ListOffset, ListScrollEvent, ListState, Render, SharedString, Window, Div,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile, PublishEvent};
+use satori_core::manager::{Core, FeedEvent, FeedRx, Live, ParentNote, Profile, PublishEvent};
 use satori_core::nip::nip10;
 
 use crate::{icons, media, theme};
@@ -48,6 +48,9 @@ pub struct Feed {
     /// author + snippet. `parents_asked` keeps misses from re-requesting.
     parents: HashMap<String, ParentNote>,
     parents_asked: HashSet<String>,
+    /// Push signals since the last load (the live subscription): the
+    /// new-notes pill's count. Nothing moves until the reader clicks.
+    live_new: usize,
     liked: HashSet<String>,
     bookmarked: HashSet<String>,
     quotes: content::Quotes,
@@ -115,6 +118,7 @@ impl Feed {
             profiles: HashMap::new(),
             parents: HashMap::new(),
             parents_asked: HashSet::new(),
+            live_new: 0,
             liked: HashSet::new(),
             bookmarked: HashSet::new(),
             quotes: HashMap::new(),
@@ -150,6 +154,27 @@ impl Feed {
                 feed.maybe_older(feed.last_visible_end, cx);
             });
         });
+        // Live push: fresh follow posts bump the new-notes pill (the list
+        // itself never moves on its own — the reader clicks when ready).
+        let this = cx.entity().downgrade();
+        let mut live_rx = feed.core.subscribe_live();
+        cx.spawn(async move |_, cx| {
+            loop {
+                match live_rx.recv().await {
+                    Ok(Live::Post) => {
+                        let _ = this.update(cx, |feed, cx| {
+                            feed.live_new += 1;
+                            cx.notify();
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(_) => continue, // lagged: still true that there's news
+                    Err(_) => continue, // lagged: still true that there's news
+                }
+            }
+        })
+        .detach();
         let boot = feed.core.bootstrap(mode.kinds());
         feed.pump(boot, cx);
         feed
@@ -789,6 +814,40 @@ impl Render for Feed {
                         .border_b_1()
                         .border_color(rgb(theme::HAIRLINE))
                         .child(status),
+                )
+            })
+            // The new-notes pill (the live subscription's push signal):
+            // quiet, centered, only when there's news. Nothing else moves —
+            // the reader decides when the list turns over.
+            .when(self.live_new > 0 && !empty, |d| {
+                let n = self.live_new;
+                let handle = handle.clone();
+                d.child(
+                    div()
+                        .id("new-posts-pill")
+                        .cursor_pointer()
+                        .mb_1()
+                        .px_4()
+                        .py_1p5()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgb(theme::HAIRLINE))
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme::MUTED))
+                        .on_click(move |_, _, cx| {
+                            handle.update(cx, |feed, cx| {
+                                feed.live_new = 0;
+                                feed.scroll_top();
+                                let rx = feed.core.refresh(feed.mode.kinds());
+                                feed.pump(rx, cx);
+                                cx.notify();
+                            });
+                        })
+                        .child(if n == 1 {
+                            "1 new note — load it".to_string()
+                        } else {
+                            format!("{n} new notes — load them")
+                        }),
                 )
             })
             .child(
