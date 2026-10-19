@@ -125,7 +125,13 @@ impl Cache {
     /// Oldest-first eviction past the caps. Loading entries rotate to the
     /// back (they're transient); Ready/NotMedia drop. Bounded passes.
     fn evict(&self) {
-        for _ in 0..self.order.borrow().len() * 2 {
+        // The round count borrows `order`; the temporary must be dropped
+        // BEFORE the loop — a `for _ in 0..self.order.borrow().len()`
+        // keeps the borrow alive across the whole loop and the
+        // `borrow_mut()` inside panics (RefCell already borrowed). It
+        // fired the first time the cache crossed its caps.
+        let rounds = self.order.borrow().len() * 2;
+        for _ in 0..rounds {
             let over =
                 self.map.borrow().len() > CACHE_MAX_ENTRIES || self.bytes.get() > CACHE_MAX_BYTES;
             if !over {
