@@ -24,6 +24,10 @@ const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Feed page size; the bootstrap fetch keeps depth for "view older".
 const PAGE: usize = 40;
+/// How deep one older-page top-up reaches into the relays (the web app's
+/// fetchRoutedPage asked limit*2 per author shard — same spirit: each round
+/// trip should feed several pages before the next one).
+const TOPUP_DEPTH: usize = 200;
 const BOOTSTRAP_DEPTH: usize = 200;
 
 
@@ -733,22 +737,28 @@ impl Core {
         Ok(())
     }
 
-    /// Older page from the store (pure projection; relay top-up in M2).
+    /// Older page: project the store; when it runs dry, top up from the
+    /// relays — strictly older than `until` (the oldest note currently
+    /// shown), all visible kinds — and project again. The store stays the
+    /// chokepoint; the relays are the reservoir.
     pub fn older(self: &Arc<Self>, until: u64) -> FeedRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
             let res: Result<FeedEvent> = async {
                 let active = this.active().await?;
-                let mut notes = active
-                    .pool
-                    .store
-                    .feed_page(&active.follows, Some(until), PAGE + 1)
-                    .await
-                    .map_err(|e| LoginError::Resume(e.to_string()))?;
-                {
-                    let muted = this.muted.lock().unwrap();
-                    notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
+                let mut notes = this.project_page(&active, Some(until)).await?;
+                if notes.len() <= PAGE {
+                    let filter = Filter::new()
+                        .kinds(crate::store::visible_kinds())
+                        .authors(active.follows.clone())
+                        .until(Timestamp::from(until))
+                        .limit(TOPUP_DEPTH);
+                    let fetched = active.pool.get(filter).await.unwrap_or_default();
+                    for ev in fetched {
+                        let _ = active.pool.store.save(&ev).await;
+                    }
+                    notes = this.project_page(&active, Some(until)).await?;
                 }
                 let has_more = notes.len() > PAGE;
                 notes.truncate(PAGE);
@@ -802,6 +812,22 @@ impl Core {
     /// profile cache; misses render as short npubs).
     pub fn profile_of(&self, pk: &PublicKey) -> Option<Profile> {
         self.profiles_mem.lock().unwrap().get(&pk.to_string()).cloned()
+    }
+
+    /// One page projection: store query (a PAGE+1 window so "has more" is
+    /// knowable), then the mutes gate at the chokepoint.
+    async fn project_page(&self, active: &Active, until: Option<u64>) -> Result<Vec<Event>> {
+        let mut notes = active
+            .pool
+            .store
+            .feed_page(&active.follows, until, PAGE + 1)
+            .await
+            .map_err(|e| LoginError::Resume(e.to_string()))?;
+        {
+            let muted = self.muted.lock().unwrap();
+            notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
+        }
+        Ok(notes)
     }
 
     async fn page_from_store(&self, active: &Active, until: Option<u64>) -> Result<FeedPage> {

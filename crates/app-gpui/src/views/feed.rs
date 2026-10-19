@@ -12,8 +12,9 @@ use std::{
 };
 
 use gpui::{
-    div, list, prelude::*, px, rgb, Context, Entity, EventEmitter, FontWeight,
-    ListAlignment, ListState, Render, SharedString, Window,
+    div, list, prelude::*, px, relative, rgb, Context, Entity, EventEmitter, FontWeight,
+    ListAlignment,
+    ListScrollEvent, ListState, Render, SharedString, Window, Div,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile, PublishEvent};
@@ -35,6 +36,9 @@ pub struct Feed {
     voted: HashSet<EventId>,
     rsvped: HashMap<EventId, String>,
     status: String,
+    /// Endless scroll: the relays may have more; a round trip is in flight.
+    has_more: bool,
+    paging: bool,
     list: ListState,
 }
 
@@ -54,11 +58,45 @@ impl Feed {
             voted: HashSet::new(),
             rsvped: HashMap::new(),
             status: "connecting to the relays…".into(),
+            has_more: true,
+            paging: false,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
+        // Endless scroll: the list's own scroll stream orders the next page
+        // (the GTK app prefetched at 70% scroll — same idea). The handler
+        // runs on &mut App; WeakEntity::update accepts that.
+        let this = cx.entity().downgrade();
+        feed.list.set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
+            let _ = this.update(cx, |feed, cx| feed.maybe_older(ev.visible_range.end, cx));
+        });
         let boot = feed.core.bootstrap();
         feed.pump(boot, cx);
         feed
+    }
+
+    /// The list's item count: one row per note + the end cap.
+    fn list_len(&self) -> usize {
+        self.notes.len() + 1
+    }
+
+    /// Near the bottom, order the next older page. The scroll handler calls
+    /// this on every wheel tick — `paging` keeps it one round trip at a time.
+    fn maybe_older(&mut self, visible_end: usize, cx: &mut Context<Self>) {
+        const LOOKAHEAD: usize = 6;
+        if !self.has_more || self.paging || self.notes.is_empty() {
+            return;
+        }
+        if visible_end + LOOKAHEAD < self.notes.len() {
+            return;
+        }
+        self.paging = true;
+        let oldest = self
+            .notes
+            .last()
+            .map(|n| n.created_at.as_secs())
+            .unwrap_or(0);
+        self.pump(self.core.older(oldest), cx);
+        cx.notify();
     }
 
     /// The GPUI twin of app/bridge.rs `drain`: core returns receivers, the UI
@@ -74,27 +112,53 @@ impl Feed {
     }
 
     fn on_event(&mut self, ev: FeedEvent, cx: &mut Context<Self>) {
-        let before = self.notes.len();
+        enum Reflow {
+            Reset,
+            Append(usize),
+            None,
+        }
+        let mut reflow = Reflow::Reset;
+        let before = self.list_len();
         match ev {
             FeedEvent::Loaded(page) => {
                 self.absorb(page.notes, page.profiles, cx);
                 self.status.clear();
+                self.has_more = true;
             }
-            FeedEvent::Older(page, _more) => {
+            FeedEvent::Older(page, more) => {
+                self.has_more = more;
+                self.paging = false;
+                let old = self.notes.len();
                 self.absorb(page.notes, page.profiles, cx);
+                if self.notes.len() > old {
+                    // Appends keep the reader's place: reset() clears the
+                    // scroll anchor and would yank the pane to the top,
+                    // while splice() leaves logical_scroll_top alone (the
+                    // anchor survives a non-overlapping splice).
+                    reflow = Reflow::Append(old);
+                } else {
+                    reflow = Reflow::None;
+                }
             }
             FeedEvent::Profiles(profiles) => self.absorb_profiles(profiles, cx),
-            FeedEvent::Failed(e) => self.status = format!("… {e}"),
+            FeedEvent::Failed(e) => {
+                self.status = format!("… {e}");
+                // A failed round trip must not wedge the end cap.
+                self.paging = false;
+            }
             _ => {}
         }
         // Reset only when the item count changed: gpui's List drops every
         // scroll event while a reset is pending, so resetting on profile
         // resolutions (constant during a busy feed) ate wheel input mid-scroll
-        // and wedged the pane blank. Appends still reset (the list learns the
-        // new count); same-height patches don't need it (list.rs: "elements
-        // outside the scrolled area do not change their height").
-        if self.notes.len() != before {
-            self.list.reset(self.notes.len());
+        // and wedged the pane blank. Appends go through splice() instead (the
+        // list learns the new count without losing the anchor); same-height
+        // patches need neither (list.rs: "elements outside the scrolled area
+        // do not change their height").
+        match reflow {
+            Reflow::Reset if self.list_len() != before => self.list.reset(self.list_len()),
+            Reflow::Append(old) => self.list.splice(old..old, self.list_len()),
+            _ => {}
         }
         cx.notify();
     }
@@ -122,12 +186,18 @@ impl Feed {
             self.notes.push(note);
         }
         self.notes.sort_by_key(|n| std::cmp::Reverse(n.created_at));
-        // Ask core for any authors we still can't name.
+        // Ask core for any authors we still can't name — plus mentioned
+        // pubkeys, so a mention renders @name instead of @npub1…
+        // (TODO(port): content.ts mentionPubkeys — hydrate before render).
         let missing: Vec<PublicKey> = {
             let mut seen = HashSet::new();
             self.notes
                 .iter()
-                .map(|n| n.pubkey)
+                .flat_map(|n| {
+                    let mut pks = vec![n.pubkey];
+                    pks.extend(content::mention_pks(&n.content));
+                    pks
+                })
                 .filter(|pk| {
                     !self.profiles.contains_key(&pk.to_string()) && seen.insert(pk.to_string())
                 })
@@ -534,6 +604,8 @@ impl Render for Feed {
                             voted: self.voted.clone(),
                             rsvped: self.rsvped.clone(),
                         };
+                        let paging = self.paging;
+                        let has_more = self.has_more;
                         list(self.list.clone(), move |idx, _w, _cx| {
                             match notes.get(idx) {
                                 Some(ev) => note_card(
@@ -541,7 +613,7 @@ impl Render for Feed {
                                     &cards, handle.clone(),
                                 )
                                 .into_any_element(),
-                                None => div().into_any_element(),
+                                None => end_cap(paging, has_more).into_any_element(),
                             }
                         })
                         // list() has no intrinsic height — it must be told to fill
@@ -553,4 +625,30 @@ impl Render for Feed {
                     }),
             )
     }
+}
+
+/// The list's last row: the round-trip note while paging, the caught-up seal
+/// when the relays remember nothing older (the GTK app's caught_up box), and
+/// nothing visible while more pages wait quietly.
+fn end_cap(paging: bool, more: bool) -> Div {
+    let words = if paging {
+        "… fetching older posts"
+    } else if more {
+        ""
+    } else {
+        "Caught up."
+    };
+    div()
+        .w_full()
+        .py_4()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .font_family(theme::SERIF)
+                .text_size(px(13.0))
+                .line_height(relative(1.2))
+                .text_color(rgb(theme::MUTED))
+                .child(words.to_string()),
+        )
 }

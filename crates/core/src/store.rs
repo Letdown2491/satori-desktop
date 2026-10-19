@@ -101,8 +101,13 @@ impl Store {
         until: Option<u64>,
         limit: usize,
     ) -> NostrResult<Vec<Event>> {
+        // The projection admits the whole catalog the relays were asked for
+        // (visible_kinds honors the content prefs). The old kinds-1-and-6
+        // filter let bootstrap fetch rich kinds into the store and then
+        // dropped them at the door — polls and articles never reached the
+        // feed's pages.
         let mut filter = Filter::new()
-            .kinds([Kind::TextNote, Kind::Repost])
+            .kinds(visible_kinds())
             .authors(authors.to_vec())
             .limit(limit);
         if let Some(ts) = until {
