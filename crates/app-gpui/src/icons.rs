@@ -96,6 +96,31 @@ pub fn bookmark_icon(color: u32) -> impl IntoElement {
     icon(bookmark, color, 17.0)
 }
 
+/// Rail glyphs at rail size (icons.rs rail pass — the sidebar icons).
+pub fn stream_icon(color: u32) -> impl IntoElement {
+    icon(stream, color, 20.0)
+}
+
+pub fn search_icon(color: u32) -> impl IntoElement {
+    icon(magnifier, color, 20.0)
+}
+
+pub fn bell_icon(color: u32) -> impl IntoElement {
+    icon(bell, color, 20.0)
+}
+
+pub fn pen_icon(color: u32) -> impl IntoElement {
+    icon(pen, color, 20.0)
+}
+
+pub fn gear_icon(color: u32) -> impl IntoElement {
+    icon(gear, color, 20.0)
+}
+
+pub fn arrow_up_icon(color: u32) -> impl IntoElement {
+    icon(arrow_up, color, 16.0)
+}
+
 // The ensō — the brush circle with a gap, drawn as a slightly spiralling
 // arc that tapers toward the tail (the brush lifting off). It opens every
 // session: the waiting mark of the login flow.
@@ -115,6 +140,89 @@ fn enso_glyph(b: &mut PathBuilder, g: &Grid) {
             b.line_to(pt);
         }
     }
+}
+
+/// A sampled circle stroke (the magnifier's lens, the gear's hub).
+fn circle(b: &mut PathBuilder, g: &Grid, cx: f32, cy: f32, r: f32) {
+    let n = 48;
+    for i in 0..=n {
+        let a = (i as f32 / n as f32) * std::f32::consts::TAU;
+        let pt = g.p(cx + r * a.cos(), cy + r * a.sin());
+        if i == 0 {
+            b.move_to(pt);
+        } else {
+            b.line_to(pt);
+        }
+    }
+}
+
+// The rail's feed mark: three lines of text with the current-position dot —
+// the quietest possible "stream".
+fn stream(b: &mut PathBuilder, g: &Grid) {
+    b.move_to(g.p(10.0, 6.5));
+    b.line_to(g.p(19.5, 6.5));
+    b.move_to(g.p(10.0, 12.0));
+    b.line_to(g.p(19.5, 12.0));
+    b.move_to(g.p(10.0, 17.5));
+    b.line_to(g.p(19.5, 17.5));
+    // The dot: a hairline segment, too short to read as a line.
+    b.move_to(g.p(4.8, 6.5));
+    b.line_to(g.p(5.2, 6.5));
+    b.move_to(g.p(4.8, 12.0));
+    b.line_to(g.p(5.2, 12.0));
+    b.move_to(g.p(4.8, 17.5));
+    b.line_to(g.p(5.2, 17.5));
+}
+
+// satori-search-symbolic.svg — lens + handle.
+fn magnifier(b: &mut PathBuilder, g: &Grid) {
+    circle(b, g, 10.5, 10.5, 6.2);
+    b.move_to(g.p(15.2, 15.2));
+    b.line_to(g.p(20.2, 20.2));
+}
+
+// The bell: dome with a smile-arc clapper.
+fn bell(b: &mut PathBuilder, g: &Grid) {
+    b.move_to(g.p(12.0, 4.0));
+    b.curve_to(g.p(6.0, 4.6), g.p(6.0, 12.0));
+    b.line_to(g.p(6.0, 15.5));
+    b.line_to(g.p(18.0, 15.5));
+    b.line_to(g.p(18.0, 12.0));
+    b.curve_to(g.p(18.0, 4.6), g.p(12.0, 4.0));
+    b.move_to(g.p(10.0, 18.6));
+    b.curve_to(g.p(12.0, 20.0), g.p(14.0, 18.6));
+}
+
+// The compose pen: pencil outline with the tip cross-line (feather edit-2).
+fn pen(b: &mut PathBuilder, g: &Grid) {
+    b.move_to(g.p(5.0, 19.0));
+    b.line_to(g.p(5.9, 15.7));
+    b.line_to(g.p(17.0, 4.6));
+    b.line_to(g.p(19.4, 7.0));
+    b.line_to(g.p(8.8, 18.6));
+    b.line_to(g.p(5.0, 19.0));
+    b.move_to(g.p(15.4, 6.2));
+    b.line_to(g.p(18.3, 9.1));
+}
+
+// Settings: the brush gear — a hub circle wearing eight short spokes.
+fn gear(b: &mut PathBuilder, g: &Grid) {
+    circle(b, g, 12.0, 12.0, 4.2);
+    for i in 0..8 {
+        let a = (i as f32) * std::f32::consts::FRAC_PI_4;
+        let (sin, cos) = a.sin_cos();
+        b.move_to(g.p(12.0 + 6.4 * cos, 12.0 + 6.4 * sin));
+        b.line_to(g.p(12.0 + 8.6 * cos, 12.0 + 8.6 * sin));
+    }
+}
+
+// Back-to-top: shaft + head.
+fn arrow_up(b: &mut PathBuilder, g: &Grid) {
+    b.move_to(g.p(12.0, 19.0));
+    b.line_to(g.p(12.0, 5.5));
+    b.move_to(g.p(6.5, 11.0));
+    b.line_to(g.p(12.0, 5.5));
+    b.line_to(g.p(17.5, 11.0));
 }
 
 /// The ensō at display size — a brush circle, so the stroke runs heavier

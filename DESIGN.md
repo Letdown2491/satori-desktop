@@ -379,11 +379,16 @@ re-expression of views, not a feature rebuild.
   xattr patch, `theme.rs` (sumi-e tokens as constants), `icons.rs` (PathBuilder
   glyphs), feed view with real note cards. *Accept: real session, real feed, scroll,
   like posts a real reaction.*
-- **P1 — Shell & navigation (done).** `shell.rs`: header (back/title/settings seal) +
-  nav stack of panes (feed/thread/profile/settings); content views emit `Nav`
-  events, the shell owns the stack. Thread view (anchor + flat replies, reply
+- **P1 — Shell & navigation (done).** `shell.rs`: nav stack of panes
+  (feed/thread/profile/settings); content views emit `Nav` events, the shell
+  owns the stack. Thread view (anchor + flat replies, reply
   click opens its own thread), profile view (name/about/follow seal + notes),
   settings view (relays + media servers, read-only). Escape-to-back via root
+  key-down. *Later pass: the header became an icon rail (sumi-e sidebar) —
+  ensō home, feed, search, bell with dot, vermilion pen, gear at the foot;
+  back+title live on the deep panes' own top row; re-clicking the active
+  rail spot scrolls the feed to top, and a floating ↑ whisper appears when
+  scrolled deep.*
   key-down + focused shell handle. *Accept: click note → thread, Escape →
   back, all four routes render.* Finding for P2: GPUI's Wayland CSD drag strip
   overlays our header — in fullscreen, clicks on the top ~30px start a window

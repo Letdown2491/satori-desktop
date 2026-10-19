@@ -16,6 +16,9 @@ pub enum Nav {
     /// The lightbox overlay: full-screen image viewer (lightbox.rs), the
     /// URL list plus the starting index.
     OpenLightbox(Vec<String>, usize),
+    /// The feed crossed the deep-scroll threshold (or came back): the shell
+    /// shows/hides the floating back-to-top whisper.
+    FeedDeep(bool),
     /// The active pane closes itself (composer after commit/undo).
     Pop,
 }

@@ -9,14 +9,14 @@
 use std::sync::Arc;
 
 use gpui::{
-    EventEmitter,
+    ClickEvent, Div, EventEmitter,
     div, img, prelude::*, px, rgb, App, Context, Entity, FocusHandle, Focusable, KeyDownEvent,
-    ObjectFit, Render, Window,
+    ObjectFit, Render, SharedString, Stateful, Window,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent};
 
-use crate::{media, theme};
+use crate::{icons, media, theme};
 use super::{
     composer::{Draft, Composer},
     feed::Feed,
@@ -29,6 +29,7 @@ use super::{
     thread::ThreadView,
 };
 
+#[derive(Clone)]
 pub enum Pane {
     Feed(Entity<Feed>),
     Thread(Entity<ThreadView>),
@@ -55,6 +56,9 @@ pub struct Shell {
     /// Bell dot: anything newer than the read-state high-water? Polled every
     /// 90s like the GTK shell (poll_notif); cleared when the pane opens.
     notif_unread: bool,
+    /// The feed's deep-scroll state (Nav::FeedDeep): the floating
+    /// back-to-top whisper only shows once the reader is well below the top.
+    feed_deep: bool,
     stack: Vec<Pane>,
 }
 
@@ -67,6 +71,10 @@ impl Shell {
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
+            Nav::FeedDeep(deep) => {
+                this.feed_deep = *deep;
+                cx.notify();
+            }
             Nav::Pop => this.back(cx),
         })
         .detach();
@@ -77,6 +85,7 @@ impl Shell {
             refocus: false,
             lightbox: None,
             notif_unread: false,
+            feed_deep: false,
             stack: vec![],
         };
         shell.stack.push(Pane::Feed(feed));
@@ -91,6 +100,10 @@ impl Shell {
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
+            Nav::FeedDeep(deep) => {
+                this.feed_deep = *deep;
+                cx.notify();
+            }
             Nav::Pop => this.back(cx),
         })
         .detach();
@@ -231,55 +244,231 @@ impl Shell {
         }
     }
 
-    fn gear(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("open-settings")
-            .cursor_pointer()
-            .p_1()
-            .text_size(px(13.0))
-            .text_color(rgb(theme::MUTED))
-            .on_click(cx.listener(|shell, _, _, cx| shell.open_settings(cx)))
-            .child("Settings")
+}
+
+// --- the rail (P1's sidebar pass) ------------------------------------------
+
+/// Which rail spot (if any) the active pane corresponds to — the tick marks
+/// the active spot, and re-clicking it is an affordance (feed: back to top).
+#[derive(Clone, Copy, PartialEq)]
+enum Spot {
+    Feed,
+    Search,
+    Notif,
+    Compose,
+    Settings,
+}
+
+impl Shell {
+    fn active_spot(&self) -> Option<Spot> {
+        match self.stack.last() {
+            Some(Pane::Feed(_)) => Some(Spot::Feed),
+            Some(Pane::Search(_)) => Some(Spot::Search),
+            Some(Pane::Notifications(_)) => Some(Spot::Notif),
+            Some(Pane::Composer(_)) => Some(Spot::Compose),
+            Some(Pane::Settings(_)) => Some(Spot::Settings),
+            _ => None,
+        }
     }
 
-    /// The compose seal: a quiet header affordance, the only way in.
-    fn compose_seal(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("open-compose")
-            .cursor_pointer()
-            .p_1()
-            .px_2()
-            .text_size(px(13.0))
-            .text_color(rgb(theme::VERMILION))
-            .on_click(cx.listener(|shell, _, _, cx| shell.open_composer(None, cx)))
-            .child("Compose")
+    /// Home: back to the feed, unstacking whatever depth we're at (back()
+    /// handles each pop, including the composer draft stash).
+    fn go_home(&mut self, cx: &mut Context<Self>) {
+        while self.stack.len() > 1 {
+            self.back(cx);
+        }
     }
 
-    /// The notifications seal with its bell dot (layout.ts notifBell — no
-    /// counts, no badges, just a dot).
-    fn notif_seal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The feed pane's scroll-to-top (rail re-click, ensō, the whisper).
+    fn feed_to_top(&self, cx: &mut Context<Self>) {
+        if let Some(Pane::Feed(view)) = self.stack.last().cloned() {
+            view.update(cx, |feed, _| feed.scroll_top());
+        }
+    }
+
+    fn rail(&self, cx: &mut Context<Self>) -> Div {
+        let active = self.active_spot();
+        let ink = |on: bool| if on { theme::INK } else { theme::MUTED };
+        let feed_active = active == Some(Spot::Feed);
+
         div()
-            .id("open-notifications")
-            .cursor_pointer()
+            .flex_none()
+            .h_full()
+            .w(px(52.0))
             .flex()
+            .flex_col()
             .items_center()
+            .pt(px(14.0))
+            .pb(px(12.0))
             .gap_1()
-            .p_1()
-            .on_click(cx.listener(|shell, _, _, cx| shell.open_notifications(cx)))
-            .child(
+            // The ensō: home. Same as the feed mark, drawn heavier.
+            .child(self.rail_button(
+                "rail-home",
+                icons::enso_icon(ink(feed_active), 22.0),
+                feed_active,
+                cx.listener(move |shell, _, _, cx| {
+                    if feed_active {
+                        shell.feed_to_top(cx);
+                    } else {
+                        shell.go_home(cx);
+                    }
+                }),
+            ))
+            .child(self.rail_button(
+                "rail-feed",
+                icons::stream_icon(ink(feed_active)),
+                feed_active,
+                cx.listener(move |shell, _, _, cx| {
+                    if feed_active {
+                        // Re-click the active spot: back to the top.
+                        shell.feed_to_top(cx);
+                    } else {
+                        shell.go_home(cx);
+                    }
+                }),
+            ))
+            .child(self.rail_button(
+                "rail-search",
+                icons::search_icon(ink(active == Some(Spot::Search))),
+                active == Some(Spot::Search),
+                cx.listener(move |shell, _, _, cx| {
+                    if shell.active_spot() != Some(Spot::Search) {
+                        shell.open_search(cx);
+                    }
+                }),
+            ))
+            .child(self.rail_button(
+                "rail-notifications",
                 div()
-                    .text_size(px(13.0))
-                    .text_color(rgb(theme::MUTED))
-                    .child("Notifs"),
-            )
-            .when(self.notif_unread, |d| {
+                    .relative()
+                    .child(icons::bell_icon(ink(active == Some(Spot::Notif))))
+                    .when(self.notif_unread, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top(px(-1.))
+                                .right(px(-1.))
+                                .size(px(6.))
+                                .rounded_full()
+                                .bg(rgb(theme::VERMILION)),
+                        )
+                    }),
+                active == Some(Spot::Notif),
+                cx.listener(move |shell, _, _, cx| {
+                    if shell.active_spot() != Some(Spot::Notif) {
+                        shell.open_notifications(cx);
+                    }
+                }),
+            ))
+            // Compose speaks (it broadcasts) — the pen wears vermilion.
+            .child(self.rail_button(
+                "rail-compose",
+                icons::pen_icon(theme::VERMILION),
+                active == Some(Spot::Compose),
+                cx.listener(move |shell, _, _, cx| {
+                    // Never clobber an open composer (its draft is live).
+                    if shell.active_spot() != Some(Spot::Compose) {
+                        shell.open_composer(None, cx);
+                    }
+                }),
+            ))
+            // Settings anchors the rail's foot.
+            .child(div().flex_1())
+            .child(self.rail_button(
+                "rail-settings",
+                icons::gear_icon(ink(active == Some(Spot::Settings))),
+                active == Some(Spot::Settings),
+                cx.listener(move |shell, _, _, cx| {
+                    if shell.active_spot() != Some(Spot::Settings) {
+                        shell.open_settings(cx);
+                    }
+                }),
+            ))
+    }
+
+    fn rail_button(
+        &self,
+        id: &'static str,
+        glyph: impl IntoElement + 'static,
+        active: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Stateful<Div> {
+        div()
+            .id(SharedString::from(id))
+            .relative()
+            .cursor_pointer()
+            .w(px(52.0))
+            .py(px(9.0))
+            .flex()
+            .justify_center()
+            .on_click(on_click)
+            // The active tick: a small vermilion brush accent, not a pill.
+            .when(active, |d| {
                 d.child(
                     div()
-                        .size(px(6.))
+                        .absolute()
+                        .left(px(11.0))
+                        .top(px(11.0))
+                        .bottom(px(11.0))
+                        .w(px(2.0))
                         .rounded_full()
                         .bg(rgb(theme::VERMILION)),
                 )
             })
+            .child(glyph)
+    }
+
+    /// The deep panes' quiet top row: back + title. The feed (depth 1) has
+    /// none — the rail's ensō is home and the stream needs no label.
+    fn title_row(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_4()
+            .pt(px(8.0))
+            .pb(px(4.0))
+            .child(
+                div()
+                    .id("back")
+                    .cursor_pointer()
+                    .text_size(px(13.0))
+                    .text_color(rgb(theme::MUTED))
+                    .on_click(cx.listener(|shell, _, _, cx| shell.back(cx)))
+                    .child("‹ Back"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(13.0))
+                    .text_color(rgb(theme::INK))
+                    .child(self.title()),
+            )
+    }
+
+    /// The floating back-to-top whisper — bottom-right of the content
+    /// column, only when the feed is scrolled well down.
+    fn floating_top(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id("back-to-top")
+            .absolute()
+            .bottom(px(20.0))
+            .right(px(24.0))
+            .size(px(38.0))
+            .rounded_full()
+            .cursor_pointer()
+            .border_1()
+            .border_color(rgb(theme::HAIRLINE))
+            .bg(rgb(theme::WASHI))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|shell, _, _, cx| {
+                shell.feed_to_top(cx);
+                shell.feed_deep = false;
+                cx.notify();
+            }))
+            .child(icons::arrow_up_icon(theme::MUTED))
     }
 }
 
@@ -292,7 +481,6 @@ impl Focusable for Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let depth = self.stack.len();
-        let title = self.title();
         let pane = self.stack.last().unwrap();
         if !self.focused_once || self.refocus {
             self.focused_once = true;
@@ -360,56 +548,36 @@ impl Render for Shell {
             .bg(rgb(theme::WASHI))
             .text_color(rgb(theme::INK))
             .font_family(theme::SANS)
+            // The rail + content row. The rail sits outside every pane's
+            // scroll container, so anchoring is free; the deep panes carry
+            // their back+title row above the pane (the feed carries none).
             .flex()
-            .flex_col()
+            .flex_row()
+            .child(self.rail(cx))
             .child(
                 div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
                     .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(rgb(theme::HAIRLINE))
-                    .child(if depth > 1 {
-                        div()
-                            .id("back")
-                            .cursor_pointer()
-                            .text_size(px(13.0))
-                            .text_color(rgb(theme::MUTED))
-                            .on_click(cx.listener(|shell, _, _, cx| shell.back(cx)))
-                            .child("‹ Back")
-                            .into_any_element()
-                    } else {
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(rgb(theme::MUTED))
-                            .child("Satori")
-                            .into_any_element()
+                    .flex_col()
+                    .when(depth > 1, |d| d.child(self.title_row(cx)))
+                    .child(match pane {
+                        Pane::Feed(view) => view.clone().into_any_element(),
+                        Pane::Thread(view) => view.clone().into_any_element(),
+                        Pane::Profile(view) => view.clone().into_any_element(),
+                        Pane::Notifications(view) => view.clone().into_any_element(),
+                        Pane::Search(view) => view.clone().into_any_element(),
+                        Pane::Settings(view) => view.clone().into_any_element(),
+                        Pane::Article(view) => view.clone().into_any_element(),
+                        Pane::Composer(view) => view.clone().into_any_element(),
                     })
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(13.0))
-                            .text_color(rgb(theme::INK))
-                            .child(title),
-                    )
-                    .when(!matches!(pane, Pane::Composer(_)), |h| {
-                        h.child(self.notif_seal(cx).into_any_element())
-                            .child(self.compose_seal(cx).into_any_element())
-                    })
-                    .child(self.gear(cx).into_any_element()),
+                    .when(
+                        self.feed_deep && matches!(pane, Pane::Feed(_)),
+                        |d| d.child(self.floating_top(cx)),
+                    ),
             )
-            .child(match pane {
-                Pane::Feed(view) => view.clone().into_any_element(),
-                Pane::Thread(view) => view.clone().into_any_element(),
-                Pane::Profile(view) => view.clone().into_any_element(),
-                Pane::Notifications(view) => view.clone().into_any_element(),
-                Pane::Search(view) => view.clone().into_any_element(),
-                Pane::Settings(view) => view.clone().into_any_element(),
-                Pane::Article(view) => view.clone().into_any_element(),
-                Pane::Composer(view) => view.clone().into_any_element(),
-            })
             .when_some(self.lightbox.clone(), |d, (urls, idx)| {
                 d.child(lightbox_overlay(&urls, idx, cx))
             })

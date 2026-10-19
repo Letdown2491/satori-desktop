@@ -14,7 +14,7 @@ use std::{
 use gpui::{
     div, list, prelude::*, px, relative, rgb, Context, Entity, EventEmitter, FontWeight,
     ListAlignment,
-    ListScrollEvent, ListState, Render, SharedString, Window, Div,
+    ListOffset, ListScrollEvent, ListState, Render, SharedString, Window, Div,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile, PublishEvent};
@@ -53,6 +53,9 @@ pub struct Feed {
     /// while the reader idles at the end cap can chain the next one (the
     /// scroll handler only fires on wheel ticks, which stop at the cap).
     last_visible_end: usize,
+    /// Deep-scroll state, emitted to the shell (Nav::FeedDeep) so the
+    /// floating back-to-top whisper knows when to appear.
+    deep: bool,
     list: ListState,
 }
 
@@ -92,6 +95,7 @@ impl Feed {
             snap_dirty: true,
             note_ids: HashSet::new(),
             last_visible_end: 0,
+            deep: false,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
         // Endless scroll: the list's own scroll stream orders the next page
@@ -101,6 +105,13 @@ impl Feed {
         feed.list.set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
             let _ = this.update(cx, |feed, cx| {
                 feed.last_visible_end = ev.visible_range.end;
+                // Deep-scroll whisper: the shell floats a back-to-top button
+                // once the reader is a dozen items down. Emit on change only.
+                let deep = ev.visible_range.start >= 10;
+                if feed.deep != deep {
+                    feed.deep = deep;
+                    cx.emit(Nav::FeedDeep(deep));
+                }
                 feed.maybe_older(feed.last_visible_end, cx);
             });
         });
@@ -112,6 +123,17 @@ impl Feed {
     /// The list's item count: one row per note + the end cap.
     fn list_len(&self) -> usize {
         self.notes.len() + 1
+    }
+
+    /// Back to the top (rail re-click, ensō click, the floating whisper):
+    /// home is item zero. The remembered scroll end resets too, or the next
+    /// landing page would chain a prefetch for a reader sitting at the top.
+    pub fn scroll_top(&mut self) {
+        self.last_visible_end = 0;
+        self.list.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
     }
 
     /// Near the bottom, order the next older page. The scroll handler calls
