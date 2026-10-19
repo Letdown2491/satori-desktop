@@ -11,7 +11,7 @@ use std::sync::Arc;
 use gpui::{
     ClickEvent, Div, EventEmitter,
     div, img, prelude::*, px, rgb, App, Context, Entity, FocusHandle, Focusable, KeyDownEvent,
-    ObjectFit, Render, SharedString, Stateful, Window,
+    AnyView, ObjectFit, Render, SharedString, Stateful, Window,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent};
@@ -247,6 +247,29 @@ impl Shell {
 
 }
 
+/// A rail tooltip: ink chip, washi text, nothing more. gpui paints these
+/// itself near the cursor after a hover (window.rs prepaint_tooltip).
+struct Tip {
+    label: &'static str,
+}
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded(px(3.0))
+            .bg(rgb(theme::INK))
+            .text_color(rgb(theme::WASHI))
+            .text_size(px(11.5))
+            .font_family(theme::SANS)
+            .child(self.label)
+    }
+}
+/// The `.tooltip(...)` builder for a static label.
+fn tip(label: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    move |_, cx| cx.new(|_| Tip { label }).into()
+}
+
 // --- the rail (P1's sidebar pass) ------------------------------------------
 
 /// Which rail spot (if any) the active pane corresponds to — the tick marks
@@ -307,6 +330,7 @@ impl Shell {
                 // The ensō is the logo that happens to lead home — it never
                 // wears the active tick.
                 "rail-home",
+                "Home",
                 icons::enso_icon(ink(feed_active), 22.0),
                 false,
                 cx.listener(move |shell, _, _, cx| {
@@ -319,6 +343,7 @@ impl Shell {
             ))
             .child(self.rail_button(
                 "rail-feed",
+                "Feed",
                 icons::stream_icon(ink(feed_active)),
                 feed_active,
                 cx.listener(move |shell, _, _, cx| {
@@ -332,6 +357,7 @@ impl Shell {
             ))
             .child(self.rail_button(
                 "rail-search",
+                "Search",
                 icons::search_icon(ink(active == Some(Spot::Search))),
                 active == Some(Spot::Search),
                 cx.listener(move |shell, _, _, cx| {
@@ -342,6 +368,7 @@ impl Shell {
             ))
             .child(self.rail_button(
                 "rail-notifications",
+                "Notifications",
                 div()
                     .relative()
                     .child(icons::bell_icon(ink(active == Some(Spot::Notif))))
@@ -366,6 +393,7 @@ impl Shell {
             // Compose speaks (it broadcasts) — the pen wears vermilion.
             .child(self.rail_button(
                 "rail-compose",
+                "Compose",
                 icons::pen_icon(theme::VERMILION),
                 active == Some(Spot::Compose),
                 cx.listener(move |shell, _, _, cx| {
@@ -379,6 +407,7 @@ impl Shell {
             .child(div().flex_1())
             .child(self.rail_button(
                 "rail-settings",
+                "Settings",
                 icons::gear_icon(ink(active == Some(Spot::Settings))),
                 active == Some(Spot::Settings),
                 cx.listener(move |shell, _, _, cx| {
@@ -392,6 +421,7 @@ impl Shell {
     fn rail_button(
         &self,
         id: &'static str,
+        label: &'static str,
         glyph: impl IntoElement + 'static,
         active: bool,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -404,6 +434,7 @@ impl Shell {
             .py(px(9.0))
             .flex()
             .justify_center()
+            .tooltip(tip(label))
             .on_click(on_click)
             // The active tick: a small vermilion brush accent, not a pill.
             .when(active, |d| {
@@ -466,6 +497,7 @@ impl Shell {
             .flex()
             .items_center()
             .justify_center()
+            .tooltip(tip("Back to top"))
             .on_click(cx.listener(|shell, _, _, cx| {
                 shell.feed_to_top(cx);
                 shell.feed_deep = false;
