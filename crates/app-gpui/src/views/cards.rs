@@ -297,7 +297,7 @@ fn poll_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> Div
                 .w_full()
                 .flex()
                 .justify_end()
-                .child(seal(format!("vote-{}", ev.id), "Vote", theme::live(), false).on_click(
+                .child(seal(format!("vote-{}", ev.id), "Vote", theme::vermilion(), false).on_click(
                     move |_, _, cx| {
                         cx.stop_propagation();
                         let ev = ev_for_vote.clone();
