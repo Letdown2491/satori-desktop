@@ -20,8 +20,11 @@ use crate::config;
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
-    /// Raw RGBA8 pixels.
-    pub rgba: Vec<u8>,
+    /// The ORIGINAL encoded bytes (jpeg/png/webp/gif) — the UI hands them to
+    /// gpui's image pipeline, which decodes on its own asset thread.
+    pub bytes: Vec<u8>,
+    /// Format of `bytes` (gpui maps it onto its own enum).
+    pub format: image::ImageFormat,
 }
 
 /// Fetch a JSON document (oEmbed etc.) through the same guarded, cached
@@ -109,10 +112,19 @@ fn cache_path(key: &str) -> PathBuf {
 }
 
 fn decode(bytes: &[u8]) -> Result<DecodedImage, String> {
+    // The full decode validates the bytes (a blossom page URL is not media)
+    // and yields the true dims for aspect-correct frames; the UI never
+    // touches these pixels — it re-decodes from `bytes` on its own thread.
     let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
     let rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
-    Ok(DecodedImage { width, height, rgba: rgba.into_raw() })
+    let format = image::guess_format(bytes).map_err(|e| e.to_string())?;
+    Ok(DecodedImage {
+        width,
+        height,
+        bytes: bytes.to_vec(),
+        format,
+    })
 }
 
 /// SSRF guard, reduced surface: https only; rejects IP literals and

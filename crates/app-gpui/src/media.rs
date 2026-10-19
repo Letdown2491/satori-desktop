@@ -9,7 +9,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    io::Cursor,
     sync::Arc,
 };
 
@@ -150,16 +149,23 @@ impl Cache {
     }
 }
 
-/// Encode core's decoded RGBA as PNG bytes for gpui's image pipeline,
-/// keeping the decoded size for aspect-correct frames.
-pub fn png_from_rgba(d: &DecodedImage) -> Option<CachedImage> {
-    let img = image::RgbaImage::from_raw(d.width, d.height, d.rgba.clone())?;
-    let mut out = Vec::new();
-    image::DynamicImage::ImageRgba8(img)
-        .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
-        .ok()?;
+/// Build the cached entry from core's handoff. The ORIGINAL encoded bytes
+/// go to gpui's pipeline as-is: gpui decodes on its own asset thread and
+/// caches the texture by content hash. (The old path re-encoded everything
+/// to PNG on the main thread — a 12MP photo spent hundreds of ms in deflate
+/// there, ×40 per top-up page: the endless-scroll hang.) `size` stays the
+/// original dimensions — the frame's aspect is the picture's, and eviction
+/// budgets decoded pixels, not file bytes.
+pub fn cached_from_decoded(d: DecodedImage) -> Option<CachedImage> {
+    let format = match d.format {
+        image::ImageFormat::Png => ImageFormat::Png,
+        image::ImageFormat::Jpeg => ImageFormat::Jpeg,
+        image::ImageFormat::WebP => ImageFormat::Webp,
+        image::ImageFormat::Gif => ImageFormat::Gif,
+        _ => return None,
+    };
     Some(CachedImage {
-        png: Arc::new(Image::from_bytes(ImageFormat::Png, out)),
+        png: Arc::new(Image::from_bytes(format, d.bytes)),
         size: (d.width, d.height),
     })
 }
@@ -222,13 +228,13 @@ pub fn fetch<V: 'static>(
             let rx = core.fetch_image(url.clone());
             cx.spawn(async move |_this, cx| {
                 let decoded = { let mut rx = rx; rx.recv().await }.flatten();
-                let png = decoded.as_ref().and_then(png_from_rgba);
+                let cached = decoded.and_then(cached_from_decoded);
                 // Publish globally, then drain every joiner.
                 let cbs = cx
                     .update(|app| {
                         let cache = app.global_mut::<Cache>();
                         let mut map = cache.map.borrow_mut();
-                        let st = png.as_ref().map_or(Entry::NotMedia, |c| {
+                        let st = cached.as_ref().map_or(Entry::NotMedia, |c| {
                             let (w, h) = c.size;
                             cache.bytes.set(cache.bytes.get() + w as u64 * h as u64 * 4);
                             Entry::Ready(c.clone())
@@ -253,7 +259,7 @@ pub fn fetch<V: 'static>(
                     })
                     .unwrap_or_default();
                 for cb in cbs {
-                    cb(png.clone(), cx);
+                    cb(cached.clone(), cx);
                 }
             })
             .detach();
