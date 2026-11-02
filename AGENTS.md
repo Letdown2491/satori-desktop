@@ -32,6 +32,9 @@ container runs.)
 Launching on the host: the bootc host lacks `libxkbcommon-x11` (GTK's Wayland
 backend never needed it). A copy lives at `~/.local/lib/libxkbcommon-x11.so.0`;
 launch with `LD_LIBRARY_PATH=~/.local/lib ./target/debug/satori-desktop`.
+Daily-driver install (release): `cargo build --release` in the container, then
+`./packaging/install-local.sh` (bin + wrapper + desktop file + hicolor icons
+into `~/.local`; `target/debug` can be deleted after).
 
 ## Gates
 

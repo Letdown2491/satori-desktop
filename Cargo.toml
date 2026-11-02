@@ -40,6 +40,9 @@ base64 = "0.22"
 bech32 = "0.12"
 chrono = "0.4"
 
+# Daily-driver release: stripped (the 25GB debug tree is dev-only), thin
+# LTO and a single codegen unit for the render hot paths (D25).
 [profile.release]
 lto = "thin"
 strip = "symbols"
+codegen-units = 1
