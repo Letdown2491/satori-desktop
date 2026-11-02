@@ -16,7 +16,8 @@ is commit `a4b09e8`: `git show a4b09e8:src/<file>`). The build spec is
   `theme.rs`, stroke-drawn glyphs in `icons.rs`, views in `views/`.
 - `vendor/xattr` — one-line Linux compile fix for a gpui 0.2.2 transitive dep
   (D13); wired via `[patch.crates-io]` in the root `Cargo.toml`.
-- `packaging/flatpak` — Flatpak packaging (M5).
+- `packaging/` — `install-local.sh` ships the release (bin + wrapper + desktop
+  file + hicolor icons into `~/.local`); Flatpak packaging is not built.
 
 ## Dev environment (host is bootc — no GTK/Vulkan dev headers on the host)
 

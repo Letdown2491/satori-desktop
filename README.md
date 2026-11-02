@@ -20,19 +20,31 @@ Satori is built on three commitments:
 
 ## Status
 
-Daily-driver quality: the GPUI port is complete through P4 except packaging.
+Daily-driver quality — the owner runs it as their main client. The GPUI port
+is complete through P4, plus the follow-on polish phases:
 
 - Timeline — endless scroll to the bottom of your history, media, quotes,
-  reposts (NIP-18), polls (NIP-68 vote + compose), articles (NIP-23 reader)
+  reposts (NIP-18), polls (NIP-68 vote + compose), articles (NIP-23 reader),
+  hashtag timelines; a new-notes pill when the live subscription lands
+  updates while you're reading
 - Threads — NIP-10 roots, NIP-22 comments, reply-to-root routing
-- Composer — undo window on every publish kind, draft restore, attachments
-  (Blossom upload), @-mentions, quote cards
+- Composer — undo window on every publish kind, draft restore, scheduled
+  posts, attachments (Blossom upload), @-mentions, quote cards
+- Zaps — NIP-57 send with verified receipts (D18), paid through a
+  connected NWC wallet (NIP-47)
 - Notifications — replies, comments, zaps, poll votes; reactions behind a pref
-- Profiles, search (NIP-50), list backup (export/import), two live themes,
-  reduced-motion honored
+- Profiles — banner + avatar header, NIP-05 verification badge,
+  click-to-copy npub/Lightning rows, notes rendered exactly like the
+  timeline (D30), photos/videos media strips that page endlessly
+- Inline video — poster tiles, click-to-play, one GStreamer player per
+  process (D21)
+- Search (NIP-50), list backup (export/import), NIP-78 preferences sync,
+  two live themes, reduced-motion honored
 
-Open: Flatpak packaging (and with it the Secret Service keyring decision).
-The design and build spec is [DESIGN.md](DESIGN.md).
+Open: NIP-37 draft sync, the owner metrics pane, the private-relay routing
+policy, Tor-routed media fetch (D24), and Flatpak packaging — the release
+ships today via `packaging/install-local.sh` (bin + desktop file + icons
+into `~/.local`). The design and build spec is [DESIGN.md](DESIGN.md).
 
 ## Development
 

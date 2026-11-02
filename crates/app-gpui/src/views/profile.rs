@@ -1,7 +1,11 @@
-//! Profile view: an author's metadata + their notes.
+//! Profile view: an author's header, their notes as a feed, and media strips.
 //!
-//! TODO(port): crates/app/src/profile.rs — P1. Name/about + note list; banner
-//! and avatar images wait for the P2 image pipeline (core fetch → gpui `img`).
+//! TODO(port): crates/app/src/profile.rs — P1 (D30 reworked the notes list).
+//! Header: banner strip (cover-fit, hairline, nothing when absent), 72px
+//! avatar, NIP-05 verification badge, click-to-copy npub/Lightning rows,
+//! live about text. The Notes tab hosts an embedded `Feed`
+//! (`FeedMode::Profile`) — the timeline's exact cards; Photos/Videos are
+//! 3-column thumbnail grids that page endlessly (`profile_older`, deduped).
 //! Follow/mute management ports with the rest of the settings scope (P3).
 
 use std::{collections::HashMap, collections::HashSet, sync::Arc, time::Duration};
