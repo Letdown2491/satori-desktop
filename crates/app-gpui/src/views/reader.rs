@@ -137,11 +137,15 @@ fn render_block(
             block_item(md_flow(&text, 15.0, false, ctx, handle), 14.0).into_any_element()
         }
         markdown::Block::Heading(level, text) => {
-            // The GTK sizes: 28000/23000/19000 Pango units for 1/2/3; the
-            // deeper levels step down toward body size.
-            let size = [24.0, 20.0, 17.0, 15.5, 14.5, 14.0][(level - 1).clamp(0, 5)];
+            // The ladder sits UNDER the 22px title (H1 just below it, deeper
+            // levels stepping down toward body size); a little air ABOVE each
+            // heading separates it from the paragraph it introduces — the
+            // reading rhythm hangs on that gap.
+            let size = [20.0, 18.0, 16.0, 15.0, 14.5, 14.0][(level - 1).clamp(0, 5)];
+            let top = [10.0, 8.0, 6.0, 4.0, 2.0, 0.0][(level - 1).clamp(0, 5)];
             let head = div()
                 .w_full()
+                .pt(px(top))
                 .font_family(theme::SERIF)
                 .text_size(px(size))
                 .line_height(relative(1.2))
@@ -221,7 +225,8 @@ fn render_block(
 /// One markdown paragraph through the word flow: markdown spans carry the
 /// styling; plain words classify as entities (urls, mentions) exactly like
 /// note bodies. Link spans wrap as one unit — a link is one word to the
-/// reader's eye anyway.
+/// reader's eye anyway. (Line height 1.35: long-form serif needs the air —
+/// the note cards' 1.2 is for short bursts.)
 fn md_flow(
     para: &str,
     size: f32,
@@ -243,7 +248,7 @@ fn md_flow(
             div()
                 .font_family(if span.code { theme::MONO } else { theme::SERIF })
                 .text_size(px(if span.code { size * 0.88 } else { size }))
-                .line_height(relative(1.2))
+                .line_height(relative(1.35))
                 .text_color(rgb(if quiet || is_link {
                     theme::muted()
                 } else {
@@ -387,12 +392,12 @@ impl Render for ArticleView {
                                     div()
                                         .w_full()
                                         .font_family(theme::SERIF)
-                                        .text_size(px(30.0))
-                                        .line_height(relative(1.2))
+                                        .text_size(px(22.0))
+                                        .line_height(relative(1.25))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb(theme::ink()))
                                         .child(title.clone()),
-                                    12.0,
+                                    10.0,
                                 )
                                 .into_any_element(),
                                 1 => block_item(
@@ -404,7 +409,7 @@ impl Render for ArticleView {
                                             &media,
                                             &author_pic,
                                             &author,
-                                            28.0,
+                                            24.0,
                                         ))
                                         .child(
                                             div()
