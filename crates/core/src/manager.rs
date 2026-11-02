@@ -1568,8 +1568,34 @@ impl Core {
             .collect()
     }
 
-    fn active_pubkey(&self) -> String {
-        self.active
+    /// People results for the search pane: a substring scan of the hydrated
+    /// profile cache (name, NIP-05, pubkey hex), any author — mention
+    /// candidates without the follow gate. Cache-local by design: kind-0
+    /// search is thin relay-side, and the cache hydrates as the session
+    /// reads. Sorted by name so the rows hold still run to run.
+    pub fn search_people(&self, query: &str) -> Vec<Profile> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return vec![];
+        }
+        let m = self.profiles_mem.lock().unwrap();
+        let mut hits: Vec<Profile> = m
+            .values()
+            .filter(|p| {
+                p.name.to_lowercase().contains(&q)
+                    || p.nip05.to_lowercase().contains(&q)
+                    || p.pubkey.to_lowercase().contains(&q)
+            })
+            .cloned()
+            .collect();
+        hits.sort_by_key(|p| p.name.to_lowercase());
+        // The search pane's People tab is a proper results page now (not a
+        // sidebar strip) — room for a real page.
+        hits.truncate(20);
+        hits
+    }
+
+    fn active_pubkey(&self) -> String {        self.active
             .lock()
             .unwrap()
             .as_ref()

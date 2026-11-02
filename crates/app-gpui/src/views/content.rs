@@ -242,7 +242,7 @@ pub fn note_refs(ev: &Event) -> Vec<String> {
 }
 
 /// Short display for a bech32 mention when the profile isn't known yet.
-fn short_bech32(bech: &str) -> String {
+pub(crate) fn short_bech32(bech: &str) -> String {
     let bech = bech.strip_prefix("nostr:").unwrap_or(bech);
     format!("{}…", &bech[..bech.len().min(14)])
 }
