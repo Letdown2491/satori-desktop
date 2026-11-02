@@ -3915,6 +3915,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nwc"
+version = "0.45.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8ce4fad7ce258066ea8ca68f58f8843118a4df34de1df9a6c40bd6b1ff73b11"
+dependencies = [
+ "futures-core",
+ "nostr",
+ "nostr-sdk",
+ "opaquerr",
+ "tracing",
+]
+
+[[package]]
 name = "objc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5220,6 +5233,7 @@ name = "satori-core"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bech32",
  "futures-util",
  "image",
  "keyring",
@@ -5228,6 +5242,7 @@ dependencies = [
  "nostr-database",
  "nostr-lmdb",
  "nostr-sdk",
+ "nwc",
  "reqwest",
  "serde",
  "serde_json",

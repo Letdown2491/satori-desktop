@@ -33,6 +33,7 @@ pub mod publish;
 pub mod store;
 pub mod tor;
 pub mod upload;
+pub mod wallet;
 
 #[cfg(test)]
 pub(crate) mod test_env {

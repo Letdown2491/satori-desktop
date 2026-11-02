@@ -83,7 +83,7 @@ timeouts; `h-optimistic` → mutate-then-reconcile.
 | Undo window, scheduled sweep, drafts + NIP-37 sync, filters, content prefs, list backup, bookmark/mute/pin/follow, NIP-17 DMs, NIP-50 search, NIP-11 relay info/browse, Blossom upload, media proxy + NIP-B7 hash healing, SSRF guards, Tor modes | **Port** |
 | Sumi-e design language | **Port** — GTK CSS provider first, now Rust token constants (§5, `theme.rs`) |
 | NIP-46 bunker client | **Use nostr-connect crate** (nostr-sdk) |
-| NWC (NIP-47) | **Deferred** with wallet (nostr-sdk `nwc` crate when built) |
+| NWC (NIP-47) | **Port** — the `nwc` crate, un-deferred (D20) |
 | NIP-07 / hext.js / sign-and-resubmit seam / batch chains / `H-Nostr-Sign` protocol | **Deleted** — existed only because the key lived in the browser |
 | WebLN payment round-trips | **Deleted** (wallet deferred) |
 | Session cookies, read-state cookies, appearance cookie | **Re-expressed** as local state (GSettings/JSON) |
@@ -305,7 +305,7 @@ by kind. Hand-coded handlers for every curated kind; the declarative `engine.ts`
 
 **Provided by rust-nostr workspace** (do not reimplement):
 01, 02, 04(read), 05, 09, 10, 11, 17, 18, 19, 21, 22, 23, 25, 30, 31, 36, 40, 42, 44,
-46 (`nostr-connect`), 47 (`nwc`, deferred), 50, 51, 57, 59, 65, 70, 77, 88, 94, 98,
+46 (`nostr-connect`), 47 (`nwc` — D20), 50, 51, 57, 59, 65, 70, 77, 88, 94, 98,
 B7 (`nostr-blossom`).
 
 **Thin implementations in `core/src/nip/`** (tag/parse/render semantics — no protocol
@@ -351,7 +351,7 @@ rejected (Blossom only).
 | D3 | nostr-sdk workspace for protocol layer | Eliminates the single biggest port risk (relay pool); NIP coverage verified §6.2 |
 | D4 | Event store: nostr-lmdb; app state: 0600 JSON files | LMDB for query-heavy event cache; JSON keeps small state inspectable + compatible habits |
 | D5 | Decrypted DMs memory-only | Cypherpunk at-rest posture; web app's plaintext cache was a compromise |
-| D6 | Wallet (WebLN/NWC UI) deferred | Uncarved block; NWC lands with wallet milestone later |
+| D6 | Wallet (WebLN/NWC UI) deferred — **NWC side un-deferred by D20** | Uncarved block; NWC lands with wallet milestone later |
 | D7 | Tor = bundled C tor child process via SOCKS, per-host isolation | Bootc host can't layer a tor service; isolation trick is proven; arti behind trait later |
 | D8 | Flatpak is the distribution (GNOME runtime); dev in podman container | Bootc host (Fedora atomic); host lacks GTK dev headers |
 | D9 | Design language: sumi-e tokens as GTK CSS provider, bundled OFL serif, Adw idioms with custom note-card/lightbox/ensō | Faithful-adaptation base, pixel-faithful where it defines Satori's identity |
@@ -364,6 +364,7 @@ rejected (Blossom only).
 | D17 | **The app never handles the master key.** The nsec login door is removed; sign-in is NIP-46 only — bunker:// paste or nostrconnect:// QR (advertised on `relay.nip46.com`), both holding only an ephemeral transport secret in `BUNKER_CLIENT_SECRET`. The core's `login_nsec_inner` survives as a `#[cfg(test)]` fixture for the logout/re-login flow tests; `SessionMode::Local` + its resume arm stay for reading old session files. nostrconnect metadata: `name: "Satori"`, `description: "A quiet Nostr reader."`; `url`/`icons` stay unset until the app has hosted art (both optional per NIP-46). The updated NIP-46 also defines `optional_client_metadata` (name/url/image) as the 4th `connect` param for the bunker flow — nostr-sdk 0.45's `connect_bunker` doesn't expose it (sends only pk+secret), noted as an SDK gap; likewise the SDK advertises nostrconnect metadata as a `metadata=` JSON blob while the current spec spells flat `name`/`url`/`image` query params. | User: "remove the sign in via nsec, that's not secure"; prompted by the discovery that a month-old local session had the master key sitting user-level-readable in the Secret Service. |
 | D18 | **The notification stream mirrors the reference's shape, not just kind 1.** Four layers were kind-1-only (relay mention filter, relay reply filter, cached store phase, render gate) — after Amethyst's NIP-22 migration real notifications were invisible. Stream = kind 1 + 1111 (replies/mentions, 1111 always a reply), 9735 zaps (embedded 9734 must verify + p/e/a match the receipt; bolt11 amount authoritative; unverifiable = anonymous, never a spoofed name), 1018 poll votes (#e my poll ids), kind 7 reactions behind the `reactionNotifs` pref (default off), `-` dislikes never. Mutes gate at both phases. Rows carry action words ("· replied", "· zapped 21 sats"); a comment row opens the PARENT's thread. | User approved all five notification types, zaps last ("maybe zaps last but all five sounds good"); reference is `src/data/notifications.ts`. |
 | D19 | **The TypeScript reference is retired at P4 parity.** `src/` + `public/` (1.8 MB, build tooling already gone — it was source-as-documentation only) deleted once the port's remaining slices closed; the code is unchanged since the initial commit, so the pinned address `a4b09e8` is its complete final state (`git show a4b09e8:src/<file>`). The ~118 `TODO(port)`/doc citations across `crates/` and this document stay as historical pointers to that address. Rationale: nothing executed it, and the product behavior it specified now lives in the Rust code it specified it for — the tree should say what the project IS, not what it was rewritten from. | User decision ("shouldn't we delete all the stuff that doesn't belong to this project now?"); the parity trigger was the P4-minus-packaging sweep (reduced-motion audit, reactionNotifs surface, cached-phase engagement kinds). |
+| D20 | **The wallet milestone is un-deferred: NIP-47 zaps via the `nwc` crate (0.45 line, same as the other rust-nostr deps).** D6's carve (§1.3 "no wallet in v1") is reopened — explicitly and only for the NWC *payer*; D17 is untouched (an NWC connection secret is a separate, revocable wallet credential, never master-key material, stored through `secrets.rs` — keyring-first, 0600-file fallback — and never in `prefs.json`). Zaps are **public**: the kind-9734 request is signed through the owner's bunker signer; the anon invoice mode stays as the no-wallet fallback. Feather's payment-discipline rules port as law: **never automatically retry an uncertain payment** (a timeout or unknown NIP-47 response is a terminal `Uncertain` state surfaced to the UI — only an explicit user action retries), **store the signed zap request before paying** (a crash between sign and pay can't double-zap: the explicit retry reuses the same event ID), and **one in-flight payment per note**. Tap = 21 sats, no confirmation dialog; long-press = amount picker; NIP-47 error codes (`INSUFFICIENT_BALANCE`, `RATE_LIMITED`, `QUOTA_EXCEEDED`, …) surface as honest, quiet error states; LNURL-pay fetches ride the SSRF-guarded path. | The Feather-inspired work plan (Nov 2026): zaps are the one load-bearing gap left for a reader-first desktop client — receipts already verify (D18), the UI already shows them; only paying was missing. Feather's own rule "NWC uses its separate connection secret" is what makes this D17-compatible. |
 
 ---
 
@@ -521,7 +522,9 @@ the retirement (D19) those citations point into git history.
 
 ## 10. Open questions / deferred
 
-- Wallet milestone (NWC via `nwc` crate) — revisit after M4.
+- Wallet milestone — **un-deferred (D20)**: NIP-47 zaps via the `nwc` crate are
+  the current Phase-1 work (public zaps through the bunker signer; the anon
+  invoice mode stays the no-wallet fallback).
 - Multi-account / profiles-per-window — deferred (D10).
 - arti in-process — behind transport trait, evaluate post-M5.
 - YouTube embeds in-app (webkitgtk view) vs external browser — **external browser for

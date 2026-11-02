@@ -27,6 +27,14 @@ pub mod files {
     pub const ENGAGEMENT: &str = "engagement.json";
     pub const DELETIONS: &str = "deletions.json";
     pub const PROFILES: &str = "profiles.json";
+    /// NWC wallet connection — secret-FREE (the secret rides in the secret
+    /// store under `secrets::NWC_SECRET`); only pubkey + relays live here so
+    /// a restart can rebuild the client. D20.
+    pub const WALLET: &str = "wallet.json";
+    /// Signed kind-9734 zap requests, stored BEFORE paying (the Feather
+    /// rule: an explicit retry after a crash reuses the same event ID —
+    /// no duplicate zap events).
+    pub const ZAPS: &str = "zaps.json";
 }
 
 fn home() -> Option<PathBuf> {

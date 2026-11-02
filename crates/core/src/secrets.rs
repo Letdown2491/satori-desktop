@@ -17,6 +17,9 @@ use crate::error::{LoginError, Result};
 const SERVICE: &str = "io.github.Letdown2491.Satori";
 pub const BUNKER_CLIENT_SECRET: &str = "bunker-client-secret";
 pub const NSEC: &str = "nsec";
+/// The NWC wallet's connection secret (NIP-47). D20: a separate, revocable
+/// wallet credential — NOT identity material (D17 is untouched).
+pub const NWC_SECRET: &str = "nwc-connection-secret";
 
 fn entry(name: &str) -> Result<keyring::Entry> {
     // A unique "user" per slot keeps entries distinct in the Secret Service UI.

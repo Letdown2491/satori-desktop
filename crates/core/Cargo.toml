@@ -12,6 +12,7 @@ nostr-sdk = { workspace = true }
 nostr-connect = { workspace = true }
 nostr-lmdb = { workspace = true }
 nostr-database = { workspace = true }
+nwc = { workspace = true }
 tokio = { workspace = true }
 tokio-socks = { workspace = true }
 futures-util = { workspace = true }
@@ -23,3 +24,4 @@ image = { workspace = true }
 sha2 = { workspace = true }
 url = { workspace = true }
 base64 = { workspace = true }
+bech32 = { workspace = true }

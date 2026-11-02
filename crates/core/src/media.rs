@@ -58,6 +58,23 @@ pub async fn fetch_json(url: &str) -> Result<serde_json::Value, String> {
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 
+/// A guarded JSON fetch with NO disk cache — for answers that must never be
+/// replayed (LNURL-pay callbacks return one-time bolt11 invoices; a cached
+/// invoice would double-fail after its first spend). Same SSRF discipline as
+/// every other fetch (D20: the wallet's LNURL path rides this).
+pub async fn fetch_json_uncached(url: &str) -> Result<serde_json::Value, String> {
+    if !is_safe_media_url(url) {
+        return Err("unsafe URL".into());
+    }
+    let res = reqwest::get(url)
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let body = res.bytes().await.map_err(|e| e.to_string())?;
+    serde_json::from_slice(&body).map_err(|e| e.to_string())
+}
+
 pub async fn fetch_image(url: &str) -> Result<DecodedImage, String> {
     if !is_safe_media_url(url) {
         return Err("unsafe media URL".into());

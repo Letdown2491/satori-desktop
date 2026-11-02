@@ -18,6 +18,7 @@ use crate::pool::Pool;
 use crate::secrets;
 use crate::session::{self, Session, SessionMode};
 use crate::signer::{self, Signer};
+use crate::wallet::{self, Wallet, WalletEvent};
 
 /// How long to wait for the remote signer to approve a connect request.
 const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -49,6 +50,16 @@ pub enum ConnectEvent {
 /// The channel login flows resolve through. Tokio's sync primitives are
 /// executor-agnostic, so the GLib main context can await them directly.
 pub type ConnectRx = mpsc::UnboundedReceiver<ConnectEvent>;
+
+/// One zap's result stream: the events for the view that started (or
+/// retried) the payment. The same events also flow on the wallet broadcast
+/// (`subscribe_wallet`) — a view's channel dies with the view, the feed's
+/// bolt glyphs must not.
+pub type WalletResultRx = mpsc::UnboundedReceiver<WalletEvent>;
+
+/// Zap-flow outcome: the error IS the event (a failed zap is a user-facing
+/// message, not a crash).
+type ZapFlow = std::result::Result<(), WalletEvent>;
 
 /// Stream of feed/write results for the UI.
 #[derive(Debug, Clone)]
@@ -232,6 +243,11 @@ pub struct Core {
     own_bookmarked: Mutex<HashSet<String>>,
     /// Muted authors (pubkey hex) — NIP-51 kind:10000, content encrypted.
     muted: Mutex<HashSet<String>>,
+    /// Own zaps: note id (hex) → zapped. The ledger (zaps.json) is the
+    /// durable authority; this mirrors it for render, like own_liked.
+    own_zapped: Mutex<HashSet<String>>,
+    /// The NIP-47 wallet handle (D20) — one per process, like the pool.
+    wallet: Arc<Wallet>,
     /// Resolved profiles (mentions/name display) — absorbed as they stream in.
     profiles_mem: Mutex<std::collections::HashMap<String, Profile>>,
     /// Live undo holds: token → cancel signal.
@@ -264,6 +280,8 @@ impl Core {
             own_reposted: Mutex::new(HashSet::new()),
             own_bookmarked: Mutex::new(HashSet::new()),
             muted: Mutex::new(HashSet::new()),
+            own_zapped: Mutex::new(HashSet::new()),
+            wallet: Arc::new(Wallet::new()),
             profiles_mem: Mutex::new(std::collections::HashMap::new()),
             holds: Mutex::new(std::collections::HashMap::new()),
             live: tokio::sync::broadcast::Sender::new(64),
@@ -295,6 +313,7 @@ impl Core {
         match self.rt.block_on(self.build_active(&session)) {
             Ok(active) => {
                 *self.active.lock().unwrap() = Some(active);
+                self.resume_wallet();
                 (Some(session), None)
             }
             Err(e) => {
@@ -326,9 +345,16 @@ impl Core {
         session::clear();
         secrets::delete(secrets::BUNKER_CLIENT_SECRET);
         secrets::delete(secrets::NSEC);
+        // The wallet is a session-scoped capability too: shut the NWC
+        // transport down (phantom subscriptions are the bunker bug's
+        // cousin) and forget the render mirror. The LEDGER stays — it is
+        // history, not state.
+        let w = Arc::clone(&self.wallet);
+        self.rt.spawn(async move { w.disconnect().await });
         self.own_liked.lock().unwrap().clear();
         self.own_reposted.lock().unwrap().clear();
         self.own_bookmarked.lock().unwrap().clear();
+        self.own_zapped.lock().unwrap().clear();
         self.muted.lock().unwrap().clear();
         eprintln!("[core] logout");
     }
@@ -397,6 +423,337 @@ impl Core {
             let _ = tx.send(res);
         });
         rx
+    }
+
+    // --- wallet / zaps (D20) ---------------------------------------------------
+
+    /// The wallet handle (the settings pane reads status/balance directly).
+    pub fn wallet(&self) -> Arc<Wallet> {
+        Arc::clone(&self.wallet)
+    }
+
+    /// Wallet event stream: status changes, pay outcomes, verified
+    /// receipts. The global pump every surface keeps.
+    pub fn subscribe_wallet(&self) -> wallet::WalletRx {
+        self.wallet.subscribe()
+    }
+
+    /// Connect a `nostr+walletconnect://` URI. Status streams on
+    /// subscribe_wallet (Connecting → Ready | ConnectFailed).
+    pub fn connect_wallet(&self, uri: String) {
+        let w = Arc::clone(&self.wallet);
+        self.rt.spawn(async move { w.connect(uri).await });
+    }
+
+    /// Disconnect and forget (wallet.json + the secret store entry).
+    pub fn disconnect_wallet(&self) {
+        let w = Arc::clone(&self.wallet);
+        self.rt.spawn(async move { w.disconnect().await });
+    }
+
+    /// Reconnect a persisted wallet and seed the own-zapped mirror from
+    /// the ledger. Best-effort: a dead wallet backend is a settings
+    /// concern, never a login failure.
+    fn resume_wallet(&self) {
+        // Paid/Confirmed notes render settled without waiting on the
+        // wallet; Pending/Uncertain still owe the wallet an answer.
+        let mut zapped = self.own_zapped.lock().unwrap();
+        for z in wallet::ledger_history() {
+            if matches!(z.state, wallet::ZapState::Paid | wallet::ZapState::Confirmed) {
+                zapped.insert(z.note);
+            }
+        }
+        drop(zapped);
+        let w = Arc::clone(&self.wallet);
+        self.rt.spawn(async move { w.resume().await });
+    }
+
+    /// Zap-state lookup for render (the settled bolt).
+    pub fn is_zapped(&self, note: &EventId) -> bool {
+        self.own_zapped.lock().unwrap().contains(&note.to_string())
+    }
+
+    /// The whole own-zapped set (a view seeds its snapshot from this).
+    pub fn zapped_set(&self) -> HashSet<String> {
+        self.own_zapped.lock().unwrap().clone()
+    }
+
+    /// Zap a note: a PUBLIC NIP-57 zap through the connected NWC wallet
+    /// (the tap = 21 sats default). Events stream on the returned channel
+    /// AND on subscribe_wallet — see [`WalletResultRx`].
+    pub fn zap(self: &Arc<Self>, note: Event, msat: u64) -> WalletResultRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            if let Err(e) = this.zap_inner(&note, msat, &tx).await {
+                let _ = tx.send(e);
+            }
+        });
+        rx
+    }
+
+    /// Retry a stored zap (Pending/Uncertain only). The SAME signed request
+    /// goes back out — same event id, no duplicate zap events; that is the
+    /// ledger's whole reason for keeping the full signed 9734.
+    pub fn retry_zap(self: &Arc<Self>, note: String) -> WalletResultRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            if let Err(e) = this.retry_inner(note, &tx).await {
+                let _ = tx.send(e);
+            }
+        });
+        rx
+    }
+
+    async fn retry_inner(
+        self: &Arc<Self>,
+        note: String,
+        tx: &mpsc::UnboundedSender<WalletEvent>,
+    ) -> ZapFlow {
+        let Some(record) = wallet::ledger_for_note(&note).filter(|z| {
+            matches!(z.state, wallet::ZapState::Pending | wallet::ZapState::Uncertain)
+        }) else {
+            return Err(WalletEvent::ZapFailed {
+                note,
+                reason: "nothing to retry for this note".into(),
+            });
+        };
+        // The stored request replays as-is — re-signing would mint a new
+        // event id and risk a duplicate zap event (the Feather rule).
+        let signed = serde_json::from_str::<Event>(&record.event).map_err(|_| {
+            WalletEvent::ZapFailed {
+                note: note.clone(),
+                reason: "stored zap request is corrupt".into(),
+            }
+        })?;
+        // One in-flight payment per note — the retry reclaims the slot.
+        if !self.wallet.claim_flight(&note) {
+            return Err(WalletEvent::ZapFailed {
+                note,
+                reason: "a zap on this note is already in flight".into(),
+            });
+        }
+        let _guard = FlightGuard(&self.wallet, &note);
+        self.pay_stored(&record, &signed, tx).await
+    }
+
+    async fn zap_inner(
+        self: &Arc<Self>,
+        note: &Event,
+        msat: u64,
+        tx: &mpsc::UnboundedSender<WalletEvent>,
+    ) -> ZapFlow {
+        let note_hex = note.id.to_string();
+        // One in-flight payment per note — the Feather rule (the wallet
+        // owns the set; fresh zaps and retries both come through it).
+        if !self.wallet.claim_flight(&note_hex) {
+            return Err(WalletEvent::ZapFailed {
+                note: note_hex,
+                reason: "a zap on this note is already in flight".into(),
+            });
+        }
+        let _guard = FlightGuard(&self.wallet, &note_hex);
+
+        if !self.wallet.is_ready() {
+            return Err(WalletEvent::ZapFailed {
+                note: note_hex.clone(),
+                reason: "no wallet connected".into(),
+            });
+        }
+        let active = self.active().await.map_err(|e| WalletEvent::ZapFailed {
+            note: note_hex.clone(),
+            reason: e.to_string(),
+        })?;
+        let me = active.me();
+        let recipient = note.pubkey;
+
+        // The recipient's lightning pointer (lud16 before lud06). No
+        // address, no zap — an honest quiet failure, not a dialog.
+        let lud = match active
+            .pool
+            .store
+            .latest_by_kind(recipient, Kind::Metadata)
+            .await
+        {
+            Ok(Some(meta)) => lightning_field(&meta.content),
+            _ => None,
+        }
+        .ok_or_else(|| WalletEvent::ZapFailed {
+            note: note_hex.clone(),
+            reason: "this profile has no lightning address".into(),
+        })?;
+        let lnurl = wallet::lnurlp_url(&lud).map_err(|e| WalletEvent::ZapFailed {
+            note: note_hex.clone(),
+            reason: e,
+        })?;
+
+        // Sign FIRST (through the owner's signer — the bunker), STORE the
+        // signed request, then pay. A crash between sign and pay leaves a
+        // Pending record a retry can finish — same event id.
+        let unsigned = wallet::zap_request(
+            me,
+            recipient,
+            note.id,
+            msat,
+            &lnurl,
+            active.write_relays.clone(),
+        );
+        let signed = active
+            .signer
+            .sign_event(unsigned)
+            .await
+            .map_err(|e| WalletEvent::ZapFailed {
+                note: note_hex.clone(),
+                reason: e.to_string(),
+            })?;
+        let record = wallet::ZapRecord {
+            req: signed.id.to_string(),
+            note: note_hex.clone(),
+            recipient: recipient.to_string(),
+            msat,
+            state: wallet::ZapState::Pending,
+            created_at: now_secs(),
+            event: serde_json::to_string(&signed).unwrap_or_default(),
+        };
+        wallet::ledger_update(record.clone());
+
+        self.pay_stored(&record, &signed, tx).await
+    }
+
+    /// The shared pay path for a STORED, signed request (fresh or retry):
+    /// fetch the invoice from the recipient's LNURL-pay endpoint, hand the
+    /// bolt11 to the NWC wallet, classify the answer per the Feather rule.
+    async fn pay_stored(
+        self: &Arc<Self>,
+        record: &wallet::ZapRecord,
+        signed: &Event,
+        tx: &mpsc::UnboundedSender<WalletEvent>,
+    ) -> ZapFlow {
+        let note = record.note.clone();
+        let req = record.req.clone();
+
+        // The lnurl tag rides the signed request (bech32) — lnurlp_url
+        // accepts it as-is (the lud06 branch). Reading it from the event
+        // (not the caller) is what lets retries share this path.
+        let lnurl_tag = signed
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(String::as_str) == Some("lnurl"))
+            .and_then(|t| t.as_slice().get(1).cloned())
+            .ok_or_else(|| WalletEvent::ZapFailed {
+                note: note.clone(),
+                reason: "zap request has no lnurl tag".into(),
+            })?;
+        let endpoint =
+            wallet::lnurlp_url(&lnurl_tag).map_err(|e| WalletEvent::ZapFailed {
+                note: note.clone(),
+                reason: e,
+            })?;
+        // No invoice yet → nothing CAN have been paid: a definite LNURL
+        // error erases the record, the user just taps again.
+        let callback = match wallet::fetch_lnurlp(&endpoint).await {
+            Ok(cb) => cb,
+            Err(e) => {
+                wallet::ledger_remove(&req);
+                return Err(WalletEvent::ZapFailed { note, reason: e });
+            }
+        };
+        let bolt11 = match wallet::fetch_zap_invoice(&callback, record.msat, signed).await {
+            Ok(pr) => pr,
+            Err(e) => {
+                wallet::ledger_remove(&req);
+                return Err(WalletEvent::ZapFailed { note, reason: e });
+            }
+        };
+
+        // The money moment. The wallet SPOKE and did not pay → retrying is
+        // safe (erase + quiet error). Anything else → Uncertain, terminal
+        // until the user (or a receipt) decides — never auto-retried.
+        match self.wallet.pay(&bolt11).await {
+            Ok(_preimage) => {
+                wallet::ledger_set_state(&req, wallet::ZapState::Paid);
+                let ev = WalletEvent::ZapPaid {
+                    note: note.clone(),
+                    req: req.clone(),
+                    msat: record.msat,
+                };
+                self.wallet.emit(ev.clone());
+                let _ = tx.send(ev);
+                self.watch_receipt(&note, &req, tx);
+                Ok(())
+            }
+            Err(wallet::PayError::Uncertain) => {
+                wallet::ledger_set_state(&req, wallet::ZapState::Uncertain);
+                let ev = WalletEvent::ZapUncertain {
+                    note: note.clone(),
+                    req: req.clone(),
+                    msat: record.msat,
+                };
+                self.wallet.emit(ev.clone());
+                let _ = tx.send(ev);
+                Ok(())
+            }
+            Err(e) => {
+                // Code(_) or NoWallet: the wallet never paid.
+                wallet::ledger_remove(&req);
+                let ev = WalletEvent::ZapFailed {
+                    note,
+                    reason: e.to_string(),
+                };
+                self.wallet.emit(ev.clone());
+                let _ = tx.send(ev);
+                Ok(())
+            }
+        }
+    }
+
+    /// Watch for the wallet service's kind-9735 receipt (it publishes to
+    /// OUR relays — the request's relays tag) and reconcile the ledger to
+    /// Confirmed when OUR verified zap lands. Best-effort: Paid is already
+    /// truthful (the wallet returned a preimage); the receipt is the
+    /// stronger proof and recovers nothing else.
+    fn watch_receipt(
+        self: &Arc<Self>,
+        note_hex: &str,
+        req: &str,
+        tx: &mpsc::UnboundedSender<WalletEvent>,
+    ) {
+        let this = Arc::clone(self);
+        let note = note_hex.to_string();
+        let req = req.to_string();
+        let tx = tx.clone(); // the spawned task outlives the borrow
+        self.rt.spawn(async move {
+            let Ok(active) = this.active().await else { return };
+            let me = active.me();
+            let Ok(note_id) = EventId::from_hex(&note) else { return };
+            for _ in 0..6 {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                let events = match active
+                    .pool
+                    .get(Filter::new().kind(Kind::Custom(9735)).event(note_id))
+                    .await
+                {
+                    Ok(set) => set,
+                    Err(_) => continue, // relay budget blown — look again
+                };
+                // parse_zap_receipt verifies the embedded 9734 (signature +
+                // p/e/a tags); the sender being ME is the reconciliation.
+                if events
+                    .iter()
+                    .any(|ev| crate::notifications::parse_zap_receipt(ev).sender == Some(me))
+                {
+                    wallet::ledger_set_state(&req, wallet::ZapState::Confirmed);
+                    let ev = WalletEvent::ZapReceipt {
+                        note: note.clone(),
+                        req: req.clone(),
+                    };
+                    this.wallet.emit(ev.clone());
+                    let _ = tx.send(ev);
+                    return;
+                }
+            }
+        });
     }
 
     // --- bunker login ---------------------------------------------------------
@@ -3013,6 +3370,28 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Releases the one-per-note flight slot on every exit path (success,
+/// failure, early return) — the manager's arm of the Feather rule.
+struct FlightGuard<'a>(&'a Wallet, &'a str);
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.release_flight(self.1);
+    }
+}
+
+/// A profile's lightning pointer: lud16 before lud06 (NIP-57's order).
+/// `None` = the profile has no zap address.
+fn lightning_field(content: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(content).ok()?;
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    field("lud16").or_else(|| field("lud06"))
 }
 
 /// The caption's first non-empty line, capped at 120 chars — nip68.ts

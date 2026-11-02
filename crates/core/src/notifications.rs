@@ -33,7 +33,8 @@ fn tag_value(ev: &Event, name: &str) -> Option<String> {
 
 /// Millisats from a bolt11 invoice's human-readable part
 /// (notifications.ts msatsFromBolt11): `lnbc<digits>[munp]1…`.
-fn msats_from_bolt11(invoice: &str) -> u64 {
+/// Also the receipt-side amount authority for the wallet's LNURL check (D20).
+pub(crate) fn msats_from_bolt11(invoice: &str) -> u64 {
     let s = invoice.to_lowercase();
     let Some(rest) = s.strip_prefix("lnbc") else { return 0 };
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -45,13 +46,14 @@ fn msats_from_bolt11(invoice: &str) -> u64 {
     if amount == 0 {
         return 0;
     }
-    // Multiplier in msats; pico needs the divide, not a multiply.
+    // Multiplier in msats (BOLT-11: m = 10^-3 BTC, u = 10^-6, n = 10^-9,
+    // p = 10^-12; 1 BTC = 10^11 msat). Pico needs the divide, not a multiply.
     let (mult, tail) = match after.chars().next() {
-        Some('m') => (100_000_000_000u64, &after[1..]),
-        Some('u') => (100_000_000, &after[1..]),
+        Some('m') => (100_000_000u64, &after[1..]),
+        Some('u') => (100_000, &after[1..]),
         Some('n') => (100, &after[1..]),
         Some('p') => (0, &after[1..]),
-        _ => (1_000_000_000_000, after), // bare = whole BTC
+        _ => (100_000_000_000, after), // bare = whole BTC
     };
     // The signature separator must follow (the regex's `1`).
     if !tail.starts_with('1') {
@@ -106,8 +108,12 @@ mod tests {
 
     #[test]
     fn bolt11_amounts() {
+        // 21 sats = lnbc210n (nano-BTC × 100 msat).
         assert_eq!(msats_from_bolt11("lnbc210n1xyz"), 21_000);
-        assert_eq!(msats_from_bolt11("lnbc1m1xyz"), 100_000_000_000);
+        // 1 mBTC = 100k sats = 10^8 msat; 1 µBTC = 100 sats = 10^5 msat.
+        assert_eq!(msats_from_bolt11("lnbc1m1xyz"), 100_000_000);
+        assert_eq!(msats_from_bolt11("lnbc1u1xyz"), 100_000);
+        // 2100 pico-BTC = 210 msat.
         assert_eq!(msats_from_bolt11("lnbc2100p1xyz"), 210);
         assert_eq!(msats_from_bolt11("lnbc1234567890"), 0); // no separator
         assert_eq!(msats_from_bolt11("not-an-invoice"), 0);
