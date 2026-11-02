@@ -867,7 +867,7 @@ fn note_card(
         .flex_col()
         .gap_2()
         .px_4()
-        .py_3()
+        .py_4()
         .child(
             div()
                 .flex()
@@ -880,7 +880,7 @@ fn note_card(
                         .id(SharedString::from(format!("author-{idx}")))
                         .cursor_pointer()
                         .flex_1()
-                        .text_size(px(13.0))
+                        .text_size(px(14.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(theme::ink()))
                         .on_click(move |_, _, cx| {
@@ -1355,7 +1355,7 @@ fn repost_card(
                 .flex_col()
                 .gap_2()
                 .px_4()
-                .py_3()
+                .py_4()
                 .child(
                     div()
                         .flex()
