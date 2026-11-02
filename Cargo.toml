@@ -7,6 +7,10 @@ members = ["crates/core", "crates/app-gpui"]
 # patch is a vendored copy with ENOATTR aliased to ENODATA (same errno).
 [patch.crates-io]
 xattr = { path = "vendor/xattr" }
+# Emoji face preference: distros ship Noto Color Emoji twice (COLRv1 + CBDT)
+# under one family name; COLRv1 renders EMPTY under swash (COLRv0-only), so
+# the matcher must prefer the CBDT face. Probed empirically (Nov 2026).
+cosmic-text = { path = "vendor/cosmic-text" }
 
 [workspace.package]
 version = "0.1.0"
