@@ -58,6 +58,9 @@ pub struct SettingsView {
     // The signed-in identity, resolved name for the Session row (the short
     // npub stands in until the profile lands).
     me_name: Option<String>,
+    // The short npub, computed once — it used to re-read session.json from
+    // disk and re-bech32 the key on EVERY render of the pane.
+    me_npub: String,
     // Toast equivalent (the pane has no header seal to hang one on).
     status: String,
     status_err: bool,
@@ -106,6 +109,7 @@ impl SettingsView {
             wallet: core.wallet().status(),
             signing_out: false,
             me_name: None,
+            me_npub: Self::me_npub_short(),
             status: String::new(),
             status_err: false,
         };
@@ -253,8 +257,10 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// The signed-in identity, short npub form for the Session row.
-    fn me_npub_short(&self) -> String {
+    /// The signed-in identity, short npub form for the Session row. Called
+    /// ONCE (at construction): it reads session.json from disk and bech32s
+    /// the key — not per-render work.
+    fn me_npub_short() -> String {
         satori_core::session::load()
             .and_then(|s| PublicKey::from_str(&s.pubkey).ok())
             .and_then(|pk| {
@@ -733,7 +739,7 @@ impl Render for SettingsView {
                                 .text_color(rgb(theme::ink()))
                                 .child(match &self.me_name {
                                     Some(name) => format!("Signed in as {name}"),
-                                    None => format!("Signed in as {}", self.me_npub_short()),
+                                    None => format!("Signed in as {}", self.me_npub),
                                 }),
                         )
                         .child(

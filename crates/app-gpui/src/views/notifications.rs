@@ -208,7 +208,7 @@ impl NotificationsView {
     }
 
     fn want_media(&mut self, note: &Event, cx: &mut Context<Self>) {
-        for url in content::media_urls(note) {
+        for url in content::media_urls_cached(note).iter().cloned() {
             media::fetch(&self.core, url, cx.entity_id(), cx);
         }
     }
@@ -488,7 +488,7 @@ impl Render for NotificationsView {
         }
         for row in &self.rows {
             if let Row::Note(ev, _) = row {
-                for url in content::media_urls(ev) {
+                for url in content::media_urls_cached(ev).iter().cloned() {
                     media::fetch(&self.core, url, viewer, cx);
                 }
             }

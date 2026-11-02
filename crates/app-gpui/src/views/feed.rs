@@ -565,7 +565,7 @@ impl Feed {
     /// land in the shared media cache (media.rs) — a `cx.notify()` re-render
     /// picks them up via the snapshot.
     fn want_images(&mut self, note: &Event, cx: &mut Context<Self>) {
-        for url in content::media_urls(note) {
+        for url in content::media_urls_cached(note).iter().cloned() {
             media::fetch(&self.core, url, cx.entity_id(), cx);
         }
     }
@@ -1339,7 +1339,7 @@ fn card_media_urls(ev: &Event, profiles: &HashMap<String, Profile>) -> Vec<Strin
         if let Some(p) = profiles.get(&note.pubkey.to_string()) {
             urls.push(p.picture.clone());
         }
-        urls.extend(content::media_urls(note));
+        urls.extend(content::media_urls_cached(note).iter().cloned());
     }
     let mut urls: Vec<String> = Vec::new();
     if u16::from(ev.kind) == 6 {

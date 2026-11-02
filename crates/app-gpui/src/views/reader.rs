@@ -74,7 +74,7 @@ impl ArticleView {
 
     /// Queue fetches for the cover + every own-line image in the body.
     fn want_media(&self, cx: &mut Context<Self>) {
-        let mut urls = content::media_urls(&self.ev);
+        let mut urls = content::media_urls_cached(&self.ev).iter().cloned().collect::<Vec<_>>();
         if let Some(image) = &self.data.image {
             urls.push(image.clone());
         }
@@ -352,7 +352,7 @@ impl Render for ArticleView {
         if let Some(url) = &cover {
             media::fetch(&self.core, url.clone(), cx.entity_id(), cx);
         }
-        for url in content::media_urls(&self.ev) {
+        for url in content::media_urls_cached(&self.ev).iter().cloned() {
             media::fetch(&self.core, url, cx.entity_id(), cx);
         }
         for block in &blocks {

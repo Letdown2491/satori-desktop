@@ -200,7 +200,7 @@ impl SearchView {
                     self.profiles.insert(p.pubkey.clone(), p);
                 }
                 for n in &results {
-                    for url in content::media_urls(n) {
+                    for url in content::media_urls_cached(n).iter().cloned() {
                         media::fetch(&self.core, url, cx.entity_id(), cx);
                     }
                     self.want_quotes(n, cx);

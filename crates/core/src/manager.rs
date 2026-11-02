@@ -1609,24 +1609,39 @@ impl Core {
     /// @-mention candidates for the composer: the people you follow whose
     /// cached name (or pubkey hex) matches the typed handle. Profiles not
     /// yet in the cache match only by hex — the profiles service fills the
-    /// rest as the feed loads them.
+    /// rest as the feed loads them. One lock, eight hits max: this runs
+    /// per keystroke.
     pub fn mention_candidates(&self, query: &str) -> Vec<Profile> {
-        let follows: Vec<PublicKey> = {
+        let (follows, me): (Vec<PublicKey>, String) = {
             let held = self.active.lock().unwrap();
-            held.as_ref().map(|a| a.follows.clone()).unwrap_or_default()
+            let me = held
+                .as_ref()
+                .map(|a| a.session.pubkey.clone())
+                .unwrap_or_default();
+            let follows = held.as_ref().map(|a| a.follows.clone()).unwrap_or_default();
+            (follows, me)
         };
         let q = query.to_lowercase();
-        follows
-            .iter()
-            .filter(|pk| pk.to_string() != self.active_pubkey())
-            .filter_map(|pk| self.profile_of(pk))
-            .filter(|p| {
-                q.is_empty()
-                    || p.name.to_lowercase().contains(&q)
-                    || p.pubkey.to_lowercase().contains(&q)
-            })
-            .take(8)
-            .collect()
+        let m = self.profiles_mem.lock().unwrap();
+        let mut out: Vec<Profile> = Vec::new();
+        for pk in &follows {
+            if pk.to_string() == me {
+                continue;
+            }
+            let Some(p) = m.get(&pk.to_string()) else {
+                continue;
+            };
+            if q.is_empty()
+                || p.name.to_lowercase().contains(&q)
+                || p.pubkey.to_lowercase().contains(&q)
+            {
+                out.push(p.clone());
+                if out.len() == 8 {
+                    break;
+                }
+            }
+        }
+        out
     }
 
     /// People results for the search pane: a substring scan of the hydrated

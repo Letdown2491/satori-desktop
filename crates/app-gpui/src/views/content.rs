@@ -202,6 +202,39 @@ pub fn media_urls(ev: &Event) -> Vec<String> {
         .collect()
 }
 
+/// `media_urls`, memoized per event. The parse (imeta + the content's
+/// line scan) is a pure function of the event, but every pane's render
+/// swept it per visible row per frame. Bounded, oldest-dropped at 4096
+/// events; an entry is a handful of url strings.
+pub fn media_urls_cached(ev: &Event) -> std::sync::Arc<[String]> {
+    const CAP: usize = 4096;
+    struct UrlsMemo {
+        map: HashMap<String, std::sync::Arc<[String]>>,
+        order: std::collections::VecDeque<String>,
+    }
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<UrlsMemo>> = std::sync::OnceLock::new();
+    let memo = MEMO.get_or_init(|| {
+        std::sync::Mutex::new(UrlsMemo {
+            map: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        })
+    });
+    let key = ev.id.to_string();
+    let mut memo = memo.lock().unwrap();
+    if let Some(hit) = memo.map.get(&key) {
+        return hit.clone();
+    }
+    let urls: std::sync::Arc<[String]> = media_urls(ev).into();
+    if memo.map.len() >= CAP
+        && let Some(oldest) = memo.order.pop_front()
+    {
+        memo.map.remove(&oldest);
+    }
+    memo.order.push_back(key.clone());
+    memo.map.insert(key, urls.clone());
+    urls
+}
+
 /// The thumbnail for a YouTube link (watch?v=, youtu.be/, shorts/) —
 /// video.rs reuses the shape as the "is a YouTube page" test: GStreamer
 /// can't stream watch pages, so they stay browser links.

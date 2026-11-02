@@ -151,7 +151,7 @@ impl ThreadView {
     /// Queue core fetches for every media URL we haven't got yet (results
     /// land in the shared media cache; notify re-renders pick them up).
     fn want_media(&mut self, note: &Event, cx: &mut Context<Self>) {
-        for url in content::media_urls(note) {
+        for url in content::media_urls_cached(note).iter().cloned() {
             media::fetch(&self.core, url, cx.entity_id(), cx);
         }
     }
@@ -348,11 +348,13 @@ impl Render for ThreadView {
         for p in self.profiles.values() {
             media::fetch(&self.core, p.picture.clone(), viewer, cx);
         }
-        for url in self.anchor.as_ref().into_iter().flat_map(content::media_urls) {
-            media::fetch(&self.core, url, viewer, cx);
+        for a in self.anchor.as_ref().into_iter() {
+            for url in content::media_urls_cached(a).iter().cloned() {
+                media::fetch(&self.core, url, viewer, cx);
+            }
         }
         for (ev, _) in &self.replies {
-            for url in content::media_urls(ev) {
+            for url in content::media_urls_cached(ev).iter().cloned() {
                 media::fetch(&self.core, url, viewer, cx);
             }
         }

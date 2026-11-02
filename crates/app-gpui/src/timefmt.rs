@@ -8,10 +8,10 @@
 //! global carries the core handle plus the per-timestamp ask dedup so
 //! Block mode can refine itself from item closures.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use satori_core::manager::Core;
 
@@ -63,15 +63,26 @@ impl gpui::Global for Signal {}
 pub struct Bridge {
     core: Arc<Core>,
     asked: HashSet<u64>,
+    /// Failed asks, with when — the retry cool-off. A failed fetch used to
+    /// un-ask and wake the window, and the next render re-asked: a
+    /// whole-window repaint loop for as long as mempool.space stayed
+    /// unreachable (every visible Block timestamp, every cycle).
+    failed: HashMap<u64, Instant>,
 }
 
 impl gpui::Global for Bridge {}
+
+/// How long a failed blocktime ask cools off before a render may re-ask.
+/// Mempool outages (offline, Tor without mempool) should cost one probe
+/// per timestamp per window, not a wake storm.
+const RETRY_COOL_OFF: Duration = Duration::from_secs(300);
 
 /// Install the bridge (main.rs — one core, one bridge).
 pub fn init(core: Arc<Core>, cx: &mut gpui::App) {
     cx.set_global(Bridge {
         core,
         asked: HashSet::new(),
+        failed: HashMap::new(),
     });
 }
 
@@ -121,15 +132,30 @@ pub fn stamp_text(secs: u64) -> String {
 
 /// Ensure a block lookup is in flight for `secs` (call from the same item
 /// closure that rendered `stamp`). Silent no-ops: no bridge yet, height
-/// already exact, already asked. A failed fetch un-asks so a later frame
-/// retries — the table converges on exactness without spinning.
+/// already exact, already asked, or a failed ask still cooling off (one
+/// probe per RETRY_COOL_OFF per timestamp — the table converges on
+/// exactness without a failure wake-storm).
 pub fn ensure(secs: u64, cx: &mut gpui::App) {
     if !cx.has_global::<Bridge>() {
         return;
     }
     let rx = {
         let bridge = cx.global_mut::<Bridge>();
-        if bridge.core.block_height_known(secs) || !bridge.asked.insert(secs) {
+        if bridge.core.block_height_known(secs) {
+            return;
+        }
+        // A failed ask cools off: no probe, no wake while the window runs.
+        // Past the window this render retries — clear the gates so the
+        // re-ask below re-books it.
+        if bridge
+            .failed
+            .get(&secs)
+            .is_some_and(|t| t.elapsed() < RETRY_COOL_OFF)
+        {
+            return;
+        }
+        bridge.failed.remove(&secs);
+        if !bridge.asked.insert(secs) {
             return;
         }
         bridge.core.block_height(secs)
@@ -137,13 +163,18 @@ pub fn ensure(secs: u64, cx: &mut gpui::App) {
     cx.spawn(async move |cx| {
         let res = { let mut rx = rx; rx.recv().await };
         let _ = cx.update(|cx| {
-            if res.is_none_or(|r| r.is_err())
-                && cx.has_global::<Bridge>()
-            {
-                cx.global_mut::<Bridge>().asked.remove(&secs);
+            if cx.has_global::<Bridge>() {
+                let bridge = cx.global_mut::<Bridge>();
+                if res.is_none_or(|r| r.is_err()) {
+                    bridge.asked.remove(&secs);
+                    bridge.failed.insert(secs, Instant::now());
+                } else {
+                    bridge.failed.remove(&secs);
+                }
             }
             // Wake the watchers either way: a landing repaints into the
-            // exact height; a failure leaves the fallback standing.
+            // exact height; a failure leaves the fallback standing (and
+            // the cool-off keeps that wake from re-probing in a loop).
             cx.set_global(Signal);
         });
     })

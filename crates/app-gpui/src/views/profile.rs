@@ -339,7 +339,7 @@ impl ProfileView {
     /// Queue core fetches for every media URL in a note (avatars share the
     /// same cache; URLs are unique so there's no clash).
     fn want_media(&mut self, note: &Event, cx: &mut Context<Self>) {
-        for url in content::media_urls(note) {
+        for url in content::media_urls_cached(note).iter().cloned() {
             media::fetch(&self.core, url, cx.entity_id(), cx);
         }
     }
@@ -453,7 +453,7 @@ impl Render for ProfileView {
             media::fetch(&self.core, p.picture.clone(), viewer, cx);
         }
         for ev in &self.notes {
-            for url in content::media_urls(ev) {
+            for url in content::media_urls_cached(ev).iter().cloned() {
                 media::fetch(&self.core, url, viewer, cx);
             }
         }
