@@ -868,6 +868,8 @@ impl Shell {
             .border_1()
             .border_color(rgb(theme::hairline()))
             .bg(rgb(theme::washi()))
+            // Hover like the new-notes chip: the ring takes the accent.
+            .hover(|s| s.border_color(rgb(theme::vermilion())))
             .flex()
             .items_center()
             .justify_center()
