@@ -1486,7 +1486,11 @@ fn reply_whisper(
     let handle = handle.clone();
     Some(
         div()
-            .id(SharedString::from(format!("reply-{idx}")))
+            // NOT "reply-{idx}": the action row's reply button owns that id
+            // one sibling away, and two elements sharing an id path clobber
+            // each other's interaction state — the owner's reply clicks
+            // died exactly here (only reply cards have a whisper).
+            .id(SharedString::from(format!("parent-{idx}")))
             .cursor_pointer()
             .pl(px(36.0)) // under the note's avatar column
             .flex()
