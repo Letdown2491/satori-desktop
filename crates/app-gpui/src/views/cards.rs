@@ -694,6 +694,29 @@ fn highlight_card(ev: &Event, ctx: &Body, _feed: &Entity<Feed>, _st: &CardState)
     card
 }
 
+/// First 8 chars + ellipsis. Char cut, not byte cut: the highlight
+/// author tag is relay-controlled text (nip/highlight.rs), and a byte
+/// slice at 8 landed mid-character on multi-byte names — a panic that
+/// took the whole window down on render.
 fn short(key: &str) -> String {
-    format!("{}…", &key[..8.min(key.len())])
+    let cut = key
+        .char_indices()
+        .nth(8)
+        .map_or(key.len(), |(i, _)| i);
+    format!("{}…", &key[..cut])
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn short_cuts_on_char_boundaries() {
+        // The regression: byte 8 of a CJK author tag is mid-character.
+        assert_eq!(
+            super::short("作者某某作者某某作者某某"),
+            "作者某某作者某某…"
+        );
+        assert_eq!(super::short("abcdefghijkl"), "abcdefgh…");
+        assert_eq!(super::short("ab"), "ab…");
+        assert_eq!(super::short(""), "…");
+    }
 }
