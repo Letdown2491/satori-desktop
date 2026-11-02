@@ -58,13 +58,18 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn new(cx: &gpui::App) -> Self {
-        let cache = cx.global::<Cache>().map.borrow();
+        Self::from_cache(cx.global::<Cache>())
+    }
+
+    /// The App-less core — tests build snapshots straight from a Cache.
+    fn from_cache(cache: &Cache) -> Self {
+        let map = cache.map.borrow();
         Self {
-            ready: cache
+            ready: map
                 .iter()
                 .filter_map(|(url, e)| Some((url.clone(), e.ready()?)))
                 .collect(),
-            not_media: cache
+            not_media: map
                 .iter()
                 .filter(|(_, e)| matches!(e, Entry::NotMedia))
                 .map(|(url, _)| url.clone())
@@ -76,10 +81,15 @@ impl Snapshot {
         self.ready.get(url).map(|c| c.png.clone())
     }
 
-    /// Disc-sized render source: the ≤128px thumb when the original grew
-    /// one, else the full image (small sources never needed a thumb — and
+    /// Disc-sized render source: the thumb entry when one landed (the
+    /// Arc avatars paint is STABLE across re-lands of the big original —
+    /// its texture is never dropped by photo eviction), then the entry's
+    /// own thumb field, then the full png (small originals ship no thumb —
     /// nothing else was decoded).
     pub fn thumb(&self, url: &str) -> Option<Png> {
+        if let Some(c) = self.ready.get(&thumb_key(url)) {
+            return Some(c.png.clone());
+        }
         self.ready
             .get(url)
             .map(|c| c.thumb.clone().unwrap_or_else(|| c.png.clone()))
@@ -265,10 +275,10 @@ impl Cache {
                 let (w, h) = c.size;
                 self.bytes
                     .set(self.bytes.get().saturating_sub(w as u64 * h as u64 * 4));
+                // ONLY the full png's texture goes: a thumb rides its own
+                // small-class entry (thumb_key) — the avatars painting that
+                // Arc must not flash when the big original evicts.
                 dropped.push(c.png);
-                if let Some(t) = c.thumb {
-                    dropped.push(t);
-                }
             }
             self.touched.borrow_mut().remove(&url);
             self.epoch.set(self.epoch.get() + 1);
@@ -331,6 +341,19 @@ pub fn cached_from_decoded(d: DecodedImage) -> Option<CachedImage> {
     })
 }
 
+/// The thumb entry's cache key — a NUL keeps it off real-URL space. Avatars
+/// paint the ≤128px thumb (media::avatar), so the thumb lives as its OWN
+/// small-class entry: photo pressure can never evict it, no matter how big
+/// the original decodes (a 4000×3000 avatar original is a 48MB BIG entry;
+/// the thumb the rail actually paints is 64KB and stays put).
+fn thumb_key(url: &str) -> String {
+    format!("{url}\u{0}thumb")
+}
+
+/// Core re-encodes thumbs at thumbnail(128, 128) — the byte math uses the
+/// ceiling; nothing reads a thumb entry's aspect.
+const THUMB_DIMS: (u32, u32) = (128, 128);
+
 /// Fetch one image through core into the shared cache, notifying `view`
 /// when the fetch lands. Joins an in-flight fetch for the same URL (the
 /// landing notifies every waiter). Verdicts (NotMedia) and ready entries
@@ -355,7 +378,7 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
     let action = {
         let cache = cx.global_mut::<Cache>();
         let mut map = cache.map.borrow_mut();
-        match map.entry(url.clone()) {
+        let action = match map.entry(url.clone()) {
             std::collections::hash_map::Entry::Occupied(mut e) => {
                 // LRU touch: a fetch call for an entry we HAVE is a use —
                 // visible cards re-request their media every frame, so an
@@ -406,7 +429,22 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                     .insert(url.clone(), Instant::now());
                 Action::Start(BACKOFF_START)
             }
+        };
+        // The painted thumb rides along (either match arm — the thumb entry
+        // can even outlive its big entry to eviction): a surface fetching
+        // this URL is (very likely) painting its avatar, so keep the thumb
+        // entry fresh in the small-class LRU too.
+        let tk = thumb_key(&url);
+        if map.contains_key(&tk) {
+            let mut order = cache.order.borrow_mut();
+            if order.back().map(|b| b != &tk).unwrap_or(true) {
+                order.retain(|u| u != &tk);
+                order.push_back(tk.clone());
+            }
+            drop(order);
+            cache.touched.borrow_mut().insert(tk, Instant::now());
         }
+        action
     };
 
     match action {
@@ -452,6 +490,49 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                                 retry = Some(*backoff);
                             }
                             map.insert(url.clone(), st);
+                            // The thumb rides as its OWN small-class entry
+                            // (thumb_key): avatars paint THIS Arc, so photo
+                            // pressure can never drop its texture. Overwrite
+                            // on re-land is deliberate (a changed image at
+                            // the same URL must update); the old texture is
+                            // not remove_asset'd — a painted element keeps
+                            // its pixels until it re-renders with the new
+                            // Arc, and one 64KB texture per re-land is
+                            // noise.
+                            let thumb = match map.get(&url) {
+                                Some(Entry::Ready(c)) => c.thumb.clone(),
+                                _ => None,
+                            };
+                            if let Some(t) = thumb {
+                                let tk = thumb_key(&url);
+                                // Byte math: an overwrite REPLACES the old
+                                // entry — subtract its bytes before adding
+                                // the new, or re-lands inflate the total.
+                                let mut old_bytes = 0u64;
+                                if let Some(Entry::Ready(oc)) = map.insert(
+                                    tk.clone(),
+                                    Entry::Ready(CachedImage {
+                                        png: t,
+                                        thumb: None,
+                                        size: THUMB_DIMS,
+                                    }),
+                                ) {
+                                    let (ow, oh) = oc.size;
+                                    old_bytes = ow as u64 * oh as u64 * 4;
+                                }
+                                // Rotate to the back (a re-land must not
+                                // leave a stale duplicate mid-deque).
+                                let mut order = cache.order.borrow_mut();
+                                order.retain(|u| u != &tk);
+                                order.push_back(tk.clone());
+                                drop(order);
+                                cache.touched.borrow_mut().insert(tk, Instant::now());
+                                cache.bytes.set(
+                                    cache.bytes.get() + THUMB_DIMS.0 as u64 * THUMB_DIMS.1 as u64
+                                        * 4
+                                        - old_bytes,
+                                );
+                            }
                             // A landing is a touch: the bytes just arrived
                             // for whatever rendered surface asked for them.
                             cache
@@ -640,5 +721,77 @@ mod tests {
         assert_eq!(dropped.len(), 1, "only the overflow avatar goes");
         assert!(!cache.map.borrow().contains_key("a0"), "LRU small goes first");
         assert!(cache.map.borrow().contains_key("fresh"));
+    }
+
+    /// THE sidebar-flicker regression: a big original (the user's avatar
+    /// decodes over the small line) whose THUMB the rail paints — photo
+    /// pressure evicts the big entry, but the thumb entry (what avatars
+    /// actually paint) stays, and the dropped texture is only the full png.
+    #[test]
+    fn photo_pressure_spares_the_painted_thumb() {
+        let cache = Cache::default();
+        // The avatar's landing: a big full entry plus its own thumb entry.
+        // The helper builds thumb: None — the painted Arc is constructed
+        // inline; eviction math only reads `size` anyway.
+        let thumb_arc: Png = Arc::new(Image::from_bytes(
+            ImageFormat::Png,
+            b"thumb-bytes".to_vec(),
+        ));
+        insert(&cache, "me", 1000, 1000, Duration::from_secs(3600)); // 4MB — BIG
+        cache.map.borrow_mut().insert(
+            thumb_key("me"),
+            Entry::Ready(CachedImage { png: thumb_arc.clone(), thumb: None, size: THUMB_DIMS }),
+        );
+        cache.order.borrow_mut().push_back(thumb_key("me"));
+        // Photo burst: bigs over budget, all stale.
+        for i in 0..4 {
+            insert(&cache, &format!("ph{i}"), 3000, 3000, Duration::from_secs(3600));
+        } // 144MB + 4MB
+        let dropped = cache.evict();
+        assert!(!dropped.is_empty(), "stale bigs must go");
+        assert!(
+            dropped.iter().all(|p| !Arc::ptr_eq(p, &thumb_arc)),
+            "the painted thumb texture must never be dropped"
+        );
+        assert!(
+            cache.map.borrow().contains_key(&thumb_key("me")),
+            "the thumb entry survives photo pressure"
+        );
+    }
+
+    /// Snapshot::thumb serves the thumb ENTRY when one landed — that Arc is
+    /// the stable one avatars paint (photo eviction can't touch it). The
+    /// full entry's own thumb FIELD is a different Arc here, so the test
+    /// proves the entry takes precedence over the field.
+    #[test]
+    fn snapshot_thumb_prefers_the_thumb_entry() {
+        let cache = Cache::default();
+        let field_arc: Png = Arc::new(Image::from_bytes(
+            ImageFormat::Png,
+            b"field-thumb".to_vec(),
+        ));
+        let entry_arc: Png = Arc::new(Image::from_bytes(
+            ImageFormat::Png,
+            b"entry-thumb".to_vec(),
+        ));
+        cache.map.borrow_mut().insert(
+            "me".into(),
+            Entry::Ready(CachedImage {
+                png: Arc::new(Image::from_bytes(ImageFormat::Png, b"full-bytes".to_vec())),
+                thumb: Some(field_arc),
+                size: (1000, 1000),
+            }),
+        );
+        cache.map.borrow_mut().insert(
+            thumb_key("me"),
+            Entry::Ready(CachedImage {
+                png: entry_arc.clone(),
+                thumb: None,
+                size: THUMB_DIMS,
+            }),
+        );
+        let snap = Snapshot::from_cache(&cache);
+        let served = snap.thumb("me").expect("thumb served");
+        assert!(Arc::ptr_eq(&served, &entry_arc), "the thumb entry's Arc is served");
     }
 }
