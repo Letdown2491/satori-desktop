@@ -20,8 +20,10 @@
 //! HEADER before any pixel allocation, so a 20MB compressed bomb never
 //! becomes 1.6GB of RGBA.
 //!
-//! TODO(port): full SSRF set — DNS-rebinding-safe resolution on direct paths,
-//! per-redirect re-checks, Tor transport, NIP-B7 healing (M2/M4).
+//! TODO(port): remaining SSRF set — DNS-rebinding-safe resolution on direct
+//! paths (the guard checks HOST names; a public name resolving to a private
+//! IP needs resolve-and-pin, M2/M4), Tor transport, NIP-B7 healing (M2/M4).
+//! Per-redirect re-validation LANDED (F5): every hop re-runs the guard.
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -102,12 +104,13 @@ fn gate() -> &'static tokio::sync::Semaphore {
     GATE.get_or_init(|| tokio::sync::Semaphore::const_new(MAX_CONCURRENT_FETCHES))
 }
 
-/// One shared client for every fetch in this module. Two hard rules baked
+/// One shared client for every fetch in this module. Three hard rules baked
 /// in: a browser-style User-Agent (CDNs — Cloudflare in front of the
 /// blossoms especially — 403 requests with no UA, and those 403s read as
-/// verdicts, so avatars died permanently) and connect/total timeouts (a
+/// verdicts, so avatars died permanently), connect/total timeouts (a
 /// hung fetch used to pin the cache entry Loading forever, joining every
-/// later waiter onto a corpse — the avatar that never loads all session).
+/// later waiter onto a corpse — the avatar that never loads all session),
+/// and a per-hop SSRF re-validation policy (below).
 fn http() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -118,6 +121,20 @@ fn http() -> &'static reqwest::Client {
             )
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
+            // F5 (four-lens review): reqwest's DEFAULT policy follows up to
+            // ten redirects with no re-validation — a friendly CDN 302-ing
+            // to http://localhost:8080 or https://127.1/ was followed
+            // blindly. Every hop now re-runs the full URL guard; a failed
+            // hop STOPs (the last 3xx response surfaces through
+            // guarded_get's status map as a NotMedia verdict, so nothing
+            // retries it) and hops are capped below the old default.
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() > 5 || !is_safe_media_url(attempt.url().as_str()) {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
     })
@@ -394,11 +411,28 @@ fn is_internal_host(host: &str) -> bool {
     if host == "localhost" || host.ends_with(".local") || host.ends_with(".internal") {
         return true;
     }
-    // IPv4 literal forms (incl. dotted quad).
+    // IPv4 literal forms — INCLUDING the ones glibc's getaddrinfo accepts
+    // but Rust's Ipv4Addr::parse rejects: "127.1" (fewer than 4 parts),
+    // "2130706433" (raw u32), "0x7f.1" (hex per part), "0177.0.0.1"
+    // (octal). Every one of those resolves to loopback on this platform.
     if host.parse::<std::net::Ipv4Addr>().is_ok() {
         return true;
     }
-    false
+    // The literal spellings beyond the dotted quad. Strictness matters in
+    // BOTH directions: "0x7f.1" must die, but "bee.cd" — every part made
+    // of hex LETTERS — is a legal DNS name, because inet_aton only reads
+    // hex with an explicit 0x prefix. So a part counts as numeric only in
+    // 0x-hex form or plain decimal (which covers octal spellings); a host
+    // is treated as a literal only when EVERY dot-part is numeric.
+    host.split('.').all(part_is_numeric)
+}
+
+/// The part classifier for the literal check above (host-side names).
+fn part_is_numeric(part: &str) -> bool {
+    if let Some(hexpart) = part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
+        return !hexpart.is_empty() && hexpart.bytes().all(|c| c.is_ascii_hexdigit());
+    }
+    !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit())
 }
 
 pub fn hex(bytes: &[u8]) -> String {
@@ -456,6 +490,34 @@ mod tests {
         assert!(!is_safe_media_url("https://localhost/x.png"));
         assert!(!is_safe_media_url("https://host.internal/x.png"));
         assert!(!is_safe_media_url("not a url"));
+    }
+
+    /// F5: the guard holds for every IP-literal spelling getaddrinfo
+    /// accepts — each of these resolves to loopback despite Ipv4Addr::parse
+    /// rejecting them — and still passes real hostnames that merely LOOK
+    /// hex-ish ("0xcd" would be a literal, "c0ffee.example.com" is not).
+    #[test]
+    fn ssrf_guard_covers_getaddrinfo_literal_forms() {
+        for hostile in [
+            "https://127.1/x.png",
+            "https://127.0.0.1./x.png",
+            "https://2130706433/x.png",
+            "https://0x7f.1/x.png",
+            "https://0x7f000001/x.png",
+            "https://0177.0.0.1/x.png",
+            "https://[::1]/x.png",
+            "https://0xcd/x.png",
+        ] {
+            assert!(!is_safe_media_url(hostile), "must reject {hostile}");
+        }
+        for legit in [
+            "https://c0ffee.example.com/x.png",
+            "https://bee.cd/x.png",
+            "https://black.white.pictures/x.png",
+            "https://raw.githubusercontent.com/a/b/c.png",
+        ] {
+            assert!(is_safe_media_url(legit), "must allow {legit}");
+        }
     }
 
     /// A minimal PNG header (signature + IHDR dims) — no pixel data, which
