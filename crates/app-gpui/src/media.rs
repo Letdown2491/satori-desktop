@@ -251,9 +251,6 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
         Start(Duration),
         Joined,
         Ready,
-        /// Still cooling off — retry via timer after `remaining` (the
-        /// spawn must wait until the cache borrow below is dead).
-        Cool(Duration),
     }
     let action = {
         let cache = cx.global_mut::<Cache>();
@@ -279,18 +276,17 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                         Action::Joined
                     }
                     Entry::Failed { at, backoff } => {
-                        let elapsed = at.elapsed();
-                        if elapsed >= *backoff {
+                        if at.elapsed() >= *backoff {
                             let next = (*backoff * 2).min(BACKOFF_MAX);
                             e.insert(Entry::Loading(vec![view]));
                             Action::Start(next)
                         } else {
-                            // Still cooling off. The retry goes out on a
-                            // timer (scheduled after the borrow below dies):
-                            // an idle pane gets no other frames, and without
-                            // this a transient failure would wait for
-                            // interaction to try again.
-                            Action::Cool(*backoff - elapsed)
+                            // Still cooling off: a no-op. The retry is
+                            // scheduled ONCE — where the Failed entry was
+                            // born (the landing, below) — never per peek:
+                            // a frame storm over a cooling URL must not
+                            // pile up timer tasks.
+                            Action::Ready
                         }
                     }
                 }
@@ -305,18 +301,10 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
 
     match action {
         Action::Joined | Action::Ready => {} // the landing notifies every waiter
-        Action::Cool(remaining) => {
-            // One deferred retry per cool-off; re-entering fetch re-joins
-            // the normal path (by then the cool-off has passed → Start).
-            let core = core.clone();
-            cx.spawn(async move |cx| {
-                cx.background_executor().timer(remaining).await;
-                let _ = cx.update(|app| fetch(&core, url, view, app));
-            })
-            .detach();
-        }
         Action::Start(next_backoff) => {
             let rx = core.fetch_image(url.clone());
+            let core2 = core.clone();
+            let view2 = view;
             cx.spawn(async move |cx| {
                 let outcome =
                     { let mut rx = rx; rx.recv().await }.unwrap_or(Err(MediaError::Transient));
@@ -340,8 +328,19 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                         let (w, h) = c.size;
                         cache.bytes.set(cache.bytes.get() + w as u64 * h as u64 * 4);
                     }
+                    let mut retry = None;
                     let waiters = match map.remove(&url) {
                         Some(Entry::Loading(waiters)) => {
+                            // A transient failure books exactly one retry —
+                            // the cool-off timer (below, after the cache
+                            // borrow dies) re-enters fetch when the backoff
+                            // is spent. Booked ONCE, where the Failed entry
+                            // is born: render-path peeks during the cool-off
+                            // are no-ops, so a frame storm over a cooling
+                            // URL never piles up timer tasks.
+                            if let Entry::Failed { backoff, .. } = &st {
+                                retry = Some(*backoff);
+                            }
                             map.insert(url.clone(), st);
                             waiters
                         }
@@ -359,6 +358,15 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                     // evicts on its own — that was the RAM leak).
                     for png in cache.evict() {
                         ImageSource::Image(png).remove_asset(app);
+                    }
+                    if let Some(backoff) = retry {
+                        let core = core2.clone();
+                        let url = url.clone();
+                        app.spawn(async move |app| {
+                            app.background_executor().timer(backoff).await;
+                            let _ = app.update(|app| fetch(&core, url, view2, app));
+                        })
+                        .detach();
                     }
                     for id in waiters {
                         app.notify(id);
