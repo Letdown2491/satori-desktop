@@ -360,6 +360,12 @@ pub struct Core {
     /// Whether the live subscription is armed (start_live). An Arc so the
     /// spawned task can re-arm it when the subscribe fails.
     live_on: Arc<std::sync::atomic::AtomicBool>,
+    /// Identity epoch for the live sub: bumped on sign-out. A running
+    /// live loop compares its captured epoch per event and tears down
+    /// (unsubscribe + exit) on mismatch — the loop used to outlive its
+    /// session, still filtering by the old account's pubkey and follows,
+    /// while live_on true blocked the next login from arming its own.
+    live_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Default for Core {
@@ -405,6 +411,7 @@ impl Core {
             live: tokio::sync::broadcast::Sender::new(64),
             hold_tx: tokio::sync::broadcast::Sender::new(16),
             live_on: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            live_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -463,6 +470,13 @@ impl Core {
         *self.active.lock().unwrap() = None;
         // The deletion cache was built from the OLD session's follow set.
         *self.deleted_cache.lock().unwrap() = None;
+        // The live sub is armed per session: the epoch bump makes the old
+        // loop tear down at its next event, and live_on false lets the
+        // next login's bootstrap arm a fresh one with the new identity.
+        self.live_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.live_on
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn init(&self) -> (Option<Session>, Option<String>) {
@@ -3972,6 +3986,10 @@ impl Core {
         let pool = active.pool.clone();
         let live = self.live.clone();
         let live_on = self.live_on.clone();
+        let live_epoch = Arc::clone(&self.live_epoch);
+        // Captured at arm time; a mismatch at loop time means this session
+        // was signed out and the loop tears its sub down below.
+        let my_epoch = live_epoch.load(std::sync::atomic::Ordering::SeqCst);
         let me = active.me();
         let follows = active.follows.clone();
         self.rt.spawn(async move {
@@ -3997,6 +4015,16 @@ impl Core {
             };
             let mut notifications = pool.client().notifications();
             while let Some(n) = notifications.next().await {
+                // Session changed (sign-out, or a different account): drop
+                // the stale identity's subscription. The check runs before
+                // anything touches the store or the bell. live_on is left
+                // alone here — sign-out already reset it, and storing
+                // again could clobber a NEWER session's armed flag.
+                if live_epoch.load(std::sync::atomic::Ordering::SeqCst) != my_epoch {
+                    eprintln!("[core] live: session changed; unsubscribing");
+                    let _ = pool.client().unsubscribe(output.id()).await;
+                    return;
+                }
                 let event = match n {
                     nostr_sdk::client::ClientNotification::Event { subscription_id, event, .. }
                         if output.id() == &subscription_id =>
