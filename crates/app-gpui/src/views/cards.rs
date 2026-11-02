@@ -332,7 +332,10 @@ fn article_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) ->
             card = card.child(cover);
         }
     }
-    card = card.child(kicker("↗ Article"));
+    // No type kicker and no second timestamp: the byline already carries
+    // the stamp, the serif title + the Read seal say "article" — "↗
+    // Article" between them was noise (owner: "remove the arrow + article
+    // thing").
     card = card.child(serif_title(&data.title, 17.0));
     // Summary, or the first ~140 chars of the body as the stand-in (article.ts).
     let summary = if data.summary.is_empty() {
@@ -347,11 +350,6 @@ fn article_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) ->
             .text_color(rgb(theme::muted()))
             .child(summary),
     );
-    if let Some(ts) = data.published_at {
-        // Mode-aware without a cx (no bridge on card paths): date mode
-        // shows dates, block keeps relative.
-        card = card.child(meta_line(crate::timefmt::stamp_text(ts)));
-    }
     // The Read seal opens the reader page (markdown). Quiet on purpose —
     // a serif word, underlined, the only door out of the summary.
     let ev_for_read = ev.clone();
