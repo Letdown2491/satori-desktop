@@ -57,8 +57,12 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    pub fn new(cx: &gpui::App) -> Self {
-        Self::from_cache(cx.global::<Cache>())
+    /// Render-time view of the shared cache, memoized on the cache itself
+    /// keyed by the render-visible epoch: Snapshot::new is called by every
+    /// pane's render — with the memo, a same-epoch call (every frame in
+    /// between landings) is a refcount bump, not a full-map clone.
+    pub fn new(cx: &gpui::App) -> std::sync::Arc<Self> {
+        cx.global::<Cache>().snapshot()
     }
 
     /// The App-less core — tests build snapshots straight from a Cache.
@@ -103,12 +107,6 @@ impl Snapshot {
     pub fn not_media(&self, url: &str) -> bool {
         self.not_media.contains(url)
     }
-}
-
-/// The cache's render-visible epoch — views compare it to decide whether
-/// their cached media snapshot is stale.
-pub fn generation(cx: &gpui::App) -> u64 {
-    cx.global::<Cache>().epoch.get()
 }
 
 type Cb = EntityId;
@@ -157,6 +155,11 @@ pub struct Cache {
     pinned: std::cell::RefCell<std::collections::HashSet<String>>,
     bytes: std::cell::Cell<u64>,
     epoch: std::cell::Cell<u64>,
+    /// The last snapshot handed out, keyed by the epoch it was built at:
+    /// every pane's every frame wants a Snapshot, and a same-epoch build
+    /// (the overwhelmingly common case) is this memo's refcount bump
+    /// instead of a full-map clone.
+    snap_memo: std::cell::RefCell<Option<(u64, std::sync::Arc<Snapshot>)>>,
 }
 impl Default for Cache {
     fn default() -> Self {
@@ -167,6 +170,7 @@ impl Default for Cache {
             pinned: std::cell::RefCell::new(std::collections::HashSet::new()),
             bytes: std::cell::Cell::new(0),
             epoch: std::cell::Cell::new(0),
+            snap_memo: std::cell::RefCell::new(None),
         }
     }
 }
@@ -210,6 +214,27 @@ const EVICT_GRACE: Duration = Duration::from_secs(120);
 const EVICT_DESPERATE_BYTES: u64 = 2 * BIG_MAX_BYTES;
 
 impl Cache {
+    /// The memoized render snapshot: same epoch → refcount bump; a bumped
+    /// epoch (a landing or eviction) rebuilds once, and every subsequent
+    /// frame in that epoch reuses the build. (All render-visible map
+    /// transitions bump the epoch — the landing for Ready/NotMedia/Failed,
+    /// eviction per removal; Loading inserts and LRU touches don't change
+    /// what a snapshot would return.)
+    fn snapshot(self: &Cache) -> std::sync::Arc<Snapshot> {
+        let hit = self
+            .snap_memo
+            .borrow()
+            .as_ref()
+            .filter(|(e, _)| *e == self.epoch.get())
+            .map(|(_, s)| s.clone());
+        if let Some(snap) = hit {
+            return snap;
+        }
+        let snap = std::sync::Arc::new(Snapshot::from_cache(self));
+        *self.snap_memo.borrow_mut() = Some((self.epoch.get(), snap.clone()));
+        snap
+    }
+
     /// Unpin urls (and their disc-thumb keys) — `unpin`'s App-less core.
     fn unpin_urls(&self, urls: &[String]) {
         let mut pinned = self.pinned.borrow_mut();
@@ -710,6 +735,25 @@ mod tests {
         let dropped = cache.evict();
         assert!(dropped.is_empty(), "fresh entries must survive the grace");
         assert_eq!(cache.map.borrow().len(), 4);
+    }
+
+    /// The snapshot memo: a same-epoch request returns the SAME Arc (the
+    /// per-frame Snapshot::new is a refcount bump), a bumped epoch (a
+    /// landing/eviction) builds a fresh one.
+    #[test]
+    fn snapshot_memoizes_on_epoch() {
+        let cache = Cache::default();
+        insert(&cache, "a", 100, 100, Duration::from_secs(1));
+        let s1 = cache.snapshot();
+        let s2 = cache.snapshot();
+        assert!(
+            std::sync::Arc::ptr_eq(&s1, &s2),
+            "same epoch hands out the same snapshot"
+        );
+        cache.epoch.set(cache.epoch.get() + 1);
+        let s3 = cache.snapshot();
+        assert!(!std::sync::Arc::ptr_eq(&s1, &s3), "a bumped epoch rebuilds");
+        assert!(s3.png("a").is_some(), "content survives the rebuild");
     }
 
     /// Once the oldest entry is past the grace window it goes — and only

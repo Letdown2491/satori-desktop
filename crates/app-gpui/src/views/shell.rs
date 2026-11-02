@@ -97,10 +97,6 @@ pub struct Shell {
     /// (replacing the ensō as the home glyph).
     me: Option<PublicKey>,
     me_profile: Option<Profile>,
-    /// Snapshot memo for the one rail avatar (media::Snapshot::new clones the
-    /// cache map — not per-frame work).
-    rail_snap: Option<media::Snapshot>,
-    rail_epoch: u64,
 }
 
 impl Shell {
@@ -137,8 +133,6 @@ impl Shell {
             stack: vec![],
             me: None,
             me_profile: None,
-            rail_snap: None,
-            rail_epoch: 0,
         };
         shell.stack.push(Pane::Feed(feed));
         // The rail avatar: session pubkey synchronously, profile via the
@@ -656,13 +650,9 @@ impl Shell {
         let ink = |on: bool| if on { theme::ink() } else { theme::muted() };
         let feed_active = active == Some(Spot::Feed);
 
-        // The avatar's snapshot memoized on the media epoch — Snapshot::new
-        // clones the cache map, so it must not run per frame.
-        let epoch = media::generation(cx);
-        if self.rail_snap.is_none() || self.rail_epoch != epoch {
-            self.rail_snap = Some(media::Snapshot::new(cx));
-            self.rail_epoch = epoch;
-        }
+        // The avatar's snapshot comes from the cache's own epoch memo —
+        // Snapshot::new is a refcount bump between landings.
+        let rail_snap = media::Snapshot::new(cx);
         let (me_pic, me_name) = match (&self.me_profile, self.me) {
             (Some(p), _) => (p.picture.clone(), p.display()),
             (None, Some(pk)) => (String::new(), format!("{}…", &pk.to_string()[..8])),
@@ -679,7 +669,7 @@ impl Shell {
             media::pin(&me_pic, cx);
         }
         let me_avatar =
-            media::avatar(self.rail_snap.as_ref().unwrap(), &me_pic, &me_name, 26.0);
+            media::avatar(rail_snap.as_ref(), &me_pic, &me_name, 26.0);
 
         div()
             .flex_none()

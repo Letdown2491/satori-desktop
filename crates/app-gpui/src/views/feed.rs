@@ -122,8 +122,6 @@ struct FeedSnap {
     wallet_ready: bool,
     quotes: std::sync::Arc<content::Quotes>,
     cards: std::sync::Arc<cards::CardState>,
-    media: std::sync::Arc<media::Snapshot>,
-    media_epoch: u64,
 }
 
 impl EventEmitter<Nav> for Feed {}
@@ -1135,18 +1133,15 @@ impl Render for Feed {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let handle = cx.entity();
         let status = self.status.clone();
-        // Rebuild the render snapshot only when something actually changed
-        // (any mutation sets snap_dirty; the media cache bumps its epoch on
-        // every render-visible image arrival/eviction). Frames in between —
-        // and there are many, since every view notify repaints the shell —
-        // just bump refcounts.
-        let media_epoch = media::generation(cx);
+        // Rebuild the render snapshot only when the DATA changed (any
+        // mutation sets snap_dirty). Media is NOT in the snapshot: render
+        // takes the memoized cache snapshot fresh each frame (same epoch =
+        // refcount bump), so a landed image repaints its card without
+        // deep-copying a thousand events.
         // The pending bolt's breathing honors the desktop's motion pref
         // (desktop.rs: the portal's prefers-reduced-motion).
         let reduced_motion = crate::desktop::Desktop::get(cx).reduced_motion;
-        let stale = self.snap_dirty
-            || self.snap.as_ref().is_none_or(|s| s.media_epoch != media_epoch);
-        if stale {
+        if self.snap_dirty || self.snap.is_none() {
             self.snap = Some(FeedSnap {
                 notes: std::sync::Arc::new(self.notes.clone()),
                 profiles: std::sync::Arc::new(self.profiles.clone()),
@@ -1164,11 +1159,10 @@ impl Render for Feed {
                     voted: self.voted.clone(),
                     rsvped: self.rsvped.clone(),
                 }),
-                media: std::sync::Arc::new(media::Snapshot::new(cx)),
-                media_epoch,
             });
             self.snap_dirty = false;
         }
+        let media = media::Snapshot::new(cx);
         let snap = self.snap.as_ref().unwrap();
         let empty = snap.notes.is_empty();
 
@@ -1270,7 +1264,7 @@ impl Render for Feed {
                         let wallet_ready = snap.wallet_ready;
                         let quotes = snap.quotes.clone();
                         let cards = snap.cards.clone();
-                        let media = snap.media.clone();
+                        let media = media.clone();
                         let paging = self.paging;
                         let has_more = self.has_more;
                         let core = self.core.clone();
