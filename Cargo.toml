@@ -11,6 +11,10 @@ xattr = { path = "vendor/xattr" }
 # under one family name; COLRv1 renders EMPTY under swash (COLRv0-only), so
 # the matcher must prefer the CBDT face. Probed empirically (Nov 2026).
 cosmic-text = { path = "vendor/cosmic-text" }
+# E0365 future-incompat (rust #127909): 2.0.1 re-exports the `proc_macro`
+# extern crate through a private item — a hard error in a future release
+# (pulled in via gpui → stacksafe). The compiler's own one-word fix, vendored.
+proc-macro-error2 = { path = "vendor/proc-macro-error2" }
 
 [workspace.package]
 version = "0.1.0"
