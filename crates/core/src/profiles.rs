@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use nostr::prelude::*;
@@ -24,6 +24,9 @@ const CHUNK: usize = 100;
 /// Debounce window: calls inside it share one chunked fetch.
 const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
 const CAP: usize = 10_000;
+/// Disk-flush floor: one serialize + sync write per this window, even
+/// while continuous browsing keeps `dirty` set every tick.
+const FLUSH_EVERY: u64 = 5;
 
 #[derive(Clone)]
 struct Entry {
@@ -42,6 +45,14 @@ pub struct ProfileService {
     pool: Arc<Pool>,
     disk: PathBuf,
     dirty: Arc<AtomicBool>,
+    /// Single-flight for the revalidate pass: while one stale-sweep runs
+    /// (up to CHUNK-sized queries against the relays), later ticks skip —
+    /// without it a never-resolving entry re-spawned a task every 150ms.
+    revalidating: AtomicBool,
+    /// Unix secs of the last disk flush — the flush is a full serialize +
+    /// sync write, gated to one per FLUSH_EVERY even while browsing keeps
+    /// `dirty` set every tick.
+    last_flush: AtomicU64,
 }
 
 impl ProfileService {
@@ -53,6 +64,8 @@ impl ProfileService {
             pool,
             disk,
             dirty: Arc::new(AtomicBool::new(false)),
+            revalidating: AtomicBool::new(false),
+            last_flush: AtomicU64::new(0),
         });
         service.spawn_debouncer();
         service
@@ -154,10 +167,22 @@ impl ProfileService {
     /// Absorb a fetched profile into the cache (+ persist soon).
     pub fn absorb(&self, profile: Profile) {
         let pk = profile.pubkey.clone();
-        self.cache
-            .lock()
-            .unwrap()
-            .insert(pk, Entry { profile, at: now_secs() });
+        let mut cache = self.cache.lock().unwrap();
+        // The CAP (10k) used to bound only the disk write; the in-memory
+        // map was insert-only and grew for the process lifetime. Evict the
+        // oldest-by-`at` entry to make room — re-absorbing a trimmed
+        // profile is one relay query away (and the disk copy still holds
+        // it if it predates this run).
+        if cache.len() >= CAP && !cache.contains_key(&pk) {
+            let oldest = cache
+                .iter()
+                .min_by_key(|(_, e)| e.at)
+                .map(|(k, _)| k.clone());
+            if let Some(old) = oldest {
+                cache.remove(&old);
+            }
+        }
+        cache.insert(pk, Entry { profile, at: now_secs() });
         self.dirty.store(true, Ordering::Relaxed);
     }
 
@@ -208,8 +233,14 @@ impl ProfileService {
             .collect()
     }
 
-    /// Stale entries revalidate silently in the background.
+    /// Stale entries revalidate silently in the background. Single-flight:
+    /// a pass in flight (CHUNK-sized relay queries can take seconds)
+    /// makes later ticks skip — a never-resolving entry must not spawn a
+    /// task per 150ms tick.
     fn revalidate_stale(self: &Arc<Self>) {
+        if self.revalidating.swap(true, Ordering::Relaxed) {
+            return;
+        }
         let stale: Vec<PublicKey> = {
             let cache = self.cache.lock().unwrap();
             cache
@@ -218,22 +249,56 @@ impl ProfileService {
                 .filter_map(|e| PublicKey::from_hex(&e.profile.pubkey).ok())
                 .collect()
         };
-        if !stale.is_empty() {
-            let service = Arc::clone(self);
-            tokio::spawn(async move {
-                service.fetch_and_absorb(stale).await;
-            });
+        if stale.is_empty() {
+            self.revalidating.store(false, Ordering::Relaxed);
+            return;
+        }
+        let service = Arc::clone(self);
+        tokio::spawn(async move {
+            service.fetch_and_absorb(stale.clone()).await;
+            // Refresh `at` for the WHOLE attempted set, misses included:
+            // a profile the relays no longer hold would otherwise stay
+            // stale forever and re-fetch every pass. Revalidation is a
+            // per-TTL duty, not a per-tick one; the entry itself stays
+            // (the last-known profile still renders).
+            service.touch(&stale);
+            service.revalidating.store(false, Ordering::Relaxed);
+        });
+    }
+
+    /// Refresh the TTL clock without fetching — the miss side of
+    /// revalidation.
+    fn touch(&self, pks: &[PublicKey]) {
+        let mut cache = self.cache.lock().unwrap();
+        for pk in pks {
+            if let Some(e) = cache.get_mut(&pk.to_string()) {
+                e.at = now_secs();
+            }
         }
     }
 
     fn spawn_debouncer(self: &Arc<Self>) {
-        let service = Arc::clone(self);
+        // Weak, not strong: the service belongs to one session's Active,
+        // and a strong handle here would keep the whole cache (and this
+        // loop) alive through every logout/login — one immortal 150ms
+        // task leaked per login. The loop exits when the upgrade fails.
+        let service = Arc::downgrade(self);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(DEBOUNCE).await;
+                let Some(service) = service.upgrade() else {
+                    break;
+                };
 
-                // Flush cache to disk when dirty.
-                if service.dirty.load(Ordering::Relaxed) {
+                // Flush cache to disk when dirty — at most one serialize +
+                // sync write per FLUSH_EVERY, not per tick (browsing sets
+                // `dirty` on every landing batch).
+                let now = now_secs();
+                if service.dirty.load(Ordering::Relaxed)
+                    && now.saturating_sub(service.last_flush.load(Ordering::Relaxed))
+                        > FLUSH_EVERY
+                {
+                    service.last_flush.store(now, Ordering::Relaxed);
                     let cache = service.cache.lock().unwrap().clone();
                     service.save_disk(&cache);
                 }

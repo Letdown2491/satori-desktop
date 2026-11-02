@@ -4,7 +4,7 @@
 //! context (DESIGN.md §3.2). The web app's server-session machinery
 //! (`src/session.ts`) collapses to this single-user handle.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -244,6 +244,61 @@ impl Profile {
     }
 }
 
+/// In-memory cap for the cross-session profile mirror (`profiles_mem`):
+/// display data for mentions/search only — the durable copy is the
+/// profile service's profiles.json (10k there). 5000 hydrated profiles
+/// is far past anything a long session touches.
+const PROFILES_MEM_CAP: usize = 5000;
+
+/// The bounded profile mirror. A plain HashMap is insert-only, so every
+/// unique pubkey seen (each feed page absorbs ~40) stayed for the process
+/// lifetime — and it survived logout, too. Insertion-order eviction: the
+/// oldest-absorbed profile goes first, which is exactly the stale half
+/// of the cache.
+struct ProfileMem {
+    map: HashMap<String, Profile>,
+    order: VecDeque<String>,
+}
+
+impl ProfileMem {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    /// Absorb one profile. Overwrites don't re-push the order key (the
+    /// entry keeps its place; re-pushing would turn the deque into a
+    /// duplicate-riddled mess for zero benefit).
+    fn insert(&mut self, p: Profile) {
+        let key = p.pubkey.clone();
+        if !self.map.contains_key(&key)
+            && self.map.len() >= PROFILES_MEM_CAP
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.map.remove(&oldest);
+        }
+        if !self.map.contains_key(&key) {
+            self.order.push_back(key.clone());
+        }
+        self.map.insert(key, p);
+    }
+
+    fn get(&self, pk: &str) -> Option<&Profile> {
+        self.map.get(pk)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &Profile> {
+        self.map.values()
+    }
+
+    fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
+}
+
 pub struct Core {
     rt: tokio::runtime::Runtime,
     /// Hold-state mirror (Held/Committed/Undone/Failed) for the shell's
@@ -254,8 +309,9 @@ pub struct Core {
     pending: Mutex<Option<Arc<NostrConnect>>>,
     hold_seq: AtomicU64,
     /// ONE pool for the process: the LMDB write lock must not survive a
-    /// logout (a second env open on the same path deadlocks), and the
-    /// profile service's debouncer holds its handle forever by design.
+    /// logout (a second env open on the same path deadlocks). The profile
+    /// service's debouncer is session-scoped (Weak handle — it exits when
+    /// the service drops), so each login builds its own.
     pool: Mutex<Option<Arc<Pool>>>,
     /// Own reactions: target event id (hex) → engaged.
     own_liked: Mutex<HashSet<String>>,
@@ -272,8 +328,10 @@ pub struct Core {
     /// Bitcoin timestamp→height service (blocktime, Phase 2 §4.4) — one
     /// per process; its table outlives sessions like the ledger.
     blocktime: Arc<Blocktime>,
-    /// Resolved profiles (mentions/name display) — absorbed as they stream in.
-    profiles_mem: Mutex<std::collections::HashMap<String, Profile>>,
+    /// Resolved profiles (mentions/name display) — absorbed as they stream
+    /// in. Bounded (`ProfileMem`): insert-only maps grow for the process
+    /// lifetime otherwise, and this one survives logouts by design.
+    profiles_mem: Mutex<ProfileMem>,
     /// Live undo holds: token → cancel signal.
     holds: Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>>,
     /// Push signals off the live subscription (shell bell, feed pills).
@@ -316,7 +374,7 @@ impl Core {
             muted: Mutex::new(HashSet::new()),
             own_zapped: Mutex::new(HashSet::new()),
             wallet: Arc::new(Wallet::new()),
-            profiles_mem: Mutex::new(std::collections::HashMap::new()),
+            profiles_mem: Mutex::new(ProfileMem::new()),
             holds: Mutex::new(std::collections::HashMap::new()),
             live: tokio::sync::broadcast::Sender::new(64),
             hold_tx: tokio::sync::broadcast::Sender::new(16),
@@ -412,6 +470,9 @@ impl Core {
         self.own_bookmarked.lock().unwrap().clear();
         self.own_zapped.lock().unwrap().clear();
         self.muted.lock().unwrap().clear();
+        // The profile mirror is display state for the logged-in session's
+        // reading; a next login re-hydrates it from its own feed pages.
+        self.profiles_mem.lock().unwrap().clear();
         eprintln!("[core] logout");
     }
 
@@ -1512,7 +1573,7 @@ impl Core {
     fn absorb_profiles(&self, profiles: &[Profile]) {
         let mut m = self.profiles_mem.lock().unwrap();
         for p in profiles {
-            m.insert(p.pubkey.clone(), p.clone());
+            m.insert(p.clone());
         }
     }
 
