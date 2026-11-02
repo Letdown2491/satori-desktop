@@ -76,6 +76,11 @@ pub struct Feed {
     /// Endless scroll: the relays may have more; a round trip is in flight.
     has_more: bool,
     paging: bool,
+    /// The paging anchor: the oldest note timestamp EVER absorbed — not the
+    /// window's last row. The RAM window (trim_window) drops the tail, and
+    /// `older()` must continue from where the STREAM ended, not where the
+    /// Vec ends, or the next page would re-fetch the rows just dropped.
+    oldest_ts: Option<u64>,
     /// Render snapshot (D13's snapshot rule, made cheap): the render item
     /// closure used to clone the whole notes vec + profile map on every
     /// frame — and `cx.notify()` fires for every profile resolution, image
@@ -158,6 +163,7 @@ impl Feed {
             status: "connecting to the relays…".into(),
             has_more: true,
             paging: false,
+            oldest_ts: None,
             snap: None,
             snap_dirty: true,
             mode,
@@ -181,6 +187,9 @@ impl Feed {
                     cx.emit(Nav::FeedDeep(deep));
                 }
                 feed.maybe_older(feed.last_visible_end, cx);
+                // The trim can only fire once the reader is back above the
+                // trim line — the scroll stream is where that happens.
+                feed.trim_window(cx);
             });
         });
         // Live push: fresh follow posts bump the new-notes pill (the list
@@ -274,16 +283,39 @@ impl Feed {
             return;
         }
         self.paging = true;
-        let oldest = self
-            .notes
-            .last()
-            .map(|n| n.created_at.as_secs())
-            .unwrap_or(0);
+        // The anchor, not the window's last row: the RAM window may have
+        // trimmed the tail since this page was ordered.
+        let oldest = self.oldest_ts.unwrap_or(0);
         let rx = match &self.mode {
             FeedMode::Hashtag(tag) => self.core.hashtag_older(tag.clone(), oldest),
             _ => self.core.older(oldest, self.mode.kinds()),
         };
         self.pump(rx, cx);
+        cx.notify();
+    }
+
+    /// The feed's RAM window. Notes are KB-scale events and the timeline
+    /// only ever grows (`absorb` never clears — dedup makes reloads
+    /// idempotent), so a long reading session used to hold every note ever
+    /// fetched — and `FeedSnap` deep-clones the Vec on every data change,
+    /// so unbounded `notes` also unbounded the per-frame rebuild cost.
+    /// Past the ceiling the OLDEST tail is dropped, but only when the
+    /// reader sits well above the trim line: splice preserves heights (and
+    /// the scroll anchor) for rows above the removed range, and the paging
+    /// anchor (`oldest_ts`) keeps `older()` streaming from where the stream
+    /// ended, not where the Vec ends. `note_ids` keeps the dropped ids —
+    /// a reload overlapping the trimmed range must dedup (a re-added note
+    /// would land at the bottom, out of order).
+    fn trim_window(&mut self, cx: &mut Context<Self>) {
+        let Some(to) = trim_target(self.notes.len(), self.last_visible_end) else {
+            return;
+        };
+        let old_len = self.list_len();
+        self.notes.truncate(to);
+        // The end cap replaces the dropped tail: range to..old_len becomes
+        // one row. Rows above `to` (the reader's anchor) keep their heights.
+        self.list.splice(to..old_len, 1);
+        self.touch();
         cx.notify();
     }
 
@@ -384,9 +416,20 @@ impl Feed {
         // do not change their height").
         match reflow {
             Reflow::Reset if self.list_len() != before => self.list.reset(self.list_len()),
-            Reflow::Append(old) => self.list.splice(old..old, self.list_len()),
+            Reflow::Append(old) => {
+                // splice inserts `count` items at `old`, keeping the suffix:
+                // total = old + count + (state_total − old). The state was in
+                // sync (state_total = before), so count is the DELTA — the
+                // new-total-shaped call double-counted (the state grew by a
+                // full list length per append; probed against gpui 0.2.2).
+                let added = self.list_len() - before;
+                self.list.splice(old..old, added);
+            }
             _ => {}
         }
+        // A landing can cross the ceiling on its own (a big bootstrap); the
+        // reader is above the trim line in that case almost by definition.
+        self.trim_window(cx);
         cx.notify();
     }
 
@@ -398,6 +441,12 @@ impl Feed {
     ) {
         self.absorb_profiles(profiles, cx);
         for note in notes {
+            // The paging anchor advances on EVERY incoming note — even a
+            // deduped repeat or a filtered kind marks where the stream has
+            // reached; the window may already have trimmed the tail this
+            // note belongs to.
+            let ts = note.created_at.as_secs();
+            self.oldest_ts = Some(self.oldest_ts.map_or(ts, |o: u64| o.min(ts)));
             // Registry kinds render as rich cards (cards.rs card_for port).
             if note.kind != Kind::TextNote && !cards::is_feed_kind(note.kind) {
                 continue;
@@ -1474,4 +1523,46 @@ fn end_cap(paging: bool, more: bool) -> Div {
             );
     }
     cap
+}
+
+/// The window decision, pure for the tests: the index to truncate the
+/// timeline to, or None while it's under the ceiling — or while the reader
+/// sits too close to the trim line (their anchor row must stay above the
+/// removed range, or the splice would yank them).
+///
+/// CEIL/KEEP: the window oscillates 1000 → 400 notes (~KB each; the snap
+/// rebuild clones it). MARGIN: a wheel tick past the trigger can't shrink
+/// the visible range retroactively — 80 rows of headroom is generous.
+fn trim_target(len: usize, visible_end: usize) -> Option<usize> {
+    const CEIL: usize = 1000;
+    const KEEP: usize = 400;
+    const MARGIN: usize = 80;
+    if len <= CEIL {
+        return None;
+    }
+    let to = len - KEEP;
+    (visible_end + MARGIN <= to).then_some(to)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim_target;
+
+    #[test]
+    fn window_stays_while_under_the_ceiling() {
+        assert_eq!(trim_target(0, 0), None);
+        assert_eq!(trim_target(999, 998), None);
+        assert_eq!(trim_target(1000, 999), None);
+    }
+
+    #[test]
+    fn window_trims_only_when_the_reader_is_clear_of_the_line() {
+        // At the top (or anywhere below row 720): 1200 - 400 = 800.
+        assert_eq!(trim_target(1200, 0), Some(800));
+        // Exactly at the margin's edge (720 + 80 = 800): still clear.
+        assert_eq!(trim_target(1200, 720), Some(800));
+        // Deep reader — no trim, or the anchor would cross the range.
+        assert_eq!(trim_target(1200, 721), None);
+        assert_eq!(trim_target(1200, 1199), None);
+    }
 }
