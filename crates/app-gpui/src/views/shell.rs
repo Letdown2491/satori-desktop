@@ -830,7 +830,7 @@ impl Render for Shell {
         div()
             .relative()
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|shell, ev: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|shell, ev: &KeyDownEvent, window, cx| {
                 // The lightbox owns the keyboard while it's up: Esc closes it
                 // instead of popping the pane; arrows page through.
                 if shell.lightbox.is_some() {
@@ -848,20 +848,19 @@ impl Render for Shell {
                     shell.back(cx);
                     return;
                 }
-                // TODO(port): crates/app/src/main.rs — "N composes" (app.compose
-                // accel). GTK's TextViews consume plain keys, so the accel only
-                // fires outside text; here the guard is "a text surface is
-                // open". The Input handles characters via the IME path and
-                // lets the key events bubble, so anything typed into the
-                // search field would also fire these bindings (an "n" in
-                // "nostr" opened the composer) — the composer guard is its
-                // own pane, the search field needs the same.
-                let composing = matches!(
-                    shell.stack.last(),
-                    Some(Pane::Composer(_)) | Some(Pane::Search(_)) | Some(Pane::Settings(_))
-                    | Some(Pane::Article(_))
-                );
-                if !ev.keystroke.modifiers.modified() && !composing {
+                // The single-letter shortcuts are for the SHELL: while any
+                // text surface holds focus, typed letters are content, not
+                // commands. (The pane-type guard this replaces was whack-
+                // a-mole — "an 'n' in 'nostr' opened the composer" via the
+                // search field, and D20's wallet URI field relit it. The
+                // Input lets plain keys bubble, but it DOES take focus, and
+                // that's the honest signal: shortcuts fire only when the
+                // shell root itself holds focus — startup, after a pop's
+                // refocus, after clicking dead space.)
+                if !shell.focus.is_focused(window) {
+                    return;
+                }
+                if !ev.keystroke.modifiers.modified() {
                     if ev.keystroke.key == "n" {
                         shell.open_composer(None, None, cx);
                     }

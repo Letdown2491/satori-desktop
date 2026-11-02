@@ -232,15 +232,21 @@ impl Render for ZapSheet {
                     .items_center()
                     .gap_2()
                     .child(
+                        // Definite height — the Input fills its parent
+                        // (relative 1.0); a content-sized chain collapses
+                        // it (login.rs field()).
                         div()
                             .id("zap-custom-field")
                             .flex_1()
                             .min_w_0()
+                            .overflow_hidden()
+                            .h(px(34.))
+                            .px_2()
+                            .pt_1()
+                            .rounded(px(3.0))
+                            .bg(rgb(theme::panel()))
                             .border_1()
                             .border_color(rgb(theme::hairline()))
-                            .rounded(px(3.0))
-                            .px_2()
-                            .py_1()
                             .cursor(gpui::CursorStyle::IBeam)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let focus = this.custom.read(cx).focus_handle(cx);

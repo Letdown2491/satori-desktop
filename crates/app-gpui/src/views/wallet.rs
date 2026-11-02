@@ -155,15 +155,21 @@ impl Render for WalletView {
             .when(!ready && !connecting, |d| {
                 d.child(
                     div().flex().items_center().gap_2().child(
+                        // The height is definite — the Input fills its
+                        // parent (relative 1.0), which collapses in a
+                        // content-sized chain (login.rs field()).
                         div()
                             .id("wallet-uri")
                             .flex_1()
                             .min_w_0()
+                            .overflow_hidden()
+                            .h(px(34.))
+                            .px_2()
+                            .pt_1()
+                            .rounded(px(3.0))
+                            .bg(rgb(theme::panel()))
                             .border_1()
                             .border_color(rgb(theme::hairline()))
-                            .rounded(px(3.0))
-                            .px_2()
-                            .py_1()
                             .cursor(gpui::CursorStyle::IBeam)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let focus = this.uri.read(cx).focus_handle(cx);
