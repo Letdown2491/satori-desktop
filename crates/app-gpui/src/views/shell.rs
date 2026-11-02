@@ -581,7 +581,7 @@ impl Render for Tip {
     }
 }
 /// The `.tooltip(...)` builder for a static label.
-fn tip(label: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+pub(crate) fn tip(label: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     move |_, cx| cx.new(|_| Tip { label }).into()
 }
 

@@ -832,6 +832,18 @@ impl Feed {
 /// How long a bolt press reads as "deliberate" (the sheet, not the tap).
 const ZAP_HOLD: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// The pill's label, count capped at 99+ (a four-digit count would set
+/// the chip's width — and nobody reads the tail of a stampede).
+fn new_notes_label(n: usize) -> String {
+    if n == 1 {
+        "1 new note — load it".to_string()
+    } else if n > 99 {
+        "99+ new notes — load them".to_string()
+    } else {
+        format!("{n} new notes — load them")
+    }
+}
+
 // The card takes the full render-time snapshot — one struct would hide the
 // shape, and GPUI's no-entity-reads-during-render rule makes them explicit.
 #[allow(clippy::too_many_arguments)]
@@ -1185,37 +1197,43 @@ impl Render for Feed {
                 )
             })
             // The new-notes pill (the live subscription's push signal):
-            // quiet, centered, only when there's news. Nothing else moves —
-            // the reader decides when the list turns over.
+            // a small centered chip on the washi — content-sized, not a
+            // pane-wide bar. Nothing else moves; the reader decides when
+            // the list turns over.
             .when(self.live_new > 0 && !empty, |d| {
                 let n = self.live_new;
                 let handle = handle.clone();
                 d.child(
                     div()
-                        .id("new-posts-pill")
-                        .cursor_pointer()
-                        .mb_1()
-                        .px_4()
-                        .py_1p5()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(rgb(theme::hairline()))
-                        .text_size(px(12.0))
-                        .text_color(rgb(theme::muted()))
-                        .on_click(move |_, _, cx| {
-                            handle.update(cx, |feed, cx| {
-                                feed.live_new = 0;
-                                feed.scroll_top();
-                                let rx = feed.core.refresh(feed.mode.kinds());
-                                feed.pump(rx, cx);
-                                cx.notify();
-                            });
-                        })
-                        .child(if n == 1 {
-                            "1 new note — load it".to_string()
-                        } else {
-                            format!("{n} new notes — load them")
-                        }),
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .id("new-posts-pill")
+                                .cursor_pointer()
+                                .flex_none()
+                                .mb_1()
+                                .px_4()
+                                .py_1p5()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(rgb(theme::vermilion()))
+                                .text_size(px(12.0))
+                                .text_color(rgb(theme::muted()))
+                                .hover(|s| s.text_color(rgb(theme::vermilion())))
+                                .tooltip(super::shell::tip("Load new notes"))
+                                .on_click(move |_, _, cx| {
+                                    handle.update(cx, |feed, cx| {
+                                        feed.live_new = 0;
+                                        feed.scroll_top();
+                                        let rx = feed.core.refresh(feed.mode.kinds());
+                                        feed.pump(rx, cx);
+                                        cx.notify();
+                                    });
+                                })
+                                .child(new_notes_label(n)),
+                        ),
                 )
             })
             .child(
