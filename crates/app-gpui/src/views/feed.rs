@@ -761,16 +761,17 @@ impl Feed {
 
     /// Optimistic like, per §1.2: mutate state first (glyph flips vermilion
     /// now), reconcile against core's publish events later.
-    fn toggle_like(&mut self, ev: &Event) {
+    fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>) {
         let id = ev.id.to_string();
         if !self.liked.insert(id) {
             return;
         }
         self.touch();
         let mut rx = self.core.react(ev);
-        std::thread::spawn(move || {
-            while rx.blocking_recv().is_some() {}
-        });
+        cx.spawn(async move |_, _| {
+            while rx.recv().await.is_some() {}
+        })
+        .detach();
     }
 
     /// Optimistic repost (NIP-18 kind 6): the glyph flips vermilion now, the
@@ -1009,7 +1010,7 @@ fn note_card(
                         .cursor_pointer()
                         .on_click(move |_, _, cx| {
                             let ev = ev_for_like.clone();
-                            handle_like.update(cx, |feed, _| feed.toggle_like(&ev));
+                            handle_like.update(cx, |feed, cx| feed.toggle_like(&ev, cx));
                         })
                         .hover(|s| s.opacity(0.72))
                         .child(icons::heart_icon(if engaged {

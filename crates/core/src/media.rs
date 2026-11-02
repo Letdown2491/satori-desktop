@@ -224,12 +224,22 @@ async fn json_get(url: &str) -> Result<reqwest::Response, String> {
 /// path. Cache read-through keeps repeat previews instant; the parse is
 /// validated BEFORE the disk write (a cached non-JSON body would poison the
 /// preview permanently — same discipline as fetch_image's decode).
+/// Cache IO off the relay runtime, same reasoning as decode_async: the
+/// 2-worker rt serves relays, zaps, and the wallet, and a disk read must
+/// not pin a worker while it waits on the page cache. Read Err = cache
+/// miss, exactly as the inline `std::fs::read` it replaced.
+async fn read_cache_off_rt(path: PathBuf) -> std::io::Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || std::fs::read(path))
+        .await
+        .unwrap_or_else(|_| Err(std::io::Error::other("cache read task lost")))
+}
+
 pub async fn fetch_json(url: &str) -> Result<serde_json::Value, String> {
     if !is_safe_media_url(url) {
         return Err("unsafe URL".into());
     }
     let path = cache_path(&cache_key(url));
-    if let Ok(cached) = std::fs::read(&path) {
+    if let Ok(cached) = read_cache_off_rt(path.clone()).await {
         return serde_json::from_slice(&cached).map_err(|e| e.to_string());
     }
     let res = json_get(url).await?;
@@ -237,7 +247,9 @@ pub async fn fetch_json(url: &str) -> Result<serde_json::Value, String> {
         .await
         .map_err(|e| e.to_string())?;
     let value: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
-    write_cache(&path, &body);
+    tokio::task::spawn_blocking(move || write_cache(&path, &body))
+        .await
+        .ok();
     Ok(value)
 }
 
@@ -265,7 +277,7 @@ pub async fn fetch_image(url: &str) -> Result<DecodedImage, MediaError> {
     // ever on disk (below), so a cache hit cannot poison the decode.
     let key = cache_key(url);
     let path = cache_path(&key);
-    match std::fs::read(&path) {
+    match read_cache_off_rt(path.clone()).await {
         Ok(cached) => decode_async(cached).await,
         Err(_) => {
             let body = fetch_capped(url, MAX_IMAGE_BYTES).await?;
@@ -273,9 +285,13 @@ pub async fn fetch_image(url: &str) -> Result<DecodedImage, MediaError> {
             // decode, so an HTML error page or truncated body keyed as an
             // image stayed there forever — a broken avatar that survived
             // restarts. (The decode result doubles as the return value:
-            // fresh bytes decode exactly once.)
+            // fresh bytes decode exactly once.) The write runs off the
+            // runtime too: every 10th write triggers the trim, a stat pass
+            // over a few hundred cache files plus removals.
             let decoded = decode_async(body.clone()).await?;
-            write_cache(&path, &body);
+            tokio::task::spawn_blocking(move || write_cache(&path, &body))
+                .await
+                .ok();
             Ok(decoded)
         }
     }

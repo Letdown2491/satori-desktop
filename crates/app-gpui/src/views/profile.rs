@@ -623,9 +623,10 @@ impl Render for ProfileView {
                                                     let mut rx = view
                                                         .core
                                                         .set_following(view.who, view.following);
-                                                    std::thread::spawn(move || {
-                                                        while rx.blocking_recv().is_some() {}
-                                                    });
+                                                    cx.spawn(async move |_, _| {
+                                                        while rx.recv().await.is_some() {}
+                                                    })
+                                                    .detach();
                                                     cx.notify();
                                                 });
                                             })

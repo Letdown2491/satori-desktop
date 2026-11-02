@@ -136,12 +136,16 @@ struct Active {
     /// Own NIP-65 read relays (indexers are always on).
     read_relays: Vec<String>,
     follows: Vec<PublicKey>,
+    /// Own pubkey, parsed once at session build. me() hands it out; it
+    /// used to re-parse the session hex per call (26 call sites, some on
+    /// hot paths) and expect-panicked if session.json held a corrupt
+    /// pubkey — build_active now refuses the session instead.
+    me: PublicKey,
 }
 
 impl Active {
     fn me(&self) -> PublicKey {
-        // Sessions always persist a valid hex pubkey.
-        PublicKey::from_str(&self.session.pubkey).expect("session pubkey")
+        self.me
     }
 }
 
@@ -1363,6 +1367,11 @@ impl Core {
     }
 
     async fn build_active(&self, session: &Session) -> Result<Active> {
+        // The session pubkey, parsed once. A corrupt session.json fails
+        // the login here, with a message on the login pane, instead of
+        // panicking at the first me() call somewhere deep in a feed task.
+        let me = PublicKey::from_str(&session.pubkey)
+            .map_err(|e| LoginError::Resume(format!("session pubkey: {e}")))?;
         let signer = self.build_signer(session).await?;
         let pool = self.pool().await?;
         let profiles = crate::profiles::ProfileService::new(Arc::clone(&pool));
@@ -1384,7 +1393,7 @@ impl Core {
         // prefs.json. Remote wins at login (Feather's semantics): every
         // local change publishes forward, so only offline edits lose.
         // PrefsSynced wakes the shell to re-read what it renders live.
-        if let Ok(me) = PublicKey::from_str(&session.pubkey) {
+        {
             let pool = Arc::clone(&pool);
             let signer = signer.clone();
             let live = self.live.clone();
@@ -1401,6 +1410,7 @@ impl Core {
             write_relays: Vec::new(),
             read_relays: Vec::new(),
             follows: Vec::new(),
+            me,
         })
     }
 
