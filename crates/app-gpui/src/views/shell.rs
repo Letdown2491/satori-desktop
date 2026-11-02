@@ -231,14 +231,16 @@ impl Shell {
         }
     }
 
-    fn open_thread(&mut self, id: EventId, cx: &mut Context<Self>) {
+    /// pub(crate): the NIP-21 seam (main.rs) routes incoming `nostr:` URIs
+    /// through the same navigation the in-app taps use.
+    pub(crate) fn open_thread(&mut self, id: EventId, cx: &mut Context<Self>) {
         let view = cx.new(|cx| ThreadView::new(self.core.clone(), id, cx));
         self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Thread(view));
         cx.notify();
     }
 
-    fn open_profile(&mut self, who: PublicKey, cx: &mut Context<Self>) {
+    pub(crate) fn open_profile(&mut self, who: PublicKey, cx: &mut Context<Self>) {
         let view = cx.new(|cx| ProfileView::new(self.core.clone(), who, cx));
         self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Profile(view));
@@ -275,7 +277,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn open_article(&mut self, ev: Event, cx: &mut Context<Self>) {
+    pub(crate) fn open_article(&mut self, ev: Event, cx: &mut Context<Self>) {
         let view = cx.new(|cx| ArticleView::new(self.core.clone(), ev, cx));
         self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Article(view));
