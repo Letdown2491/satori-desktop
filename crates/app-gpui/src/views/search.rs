@@ -36,6 +36,7 @@ impl SearchView {
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
+        crate::video::watch(cx); // repaint on player open/toggle/close
         let input = cx.new(|cx| {
             let mut i = Input::new(cx);
             i.multiline = false; // Enter runs the question, no newline

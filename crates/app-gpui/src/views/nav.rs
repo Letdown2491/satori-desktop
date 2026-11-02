@@ -24,6 +24,10 @@ pub enum Nav {
     /// The lightbox overlay: full-screen image viewer (lightbox.rs), the
     /// URL list plus the starting index.
     OpenLightbox(Vec<String>, usize),
+    /// The video overlay (Phase 3): full-screen player for a video URL —
+    /// inline when video.rs allows (strict Tor/YouTube degrade to the
+    /// browser); the mime gates extension-less blossom URLs.
+    OpenVideo(String, Option<String>),
     /// The zap amount sheet for a note (bolt long-press / right-click).
     OpenZapSheet(Event),
     /// The NWC wallet connect pane (D20).

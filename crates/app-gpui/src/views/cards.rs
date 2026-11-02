@@ -2,9 +2,11 @@
 //! (`card_for` dispatch). The row shell (header, actions) stays in feed.rs;
 //! this module renders the kind-specific body between them.
 //!
-//! Honesty posture carried over: GPUI has no video/audio pipelines, so video
-//! (21/22) renders through the body's play-cards and podcasts (54) wear a
-//! "Listen" link — nothing is fetched until the user asks (media.ts facade).
+//! Honesty posture carried over: video (21/22) renders through the body's
+//! media section — a poster until tapped, then the Phase 3 inline player
+//! (video.rs; strict Tor and YouTube degrade to browser links) — and
+//! podcasts (54) wear a "Listen" link — nothing is fetched until the user
+//! asks (media.ts facade).
 //! TODO(port): the article reader page (markdown, crates/app/src/article.rs);
 //! wiki body inline.
 
@@ -128,8 +130,9 @@ fn fallback(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
 // --- video (NIP-71 kinds 21/22) ------------------------------------------
 
 fn video_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
-    // The body already carries the pipeline for video URLs (play-card +
-    // poster fetch); the card adds the kicker and the serif title.
+    // The body already carries the media section for video URLs (poster →
+    // the Phase 3 inline player on tap); the card adds the kicker and the
+    // serif title.
     let title = ev
         .content
         .lines()

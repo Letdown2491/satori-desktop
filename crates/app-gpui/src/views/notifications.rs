@@ -88,6 +88,7 @@ impl NotificationsView {
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
+        crate::video::watch(cx); // repaint on player open/toggle/close
         let prev = satori_core::read_state::load().notif;
         core.mark_notifications_seen();
         let view = Self {

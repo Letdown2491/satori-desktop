@@ -103,19 +103,19 @@ fn is_image_url(url: &str) -> bool {
     matches!(path_ext(url).as_deref(), Some("png" | "jpg" | "jpeg" | "webp" | "gif"))
 }
 
-/// Video by extension — never fetched; rendered as a play-card link (GPUI
-/// has no video pipeline; the GTK app shows these as plain links too).
-fn is_video_url(url: &str) -> bool {
+/// Video by extension — never fetched until asked; rendered as a play-card
+/// (inline player since Phase 3 — video.rs).
+pub(crate) fn is_video_url(url: &str) -> bool {
     matches!(path_ext(url).as_deref(), Some("mp4" | "webm" | "mov" | "mkv" | "m4v"))
 }
 
 /// One entry of the media section, in reading order: a picture (lightbox
-/// tile) or a video (poster tile that opens the browser — GPUI has no video
-/// pipeline, so nothing is fetched but the poster).
+/// tile) or a video (poster tile; Phase 3 — inline click-to-play, the
+/// imeta mime tells an extension-less blossom URL from a picture).
 #[derive(Clone)]
 pub enum MediaAsset {
     Picture { url: String },
-    Video { url: String, poster: Option<String> },
+    Video { url: String, poster: Option<String>, mime: Option<String> },
 }
 impl MediaAsset {
     fn url(&self) -> &str {
@@ -165,7 +165,7 @@ pub fn media_assets(ev: &Event) -> Vec<MediaAsset> {
         let video = m.mime.as_deref().is_some_and(|m| m.starts_with("video/"))
             || is_video_url(&m.url);
         out.push(if video {
-            MediaAsset::Video { url: m.url, poster: m.poster }
+            MediaAsset::Video { url: m.url, poster: m.poster, mime: m.mime.clone() }
         } else {
             MediaAsset::Picture { url: m.url }
         });
@@ -173,9 +173,9 @@ pub fn media_assets(ev: &Event) -> Vec<MediaAsset> {
     for para in ev.content.split('\n') {
         if let Some(Seg::Link(url)) = standalone(para) {
             let asset = if let Some(thumb) = youtube_thumb(&url) {
-                MediaAsset::Video { url: url.clone(), poster: Some(thumb) }
+                MediaAsset::Video { url: url.clone(), poster: Some(thumb), mime: None }
             } else if is_video_url(&url) {
-                MediaAsset::Video { url: url.clone(), poster: None }
+                MediaAsset::Video { url: url.clone(), poster: None, mime: None }
             } else if is_image_url(&url) || path_ext(&url).is_none() {
                 MediaAsset::Picture { url: url.clone() }
             } else {
@@ -203,8 +203,10 @@ pub fn media_urls(ev: &Event) -> Vec<String> {
 }
 
 /// The thumbnail for a YouTube link (watch?v=, youtu.be/, shorts/) —
+/// video.rs reuses the shape as the "is a YouTube page" test: GStreamer
+/// can't stream watch pages, so they stay browser links.
 /// mqdefault: always present, 16:9, no letterbox bars.
-fn youtube_thumb(url: &str) -> Option<String> {
+pub(crate) fn youtube_thumb(url: &str) -> Option<String> {
     let id = if let Some(rest) = url
         .strip_prefix("https://youtu.be/")
         .or_else(|| url.strip_prefix("http://youtu.be/"))
@@ -583,12 +585,103 @@ pub(crate) fn link_row(url: &str) -> AnyElement {
         .into_any_element()
 }
 
-/// Video tile: the poster frame wearing a play mark when the cache has one
+/// Video tile: a poster frame wearing a play mark when the cache has one
 /// (NIP-92 `image`, YouTube thumbnail), a quiet play-row while it loads or
-/// when there's nothing to show. Click opens the video in the browser —
-/// GPUI has no video pipeline, so nothing auto-plays.
-fn video_tile(url: &str, poster: Option<&str>, w: Option<f32>, h: f32, ctx: &Body) -> AnyElement {
-    let target = url.to_string();
+/// when there's nothing to show. Phase 3: when the inline player is live
+/// for this URL the tile renders the player element and its control row
+/// (⏸/▶, ✕, ↗ browser) instead; the tap opens the player when the URL is
+/// inline-able (video.rs gates — strict Tor and YouTube stay browser
+/// links), else the browser.
+fn video_tile(
+    url: &str,
+    poster: Option<&str>,
+    mime: Option<&str>,
+    w: Option<f32>,
+    h: f32,
+    ctx: &Body,
+) -> AnyElement {
+    let url_for_open = url.to_string();
+    let mime_for_open = mime.map(str::to_string);
+
+    // The inline player is live for this URL: the element paints the frame
+    // (the crate aspect-fits inside the box it's given), the row below is
+    // its controls — all sealed against the tile's own click.
+    if let Some(v) = crate::video::active(url) {
+        let max_w = w.unwrap_or(COL_W - 32.0);
+        let ar = v.aspect_ratio();
+        let box_h = if ar > 0.0 { (max_w / ar).clamp(80.0, 560.0) } else { h };
+        let paused_now = v.paused();
+        let browser_target = url.to_string();
+        return div()
+            .id(seg_id("video-player", url))
+            .flex_none()
+            .overflow_hidden()
+            .rounded(px(4.))
+            .border_1()
+            .border_color(rgb(theme::hairline()))
+            .bg(rgb(0x000000))
+            .map(|d| match w {
+                Some(w) => d.w(px(w)),
+                None => d.w_full(),
+            })
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(box_h))
+                    .child(crate::video::element(&v, max_w, box_h)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_2()
+                    .py_1()
+                    .bg(rgb(theme::panel()))
+                    .child(
+                        div()
+                            .id(seg_id("vp-toggle", url))
+                            .cursor_pointer()
+                            .text_size(px(13.0))
+                            .text_color(rgb(theme::ink()))
+                            .on_click(|_, _, cx| {
+                                cx.stop_propagation();
+                                crate::video::toggle(cx);
+                            })
+                            .child(if paused_now { "▶" } else { "⏸" }),
+                    )
+                    .child(
+                        div()
+                            .id(seg_id("vp-close", url))
+                            .cursor_pointer()
+                            .text_size(px(13.0))
+                            .text_color(rgb(theme::muted()))
+                            .on_click(|_, _, cx| {
+                                cx.stop_propagation();
+                                crate::video::close(cx);
+                            })
+                            .child("✕"),
+                    )
+                    .child(
+                        div()
+                            .id(seg_id("vp-browser", url))
+                            .cursor_pointer()
+                            .text_size(px(13.0))
+                            .text_color(rgb(theme::muted()))
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                cx.open_url(&browser_target);
+                            })
+                            .child("↗"),
+                    ),
+            )
+            .into_any_element();
+    }
+
     let frame = div()
         .id(seg_id("video-tile", url))
         .cursor_pointer()
@@ -605,7 +698,7 @@ fn video_tile(url: &str, poster: Option<&str>, w: Option<f32>, h: f32, ctx: &Bod
         .h(px(h))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
-            cx.open_url(&target);
+            crate::video::open(url_for_open.clone(), mime_for_open.clone(), cx);
         });
     match poster.and_then(|p| ctx.media.png(p)) {
         Some(png) => frame
@@ -714,9 +807,10 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
                 handle,
             )
             .into_any_element(),
-            MediaAsset::Video { url, poster } => video_tile(
+            MediaAsset::Video { url, poster, mime } => video_tile(
                 url,
                 poster.as_deref(),
+                mime.as_deref(),
                 None,
                 height(url, poster.as_deref(), 360.0),
                 ctx,
@@ -747,7 +841,7 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
                 ));
                 pic_idx += 1;
             }
-            MediaAsset::Video { url, poster } => {
+            MediaAsset::Video { url, poster, mime } => {
                 // The imeta dim describes the video itself; the poster (when
                 // there is one) shares its aspect.
                 let aspect = dims
@@ -763,7 +857,14 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
                         480.0
                     }
                 });
-                strip = strip.child(video_tile(&url, poster.as_deref(), Some(560.0), height, ctx));
+                strip = strip.child(video_tile(
+                    &url,
+                    poster.as_deref(),
+                    mime.as_deref(),
+                    Some(560.0),
+                    height,
+                    ctx,
+                ));
             }
         }
     }

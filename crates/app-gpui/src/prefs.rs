@@ -88,6 +88,16 @@ pub fn get_bool(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The Tor privacy mode (`privacy_mode` in prefs.json — privacy.ts). Only
+/// strict has a face in the UI today: the Phase 3 facade degrades video to
+/// links (nothing media-heavy may fetch direct). M5 wires the full toggle.
+pub fn privacy_mode() -> satori_core::privacy::PrivacyMode {
+    read_value(config::files::PREFS)
+        .get("privacy_mode")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
+}
+
 /// Set a top-level bool pref (settings.rs set_pref_bool).
 pub fn set_bool(key: &str, on: bool) {
     let mut value = read_value(config::files::PREFS);

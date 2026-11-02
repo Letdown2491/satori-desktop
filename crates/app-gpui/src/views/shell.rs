@@ -82,6 +82,9 @@ pub struct Shell {
     /// The lightbox overlay — full-screen image viewer over any pane
     /// (lightbox.rs: Esc/‹/› keys, click closes).
     lightbox: Option<(Vec<String>, usize)>,
+    /// The video overlay (Phase 3) — full-screen player over any pane:
+    /// the URL + its imeta mime (the inline gate rode the Nav).
+    video_overlay: Option<(String, Option<String>)>,
     /// The undo window's floating toast (compose.ts undo-toast): the
     /// composer pops on Held, so the countdown lives HERE, over any pane.
     /// Undone flashes briefly; a Failed error sticks until the next try.
@@ -106,6 +109,7 @@ pub struct Shell {
 impl Shell {
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
+        crate::video::watch(cx); // repaint on player open/toggle/close
         let feed = cx.new(|cx| Feed::new(core.clone(), cx));
         cx.subscribe(&feed, |this, _feed, ev: &Nav, cx| match ev {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
@@ -115,6 +119,7 @@ impl Shell {
             Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
+            Nav::OpenVideo(url, mime) => this.open_video(url.clone(), mime.clone(), cx),
             Nav::OpenZapSheet(ev) => this.open_zap_sheet(ev.clone(), cx),
             Nav::OpenWallet => this.open_wallet(cx),
             Nav::FeedDeep(deep) => {
@@ -132,6 +137,7 @@ impl Shell {
             focused_once: false,
             refocus: false,
             lightbox: None,
+            video_overlay: None,
             hold: None,
             notif_unread: false,
             feed_deep: false,
@@ -195,6 +201,7 @@ impl Shell {
             Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
+            Nav::OpenVideo(url, mime) => this.open_video(url.clone(), mime.clone(), cx),
             Nav::OpenZapSheet(ev) => this.open_zap_sheet(ev.clone(), cx),
             Nav::OpenWallet => this.open_wallet(cx),
             Nav::FeedDeep(deep) => {
@@ -502,6 +509,28 @@ impl Shell {
             && !urls.is_empty()
         {
             *idx = (*idx as isize + delta).rem_euclid(urls.len() as isize) as usize;
+            cx.notify();
+        }
+    }
+
+    /// The video overlay (Phase 3): full-screen player when the URL is
+    /// inline-able (video.rs gates strict Tor/YouTube), else the browser
+    /// link — the honest pre-Phase-3 behavior.
+    fn open_video(&mut self, url: String, mime: Option<String>, cx: &mut Context<Self>) {
+        if !crate::video::inline_able(&url, mime.as_deref()) {
+            cx.open_url(&url);
+            return;
+        }
+        self.video_overlay = Some((url.clone(), mime.clone()));
+        crate::video::open(url, mime, cx);
+        cx.notify();
+    }
+
+    /// The video overlay closes: the player's pipeline tears down with it
+    /// (video.rs close — deferred drop, off the UI thread).
+    fn close_video(&mut self, cx: &mut Context<Self>) {
+        if self.video_overlay.take().is_some() {
+            crate::video::close(cx);
             cx.notify();
         }
     }
@@ -862,6 +891,15 @@ impl Render for Shell {
             .relative()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|shell, ev: &KeyDownEvent, window, cx| {
+                // The video overlay owns Esc while it's up: Esc closes it
+                // (and tears the player down) instead of popping the pane.
+                if shell.video_overlay.is_some() {
+                    if ev.keystroke.key == "escape" {
+                        shell.close_video(cx);
+                    }
+                    cx.notify();
+                    return;
+                }
                 // The lightbox owns the keyboard while it's up: Esc closes it
                 // instead of popping the pane; arrows page through.
                 if shell.lightbox.is_some() {
@@ -967,6 +1005,9 @@ impl Render for Shell {
             .when(self.hold.is_some(), |d| d.child(self.hold_toast(cx)))
             .when_some(self.lightbox.clone(), |d, (urls, idx)| {
                 d.child(lightbox_overlay(&urls, idx, cx))
+            })
+            .when_some(self.video_overlay.clone(), |d, (url, _mime)| {
+                d.child(video_overlay(&url, cx))
             })
     }
 }
@@ -1148,5 +1189,116 @@ fn lightbox_overlay(urls: &[String], idx: usize, cx: &mut Context<Shell>) -> imp
                     shell.lightbox = None;
                     cx.notify();
                 })),
+        )
+}
+
+/// The video overlay (Phase 3): dark full-screen player mirroring the
+/// lightbox — the crate's element aspect-fit inside a centered box, the
+/// control row under it (⏸/▶, ↗ browser), ✕/Esc/backdrop close (the
+/// pipeline tears down via close_video).
+fn video_overlay(url: &str, cx: &mut Context<Shell>) -> impl IntoElement {
+    let video = crate::video::active(url);
+    let paused_now = video.as_ref().is_some_and(|v| v.paused());
+    let browser = url.to_string();
+
+    div()
+        .absolute()
+        .inset_0()
+        .bg(rgb(0x000000))
+        .opacity(0.94)
+        .flex()
+        .flex_col()
+        .font_family(theme::SANS)
+        // Top bar: the mark + close.
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .px_4()
+                .py_2()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(0xb8b2a6))
+                        .child("▶"),
+                )
+                .child(
+                    div()
+                        .id("vid-close")
+                        .cursor_pointer()
+                        .px_2()
+                        .text_size(px(13.0))
+                        .text_color(rgb(0xb8b2a6))
+                        .on_click(cx.listener(|shell, _, _, cx| shell.close_video(cx)))
+                        .child("✕"),
+                ),
+        )
+        // Middle: the player centered in the spare space, its control row
+        // directly beneath.
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p_2()
+                        .child(match video {
+                            Some(v) => crate::video::element(&v, content::COL_W - 64.0, 480.0)
+                                .into_any_element(),
+                            None => div()
+                                .text_size(px(12.0))
+                                .text_color(rgb(0xb8b2a6))
+                                .child("…")
+                                .into_any_element(),
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap_4()
+                        .py_2()
+                        .child(
+                            div()
+                                .id("vid-toggle")
+                                .cursor_pointer()
+                                .text_size(px(14.0))
+                                .text_color(rgb(0xb8b2a6))
+                                .on_click(|_, _, cx| {
+                                    cx.stop_propagation();
+                                    crate::video::toggle(cx);
+                                })
+                                .child(if paused_now { "▶" } else { "⏸" }),
+                        )
+                        .child(
+                            div()
+                                .id("vid-browser")
+                                .cursor_pointer()
+                                .text_size(px(14.0))
+                                .text_color(rgb(0xb8b2a6))
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.open_url(&browser);
+                                })
+                                .child("↗"),
+                        ),
+                ),
+        )
+        .child(
+            // Clicking the dark closes (lightbox.rs Esc), pipeline with it.
+            div()
+                .id("vid-backdrop")
+                .flex_1()
+                .cursor_pointer()
+                .on_click(cx.listener(|shell, _, _, cx| shell.close_video(cx))),
         )
 }

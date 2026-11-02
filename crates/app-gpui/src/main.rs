@@ -11,6 +11,7 @@ mod markdown;
 mod prefs;
 mod theme;
 mod timefmt;
+mod video;
 mod views;
 
 use std::sync::Arc;

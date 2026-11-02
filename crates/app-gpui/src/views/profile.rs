@@ -30,7 +30,8 @@ enum Row {
     Note(Event),
     /// Up to three thumbnails: (url, index into the tab's lightbox list).
     Pics(Vec<(String, usize)>),
-    Vid(String, Option<String>),
+    /// One video tile: url, poster, imeta mime (the overlay's inline gate).
+    Vid(String, Option<String>, Option<String>),
 }
 
 pub struct ProfileView {
@@ -54,6 +55,7 @@ impl ProfileView {
     pub fn new(core: Arc<Core>, who: PublicKey, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
+        crate::video::watch(cx); // repaint on player open/toggle/close
         let view = Self {
             following: core.is_following(&who),
             who,
@@ -136,15 +138,16 @@ impl ProfileView {
     }
 
     /// The Videos strip: one tile per video-bearing note (kind 21/22, plus
-    /// imeta/link videos on kind 1) — url + poster. Video files themselves
-    /// are never fetched (the tile opens the browser).
-    fn video_rows(&self) -> Vec<(String, Option<String>)> {
+    /// imeta/link videos on kind 1) — url + poster + imeta mime. Video
+    /// files themselves are never fetched (the tap opens the player or the
+    /// browser, video.rs decides).
+    fn video_rows(&self) -> Vec<(String, Option<String>, Option<String>)> {
         self.notes
             .iter()
             .filter(|n| matches!(u16::from(n.kind), 1 | 21 | 22))
             .filter_map(|n| {
                 content::media_assets(n).into_iter().find_map(|a| match a {
-                    content::MediaAsset::Video { url, poster } => Some((url, poster)),
+                    content::MediaAsset::Video { url, poster, mime } => Some((url, poster, mime)),
                     _ => None,
                 })
             })
@@ -269,7 +272,7 @@ impl Render for ProfileView {
             ProfileTab::Videos => self
                 .video_rows()
                 .into_iter()
-                .map(|(u, p)| Row::Vid(u, p))
+                .map(|(u, p, m)| Row::Vid(u, p, m))
                 .collect(),
         };
         // The Photos strip's lightbox list (tile taps index into it).
@@ -502,12 +505,13 @@ impl Render for ProfileView {
                                     url,
                                     Some((&pics_all, *gix)),
                                     None,
+                                    None,
                                     handle.clone(),
                                 ));
                             }
                             grid.into_any_element()
                         }
-                        Some(Row::Vid(url, poster)) => {
+                        Some(Row::Vid(url, poster, mime)) => {
                             let mut grid = div()
                                 .w_full()
                                 .flex()
@@ -523,7 +527,8 @@ impl Render for ProfileView {
                                 SharedString::from(format!("vid-{idx}")),
                                 poster.as_deref().unwrap_or(""),
                                 None,
-                                Some(url),
+                                Some(url.as_str()),
+                                mime.as_deref(),
                                 handle.clone(),
                             ));
                             grid.into_any_element()
@@ -542,19 +547,23 @@ impl Render for ProfileView {
 
 /// One 3-column strip thumbnail (Phase 2 §4.3): the cached bytes
 /// cover-cropped to a square, a quiet frame until they land. Photos tap
-/// into the lightbox at their strip index; videos open the browser (the
-/// play badge marks them, the poster is the thumb).
+/// into the lightbox at their strip index; videos ask for the shell's
+/// video overlay (Phase 3 — video.rs degrades strict-Tor/YouTube to the
+/// browser; the play badge marks them, the poster is the thumb).
+#[allow(clippy::too_many_arguments)]
 fn thumb_tile(
     snap: &media::Snapshot,
     key: SharedString,
     thumb: &str,
     lightbox: Option<(&[String], usize)>,
     video_url: Option<&str>,
+    video_mime: Option<&str>,
     handle: Entity<ProfileView>,
 ) -> AnyElement {
     let size = (content::COL_W - 32.0 - 8.0) / 3.0;
     let video = video_url.is_some();
     let target = video_url.unwrap_or_default().to_string();
+    let mime = video_mime.map(str::to_string);
     let urls: Vec<String> = lightbox.map(|(l, _)| l.to_vec()).unwrap_or_default();
     let idx = lightbox.map(|(_, i)| i).unwrap_or(0);
     let frame = div()
@@ -570,7 +579,11 @@ fn thumb_tile(
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             if video {
-                cx.open_url(&target);
+                // The shell's video overlay (Phase 3): the full-screen
+                // player when the URL is inline-able, else the browser.
+                handle.update(cx, |_, cx| {
+                    cx.emit(Nav::OpenVideo(target.clone(), mime.clone()))
+                });
             } else {
                 let urls = urls.clone();
                 handle.update(cx, |_, cx| cx.emit(Nav::OpenLightbox(urls, idx)));

@@ -22,6 +22,11 @@ RUN dnf -y install \
         libxcb-devel \
         clang \
         ydotool \
+        # Phase 3 inline video (gpui-video-player): gstreamer-sys links
+        # against the system GStreamer dev libs at build time; the plugins
+        # that actually decode live at RUNTIME (host/Flatpak, not here).
+        gstreamer1-devel \
+        gstreamer1-plugins-base-devel \
     && dnf -y clean all
 
 WORKDIR /srv
