@@ -627,6 +627,9 @@ impl Shell {
         match pane {
             Pane::Feed(view) | Pane::Articles(view) | Pane::Hashtag(view) => view.read(cx).deep,
             Pane::Notifications(view) => view.read(cx).deep,
+            // The profile pane's notes list is an embedded feed; the view
+            // mirrors the child's flag (PaneDeep forwarding).
+            Pane::Profile(view) => view.read(cx).deep,
             _ => false,
         }
     }
@@ -640,6 +643,9 @@ impl Shell {
             }
             Some(Pane::Notifications(view)) => {
                 view.update(cx, |n, _| n.scroll_top());
+            }
+            Some(Pane::Profile(view)) => {
+                view.update(cx, |p, cx| p.scroll_top(cx));
             }
             _ => {}
         }

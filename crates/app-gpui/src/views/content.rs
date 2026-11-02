@@ -442,7 +442,8 @@ fn with_punct(el: impl IntoElement, punct: &str) -> AnyElement {
 /// A whole paragraph as a wrapping flow of word elements — links, mentions
 /// and refs become clickable anywhere in the text, which the GTK markup
 /// pipeline got from rich runs and GPUI's div tree gets from flex-wrap.
-fn word_flow<V: EventEmitter<Nav> + 'static>(
+/// Also the profile page's about block (profile.rs `about_flow`).
+pub(crate) fn word_flow<V: EventEmitter<Nav> + 'static>(
     para: &str,
     ctx: &Body,
     handle: &Entity<V>,

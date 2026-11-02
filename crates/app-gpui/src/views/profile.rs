@@ -4,7 +4,7 @@
 //! and avatar images wait for the P2 image pipeline (core fetch → gpui `img`).
 //! Follow/mute management ports with the rest of the settings scope (P3).
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use gpui::{
     div, img, list, prelude::*, px, rgb, AnyElement, Context, Div, Entity, EventEmitter,
@@ -13,8 +13,8 @@ use gpui::{
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
 
-use crate::{media, theme};
-use super::{content, nav::Nav};
+use crate::{icons, media, theme};
+use super::{content, feed::Feed, nav::Nav};
 
 /// Which profile surface is up: the notes body or the media strips
 /// (Phase 2 §4.3 — Photos/Videos, three-column thumbnails).
@@ -27,7 +27,6 @@ enum ProfileTab {
 
 /// One list row of the active tab (render-time projection).
 enum Row {
-    Note(Event),
     /// Up to three thumbnails: (url, index into the tab's lightbox list).
     Pics(Vec<(String, usize)>),
     /// One video tile: url, poster, imeta mime (the overlay's inline gate).
@@ -44,8 +43,22 @@ pub struct ProfileView {
     following: bool,
     /// Known profiles — mention names in note bodies (word_flow).
     profiles: HashMap<String, Profile>,
-    quotes: content::Quotes,
+    /// The Notes tab: an embedded Feed (FeedMode::Profile) — the timeline's
+    /// exact rows (avatar, media, the reaction row) scoped to this author.
+    /// The profile owns the header + strips; the list itself is the child's.
+    notes_feed: Entity<Feed>,
+    /// Mirror of the child feed's deep-scroll state — the shell reads the
+    /// pane view's field for the back-to-top whisper (Nav::PaneDeep).
+    pub(crate) deep: bool,
     status: String,
+    /// NIP-05 verdict memo: (address, verdict — None while the check is in
+    /// flight). Keyed by the address so a changed one re-fires; unproven
+    /// and failed both stay visually quiet (the badge is an affordance,
+    /// never an accusation).
+    nip05_memo: Option<(String, Option<bool>)>,
+    /// Which copy seal is flashing "copied" ("link" | "lud"); a 2s timer
+    /// clears it (login.rs's copied pattern).
+    copied: Option<&'static str>,
     list: ListState,
 }
 
@@ -56,6 +69,16 @@ impl ProfileView {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
         crate::video::watch(cx); // repaint on player open/toggle/close
+        let notes_feed = cx.new(|cx| Feed::author(core.clone(), who, cx));
+        // The child feed owns the notes list; forward its navs upward (the
+        // shell only subscribes to the pane view) and mirror the deep flag.
+        cx.subscribe(&notes_feed, |this, feed, ev: &Nav, cx| {
+            if matches!(ev, Nav::PaneDeep) {
+                this.deep = feed.read(cx).deep;
+            }
+            cx.emit(ev.clone());
+        })
+        .detach();
         let view = Self {
             following: core.is_following(&who),
             who,
@@ -63,14 +86,24 @@ impl ProfileView {
             notes: vec![],
             tab: ProfileTab::Notes,
             profiles: HashMap::new(),
-            quotes: HashMap::new(),
+            notes_feed,
+            deep: false,
             status: "loading…".into(),
+            nip05_memo: None,
+            copied: None,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             core,
         };
         let rx = view.core.profile(view.who);
         view.pump(rx, cx);
         view
+    }
+
+    /// Back to the top (rail re-click, the floating whisper): the notes
+    /// list is the child feed's.
+    pub fn scroll_top(&mut self, cx: &mut Context<Self>) {
+        self.deep = false;
+        self.notes_feed.update(cx, |feed, _| feed.scroll_top());
     }
 
     fn pump(&self, mut rx: FeedRx, cx: &mut Context<Self>) {
@@ -95,13 +128,14 @@ impl ProfileView {
                     .cloned();
                 if let Some(p) = self.profile.clone() {
                     self.want_avatar(&p, cx);
+                    self.want_nip05(&p, cx);
                 }
                 // All visible kinds land; each tab filters (the strips read
-                // kind 20 + imeta-bearing kind 1 — Phase 2 §4.3).
+                // kind 20 + imeta-bearing kind 1 — Phase 2 §4.3). The notes
+                // LIST is the child feed's; this Vec feeds the strips.
                 self.notes = page.notes;
                 for note in self.notes.clone() {
                     self.want_media(&note, cx);
-                    self.want_quotes(&note, cx);
                 }
                 self.status.clear();
             }
@@ -113,15 +147,6 @@ impl ProfileView {
     }
 
     // --- the strips' projections (Phase 2 §4.3) -------------------------------
-
-    /// The Notes tab's rows: text + picture notes.
-    fn note_rows(&self) -> Vec<Event> {
-        self.notes
-            .iter()
-            .filter(|n| n.kind == Kind::TextNote || u16::from(n.kind) == 20)
-            .cloned()
-            .collect()
-    }
 
     /// The Photos strip: every picture URL in timeline order (kind 20 +
     /// imeta-bearing kind 1), flat — the grid chunks it into threes.
@@ -155,9 +180,10 @@ impl ProfileView {
     }
 
     /// The active tab's list-row count (list.reset wants it at event time).
+    /// The Notes tab keeps no rows here — the list is the child feed's.
     fn row_count(&self) -> usize {
         match self.tab {
-            ProfileTab::Notes => self.note_rows().len(),
+            ProfileTab::Notes => 0,
             ProfileTab::Photos => self.photo_urls().len().div_ceil(3),
             ProfileTab::Videos => self.video_rows().len(),
         }
@@ -172,46 +198,60 @@ impl ProfileView {
         media::fetch(&self.core, url, cx.entity_id(), cx);
     }
 
+    /// Fire the NIP-05 verification once per profile arrival: the domain's
+    /// nostr.json is asked (one guarded fetch, core-side) whether the name
+    /// maps to this pubkey. The memo skips refires across re-renders; a
+    /// changed address re-fires. The answer lands as the badge's state.
+    fn want_nip05(&mut self, p: &Profile, cx: &mut Context<Self>) {
+        if p.nip05.is_empty() {
+            self.nip05_memo = None;
+            return;
+        }
+        if self
+            .nip05_memo
+            .as_ref()
+            .is_some_and(|(addr, _)| addr == &p.nip05)
+        {
+            return; // in flight or answered for this address
+        }
+        self.nip05_memo = Some((p.nip05.clone(), None));
+        let rx = self.core.verify_nip05(p.nip05.clone(), self.who.to_string());
+        let h = cx.entity().downgrade();
+        cx.spawn(async move |_this, cx| {
+            let verdict = { let mut rx = rx; rx.recv().await }.flatten();
+            let _ = h.update(cx, |this, cx| {
+                if let Some(memo) = &mut this.nip05_memo {
+                    memo.1 = verdict;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Copy `payload` and flash the clicked seal's label to "copied" for
+    /// 2s (login.rs's copied pattern — acknowledgment, not chrome).
+    fn flash_copy(&mut self, which: &'static str, payload: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(payload));
+        self.copied = Some(which);
+        cx.notify();
+        let reset = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.copied == Some(which) {
+                    this.copied = None;
+                    cx.notify();
+                }
+            });
+        });
+        reset.detach();
+    }
+
     /// Queue core fetches for every media URL in a note (avatars share the
     /// same cache; URLs are unique so there's no clash).
     fn want_media(&mut self, note: &Event, cx: &mut Context<Self>) {
         for url in content::media_urls(note) {
             media::fetch(&self.core, url, cx.entity_id(), cx);
-        }
-    }
-
-    /// One quote-reference resolution, routed off `on_event` (its `Loaded`
-    /// arm is the profile page itself).
-    fn pump_quote(&self, bech: String, mut rx: FeedRx, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            while let Some(ev) = rx.recv().await {
-                if let FeedEvent::One(Some(target), prof) = ev {
-                    let _ = this.update(cx, |this, cx| {
-                        let key = target.pubkey.to_string();
-                        let name = prof
-                            .as_ref()
-                            .map(|p| p.display())
-                            .unwrap_or_else(|| format!("{}…", &key[..8]));
-                        this.quotes
-                            .insert(bech.clone(), Some(content::Embed { event: target, name }));
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// Queue event fetches for standalone note/nevent references (embeds).
-    fn want_quotes(&mut self, note: &Event, cx: &mut Context<Self>) {
-        for bech in content::note_refs(note) {
-            if self.quotes.contains_key(&bech) {
-                continue;
-            }
-            // Reserve the key so we don't re-request while loading.
-            self.quotes.insert(bech.clone(), None);
-            let rx = self.core.event_by_id_dech32(&bech);
-            self.pump_quote(bech, rx, cx);
         }
     }
 
@@ -252,9 +292,33 @@ impl Render for ProfileView {
             .unwrap_or_else(|| format!("{}…", &who_hex[..8]));
         let about = self.profile.as_ref().map(|p| p.about.clone()).unwrap_or_default();
         let picture = self.profile.as_ref().map(|p| p.picture.clone()).unwrap_or_default();
+        let banner = self.profile.as_ref().map(|p| p.banner.clone()).unwrap_or_default();
+        let nip05 = self.profile.as_ref().map(|p| p.nip05.clone()).unwrap_or_default();
+        let lud = self.profile.as_ref().map(|p| p.lud.clone()).unwrap_or_default();
+        // The share payload: the profile as a NIP-21 URI (npub form — D27's
+        // scheme; settings.rs uses the same bech32 encoding).
+        let npub_uri = format!(
+            "nostr:{}",
+            self.who
+                .to_bech32()
+                .unwrap_or_else(|_| who_hex.clone())
+        );
+        // Brief display form (login.rs's uri_brief shape): scheme stripped,
+        // leading chars + ellipsis. The full URI still rides the clipboard.
+        let npub_brief = format!(
+            "{}…",
+            npub_uri
+                .strip_prefix("nostr:")
+                .unwrap_or(&npub_uri)
+                .chars()
+                .take(16)
+                .collect::<String>()
+        );
         let tab = self.tab;
         let rows: Vec<Row> = match tab {
-            ProfileTab::Notes => self.note_rows().into_iter().map(Row::Note).collect(),
+            // The notes list is the child feed's — only the strips project
+            // rows here.
+            ProfileTab::Notes => vec![],
             ProfileTab::Photos => self
                 .photo_urls()
                 .chunks(3)
@@ -279,6 +343,14 @@ impl Render for ProfileView {
         let pics_all = self.photo_urls();
         let empty = rows.is_empty();
         let following = self.following;
+        // Copy-seal states: which seal (if any) is flashing "copied", and
+        // whether the domain's nostr.json vouched for the NIP-05 address.
+        let link_flash = self.copied == Some("link");
+        let lud_flash = self.copied == Some("lud");
+        let nip05_ok = self
+            .nip05_memo
+            .as_ref()
+            .is_some_and(|(addr, v)| addr == &nip05 && matches!(v, Some(true)));
         let media = media::Snapshot::new(cx);
         // Evicted media comes back on render — the profile header avatar,
         // known-author avatars, and the notes' pictures (fetch is a silent
@@ -286,6 +358,7 @@ impl Render for ProfileView {
         let viewer = cx.entity_id();
         if let Some(p) = self.profile.as_ref() {
             media::fetch(&self.core, p.picture.clone(), viewer, cx);
+            media::fetch(&self.core, p.banner.clone(), viewer, cx);
         }
         for p in self.profiles.values() {
             media::fetch(&self.core, p.picture.clone(), viewer, cx);
@@ -296,9 +369,16 @@ impl Render for ProfileView {
             }
         }
         let profiles = self.profiles.clone();
-        let quotes = self.quotes.clone();
+        // The about block's token context: about text never embeds quotes —
+        // an empty map satisfies Body.
+        let quotes = content::Quotes::default();
         let handle = cx.entity();
         let follow_handle = handle.clone();
+        let ctx = content::Body {
+            media: &media,
+            quotes: &quotes,
+            profiles: &profiles,
+        };
 
         div()
             .flex_1()
@@ -307,8 +387,9 @@ impl Render for ProfileView {
             .flex()
             .flex_col()
             .child(
-                // Header: name, about, follow seal — inner content rides the
-                // same centered column as the notes below.
+                // Header: banner strip, identity, lightning pointer, about —
+                // inner content rides the same centered column as the notes
+                // below.
                 div()
                     .w_full()
                     .flex()
@@ -317,6 +398,32 @@ impl Render for ProfileView {
                     .border_b_1()
                     .border_color(rgb(theme::hairline()))
                     .bg(rgb(theme::panel()))
+                    // The banner: a quiet strip under a hairline, cover-fit —
+                    // no gradient, no chrome. A profile without a banner
+                    // renders nothing here at all. The frame clips (flex_none
+                    // + overflow_hidden — content.rs's media-tile frame): an
+                    // unclipped img paints its texture over the siblings
+                    // below.
+                    .when(!banner.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .overflow_hidden()
+                                .w_full()
+                                .h(px(120.0))
+                                .border_b_1()
+                                .border_color(rgb(theme::hairline()))
+                                .bg(rgb(theme::panel()))
+                                .child(match media.png(&banner) {
+                                    Some(png) => img(png)
+                                        .w_full()
+                                        .h_full()
+                                        .object_fit(ObjectFit::Cover)
+                                        .into_any_element(),
+                                    None => div().into_any_element(), // bytes in flight
+                                }),
+                        )
+                    })
                     .child(
                         div()
                             .w(px(content::COL_W))
@@ -325,67 +432,158 @@ impl Render for ProfileView {
                             .gap_2()
                             .p_4()
                             .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
+                                // Identity row: avatar + (name, NIP-05 badge)
+                                // left; share + follow seals right.
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap_3()
-                                    .child(media::avatar(&media, &picture, &name, 48.0))
+                                    .justify_between()
+                                    .gap_4()
                                     .child(
                                         div()
-                                            .text_size(px(17.0))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(theme::ink()))
-                                            .child(name),
+                                            .flex()
+                                            .items_center()
+                                            .gap_4()
+                                            .child(media::avatar(&media, &picture, &name, 72.0))
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap_1()
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(20.0))
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .text_color(rgb(theme::ink()))
+                                                            .child(name.clone()),
+                                                    )
+                                                    .when(!nip05.is_empty(), |d| {
+                                                        // Verified (the domain's
+                                                        // nostr.json vouches) = check +
+                                                        // ink; in flight, unproven or
+                                                        // disproven stays a muted
+                                                        // address — never red (an
+                                                        // affordance, not an accusation).
+                                                        d.child(
+                                                            div()
+                                                                .flex()
+                                                                .items_center()
+                                                                .gap_1()
+                                                                .text_size(px(12.0))
+                                                                .text_color(rgb(if nip05_ok {
+                                                                    theme::ink()
+                                                                } else {
+                                                                    theme::muted()
+                                                                }))
+                                                                .when(nip05_ok, |d| d.child("✓"))
+                                                                .child(nip05.clone()),
+                                                        )
+                                                    })
+                                                    .child(
+                                                        // The npub as the share
+                                                        // affordance: the quiet
+                                                        // click-to-copy line (same
+                                                        // voice as the lud row); the
+                                                        // full nostr: URI rides the
+                                                        // clipboard, the brief form is
+                                                        // only ever shown.
+                                                        div()
+                                                            .id("npub-copy")
+                                                            .cursor_pointer()
+                                                            .text_size(px(12.0))
+                                                            .text_color(rgb(theme::muted()))
+                                                            .hover(|s| {
+                                                                s.text_color(rgb(
+                                                                    theme::vermilion(),
+                                                                ))
+                                                            })
+                                                            .on_click(cx.listener(
+                                                                move |this, _, _, cx| {
+                                                                    this.flash_copy(
+                                                                        "link",
+                                                                        npub_uri.clone(),
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            ))
+                                                            .child(if link_flash {
+                                                                format!("{npub_brief} · copied")
+                                                            } else {
+                                                                format!("{npub_brief} · click to copy")
+                                                            }),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("follow")
+                                            .cursor_pointer()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded(px(4.))
+                                            .border_1()
+                                            .border_color(rgb(theme::hairline()))
+                                            .hover(|s| s.border_color(rgb(theme::muted())))
+                                            .text_size(px(12.0))
+                                            .on_click(move |_, _, cx| {
+                                                let h = follow_handle.clone();
+                                                h.update(cx, |view, cx| {
+                                                    view.following = !view.following;
+                                                    // Optimistic flip; publish events are
+                                                    // drained and ignored (P1).
+                                                    let mut rx = view
+                                                        .core
+                                                        .set_following(view.who, view.following);
+                                                    std::thread::spawn(move || {
+                                                        while rx.blocking_recv().is_some() {}
+                                                    });
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .when(following, |d| {
+                                                d.text_color(rgb(theme::muted()))
+                                                    .child("Following")
+                                            })
+                                            .when(!following, |d| {
+                                                d.text_color(rgb(theme::vermilion()))
+                                                    .child("Follow")
+                                            }),
                                     ),
                             )
-                            .child(
-                                div()
-                                    .id("follow")
-                                    .cursor_pointer()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded(px(4.))
-                                    .text_size(px(12.0))
-                                    .on_click(move |_, _, cx| {
-                                        let h = follow_handle.clone();
-                                        h.update(cx, |view, cx| {
-                                            view.following = !view.following;
-                                            // Optimistic flip; publish events are
-                                            // drained and ignored (P1).
-                                            let mut rx = view
-                                                .core
-                                                .set_following(view.who, view.following);
-                                            std::thread::spawn(move || {
-                                                while rx.blocking_recv().is_some() {}
-                                            });
-                                            cx.notify();
-                                        });
-                                    })
-                                    .when(following, |d| {
-                                        d.text_color(rgb(theme::muted()))
-                                            .child("Following")
-                                    })
-                                    .when(!following, |d| {
-                                        d.text_color(rgb(theme::vermilion()))
-                                            .child("Follow")
-                                    }),
-                            ),
-                    )
-                    .when(!about.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .font_family(theme::SERIF)
-                                .text_size(px(14.0))
-                                .text_color(rgb(theme::muted()))
-                                .child(about),
-                        )
-                    }),
-                        ),
+                            .when(!lud.is_empty(), |d| {
+                                // The lightning pointer (lud16 as-is; a bech32
+                                // lud06 reads as just "Lightning"): click copies
+                                // the raw pointer for pasting into a zap sheet.
+                                let label = if lud.contains('@') {
+                                    lud.clone()
+                                } else {
+                                    "Lightning".to_string()
+                                };
+                                d.child(
+                                    div()
+                                        .id("lud-copy")
+                                        .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_size(px(12.0))
+                                        .text_color(rgb(theme::muted()))
+                                        .hover(|s| s.text_color(rgb(theme::vermilion())))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.flash_copy("lud", lud.clone(), cx);
+                                        }))
+                                        .child(icons::bolt_icon(theme::muted()))
+                                        .child(if lud_flash {
+                                            format!("{label} · copied")
+                                        } else {
+                                            format!("{label} · click to copy")
+                                        }),
+                                )
+                            })
+                            .when(!about.is_empty(), |d| {
+                                d.child(about_flow(&about, &ctx, &handle))
+                            }),
+                    ),
             )
             .child(
                 // The strips' tabs (Phase 2 §4.3): quiet labels, the active
@@ -409,8 +607,20 @@ impl Render for ProfileView {
                             .child(self.tab_btn(ProfileTab::Videos, "Videos", tab, cx)),
                     ),
             )
-            .child(
-                div()
+            .child(match tab {
+                // The Notes tab IS a feed (FeedMode::Profile): the timeline's
+                // exact rows — avatar, media, the reaction row — scoped to
+                // the author, endless scroll included; the profile keeps the
+                // column rhythm and the header above it.
+                ProfileTab::Notes => div()
+                    .w_full()
+                    .h_full()
+                    .max_w(px(content::COL_W))
+                    .flex()
+                    .flex_col()
+                    .child(self.notes_feed.clone())
+                    .into_any_element(),
+                ProfileTab::Photos | ProfileTab::Videos => div()
                     .flex_1()
                     .min_h_0()
                     .flex()
@@ -433,62 +643,8 @@ impl Render for ProfileView {
                             })
                             .into_any_element()
                     } else {
-                        list(self.list.clone(), move |idx, _w, cx| {
+                        list(self.list.clone(), move |idx, _w, _cx| {
                     match rows.get(idx) {
-                        Some(Row::Note(ev)) => {
-                            // The stamp reads the current mode + blocktime
-                            // cache per frame; ensure refines Block mode
-                            // from the bridge.
-                            let secs = ev.created_at.as_secs();
-                            let time = crate::timefmt::stamp(secs, cx);
-                            crate::timefmt::ensure(secs, cx);
-                            let ev_for_click = ev.clone();
-                            let body_handle = handle.clone();
-                            div()
-                                .id(SharedString::from(format!("note-{idx}")))
-                                .cursor_pointer()
-                                .w_full()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .px_4()
-                                .py_3()
-                                .border_b_1()
-                                .border_color(rgb(theme::hairline()))
-                                .child(
-                                    // The timestamp is the third mode
-                                    // toggle (timefmt.rs): tap cycles
-                                    // relative → date → block height.
-                                    div()
-                                        .id(SharedString::from(format!("pnote-time-{idx}")))
-                                        .cursor_pointer()
-                                        .text_size(px(11.5))
-                                        .text_color(rgb(theme::muted()))
-                                        .on_click(|_, _, cx| crate::timefmt::cycle(cx))
-                                        .child(time),
-                                )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("note-open-{idx}")))
-                                        .cursor_pointer()
-                                        .on_click(move |_, _, cx| {
-                                            let ev = ev_for_click.clone();
-                                            body_handle.update(cx, |_, cx| {
-                                                cx.emit(Nav::OpenThread(ev.id))
-                                            });
-                                        })
-                                        .child(content::body(
-                                            ev,
-                                            &content::Body {
-                                                media: &media,
-                                                quotes: &quotes,
-                                                profiles: &profiles,
-                                            },
-                                            handle.clone(),
-                                        )),
-                                )
-                                .into_any_element()
-                        }
                         Some(Row::Pics(tiles)) => {
                             let mut grid = div()
                                 .w_full()
@@ -540,8 +696,9 @@ impl Render for ProfileView {
                 .max_w(px(content::COL_W))
                 .h_full()
                 .into_any_element()
-                    }),
-            )
+                    })
+                    .into_any_element(),
+            })
     }
 }
 
@@ -633,4 +790,15 @@ fn thumb_tile(
             )
             .into_any_element(),
     }
+}
+
+/// The about block as live paragraphs: one `word_flow` per non-empty line
+/// (newlines in the raw about split paragraphs), so links, mentions and
+/// hashtags click through exactly as they do in note bodies.
+fn about_flow(text: &str, ctx: &content::Body, handle: &Entity<ProfileView>) -> Div {
+    let mut flow = div().w_full().flex().flex_col().gap_1();
+    for para in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        flow = flow.child(content::word_flow(para, ctx, handle));
+    }
+    flow
 }

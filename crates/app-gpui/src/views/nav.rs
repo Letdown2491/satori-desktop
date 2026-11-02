@@ -6,6 +6,9 @@
 
 use nostr::prelude::*;
 
+/// Clone by design: views that host another view (the profile's embedded
+/// notes feed) forward child navs upward with `cx.emit(ev.clone())`.
+#[derive(Clone)]
 pub enum Nav {
     /// Settings asked for a sign-out; the shell clears the session and
     /// hands the window back to the login doors.

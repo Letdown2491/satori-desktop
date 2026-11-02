@@ -66,6 +66,12 @@ impl ProfileService {
             picture: String,
             about: String,
             banner: String,
+            // Added with the profile-page rework; old cache files lack them
+            // (serde defaults keep the round-trip tolerant).
+            #[serde(default)]
+            nip05: String,
+            #[serde(default)]
+            lud: String,
             at: u64,
         }
         std::fs::read_to_string(path)
@@ -83,6 +89,8 @@ impl ProfileService {
                                     picture: r.picture,
                                     about: r.about,
                                     banner: r.banner,
+                                    nip05: r.nip05,
+                                    lud: r.lud,
                                 },
                                 at: r.at,
                             },
@@ -101,6 +109,8 @@ impl ProfileService {
             picture: String,
             about: String,
             banner: String,
+            nip05: String,
+            lud: String,
             at: u64,
         }
         // LRU-ish: newest entries win the cap.
@@ -115,6 +125,8 @@ impl ProfileService {
                 picture: e.profile.picture.clone(),
                 about: e.profile.about.clone(),
                 banner: e.profile.banner.clone(),
+                nip05: e.profile.nip05.clone(),
+                lud: e.profile.lud.clone(),
                 at: e.at,
             })
             .collect();

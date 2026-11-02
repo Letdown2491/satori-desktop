@@ -200,6 +200,12 @@ pub struct Profile {
     pub picture: String,
     pub about: String,
     pub banner: String,
+    /// NIP-05 address as self-asserted ("name@domain") — the profile page
+    /// shows it, then verifies it out-of-band (verify_nip05).
+    pub nip05: String,
+    /// The lightning pointer, lud16 before lud06 (NIP-57's order) — the
+    /// profile page's zap row (same field the zap request reads).
+    pub lud: String,
 }
 
 impl Profile {
@@ -211,6 +217,9 @@ impl Profile {
             picture: Option<String>,
             about: Option<String>,
             banner: Option<String>,
+            nip05: Option<String>,
+            lud16: Option<String>,
+            lud06: Option<String>,
         }
         let raw: RawMeta = serde_json::from_str(&ev.content).ok()?;
         Some(Self {
@@ -219,6 +228,8 @@ impl Profile {
             picture: raw.picture.unwrap_or_default(),
             about: raw.about.unwrap_or_default(),
             banner: raw.banner.unwrap_or_default(),
+            nip05: raw.nip05.unwrap_or_default(),
+            lud: raw.lud16.or(raw.lud06).unwrap_or_default(),
         })
     }
 
@@ -452,6 +463,25 @@ impl Core {
         self.rt.spawn(async move {
             let res = crate::media::fetch_json(&url).await.ok();
             let _ = tx.send(res);
+        });
+        rx
+    }
+
+    /// NIP-05 verification: does `domain`'s /.well-known/nostr.json vouch
+    /// that `name` maps to this pubkey? One SSRF-guarded JSON fetch (the
+    /// same path the zap invoice rides). `None` = unproven (fetch failed,
+    /// malformed answer, mismatch beyond doubt is `Some(false)`); the UI
+    /// treats None as "stay quiet", never red — verification is an
+    /// affordance, not an accusation.
+    pub fn verify_nip05(
+        self: &Arc<Self>,
+        nip05: String,
+        pubkey: String,
+    ) -> mpsc::UnboundedReceiver<Option<bool>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.rt.spawn(async move {
+            let verdict = verify_nip05_inner(&nip05, &pubkey).await;
+            let _ = tx.send(verdict);
         });
         rx
     }
@@ -2681,6 +2711,64 @@ impl Core {
         rx
     }
 
+    /// The profile's next older page (endless scroll): author-scoped mirror
+    /// of `older` — the store page behind the anchor, then a relay top-up
+    /// for the author only (deletions ride along), then re-project.
+    pub fn profile_older(self: &Arc<Self>, who: PublicKey, until: u64) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<FeedEvent> = async {
+                let active = this.active().await?;
+                let mut notes = active
+                    .pool
+                    .store
+                    .feed_page(&[who], Some(until), PAGE)
+                    .await
+                    .unwrap_or_default();
+                if notes.len() <= PAGE {
+                    let filter = Filter::new()
+                        .kinds(crate::store::visible_kinds())
+                        .author(who)
+                        .until(Timestamp::from(until))
+                        .limit(TOPUP_DEPTH);
+                    let fetched = active.pool.get(filter).await.unwrap_or_default();
+                    for ev in fetched {
+                        let _ = active.pool.store.save(&ev).await;
+                    }
+                    let del_filter = Filter::new()
+                        .kind(Kind::EventDeletion)
+                        .author(who)
+                        .until(Timestamp::from(until))
+                        .limit(500);
+                    for ev in active.pool.get(del_filter).await.unwrap_or_default() {
+                        let _ = active.pool.store.save(&ev).await;
+                    }
+                    notes = active
+                        .pool
+                        .store
+                        .feed_page(&[who], Some(until), PAGE)
+                        .await
+                        .unwrap_or_default();
+                }
+                let has_more = notes.len() > PAGE;
+                notes.truncate(PAGE);
+                let profiles = Self::profiles_for(&active, &notes).await;
+                Ok(FeedEvent::Older(FeedPage { notes, profiles }, has_more))
+            }
+            .await;
+            match res {
+                Ok(ev) => {
+                    let _ = tx.send(ev);
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
     // --- threads ----------------------------------------------------------------
 
     /// Replies to a note (store first, relay top-up).
@@ -3586,6 +3674,22 @@ fn lightning_field(content: &str) -> Option<String> {
             .map(String::from)
     };
     field("lud16").or_else(|| field("lud06"))
+}
+
+/// NIP-05's wire check: `https://<domain>/.well-known/nostr.json?name=<name>`
+/// maps `"names": { "<name>": "<hex pubkey>" }`. The local part is
+/// spec-lowercased alphanumerics/`-`/`_` (`_` = the domain root), so it is
+/// URL-safe as-is. Hostile/malformed answers read as unproven, not `false`.
+async fn verify_nip05_inner(nip05: &str, pubkey: &str) -> Option<bool> {
+    let nip05 = nip05.trim().to_lowercase();
+    let (name, domain) = nip05.rsplit_once('@')?;
+    if name.is_empty() || domain.is_empty() {
+        return None;
+    }
+    let url = format!("https://{domain}/.well-known/nostr.json?name={name}");
+    let v = crate::media::fetch_json(&url).await.ok()?;
+    v.get("names")?.get(name)?.as_str()
+        .map(|mapped| mapped.eq_ignore_ascii_case(pubkey))
 }
 
 /// The caption's first non-empty line, capped at 120 chars — nip68.ts

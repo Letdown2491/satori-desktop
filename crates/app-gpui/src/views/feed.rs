@@ -31,15 +31,20 @@ pub(crate) enum FeedMode {
     Timeline,
     Articles,
     Hashtag(String),
+    /// One author's notes — the profile page's Notes tab (an embedded Feed
+    /// entity; the profile view only renders the header + media strips).
+    Profile(PublicKey),
 }
 impl FeedMode {
     pub(crate) fn kinds(&self) -> Vec<Kind> {
         match self {
-            FeedMode::Timeline => satori_core::store::visible_kinds(),
+            // Never dispatched on for Hashtag/Profile — those fetches switch
+            // on the mode (the tag/author filter is the query; there's no
+            // follow set). The kinds themselves honor the content prefs.
+            FeedMode::Timeline
+            | FeedMode::Hashtag(_)
+            | FeedMode::Profile(_) => satori_core::store::visible_kinds(),
             FeedMode::Articles => vec![Kind::Custom(30023)],
-            // Never dispatched on — hashtag fetches switch on the mode
-            // (the tag filter is the query; there's no follow set).
-            FeedMode::Hashtag(_) => satori_core::store::visible_kinds(),
         }
     }
 }
@@ -142,6 +147,13 @@ impl Feed {
         Self::with_mode(core, FeedMode::Hashtag(tag), cx)
     }
 
+    /// One author's notes: the profile page's Notes tab embeds a full Feed,
+    /// so its rows ARE the timeline's rows (avatar, media, reactions) with
+    /// the same endless scroll — scoped to the author's pubkey.
+    pub fn author(core: Arc<Core>, who: PublicKey, cx: &mut Context<Self>) -> Self {
+        Self::with_mode(core, FeedMode::Profile(who), cx)
+    }
+
     fn with_mode(core: Arc<Core>, mode: FeedMode, cx: &mut Context<Self>) -> Self {
         let feed = Self {
             liked: core.liked_set(),
@@ -206,7 +218,12 @@ impl Feed {
                         let _ = this.update(cx, |feed, cx| {
                             // A follow's fresh post needn't carry this
                             // hashtag — no new-notes pill on hashtag feeds.
-                            if matches!(feed.mode, FeedMode::Hashtag(_)) {
+                            // Author feeds likewise: the pill would sit
+                            // under the profile's own header, noise.
+                            if matches!(
+                                feed.mode,
+                                FeedMode::Hashtag(_) | FeedMode::Profile(_)
+                            ) {
                                 return;
                             }
                             feed.live_new += 1;
@@ -240,6 +257,7 @@ impl Feed {
         // IS the query (profile()-shaped); the rest bootstrap as usual.
         let boot = match &feed.mode {
             FeedMode::Hashtag(tag) => feed.core.hashtag(tag.clone()),
+            FeedMode::Profile(who) => feed.core.profile(*who),
             _ => feed.core.bootstrap(feed.mode.kinds()),
         };
         feed.pump(boot, cx);
@@ -252,6 +270,9 @@ impl Feed {
             FeedMode::Hashtag(tag) => format!("#{tag}"),
             FeedMode::Timeline => "Feed".into(),
             FeedMode::Articles => "Articles".into(),
+            // Author feeds nest inside the profile pane, which carries its
+            // own header — this title never renders.
+            FeedMode::Profile(_) => "Profile".into(),
         }
     }
 
@@ -292,6 +313,7 @@ impl Feed {
         let oldest = self.oldest_ts.unwrap_or(0);
         let rx = match &self.mode {
             FeedMode::Hashtag(tag) => self.core.hashtag_older(tag.clone(), oldest),
+            FeedMode::Profile(who) => self.core.profile_older(*who, oldest),
             _ => self.core.older(oldest, self.mode.kinds()),
         };
         self.pump(rx, cx);
