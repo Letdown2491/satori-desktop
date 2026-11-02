@@ -92,9 +92,6 @@ pub struct Shell {
     /// Bell dot: anything newer than the read-state high-water? Polled every
     /// 90s like the GTK shell (poll_notif); cleared when the pane opens.
     notif_unread: bool,
-    /// The feed's deep-scroll state (Nav::FeedDeep): the floating
-    /// back-to-top whisper only shows once the reader is well below the top.
-    feed_deep: bool,
     stack: Vec<Pane>,
     /// The signed-in identity: the rail's top mark is the user's avatar
     /// (replacing the ensō as the home glyph).
@@ -122,10 +119,7 @@ impl Shell {
             Nav::OpenVideo(url, mime) => this.open_video(url.clone(), mime.clone(), cx),
             Nav::OpenZapSheet(ev) => this.open_zap_sheet(ev.clone(), cx),
             Nav::OpenWallet => this.open_wallet(cx),
-            Nav::FeedDeep(deep) => {
-                this.feed_deep = *deep;
-                cx.notify();
-            }
+            Nav::PaneDeep => cx.notify(), // whisper re-reads the pane at render
             Nav::Pop => this.back(cx),
             Nav::SetTheme(dark) => this.set_theme(*dark, cx),
             Nav::SignOut => this.sign_out(cx),
@@ -140,7 +134,6 @@ impl Shell {
             video_overlay: None,
             hold: None,
             notif_unread: false,
-            feed_deep: false,
             stack: vec![],
             me: None,
             me_profile: None,
@@ -204,10 +197,7 @@ impl Shell {
             Nav::OpenVideo(url, mime) => this.open_video(url.clone(), mime.clone(), cx),
             Nav::OpenZapSheet(ev) => this.open_zap_sheet(ev.clone(), cx),
             Nav::OpenWallet => this.open_wallet(cx),
-            Nav::FeedDeep(deep) => {
-                this.feed_deep = *deep;
-                cx.notify();
-            }
+            Nav::PaneDeep => cx.notify(), // whisper re-reads the pane at render
             Nav::Pop => this.back(cx),
             Nav::SetTheme(dark) => this.set_theme(*dark, cx),
             Nav::SignOut => this.sign_out(cx),
@@ -630,11 +620,26 @@ impl Shell {
         }
     }
 
-    /// The feed pane's scroll-to-top (rail re-click, ensō, the whisper).
-    fn feed_to_top(&self, cx: &mut Context<Self>) {
+    /// The active pane's own deep-scroll state, read straight from the view
+    /// at render — the shell keeps no copy (a stored flag goes stale across
+    /// pane switches; Nav::PaneDeep is only the repaint signal).
+    fn pane_deep(pane: &Pane, cx: &Context<Self>) -> bool {
+        match pane {
+            Pane::Feed(view) | Pane::Articles(view) | Pane::Hashtag(view) => view.read(cx).deep,
+            Pane::Notifications(view) => view.read(cx).deep,
+            _ => false,
+        }
+    }
+
+    /// The active pane's scroll-to-top (rail re-click, the floating
+    /// whisper): whichever scrollable list is on top of the stack.
+    fn pane_to_top(&self, cx: &mut Context<Self>) {
         match self.stack.last().cloned() {
             Some(Pane::Feed(view)) | Some(Pane::Articles(view)) | Some(Pane::Hashtag(view)) => {
                 view.update(cx, |feed, _| feed.scroll_top());
+            }
+            Some(Pane::Notifications(view)) => {
+                view.update(cx, |n, _| n.scroll_top());
             }
             _ => {}
         }
@@ -685,7 +690,7 @@ impl Shell {
                 false,
                 cx.listener(move |shell, _, _, cx| {
                     if feed_active {
-                        shell.feed_to_top(cx);
+                        shell.pane_to_top(cx);
                     } else {
                         shell.go_home(cx);
                     }
@@ -699,7 +704,7 @@ impl Shell {
                 cx.listener(move |shell, _, _, cx| {
                     if feed_active {
                         // Re-click the active spot: back to the top.
-                        shell.feed_to_top(cx);
+                        shell.pane_to_top(cx);
                     } else {
                         shell.go_home(cx);
                     }
@@ -860,8 +865,7 @@ impl Shell {
             .justify_center()
             .tooltip(tip("Back to top"))
             .on_click(cx.listener(|shell, _, _, cx| {
-                shell.feed_to_top(cx);
-                shell.feed_deep = false;
+                shell.pane_to_top(cx);
                 cx.notify();
             }))
             .child(icons::arrow_up_icon(theme::muted()))
@@ -998,9 +1002,19 @@ impl Render for Shell {
                         Pane::ZapSheet(view) => view.clone().into_any_element(),
                         Pane::Wallet(view) => view.clone().into_any_element(),
                     })
+                    // The floating back-to-top whisper: the ACTIVE pane's own
+                    // deep state, read straight from the view (never a shell
+                    // copy — a stale flag would show the whisper over the
+                    // wrong pane after a switch).
                     .when(
-                        self.feed_deep
-                            && matches!(pane, Pane::Feed(_) | Pane::Articles(_) | Pane::Hashtag(_)),
+                        Self::pane_deep(pane, cx)
+                            && matches!(
+                                pane,
+                                Pane::Feed(_)
+                                    | Pane::Articles(_)
+                                    | Pane::Hashtag(_)
+                                    | Pane::Notifications(_)
+                            ),
                         |d| d.child(self.floating_top(cx)),
                     ),
             )

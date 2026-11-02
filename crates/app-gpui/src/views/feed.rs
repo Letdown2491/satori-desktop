@@ -95,9 +95,10 @@ pub struct Feed {
     /// while the reader idles at the end cap can chain the next one (the
     /// scroll handler only fires on wheel ticks, which stop at the cap).
     last_visible_end: usize,
-    /// Deep-scroll state, emitted to the shell (Nav::FeedDeep) so the
-    /// floating back-to-top whisper knows when to appear.
-    deep: bool,
+    /// Deep-scroll state, emitted to the shell (Nav::PaneDeep); the shell
+    /// re-reads this field for the ACTIVE pane at render, so it must be
+    /// visible across views' modules.
+    pub(crate) deep: bool,
     list: ListState,
 }
 
@@ -184,7 +185,7 @@ impl Feed {
                 let deep = ev.visible_range.start >= 10;
                 if feed.deep != deep {
                     feed.deep = deep;
-                    cx.emit(Nav::FeedDeep(deep));
+                    cx.emit(Nav::PaneDeep);
                 }
                 feed.maybe_older(feed.last_visible_end, cx);
                 // The trim can only fire once the reader is back above the
@@ -262,6 +263,7 @@ impl Feed {
     /// landing page would chain a prefetch for a reader sitting at the top.
     pub fn scroll_top(&mut self) {
         self.last_visible_end = 0;
+        self.deep = false;
         self.list.scroll_to(ListOffset {
             item_ix: 0,
             offset_in_item: px(0.),

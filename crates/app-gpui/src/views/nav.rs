@@ -34,9 +34,13 @@ pub enum Nav {
     OpenWallet,
     /// A #tag tapped in a note body — the hashtag timeline (Phase 2 §4.2).
     OpenHashtag(String),
-    /// The feed crossed the deep-scroll threshold (or came back): the shell
-    /// shows/hides the floating back-to-top whisper.
-    FeedDeep(bool),
+    /// A scrollable list pane crossed the deep-scroll threshold (or came
+    /// back — the feed, articles shelf, hashtag timeline, notifications):
+    /// the shell shows/hides the floating back-to-top whisper for the
+    /// ACTIVE pane. Payloadless on purpose — the shell re-reads the view's
+    /// `deep` field at render (a stored copy goes stale across switches);
+    /// this event is only the repaint signal.
+    PaneDeep,
     /// The active pane closes itself (composer after commit/undo).
     Pop,
 }

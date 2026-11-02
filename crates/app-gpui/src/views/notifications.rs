@@ -8,7 +8,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use std::collections::HashSet;
 
-use gpui::{div, list, prelude::*, px, rgb, Context, Entity, EventEmitter, FontWeight, ListAlignment, ListState, Render, SharedString, Window};
+use gpui::{div, list, prelude::*, px, rgb, Context, Entity, EventEmitter, FontWeight, ListAlignment, ListOffset, ListScrollEvent, ListState, Render, SharedString, Window};
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile};
 use satori_core::nip::{comment, nip10};
@@ -76,6 +76,10 @@ pub struct NotificationsView {
     parents_asked: HashSet<String>,
     me: String,
     status: String,
+    /// Deep-scroll state, emitted to the shell (Nav::PaneDeep) so the
+    /// floating back-to-top whisper covers this pane too — same shape as
+    /// the feed's (feed.rs deep).
+    pub(crate) deep: bool,
     list: ListState,
 }
 
@@ -100,10 +104,33 @@ impl NotificationsView {
             parents_asked: HashSet::new(),
             me: String::new(),
             status: "Gathering…".into(),
+            deep: false,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
         view.pump_at(prev, cx);
+        // Deep-scroll whisper: same threshold and emission shape as the
+        // feed's (feed.rs set_scroll_handler) — emit on change only.
+        let this = cx.entity().downgrade();
+        view.list.set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
+            let _ = this.update(cx, |n, cx| {
+                let deep = ev.visible_range.start >= 10;
+                if n.deep != deep {
+                    n.deep = deep;
+                    cx.emit(Nav::PaneDeep);
+                }
+            });
+        });
         view
+    }
+
+    /// Back to the top (rail re-click, the floating whisper): home is item
+    /// zero (feed.rs scroll_top — no paging anchor to reset here).
+    pub fn scroll_top(&mut self) {
+        self.deep = false;
+        self.list.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
     }
 
     fn pump_at(&self, prev_high_water: u64, cx: &mut Context<Self>) {
