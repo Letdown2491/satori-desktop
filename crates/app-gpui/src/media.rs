@@ -135,6 +135,9 @@ impl Entry {
 pub struct Cache {
     map: std::cell::RefCell<HashMap<String, Entry>>,
     order: std::cell::RefCell<std::collections::VecDeque<String>>,
+    /// Last fetch-or-landing per URL — the eviction grace window's clock
+    /// (the deque is the recency ORDER; this is the recency TIME).
+    touched: std::cell::RefCell<HashMap<String, Instant>>,
     bytes: std::cell::Cell<u64>,
     epoch: std::cell::Cell<u64>,
 }
@@ -143,6 +146,7 @@ impl Default for Cache {
         Self {
             map: std::cell::RefCell::new(HashMap::new()),
             order: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            touched: std::cell::RefCell::new(HashMap::new()),
             bytes: std::cell::Cell::new(0),
             epoch: std::cell::Cell::new(0),
         }
@@ -159,6 +163,21 @@ impl gpui::Global for Cache {}
 /// thumb decodes at 128px, ~64KB.)
 const CACHE_MAX_ENTRIES: usize = 128;
 const CACHE_MAX_BYTES: u64 = 96 * 1024 * 1024;
+
+/// Eviction grace: entries fetched/touched within this window are
+/// immune, even over budget. Eviction runs INSIDE a landing's update —
+/// before the deferred notify can re-touch anything — so "oldest-touched"
+/// during a landing burst (articles scroll, a page of avatars arriving)
+/// is frequently an image CURRENTLY ON SCREEN. Evicting one calls
+/// remove_asset on it: gpui drops the decoded texture and re-decodes
+/// asynchronously — a guaranteed multi-frame blank. The flash-then-
+/// refetch flicker. Grace makes visible images un-evictable; the
+/// overshoot is bounded by the in-flight window and collected at the
+/// next landing once the burst goes stale.
+const EVICT_GRACE: Duration = Duration::from_secs(10);
+/// Safety valve: past double budget the grace is ignored (a pathological
+/// burst can hold everything fresh for a while; memory must stay bounded).
+const EVICT_DESPERATE_BYTES: u64 = 2 * CACHE_MAX_BYTES;
 
 impl Cache {
     /// Least-recently-used-first eviction past the caps. Loading entries
@@ -184,6 +203,23 @@ impl Cache {
             if !over {
                 break;
             }
+            // Grace: the front is the least-recently-used entry (every
+            // render-path fetch rotates it to the back). If even THAT one
+            // was touched inside the grace window, everything is fresh —
+            // a landing burst between two renders must not evict painted
+            // images. Desperation ignores the grace.
+            let desperate = self.bytes.get() > EVICT_DESPERATE_BYTES;
+            if !desperate {
+                let front_fresh = self
+                    .order
+                    .borrow()
+                    .front()
+                    .and_then(|url| self.touched.borrow().get(url).copied())
+                    .is_some_and(|t| t.elapsed() < EVICT_GRACE);
+                if front_fresh {
+                    break;
+                }
+            }
             let Some(url) = self.order.borrow_mut().pop_front() else {
                 break;
             };
@@ -201,6 +237,7 @@ impl Cache {
                     dropped.push(t);
                 }
             }
+            self.touched.borrow_mut().remove(&url);
             self.epoch.set(self.epoch.get() + 1);
         }
         dropped
@@ -261,13 +298,19 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                 // visible cards re-request their media every frame, so an
                 // on-screen image never sits at the evict-front. (`order`
                 // was insertion-order: visible pictures could be evicted
-                // while on screen — the flash-then-refetch flicker.)
+                // while on screen — the flash-then-refetch flicker.) The
+                // timestamp feeds the eviction grace window (the deque
+                // only carries the ORDER).
                 {
                     let mut order = cache.order.borrow_mut();
                     if order.back().map(|b| b != &url).unwrap_or(true) {
                         order.retain(|u| u != &url);
                         order.push_back(url.clone());
                     }
+                    cache
+                        .touched
+                        .borrow_mut()
+                        .insert(url.clone(), Instant::now());
                 }
                 match e.get_mut() {
                     Entry::Ready(_) | Entry::NotMedia => Action::Ready,
@@ -294,6 +337,10 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
             std::collections::hash_map::Entry::Vacant(e) => {
                 e.insert(Entry::Loading(vec![view]));
                 cache.order.borrow_mut().push_back(url.clone());
+                cache
+                    .touched
+                    .borrow_mut()
+                    .insert(url.clone(), Instant::now());
                 Action::Start(BACKOFF_START)
             }
         }
@@ -342,6 +389,12 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                                 retry = Some(*backoff);
                             }
                             map.insert(url.clone(), st);
+                            // A landing is a touch: the bytes just arrived
+                            // for whatever rendered surface asked for them.
+                            cache
+                                .touched
+                                .borrow_mut()
+                                .insert(url.clone(), Instant::now());
                             waiters
                         }
                         other => {
@@ -412,5 +465,78 @@ pub fn avatar(snap: &Snapshot, url: &str, name: &str, size_px: f32) -> AnyElemen
             )
             .into_any_element()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Ready entry with an arbitrary decoded size — the SIZE is what the
+    /// byte budget counts; the bytes are never touched by evict (Arcs move,
+    /// nothing decodes).
+    fn ready(w: u32, h: u32) -> Entry {
+        Entry::Ready(CachedImage {
+            png: Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new())),
+            thumb: None,
+            size: (w, h),
+        })
+    }
+
+    /// Insert a Ready entry as fetch's landing would: map + order + touch.
+    /// `age` back-dates the touch — the grace window's whole question.
+    fn insert(cache: &Cache, url: &str, w: u32, h: u32, age: Duration) {
+        cache.map.borrow_mut().insert(url.into(), ready(w, h));
+        cache.order.borrow_mut().push_back(url.into());
+        cache
+            .touched
+            .borrow_mut()
+            .insert(url.into(), Instant::now() - age);
+        cache.bytes.set(cache.bytes.get() + w as u64 * h as u64 * 4);
+    }
+
+    /// The flicker regression: a landing burst pushes the cache over
+    /// budget between two renders — but every entry was touched by the
+    /// last render (ages inside the grace window), so NOTHING may evict.
+    /// Evicting a painted image remove_assets it: gpui drops the decoded
+    /// texture and re-decodes async — the multi-frame blank.
+    #[test]
+    fn evict_spares_fresh_entries_even_over_budget() {
+        let cache = Cache::default();
+        insert(&cache, "a", 3000, 3000, Duration::from_secs(1));
+        insert(&cache, "b", 3000, 3000, Duration::from_secs(2));
+        insert(&cache, "c", 2000, 2000, Duration::from_secs(3));
+        insert(&cache, "d", 2000, 2000, Duration::from_secs(1)); // 104MB > 96
+        let dropped = cache.evict();
+        assert!(dropped.is_empty(), "fresh entries must survive the grace");
+        assert_eq!(cache.map.borrow().len(), 4);
+    }
+
+    /// Once the oldest entry is past the grace window it goes — and only
+    /// it: the fresh ones stay put (the overshoot collects as entries age).
+    #[test]
+    fn evict_takes_stale_before_fresh() {
+        let cache = Cache::default();
+        insert(&cache, "stale", 3000, 3000, Duration::from_secs(30));
+        insert(&cache, "fresh", 3000, 3000, Duration::from_secs(1));
+        insert(&cache, "f2", 2000, 2000, Duration::from_secs(2));
+        insert(&cache, "f3", 2000, 2000, Duration::from_secs(3)); // 104MB
+        let dropped = cache.evict();
+        assert_eq!(dropped.len(), 1, "only the stale entry goes");
+        assert!(!cache.map.borrow().contains_key("stale"));
+        assert!(cache.map.borrow().contains_key("fresh"));
+    }
+
+    /// Past double budget the grace is ignored — memory stays bounded no
+    /// matter how long a burst keeps everything "fresh".
+    #[test]
+    fn desperate_eviction_ignores_grace() {
+        let cache = Cache::default();
+        for i in 0..6 {
+            insert(&cache, &format!("e{i}"), 3000, 3000, Duration::from_secs(1));
+        } // 216MB = over the 192MB desperation line
+        let dropped = cache.evict();
+        assert!(!dropped.is_empty(), "desperation must evict");
+        assert!(cache.bytes.get() <= EVICT_DESPERATE_BYTES);
     }
 }
