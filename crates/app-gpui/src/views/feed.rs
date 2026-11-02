@@ -832,15 +832,16 @@ impl Feed {
 /// How long a bolt press reads as "deliberate" (the sheet, not the tap).
 const ZAP_HOLD: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// The pill's label, count capped at 99+ (a four-digit count would set
-/// the chip's width — and nobody reads the tail of a stampede).
+/// The chip's label — the count, capped at 99+ (a four-digit count would
+/// set the chip's width, and nobody reads the tail of a stampede). What
+/// the click does is the tooltip's job, not the label's.
 fn new_notes_label(n: usize) -> String {
     if n == 1 {
-        "1 new note — load it".to_string()
+        "1 new note".to_string()
     } else if n > 99 {
-        "99+ new notes — load them".to_string()
+        "99+ new notes".to_string()
     } else {
-        format!("{n} new notes — load them")
+        format!("{n} new notes")
     }
 }
 
@@ -1218,10 +1219,13 @@ impl Render for Feed {
                                 .py_1p5()
                                 .rounded_full()
                                 .border_1()
-                                .border_color(rgb(theme::vermilion()))
+                                .border_color(rgb(theme::hairline()))
                                 .text_size(px(12.0))
-                                .text_color(rgb(theme::muted()))
-                                .hover(|s| s.text_color(rgb(theme::vermilion())))
+                                .text_color(rgb(theme::vermilion()))
+                                .hover(|s| {
+                                    s.border_color(rgb(theme::vermilion()))
+                                        .text_color(rgb(theme::ink()))
+                                })
                                 .tooltip(super::shell::tip("Load new notes"))
                                 .on_click(move |_, _, cx| {
                                     handle.update(cx, |feed, cx| {
