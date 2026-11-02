@@ -93,7 +93,17 @@ pub struct Input {
     /// Single-line horizontal scroll: how far the line is shifted left so
     /// the caret stays visible ( bunker URIs run long). 0 for multiline.
     scroll_x: Pixels,
+    /// The blink: each activity bumps the epoch (a newer task owns the
+    /// caret, the old loop dies on its next tick) and the loop toggles
+    /// `caret_on` while it still holds the epoch. The loop self-terminates
+    /// when render sees the field lost focus (render bumps the epoch —
+    /// render runs on the loop's own notify, so this catches within a tick).
+    blink_epoch: u64,
+    caret_on: bool,
 }
+
+/// The classic caret duty cycle.
+const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530);
 
 impl Input {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -109,6 +119,8 @@ impl Input {
             last_bounds: None,
             is_selecting: false,
             scroll_x: px(0.),
+            blink_epoch: 0,
+            caret_on: true,
         }
     }
 
@@ -216,6 +228,7 @@ impl Input {
         let range = self.selected_range.clone();
         self.content = self.content[0..range.start].to_string() + text + &self.content[range.end..];
         self.selected_range = range.start + text.len()..range.start + text.len();
+        self.restart_blink(cx);
         cx.notify();
     }
 
@@ -253,7 +266,38 @@ impl Input {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        self.restart_blink(cx);
         cx.notify();
+    }
+
+    /// Keep the caret blinking from NOW: any caret move or edit calls this.
+    /// Reduced-motion desktops get a steady caret — visibility, not motion.
+    fn restart_blink(&mut self, cx: &mut Context<Self>) {
+        self.blink_epoch += 1;
+        self.caret_on = true;
+        if crate::desktop::Desktop::get(cx).reduced_motion {
+            return;
+        }
+        let epoch = self.blink_epoch;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(BLINK_INTERVAL).await;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if this.blink_epoch != epoch {
+                            return false; // a newer activity owns the caret
+                        }
+                        this.caret_on = !this.caret_on;
+                        cx.notify();
+                        true
+                    })
+                    .is_ok_and(|alive| alive);
+                if !alive {
+                    return;
+                }
+            }
+        })
+        .detach();
     }
 
     /// The caret's byte offset in `content` (pub: the composer's
@@ -305,6 +349,7 @@ impl Input {
             self.selection_reversed = !self.selection_reversed;
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
+        self.restart_blink(cx);
         cx.notify();
     }
 
@@ -416,6 +461,7 @@ impl EntityInputHandler for Input {
             self.content[0..range.start].to_string() + new_text + &self.content[range.end..];
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
+        self.restart_blink(cx);
         cx.notify();
     }
 
@@ -550,16 +596,18 @@ impl Element for InputElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
-        let content = input.content.clone();
+        // One content clone per prepaint (the audit's note): the shaped
+        // text needs an owned String, nothing else does.
+        let empty = input.content.is_empty();
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let multiline = input.multiline;
         let mut scroll_x = input.scroll_x;
+        let caret_visible = input.caret_on && input.focus_handle.is_focused(window);
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
 
-        let empty = content.is_empty();
         let text_color = if empty {
             // Placeholder wash: the field's own ink, rested — visible on
             // either paper (the fixed gray was invisible at night).
@@ -571,7 +619,7 @@ impl Element for InputElement {
         let display_text: SharedString = if empty {
             input.placeholder.clone()
         } else {
-            content.clone().into()
+            input.content.clone().into()
         };
 
         // One shaped block per paragraph ('\n'-separated).
@@ -675,9 +723,12 @@ impl Element for InputElement {
             }
         }
 
-        // Cursor quad.
+        // Cursor quad. Focused-only (paint re-gates), blinking, and — the
+        // click-to-type affordance — present on an EMPTY field too: the
+        // gate used to be `!empty`, so a focused empty field gave no
+        // signal at all until the first keystroke.
         let mut cursor_quad = None;
-        if !empty {
+        if caret_visible {
             for para in &paras {
                 if cursor >= para.start && cursor <= para.start + para.len {
                     let lh = line_height;
@@ -774,7 +825,20 @@ fn rows_of(para: &Para) -> Vec<(usize, usize)> {
 }
 
 impl Render for Input {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Focus bookkeeping for the blink. Programmatic focus (autofocus,
+        // parent-driven) never passes a mouse-down, so the loop starts
+        // here; a blur bumps the epoch, which stops the loop within one
+        // tick (it notified to get here). Unfocused fields then rest with
+        // no repaints at all.
+        if self.focus_handle.is_focused(window) {
+            if self.blink_epoch == 0 {
+                self.restart_blink(cx);
+            }
+        } else if self.blink_epoch != 0 {
+            self.blink_epoch += 1;
+            self.caret_on = true;
+        }
         div()
             .flex()
             .key_context("Input")
