@@ -14,6 +14,7 @@ use nostr_connect::prelude::*;
 use tokio::sync::mpsc;
 
 use crate::error::{LoginError, Result};
+use crate::nip::nip78;
 use crate::pool::Pool;
 use crate::secrets;
 use crate::session::{self, Session, SessionMode};
@@ -148,13 +149,16 @@ pub struct FeedPage {
 
 /// A push signal off the live subscription (one persistent sub per session,
 /// three filters). Live signaling, not the live timeline — nothing renders
-/// until a view asks.
+/// until a view asks. Also carries a few out-of-band manager signals (the
+/// NIP-78 login sync) that ride the same broadcast for want of a second one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Live {
     /// A reply or mention tagging me (#p) — light the bell.
     Mention,
     /// A fresh post from a follow — bump the timeline's new-notes pill.
     Post,
+    /// NIP-78 app-data sync landed (login): remote prefs won — re-read.
+    PrefsSynced,
 }
 
 /// A reply's parent, for the timeline context whisper: author + a plain
@@ -984,6 +988,18 @@ impl Core {
                     undo.set_seconds(sec as u32);
                 }
             }
+        // NIP-78 app-data sync (Phase 2 §4.1): our kind-30078 slots →
+        // prefs.json. Remote wins at login (Feather's semantics): every
+        // local change publishes forward, so only offline edits lose.
+        // PrefsSynced wakes the shell to re-read what it renders live.
+        if let Ok(me) = PublicKey::from_str(&session.pubkey) {
+            let pool = Arc::clone(&pool);
+            let signer = signer.clone();
+            let live = self.live.clone();
+            self.rt.spawn(async move {
+                sync_app_data(&pool, &me, &signer, &live).await;
+            });
+        }
         Ok(Active {
             session: session.clone(),
             signer,
@@ -996,8 +1012,9 @@ impl Core {
         })
     }
 
-    /// Live undo-window update (settings): active state + prefs.json.
-    pub fn set_undo(&self, enabled: bool, seconds: u32) {
+    /// Live undo-window update (settings): active state + prefs.json,
+    /// then NIP-78 sync of both undo keys (Phase 2 §4.1).
+    pub fn set_undo(self: &Arc<Self>, enabled: bool, seconds: u32) {
         {
             let mut a = self.active.lock().unwrap();
             if let Some(a) = a.as_mut() {
@@ -1005,29 +1022,46 @@ impl Core {
                 a.undo.set_seconds(seconds);
             }
         }
-        // Read-modify-write prefs.json, preserving app-owned keys.
-        let path =
-            crate::config::state_file(crate::config::files::PREFS);
-        let mut value = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert("undo_enabled".into(), enabled.into());
-            obj.insert("undo_seconds".into(), seconds.into());
-        }
-        if let Ok(body) = serde_json::to_string_pretty(&value) {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let _ = std::fs::create_dir_all(crate::config::data_dir());
-            let _ = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&path)
-                .and_then(|mut f| f.write_all(body.as_bytes()));
-        }
+        write_prefs_overlay(&[
+            ("undo_enabled".to_string(), enabled.into()),
+            ("undo_seconds".to_string(), seconds.into()),
+        ]);
+        // Fire and forget — sync needs no feedback surface.
+        self.publish_app_data("undo_enabled", serde_json::Value::Bool(enabled));
+        self.publish_app_data("undo_seconds", serde_json::Value::from(seconds));
+    }
+
+    /// NIP-78 app-data publish (Phase 2 §4.1): one kind-30078 per prefs
+    /// key, `d` = prefs.json key verbatim, content NIP-44-encrypted to
+    /// self — the same private-by-default semantics as the NIP-51 lists.
+    pub fn publish_app_data(self: &Arc<Self>, key: &str, value: serde_json::Value) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        let key = key.to_string();
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let content = active.signer.nip44_encrypt_self(&me, &value.to_string()).await?;
+                let unsigned = UnsignedEvent::new(
+                    me,
+                    Timestamp::now(),
+                    Kind::Custom(nip78::KIND),
+                    [Tag::custom("d", [key.as_str()])],
+                    content,
+                );
+                let signed = active.signer.sign_event(unsigned).await?;
+                Self::commit(&active, &signed, &tx).await?;
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
     }
 
     // --- feed ------------------------------------------------------------------
@@ -3441,6 +3475,68 @@ fn list_json(items: &[String], letter: &str) -> String {
 fn parse_list_event(plain: &str) -> Vec<String> {
     let arr: Vec<[String; 2]> = serde_json::from_str(plain).unwrap_or_default();
     arr.into_iter().filter_map(|pair| pair.get(1).cloned()).collect()
+}
+
+/// Read-modify-write prefs.json (0600): overlay `pairs` onto the existing
+/// object, preserving app-owned keys. Core's single prefs write path —
+/// set_undo and the NIP-78 sync both land here.
+fn write_prefs_overlay(pairs: &[(String, serde_json::Value)]) {
+    let path = crate::config::state_file(crate::config::files::PREFS);
+    let mut value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(obj) = value.as_object_mut() {
+        for (k, v) in pairs {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    if let Ok(body) = serde_json::to_string_pretty(&value) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::create_dir_all(crate::config::data_dir());
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut f| f.write_all(body.as_bytes()));
+    }
+}
+
+/// NIP-78 login sync (Phase 2 §4.1): fetch our own kind-30078 slots, keep
+/// the newest per d tag, decrypt, and overlay the Satori keys into
+/// prefs.json. Best-effort — relay misses, foreign d tags and undecryptable
+/// slots are skipped. PrefsSynced lets the shell re-read what it renders.
+async fn sync_app_data(
+    pool: &Arc<Pool>,
+    me: &PublicKey,
+    signer: &Signer,
+    live: &tokio::sync::broadcast::Sender<Live>,
+) {
+    let filter = Filter::new().kind(Kind::Custom(nip78::KIND)).author(*me);
+    let events = match pool.get(filter).await {
+        Ok(set) => set.into_iter().collect::<Vec<_>>(),
+        Err(_) => return,
+    };
+    let mut pairs: Vec<(String, serde_json::Value)> = Vec::new();
+    for slot in nip78::group_latest(&events) {
+        if !nip78::synced_key(&slot.key) || slot.content.is_empty() {
+            continue;
+        }
+        let Ok(plain) = signer.nip44_decrypt_self(me, slot.content.as_str()).await
+        else {
+            continue;
+        };
+        let Some(value) = nip78::parse_payload(&plain) else { continue };
+        pairs.push((slot.key, value));
+    }
+    if pairs.is_empty() {
+        return;
+    }
+    write_prefs_overlay(&pairs);
+    let _ = live.send(Live::PrefsSynced);
 }
 
 #[cfg(test)]

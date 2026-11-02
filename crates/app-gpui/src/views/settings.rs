@@ -406,12 +406,18 @@ impl SettingsView {
     fn toggle_machine_notes(&mut self, cx: &mut Context<Self>) {
         self.machine_hidden = !self.machine_hidden;
         prefs::set_bool("machine_notes_hidden", self.machine_hidden);
+        // NIP-78: sync (Phase 2 §4.1).
+        self.core
+            .publish_app_data("machine_notes_hidden", self.machine_hidden.into());
         cx.notify();
     }
 
     fn toggle_reaction_notifs(&mut self, cx: &mut Context<Self>) {
         self.reaction_notifs = !self.reaction_notifs;
         prefs::set_bool("reactionNotifs", self.reaction_notifs);
+        // NIP-78: sync (Phase 2 §4.1).
+        self.core
+            .publish_app_data("reactionNotifs", self.reaction_notifs.into());
         cx.notify();
     }
 
@@ -420,6 +426,9 @@ impl SettingsView {
         let hidden_now = kinds.iter().any(|k| self.hidden_kinds.contains(k));
         prefs::set_kinds_hidden(kinds, !hidden_now);
         self.hidden_kinds = prefs::content_hidden();
+        // NIP-78: sync (Phase 2 §4.1).
+        self.core
+            .publish_app_data("content_hidden", serde_json::json!(self.hidden_kinds));
         cx.notify();
     }
 

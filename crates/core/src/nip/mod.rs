@@ -13,6 +13,7 @@
 //! | `podcast` | F4 — podcast episodes |
 //! | `wiki` | 54 — wiki topics (AsciiDoc subset) |
 //! | `repo` | 34 — git repositories |
+//! | `nip78` | 78 — app data (encrypted prefs sync) |
 //!
 //! NIP-96 stays rejected; Blossom only (matches the web app).
 
@@ -27,3 +28,4 @@ pub mod podcast;
 pub mod poll;
 pub mod repo;
 pub mod wiki;
+pub mod nip78;

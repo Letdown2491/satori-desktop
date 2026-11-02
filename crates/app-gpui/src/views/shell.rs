@@ -208,11 +208,16 @@ impl Shell {
     /// select, and wake every watching view (theme.rs ThemeSignal).
     fn set_theme(&mut self, dark: bool, cx: &mut Context<Self>) {
         let mut p = crate::prefs::load();
+        let changed = p.dark != Some(dark);
         p.dark = Some(dark);
         crate::prefs::save(&p);
         theme::select(if dark { theme::DARK } else { theme::LIGHT });
         cx.set_global(theme::ThemeSignal);
         cx.notify();
+        // NIP-78: sync the theme slot (Phase 2 §4.1) — fire and forget.
+        if changed {
+            self.core.publish_app_data("dark", serde_json::Value::Bool(dark));
+        }
     }
 
     fn open_thread(&mut self, id: EventId, cx: &mut Context<Self>) {
@@ -328,6 +333,18 @@ impl Shell {
                     Ok(satori_core::manager::Live::Mention) => {
                         let _ = this.update(cx, |shell, cx| {
                             shell.notif_unread = true;
+                            cx.notify();
+                        });
+                    }
+                    Ok(satori_core::manager::Live::PrefsSynced) => {
+                        // NIP-78 login sync landed and remote prefs won —
+                        // re-read what the shell renders live (the theme).
+                        // Not a user action: no publish, no echo.
+                        let _ = this.update(cx, |_shell, cx| {
+                            if let Some(dark) = crate::prefs::load().dark {
+                                theme::select(if dark { theme::DARK } else { theme::LIGHT });
+                                cx.set_global(theme::ThemeSignal);
+                            }
                             cx.notify();
                         });
                     }
