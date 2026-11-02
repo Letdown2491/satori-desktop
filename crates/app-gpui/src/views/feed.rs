@@ -868,17 +868,23 @@ fn note_card(
 ) -> impl IntoElement {
     // TODO(port): note_card.rs layout — P0 minimal card; name fallback chain
     // matches Profile::display (render/util.ts style).
+    // One owned Arc up front: the eight action closures below each need the
+    // event, and cloning the whole Event per closure was eight deep copies
+    // of every visible row, every frame — Arc bumps now. (The list hands
+    // out &Event; the single clone here is the row's only deep copy.)
+    let ev = std::sync::Arc::new(ev.clone());
+    let id = ev.id.to_string();
     let key = ev.pubkey.to_string();
     let profile = profiles.get(&key);
     let name = profile
         .map(|p| p.display())
         .unwrap_or_else(|| format!("{}…", &key[..8]));
     let picture = profile.map(|p| p.picture.clone()).unwrap_or_default();
-    let engaged = liked.contains(&ev.id.to_string());
-    let saved = bookmarked.contains(&ev.id.to_string());
-    let shared = reposted.contains(&ev.id.to_string());
-    let zapped = zapped.contains(&ev.id.to_string());
-    let zapping = zap_pending.contains(&ev.id.to_string());
+    let engaged = liked.contains(&id);
+    let saved = bookmarked.contains(&id);
+    let shared = reposted.contains(&id);
+    let zapped = zapped.contains(&id);
+    let zapping = zap_pending.contains(&id);
     let ev_for_open = ev.clone();
     let ev_for_profile = ev.clone();
     let ev_for_like = ev.clone();
@@ -946,7 +952,7 @@ fn note_card(
         // A whisper, not a box — one muted line with the elbow glyph; click
         // opens the parent's thread (the thread pane anchors by id, so this
         // works even before the parent resolves).
-        .children(reply_whisper(idx, ev, parents, profiles, &handle))
+        .children(reply_whisper(idx, &ev, parents, profiles, &handle))
         .child(
             // Clicking the note body opens its thread (nav via the shell).
             div()
@@ -961,7 +967,7 @@ fn note_card(
                         // at the conversation's ROOT when the note is a
                         // reply (the reference never links the parent).
                         if u16::from(ev.kind) == 30023 {
-                            cx.emit(Nav::OpenArticle(ev.clone()));
+                            cx.emit(Nav::OpenArticle((*ev).clone()));
                         } else {
                             let root = satori_core::nip::nip10::reply_root(&ev)
                                 .and_then(|(id, _)| EventId::from_hex(&id).ok())
@@ -971,7 +977,7 @@ fn note_card(
                     });
                 })
                 .child(cards::row_body(
-                    ev,
+                    &ev,
                     &content::Body { media, quotes, profiles },
                     &handle,
                     cards,
@@ -991,7 +997,7 @@ fn note_card(
                         .on_click(move |_, _, cx| {
                             let ev = ev_for_reply.clone();
                             handle_reply.update(cx, |_, cx| {
-                                cx.emit(Nav::OpenComposer(Some(ev)));
+                                cx.emit(Nav::OpenComposer(Some((*ev).clone())));
                             });
                         })
                         .hover(|s| s.opacity(0.72))
@@ -1039,7 +1045,9 @@ fn note_card(
                             let ev = ev_for_zap.clone();
                             let handle = handle_zap.clone();
                             move |_, _, cx| {
-                                handle.update(cx, |_, cx| cx.emit(Nav::OpenZapSheet(ev.clone())));
+                                handle.update(cx, |_, cx| {
+                                    cx.emit(Nav::OpenZapSheet((*ev).clone()));
+                                });
                             }
                         })
                         // Left: remember when the press began; the release
@@ -1059,7 +1067,7 @@ fn note_card(
                                 let held = t0.elapsed() >= ZAP_HOLD;
                                 handle.update(cx, |feed, cx| {
                                     if held {
-                                        cx.emit(Nav::OpenZapSheet(ev.clone()));
+                                        cx.emit(Nav::OpenZapSheet((*ev).clone()));
                                     } else {
                                         feed.zap_tap(&ev, cx);
                                     }
@@ -1105,7 +1113,7 @@ fn note_card(
                         .on_click(move |_, _, cx| {
                             let ev = ev_for_quote.clone();
                             handle_quote.update(cx, |_, cx| {
-                                cx.emit(Nav::OpenQuote(ev));
+                                cx.emit(Nav::OpenQuote((*ev).clone()));
                             });
                         })
                         .hover(|s| s.opacity(0.72))

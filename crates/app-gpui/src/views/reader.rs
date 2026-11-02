@@ -341,18 +341,23 @@ impl Render for ArticleView {
         // the cover, and every body image. A long read outlives the
         // cache's photo budget; without the sweep an evicted mid-article
         // image stayed dark for good (want_media only ran at construction).
+        // The markdown parses ONCE: the sweep and the render list share
+        // the same blocks (the double parse ran the full block scan twice
+        // per render).
+        let cover = content::article_cover(&self.ev);
+        let blocks = markdown::blocks(&self.ev.content);
         if !author_pic.is_empty() {
             media::fetch(&self.core, author_pic.clone(), cx.entity_id(), cx);
         }
-        if let Some(url) = content::article_cover(&self.ev) {
-            media::fetch(&self.core, url, cx.entity_id(), cx);
+        if let Some(url) = &cover {
+            media::fetch(&self.core, url.clone(), cx.entity_id(), cx);
         }
         for url in content::media_urls(&self.ev) {
             media::fetch(&self.core, url, cx.entity_id(), cx);
         }
-        for block in markdown::blocks(&self.ev.content) {
+        for block in &blocks {
             if let markdown::Block::Image { url } = block {
-                media::fetch(&self.core, url, cx.entity_id(), cx);
+                media::fetch(&self.core, url.clone(), cx.entity_id(), cx);
             }
         }
         // Mode-aware stamp; ensure refines Block mode from the bridge
@@ -364,8 +369,6 @@ impl Render for ArticleView {
         });
         // Reading time at ~220 wpm (content.ts's readingMinutes rate).
         let minutes = self.ev.content.split_whitespace().count() / 220 + 1;
-        let cover = content::article_cover(&self.ev);
-        let blocks = markdown::blocks(&self.ev.content);
         let profiles = self.profiles.clone();
         let media = media_snap;
         let block_count = blocks.len();
