@@ -13,6 +13,13 @@
 //! sized needs ship a ≤128px PNG beside the original so an avatar never
 //! costs a 48MB full-res decode inside gpui's asset thread.
 //!
+//! Resource bounds (perf/security pass): downloads are gated — at most six
+//! in flight, so a media-heavy top-up queues instead of opening forty TLS
+//! connections; the decode runs on tokio's BLOCKING pool, off the 2-worker
+//! relay runtime; and the decode ceiling is checked from the container
+//! HEADER before any pixel allocation, so a 20MB compressed bomb never
+//! becomes 1.6GB of RGBA.
+//!
 //! TODO(port): full SSRF set — DNS-rebinding-safe resolution on direct paths,
 //! per-redirect re-checks, Tor transport, NIP-B7 healing (M2/M4).
 
@@ -27,6 +34,7 @@ use url::Url;
 
 use crate::config;
 
+#[derive(Debug)]
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
@@ -71,10 +79,28 @@ impl std::fmt::Display for MediaError {
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_JSON_BYTES: usize = 2 * 1024 * 1024;
 
+/// The decode ceiling in PIXELS (checked from the header before any
+/// allocation — see decode): 40MP ≈ a full-frame camera photo ≈ 160MB of
+/// RGBA at the absolute peak. Compressed bombs die here instead.
+const MAX_PIXELS: u64 = 40_000_000;
+
 /// Bounded retry cadence for transient failures: three attempts, 0.6s →
 /// 1.2s apart — enough to absorb a CDN hiccup, short enough that the UI's
 /// own cool-off (media.rs) picks the next attempt up promptly.
 const RETRY_ATTEMPTS: usize = 3;
+
+/// The fetch gate: at most six media downloads in flight. A top-up page is
+/// 40+ pictures — ungated, that's forty parallel TLS connections against one
+/// CDN and a thundering herd of decodes right behind them. Queued, the page
+/// still fills promptly and nothing else in the process drowns. JSON
+/// fetches (oEmbed, LNURL) stay ungated: they're small, rare, and a zap
+/// invoice must not queue behind pictures.
+const MAX_CONCURRENT_FETCHES: usize = 6;
+
+fn gate() -> &'static tokio::sync::Semaphore {
+    static GATE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Semaphore::const_new(MAX_CONCURRENT_FETCHES))
+}
 
 /// One shared client for every fetch in this module. Two hard rules baked
 /// in: a browser-style User-Agent (CDNs — Cloudflare in front of the
@@ -137,9 +163,20 @@ async fn read_capped(mut res: reqwest::Response, cap: usize) -> Result<Vec<u8>, 
 async fn fetch_capped(url: &str, cap: usize) -> Result<Vec<u8>, MediaError> {
     let mut wait = Duration::from_millis(600);
     for attempt in 0..RETRY_ATTEMPTS {
-        let outcome = match guarded_get(url).await {
-            Ok(res) => return read_capped(res, cap).await,
-            Err(e) => e,
+        // One gate slot per ATTEMPT, not per URL: the permit is released
+        // during the backoff sleep, so a dead CDN can't pin a slot for its
+        // whole retry cycle and starve the queue behind it.
+        let outcome = {
+            let _permit = gate()
+                .acquire()
+                .await
+                .map_err(|_| MediaError::Transient)?;
+            match guarded_get(url).await {
+                // The permit is held through the body read — the transfer
+                // is the thing being bounded.
+                Ok(res) => return read_capped(res, cap).await,
+                Err(e) => e,
+            }
         };
         if outcome == MediaError::NotMedia || attempt + 1 == RETRY_ATTEMPTS {
             return Err(outcome);
@@ -208,7 +245,7 @@ pub async fn fetch_image(url: &str) -> Result<DecodedImage, MediaError> {
     let key = cache_key(url);
     let path = cache_path(&key);
     match std::fs::read(&path) {
-        Ok(cached) => decode(&cached),
+        Ok(cached) => decode_async(cached).await,
         Err(_) => {
             let body = fetch_capped(url, MAX_IMAGE_BYTES).await?;
             // Validate BEFORE the disk write. The write used to precede the
@@ -216,7 +253,7 @@ pub async fn fetch_image(url: &str) -> Result<DecodedImage, MediaError> {
             // image stayed there forever — a broken avatar that survived
             // restarts. (The decode result doubles as the return value:
             // fresh bytes decode exactly once.)
-            let decoded = decode(&body)?;
+            let decoded = decode_async(body.clone()).await?;
             write_cache(&path, &body);
             Ok(decoded)
         }
@@ -264,7 +301,31 @@ fn write_cache(path: &std::path::Path, body: &[u8]) {
     }
 }
 
+/// Decode OFF the relay runtime. fetch_image runs on the same 2-worker
+/// tokio rt that serves relays, zaps, and the wallet — a 12MP decode
+/// (hundreds of ms, plus the AVIF re-encode) belongs on the blocking pool,
+/// whose threads exist precisely so event-loop workers never stall.
+async fn decode_async(bytes: Vec<u8>) -> Result<DecodedImage, MediaError> {
+    tokio::task::spawn_blocking(move || decode(&bytes))
+        .await
+        .map_err(|_| MediaError::Transient)?
+}
+
 fn decode(bytes: &[u8]) -> Result<DecodedImage, MediaError> {
+    // The ceiling is checked from the CONTAINER HEADER before any pixel
+    // allocation: a 20MB compressed bomb decodes to ~1.6GB of RGBA, and the
+    // byte cap bounds the compressed size, not the pixels. 40MP (~160MB of
+    // RGBA at peak) is far past anything a timeline shows and far below
+    // bomb scale. NotMedia is the honest verdict: the bytes arrived whole
+    // and will not be shown.
+    let (w0, h0) = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|_| MediaError::NotMedia)?
+        .into_dimensions()
+        .map_err(|_| MediaError::NotMedia)?;
+    if w0 as u64 * h0 as u64 > MAX_PIXELS {
+        return Err(MediaError::NotMedia);
+    }
     // The full decode validates the bytes (a blossom page URL is not media)
     // and yields the true dims for aspect-correct frames; the UI never
     // touches these pixels — it re-decodes from `bytes` on its own thread.
@@ -395,5 +456,47 @@ mod tests {
         assert!(!is_safe_media_url("https://localhost/x.png"));
         assert!(!is_safe_media_url("https://host.internal/x.png"));
         assert!(!is_safe_media_url("not a url"));
+    }
+
+    /// A minimal PNG header (signature + IHDR dims) — no pixel data, which
+    /// is the point: the bomb must be rejected from the header alone,
+    /// before any pixel allocation.
+    fn png_header(w: u32, h: u32) -> Vec<u8> {
+        let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        v.extend_from_slice(&[0, 0, 0, 13, b'I', b'H', b'D', b'R']);
+        v.extend_from_slice(&w.to_be_bytes());
+        v.extend_from_slice(&h.to_be_bytes());
+        v.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]); // 8-bit RGBA, fake CRC
+        v
+    }
+
+    fn real_png(w: u32, h: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::DynamicImage::new_rgba8(w, h)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn decode_accepts_legit_and_rejects_bomb_dimensions() {
+        let d = decode(&real_png(64, 64)).unwrap();
+        assert_eq!((d.width, d.height), (64, 64));
+        assert!(d.thumb.is_none(), "small sources need no thumb");
+
+        // 225MP: the byte cap passes (1KB file!) but the header check must
+        // reject before any allocation — a 20MB bomb would be ~900MB RGBA.
+        assert!(matches!(decode(&png_header(15000, 15000)), Err(MediaError::NotMedia)));
+    }
+
+    #[tokio::test]
+    async fn decode_async_runs_off_the_relay_runtime() {
+        let d = decode_async(real_png(300, 200)).await.unwrap();
+        assert_eq!((d.width, d.height), (300, 200));
+        assert!(d.thumb.is_some(), "long edge > 256 ships a disc thumb");
+        assert!(matches!(
+            decode_async(png_header(15000, 15000)).await,
+            Err(MediaError::NotMedia)
+        ));
     }
 }
