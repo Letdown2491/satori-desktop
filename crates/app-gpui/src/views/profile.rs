@@ -4,11 +4,12 @@
 //! and avatar images wait for the P2 image pipeline (core fetch → gpui `img`).
 //! Follow/mute management ports with the rest of the settings scope (P3).
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, collections::HashSet, sync::Arc, time::Duration};
 
 use gpui::{
     div, img, list, prelude::*, px, rgb, AnyElement, Context, Div, Entity, EventEmitter,
-    FontWeight, ListAlignment, ListState, ObjectFit, Render, SharedString, Window,
+    FontWeight, ListAlignment, ListScrollEvent, ListState, ObjectFit, Render, SharedString,
+    Window,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
@@ -29,8 +30,9 @@ enum ProfileTab {
 enum Row {
     /// Up to three thumbnails: (url, index into the tab's lightbox list).
     Pics(Vec<(String, usize)>),
-    /// One video tile: url, poster, imeta mime (the overlay's inline gate).
-    Vid(String, Option<String>, Option<String>),
+    /// Up to three video tiles: (url, poster, imeta mime) — the same
+    /// 3-column grid as the photos, the play badge marking them.
+    Vids(Vec<(String, Option<String>, Option<String>)>),
 }
 
 pub struct ProfileView {
@@ -50,6 +52,15 @@ pub struct ProfileView {
     /// Mirror of the child feed's deep-scroll state — the shell reads the
     /// pane view's field for the back-to-top whisper (Nav::PaneDeep).
     pub(crate) deep: bool,
+    /// Endless scroll for the media strips (the feed's pattern): a page in
+    /// flight, whether relays may hold more, the paging anchor (the oldest
+    /// timestamp EVER absorbed — `notes` is newest-first, so its last row),
+    /// the scroll stream's last visible end, and the absorbed ids (dedupe).
+    has_more: bool,
+    paging: bool,
+    oldest_ts: Option<u64>,
+    last_visible_end: usize,
+    note_ids: HashSet<EventId>,
     status: String,
     /// NIP-05 verdict memo: (address, verdict — None while the check is in
     /// flight). Keyed by the address so a changed one re-fires; unproven
@@ -88,12 +99,34 @@ impl ProfileView {
             profiles: HashMap::new(),
             notes_feed,
             deep: false,
+            has_more: true,
+            paging: false,
+            oldest_ts: None,
+            last_visible_end: 0,
+            note_ids: HashSet::new(),
             status: "loading…".into(),
             nip05_memo: None,
             copied: None,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             core,
         };
+        // Endless scroll for the strips (the feed's pattern): the list's
+        // scroll stream orders the next older page near the end cap, and
+        // floats the back-to-top whisper a few rows down. The handler runs
+        // on &mut App; WeakEntity::update accepts that. (The Notes tab's
+        // list belongs to the child feed — its own handler pages there.)
+        let this = cx.entity().downgrade();
+        view.list.set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
+            let _ = this.update(cx, |this, cx| {
+                this.last_visible_end = ev.visible_range.end;
+                let deep = ev.visible_range.start >= 3;
+                if this.deep != deep {
+                    this.deep = deep;
+                    cx.emit(Nav::PaneDeep);
+                }
+                this.maybe_older(this.last_visible_end, cx);
+            });
+        });
         let rx = view.core.profile(view.who);
         view.pump(rx, cx);
         view
@@ -134,10 +167,36 @@ impl ProfileView {
                 // kind 20 + imeta-bearing kind 1 — Phase 2 §4.3). The notes
                 // LIST is the child feed's; this Vec feeds the strips.
                 self.notes = page.notes;
+                self.note_ids = self.notes.iter().map(|n| n.id).collect();
+                self.oldest_ts = self.notes.last().map(|n| n.created_at.as_secs());
                 for note in self.notes.clone() {
                     self.want_media(&note, cx);
                 }
                 self.status.clear();
+            }
+            // The strips' next page (endless scroll): dedupe by id — the
+            // store page may hand back rows the page boundary already
+            // delivered — then append behind the window (newest-first
+            // order throughout). Then chain, like the feed: the reader may
+            // still be at the end cap, and waiting for a wheel tick that
+            // may never come strands them there.
+            FeedEvent::Older(page, has_more) => {
+                self.paging = false;
+                self.has_more = has_more;
+                for p in &page.profiles {
+                    self.profiles.insert(p.pubkey.clone(), p.clone());
+                }
+                for n in page.notes {
+                    if self.note_ids.insert(n.id) {
+                        self.want_media(&n, cx);
+                        self.notes.push(n);
+                    }
+                }
+                self.oldest_ts = self.notes.last().map(|n| n.created_at.as_secs());
+                self.status.clear();
+                if self.has_more {
+                    self.maybe_older(self.last_visible_end, cx);
+                }
             }
             FeedEvent::Failed(e) => self.status = format!("… {e}"),
             _ => {}
@@ -162,17 +221,20 @@ impl ProfileView {
             .collect()
     }
 
-    /// The Videos strip: one tile per video-bearing note (kind 21/22, plus
-    /// imeta/link videos on kind 1) — url + poster + imeta mime. Video
-    /// files themselves are never fetched (the tap opens the player or the
-    /// browser, video.rs decides).
-    fn video_rows(&self) -> Vec<(String, Option<String>, Option<String>)> {
+    /// The Videos strip: every video asset in timeline order (kind 21/22,
+    /// plus imeta/link videos on kind 1) — url + poster + imeta mime. All
+    /// of a note's videos, the same way Photos takes all of its pictures.
+    /// Video files themselves are never fetched (the tap opens the player
+    /// or the browser, video.rs decides).
+    fn video_urls(&self) -> Vec<(String, Option<String>, Option<String>)> {
         self.notes
             .iter()
             .filter(|n| matches!(u16::from(n.kind), 1 | 21 | 22))
-            .filter_map(|n| {
-                content::media_assets(n).into_iter().find_map(|a| match a {
-                    content::MediaAsset::Video { url, poster, mime } => Some((url, poster, mime)),
+            .flat_map(|n| {
+                content::media_assets(n).into_iter().filter_map(|a| match a {
+                    content::MediaAsset::Video { url, poster, mime } => {
+                        Some((url, poster, mime))
+                    }
                     _ => None,
                 })
             })
@@ -185,8 +247,31 @@ impl ProfileView {
         match self.tab {
             ProfileTab::Notes => 0,
             ProfileTab::Photos => self.photo_urls().len().div_ceil(3),
-            ProfileTab::Videos => self.video_rows().len(),
+            ProfileTab::Videos => self.video_urls().len().div_ceil(3),
         }
+    }
+
+    /// Near the end of a media strip, order the next older page (the feed's
+    /// endless-scroll lookahead, in strip rows — three media each). The
+    /// Notes tab never pages here: its list is the child feed's.
+    fn maybe_older(&mut self, visible_end: usize, cx: &mut Context<Self>) {
+        const LOOKAHEAD: usize = 3;
+        if !self.has_more || self.paging || self.notes.is_empty() {
+            return;
+        }
+        let total = match self.tab {
+            ProfileTab::Notes => return,
+            ProfileTab::Photos => self.photo_urls().len().div_ceil(3),
+            ProfileTab::Videos => self.video_urls().len().div_ceil(3),
+        };
+        if visible_end + LOOKAHEAD < total {
+            return;
+        }
+        self.paging = true;
+        let oldest = self.oldest_ts.unwrap_or(0);
+        let rx = self.core.profile_older(self.who, oldest);
+        self.pump(rx, cx);
+        cx.notify();
     }
 
     /// Queue the profile picture fetch (core's guarded, disk-cached path).
@@ -334,9 +419,9 @@ impl Render for ProfileView {
                 })
                 .collect(),
             ProfileTab::Videos => self
-                .video_rows()
-                .into_iter()
-                .map(|(u, p, m)| Row::Vid(u, p, m))
+                .video_urls()
+                .chunks(3)
+                .map(|chunk| Row::Vids(chunk.to_vec()))
                 .collect(),
         };
         // The Photos strip's lightbox list (tile taps index into it).
@@ -667,7 +752,7 @@ impl Render for ProfileView {
                             }
                             grid.into_any_element()
                         }
-                        Some(Row::Vid(url, poster, mime)) => {
+                        Some(Row::Vids(tiles)) => {
                             let mut grid = div()
                                 .w_full()
                                 .flex()
@@ -676,17 +761,19 @@ impl Render for ProfileView {
                                 .py_1()
                                 .border_b_1()
                                 .border_color(rgb(theme::hairline()));
-                            // One tile per video note: the poster thumb when
-                            // the bytes landed, the quiet play frame otherwise.
-                            grid = grid.child(thumb_tile(
-                                &media,
-                                SharedString::from(format!("vid-{idx}")),
-                                poster.as_deref().unwrap_or(""),
-                                None,
-                                Some(url.as_str()),
-                                mime.as_deref(),
-                                handle.clone(),
-                            ));
+                            // One tile per video, the poster thumb when the
+                            // bytes landed, the quiet play frame otherwise.
+                            for (i, (url, poster, mime)) in tiles.iter().enumerate() {
+                                grid = grid.child(thumb_tile(
+                                    &media,
+                                    SharedString::from(format!("vid-{idx}-{i}")),
+                                    poster.as_deref().unwrap_or(""),
+                                    None,
+                                    Some(url.as_str()),
+                                    mime.as_deref(),
+                                    handle.clone(),
+                                ));
+                            }
                             grid.into_any_element()
                         }
                         None => div().into_any_element(),
