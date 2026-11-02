@@ -203,6 +203,9 @@ fn main() {
         if let Some(false) = crate::prefs::load().dark.or(desktop.dark) { crate::theme::select(crate::theme::LIGHT) }
         cx.set_global(desktop);
         let core = Arc::new(Core::new());
+        // The suspend watchdog (DESIGN.md §3.4): after sleep/hibernate,
+        // reconnect the relays in seconds instead of the SDK's backoff.
+        core.spawn_suspend_watchdog();
         // The blocktime bridge (timefmt.rs): the core handle + ask dedup
         // behind every tappable timestamp, before any window renders.
         crate::timefmt::init(core.clone(), cx);

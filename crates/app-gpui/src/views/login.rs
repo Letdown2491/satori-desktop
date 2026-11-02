@@ -12,6 +12,7 @@ use gpui::{
     div, img, prelude::*, px, rgb, Animation, AnimationExt, App, Context, Entity, EventEmitter,
     FocusHandle, Focusable, Image, ImageFormat, KeyDownEvent, Render, TextAlign, Window,
 };
+use satori_core::dlog;
 use satori_core::manager::{ConnectEvent, ConnectRx, Core};
 use std::time::Duration;
 
@@ -43,6 +44,11 @@ pub struct LoginView {
     error_is_notice: bool,
     /// Each connect run invalidates the previous pump (same seam as search).
     generation: u64,
+    /// A handshake is in flight. Gates the URI strip's click-to-re-arm:
+    /// re-arming while a handshake runs bumps the generation, which
+    /// silently discards the completed login (session saved core-side
+    /// before the UI ever saw Approved) — the quit-and-restart bug.
+    connecting: bool,
     autofocused: bool,
 }
 
@@ -76,6 +82,7 @@ impl LoginView {
             error: resume_error.unwrap_or_default(),
             error_is_notice: resume_notice,
             generation: 0,
+            connecting: false,
             autofocused: false,
         };
         view.start_nostrconnect(cx);
@@ -90,13 +97,12 @@ impl LoginView {
         let generation = self.generation;
         self.qr_uri = None;
         self.qr = None;
+        self.connecting = true;
         let rx = self.core.connect_nostrconnect("wss://relay.nip46.com".into());
         let mut rx = rx;
-        eprintln!("[login] nostrconnect pump armed");
+        dlog!("[login] nostrconnect pump armed (generation {generation})");
         cx.spawn(async move |this, cx| {
-            eprintln!("[login] nostrconnect pump first poll");
             while let Some(ev) = rx.recv().await {
-                eprintln!("[login] pump got event");
                 let again = this
                     .update(cx, |this, cx| this.on_event(ev, generation, cx))
                     .is_ok_and(|more| more);
@@ -104,6 +110,15 @@ impl LoginView {
                     break;
                 }
             }
+            // Terminal exit (approved, failed, superseded): lift the gate —
+            // but only if this pump still owns the handshake.
+            let _ = this.update(cx, |this, cx| {
+                if this.generation == generation {
+                    this.connecting = false;
+                    cx.notify();
+                }
+            });
+            dlog!("[login] nostrconnect pump exited (generation {generation})");
         })
         .detach();
     }
@@ -122,6 +137,7 @@ impl LoginView {
         self.qr_uri = None;
         self.qr = None;
         self.waiting = Some((status.into(), hint.into()));
+        self.connecting = true;
         let mut rx = rx;
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.recv().await {
@@ -132,6 +148,13 @@ impl LoginView {
                     break;
                 }
             }
+            let _ = this.update(cx, |this, cx| {
+                if this.generation == generation {
+                    this.connecting = false;
+                    cx.notify();
+                }
+            });
+            dlog!("[login] bunker pump exited (generation {generation})");
         })
         .detach();
         cx.notify();
@@ -140,23 +163,28 @@ impl LoginView {
     /// Returns false when the flow is over (approved, failed or superseded).
     fn on_event(&mut self, ev: ConnectEvent, generation: u64, cx: &mut Context<Self>) -> bool {
         if generation != self.generation {
+            dlog!("[login] event {ev:?} arrived stale (gen {generation} vs {})", self.generation);
             return false; // superseded by a newer attempt or a cancel
         }
         match ev {
             ConnectEvent::Waiting => {}
             ConnectEvent::AuthUrl(url) => self.auth_url = Some(url),
             ConnectEvent::Uri(uri) => {
+                dlog!("[login] uri event — QR refreshed");
                 self.qr = qr_image(&uri);
                 self.qr_uri = Some(uri);
             }
             ConnectEvent::Approved(_) => {
+                dlog!("[login] approved — swapping to the shell");
                 cx.emit(Login::Approved);
                 return false;
             }
             ConnectEvent::Failed(msg) => {
+                dlog!("[login] failed: {msg}");
                 self.error = msg;
                 self.error_is_notice = false; // a real failure — red banner
                 self.waiting = None;
+                self.connecting = false;
                 // A dead handshake leaves a stale QR on the doors — drop it;
                 // the URI strip now reads "generating…" and re-arms on click.
                 self.qr_uri = None;
@@ -187,6 +215,7 @@ impl LoginView {
     fn cancel(&mut self, cx: &mut Context<Self>) {
         self.generation += 1; // invalidate the pump: failures stay quiet
         self.core.cancel_login();
+        self.connecting = false;
         self.waiting = None;
         self.auth_url = None;
         cx.notify();
@@ -492,8 +521,15 @@ impl Render for LoginView {
                                         .text_color(rgb(theme::muted()))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             // Handshake dead (timeout, relay loss)?
-                                            // The click re-arms it.
-                                            if this.qr_uri.is_none() {
+                                            // The click re-arms it — but NEVER
+                                            // while a handshake is live: the
+                                            // re-arm bumps the generation, and
+                                            // the completed login would be
+                                            // dropped on the floor (the core
+                                            // saved the session; the UI never
+                                            // heard Approved).
+                                            if this.qr_uri.is_none() && !this.connecting {
+                                                dlog!("[login] uri strip click: re-arming nostrconnect");
                                                 this.start_nostrconnect(cx);
                                                 return;
                                             }

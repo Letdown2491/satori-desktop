@@ -13,6 +13,7 @@
 
 pub mod blocktime;
 pub mod config;
+pub mod diag;
 pub mod error;
 pub mod manager;
 pub mod privacy;

@@ -79,8 +79,6 @@ pub enum FeedEvent {
     Search(Vec<Event>, Vec<Profile>),
     /// One event by id (repost target resolution), + author profile.
     One(Option<Event>, Option<Profile>),
-    /// Refresh found nothing newer — quiet feedback, no list churn.
-    NothingNew,
     /// Resolved reply parents for the timeline's context whisper: parent
     /// event id → author + snippet. Misses resolve on a later ask.
     Parents(std::collections::HashMap<String, ParentNote>),
@@ -308,6 +306,11 @@ pub struct Core {
     active: Mutex<Option<Active>>,
     pending: Mutex<Option<Arc<NostrConnect>>>,
     hold_seq: AtomicU64,
+    /// Login epoch: bumped on every connect attempt and cancel; a
+    /// handshake whose epoch has moved on drops itself instead of saving
+    /// a session the UI (or a newer attempt) no longer expects — the
+    /// core-side twin of the login view's generation guard.
+    login_seq: AtomicU64,
     /// ONE pool for the process: the LMDB write lock must not survive a
     /// logout (a second env open on the same path deadlocks). The profile
     /// service's debouncer is session-scoped (Weak handle — it exits when
@@ -337,7 +340,9 @@ pub struct Core {
     /// Push signals off the live subscription (shell bell, feed pills).
     live: tokio::sync::broadcast::Sender<Live>,
     /// The live sub starts once per process (bootstrap runs per surface).
-    live_on: std::sync::atomic::AtomicBool,
+    /// Whether the live subscription is armed (start_live). An Arc so the
+    /// spawned task can re-arm it when the subscribe fails.
+    live_on: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for Core {
@@ -348,6 +353,8 @@ impl Default for Core {
 
 impl Core {
     pub fn new() -> Self {
+        // Keep the diagnostic mirror bounded (diag.rs) before anything logs.
+        crate::diag::rotate();
         // The runtime is built first — the blocktime service needs its
         // handle for the single-flight spawns (Handle::current would panic
         // outside a runtime).
@@ -367,6 +374,7 @@ impl Core {
             active: Mutex::new(None),
             pending: Mutex::new(None),
             hold_seq: AtomicU64::new(1),
+            login_seq: AtomicU64::new(1),
             pool: Mutex::new(None),
             own_liked: Mutex::new(HashSet::new()),
             own_reposted: Mutex::new(HashSet::new()),
@@ -378,8 +386,47 @@ impl Core {
             holds: Mutex::new(std::collections::HashMap::new()),
             live: tokio::sync::broadcast::Sender::new(64),
             hold_tx: tokio::sync::broadcast::Sender::new(16),
-            live_on: std::sync::atomic::AtomicBool::new(false),
+            live_on: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Suspend watchdog (DESIGN.md §3.4): after sleep/hibernate every relay
+    /// socket is dead. The SDK's 55s ping notices, but its adaptive backoff
+    /// (10s doubling) can take minutes to reconnect — until then every read
+    /// burns its whole budget against dead relays. A wall-clock jump far
+    /// larger than the monotonic one means the machine slept: poke every
+    /// relay (`connect()` is idempotent) so reads recover in seconds, not
+    /// minutes. One probe per 30s for the process lifetime; skipped while
+    /// logged out. Call once, from main, on the Arc'd core.
+    pub fn spawn_suspend_watchdog(self: &Arc<Self>) {
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let mut last_wall = std::time::SystemTime::now();
+            let mut last_mono = std::time::Instant::now();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let wall = std::time::SystemTime::now();
+                let mono = std::time::Instant::now();
+                let wall_d = wall.duration_since(last_wall).unwrap_or_default();
+                let mono_d = mono.duration_since(last_mono);
+                last_wall = wall;
+                last_mono = mono;
+                // CLOCK_MONOTONIC freezes in sleep; the wall clock doesn't.
+                if wall_d.saturating_sub(mono_d) <= std::time::Duration::from_secs(90) {
+                    continue;
+                }
+                // The pool() getter would BUILD a pool while logged out —
+                // read the raw field and skip when there's nothing to poke.
+                let Some(pool) = this.pool.lock().unwrap().clone() else {
+                    continue;
+                };
+                crate::dlog!(
+                    "watchdog: wall jumped {:?} vs monotonic {:?} — machine slept; reconnecting relays",
+                    wall_d, mono_d
+                );
+                pool.client().connect().await;
+            }
+        });
     }
 
     // --- lifecycle -----------------------------------------------------------
@@ -928,15 +975,21 @@ impl Core {
     /// Connect to a `bunker://` URI. Events stream on the returned channel:
     /// Waiting → (AuthUrl?) → Approved | Failed. Cancel with `cancel_login`.
     pub fn connect_bunker(self: &Arc<Self>, uri: String) -> ConnectRx {
+        // This flow's epoch = the counter value after the bump; any later
+        // bump (cancel, a newer attempt) invalidates it.
+        let seq = self.login_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
             let _ = tx.send(ConnectEvent::Waiting);
-            match this.connect_bunker_inner(&uri).await {
+            crate::dlog!("bunker: flow started (seq {seq})");
+            match this.connect_bunker_inner(&uri, seq).await {
                 Ok(pk) => {
+                    crate::dlog!("bunker: approved for {pk}");
                     let _ = tx.send(ConnectEvent::Approved(pk));
                 }
                 Err(e) => {
+                    crate::dlog!("bunker: failed: {e}");
                     let _ = tx.send(ConnectEvent::Failed(e.to_string()));
                 }
             }
@@ -946,13 +999,14 @@ impl Core {
 
     /// Abandon an in-flight bunker connect (best-effort shutdown).
     pub fn cancel_login(&self) {
+        self.login_seq.fetch_add(1, Ordering::SeqCst);
         if let Some(pending) = self.pending.lock().unwrap().take() {
             self.rt
                 .spawn(async move { Arc::unwrap_or_clone(pending).shutdown().await });
         }
     }
 
-    async fn connect_bunker_inner(&self, uri: &str) -> Result<PublicKey> {
+    async fn connect_bunker_inner(&self, uri: &str, seq: u64) -> Result<PublicKey> {
         let parsed = NostrConnectUri::parse(uri.trim())
             .map_err(|e| LoginError::InvalidBunkerUri(e.to_string()))?;
 
@@ -963,6 +1017,7 @@ impl Core {
             }
             _ => return Err(LoginError::InvalidBunkerUri("expected bunker:// URI".into())),
         };
+        crate::dlog!("bunker: parsed, remote signer {remote}");
 
         let client_keys = Keys::generate();
         let connect = Arc::new(
@@ -970,12 +1025,22 @@ impl Core {
                 .map_err(|e| LoginError::Connect(e.to_string()))?,
         );
         let relays: Vec<String> = connect.relays().iter().map(|r| r.to_string()).collect();
+        crate::dlog!("bunker: client built over {} relay(s); awaiting approval", relays.len());
         *self.pending.lock().unwrap() = Some(Arc::clone(&connect));
 
-        let pk = connect
-            .get_public_key_async()
-            .await
-            .map_err(|e| LoginError::Connect(e.to_string()))?;
+        let pk = match connect.get_public_key_async().await {
+            Ok(pk) => pk,
+            Err(e) => {
+                crate::dlog!("bunker: get_public_key failed: {e}");
+                return Err(LoginError::Connect(e.to_string()));
+            }
+        };
+        crate::dlog!("bunker: approval received from signer");
+
+        if self.login_seq.load(Ordering::SeqCst) != seq {
+            crate::dlog!("bunker: login superseded mid-handshake; dropping");
+            return Err(LoginError::Connect("superseded".into()));
+        }
 
         secrets::store(
             secrets::BUNKER_CLIENT_SECRET,
@@ -987,11 +1052,19 @@ impl Core {
             mode: SessionMode::Bunker { remote, relays },
         };
         session::save(&session)?;
+        crate::dlog!("bunker: session saved");
 
         // Already on the runtime (spawned task): await, never block_on.
         let active = self.build_active(&session).await?;
         *self.active.lock().unwrap() = Some(active);
-        *self.pending.lock().unwrap() = None;
+        // Clear pending only if it still points at THIS handshake — a newer
+        // attempt may have replaced it.
+        let mut pending = self.pending.lock().unwrap();
+        if pending.as_ref().is_some_and(|p| Arc::ptr_eq(p, &connect)) {
+            *pending = None;
+        }
+        drop(pending);
+        crate::dlog!("bunker: active session built — login complete");
         Ok(pk)
     }
 
@@ -1002,16 +1075,47 @@ impl Core {
     /// this is the bunker flow (transport key in BUNKER_CLIENT_SECRET,
     /// session mode Bunker — resume rebuilds a bunker:// URI).
     pub fn connect_nostrconnect(self: &Arc<Self>, relay: String) -> ConnectRx {
+        let seq = self.login_seq.fetch_add(1, Ordering::SeqCst) + 1;
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
             let _ = tx.send(ConnectEvent::Waiting);
-            match this.connect_nostrconnect_inner(&relay, &tx).await {
+            crate::dlog!("nostrconnect: flow started (seq {seq}, relay {relay})");
+            match this.connect_nostrconnect_inner(&relay, seq, &tx).await {
                 Ok(pk) => {
+                    crate::dlog!("nostrconnect: approved for {pk}");
                     let _ = tx.send(ConnectEvent::Approved(pk));
                 }
                 Err(e) => {
-                    let _ = tx.send(ConnectEvent::Failed(e.to_string()));
+                    crate::dlog!("nostrconnect: first window failed: {e}");
+                    // One automatic retry on the SDK's 60s timeout: a fast
+                    // signer (kumaOS's built-in panel approves in ~1s) can
+                    // publish its response before the SDK's subscribe is
+                    // live, and kind-24133 filters don't replay. A fresh
+                    // URI re-arms the handshake — the Uri event repaints
+                    // the QR. Superseded or cancelled flows don't retry.
+                    if !e.to_string().contains("timeout")
+                        || this.login_seq.load(Ordering::SeqCst) != seq
+                    {
+                        let _ = tx.send(ConnectEvent::Failed(e.to_string()));
+                        return;
+                    }
+                    // (No lock across the shutdown await — take first.)
+                    let pending = this.pending.lock().unwrap().take();
+                    if let Some(pending) = pending {
+                        Arc::unwrap_or_clone(pending).shutdown().await;
+                    }
+                    crate::dlog!("nostrconnect: retrying with a fresh URI");
+                    match this.connect_nostrconnect_inner(&relay, seq, &tx).await {
+                        Ok(pk) => {
+                            crate::dlog!("nostrconnect: approved for {pk} (retry)");
+                            let _ = tx.send(ConnectEvent::Approved(pk));
+                        }
+                        Err(e2) => {
+                            crate::dlog!("nostrconnect: retry failed: {e2}");
+                            let _ = tx.send(ConnectEvent::Failed(e2.to_string()));
+                        }
+                    }
                 }
             }
         });
@@ -1021,6 +1125,7 @@ impl Core {
     async fn connect_nostrconnect_inner(
         &self,
         relay: &str,
+        seq: u64,
         tx: &mpsc::UnboundedSender<ConnectEvent>,
     ) -> Result<PublicKey> {
         let client_keys = Keys::generate();
@@ -1042,20 +1147,50 @@ impl Core {
         // secret against the parsed URI, so the extras ride along inert.
         let mut uri_str = uri.to_string();
         uri_str.push_str("&name=Satori");
-        eprintln!("[core] nostrconnect uri ready: {} chars", uri_str.len());
+        crate::dlog!("nostrconnect: uri ready ({} chars)", uri_str.len());
         let _ = tx.send(ConnectEvent::Uri(uri_str));
 
         let connect = Arc::new(
             NostrConnect::new(uri, client_keys.clone(), LOGIN_TIMEOUT, None)
                 .map_err(|e| LoginError::Connect(e.to_string()))?,
         );
-        eprintln!("[core] nostrconnect: client built, awaiting signer…");
+        crate::dlog!("nostrconnect: client built, awaiting signer…");
         *self.pending.lock().unwrap() = Some(Arc::clone(&connect));
 
-        let user_pk = connect
-            .get_public_key_async()
-            .await
-            .map_err(|e| LoginError::Connect(e.to_string()))?;
+        // The probe: a bare diagnostic client riding the same relay,
+        // subscribed to this key's response kind. The SDK's own pump skips
+        // bad responses with a tracing::warn that vanishes (no subscriber),
+        // and a fast approval can land before its subscribe — the probe
+        // turns both into lines we can actually read. Stands down when the
+        // handshake resolves.
+        let (probe_done_tx, probe_done_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(Self::nostrconnect_probe(
+            client_keys.clone(),
+            relay.to_string(),
+            probe_done_rx,
+        ));
+
+        let user_pk = match connect.get_public_key_async().await {
+            Ok(pk) => pk,
+            Err(e) => {
+                let _ = probe_done_tx.send(());
+                crate::dlog!("nostrconnect: get_public_key failed: {e}");
+                return Err(LoginError::Connect(e.to_string()));
+            }
+        };
+        let _ = probe_done_tx.send(());
+        crate::dlog!("nostrconnect: approval received from signer");
+
+        if self.login_seq.load(Ordering::SeqCst) != seq {
+            crate::dlog!("nostrconnect: login superseded mid-handshake; dropping");
+            return Err(LoginError::Connect("superseded".into()));
+        }
+
+        secrets::store(
+            secrets::BUNKER_CLIENT_SECRET,
+            &client_keys.secret_key().display_secret().to_string(),
+        )
+        .await?;
         let remote = match connect
             .bunker_uri()
             .await
@@ -1068,21 +1203,105 @@ impl Core {
         };
         let relays: Vec<String> = connect.relays().iter().map(|r| r.to_string()).collect();
 
-        secrets::store(
-            secrets::BUNKER_CLIENT_SECRET,
-            &client_keys.secret_key().display_secret().to_string(),
-        )
-        .await?;
         let session = Session {
             pubkey: user_pk.to_string(),
             mode: SessionMode::Bunker { remote, relays },
         };
         session::save(&session)?;
+        crate::dlog!("nostrconnect: session saved");
 
         let active = self.build_active(&session).await?;
         *self.active.lock().unwrap() = Some(active);
-        *self.pending.lock().unwrap() = None;
+        // Clear pending only if it still points at THIS handshake — a newer
+        // attempt may have replaced it.
+        let mut pending = self.pending.lock().unwrap();
+        if pending.as_ref().is_some_and(|p| Arc::ptr_eq(p, &connect)) {
+            *pending = None;
+        }
+        drop(pending);
+        crate::dlog!("nostrconnect: active session built — login complete");
         Ok(user_pk)
+    }
+
+    /// The nostrconnect diagnostic sub (see connect_nostrconnect_inner):
+    /// one bare client on the same relay, subscribed to the transport
+    /// key's response kind. Every signer response it sees is logged with
+    /// its decrypt outcome — "the relay delivered it and the SDK pump
+    /// missed it" becomes provable from the log instead of a guess.
+    async fn nostrconnect_probe(client_keys: Keys, relay: String, done: tokio::sync::oneshot::Receiver<()>) {
+        use futures_util::StreamExt as _;
+        let probe = nostr_sdk::client::ClientBuilder::new().build();
+        if let Err(e) = probe.add_relay(&relay).await {
+            crate::dlog!("nostrconnect probe: relay add failed: {e}");
+            return;
+        }
+        probe.connect().await;
+        crate::dlog!("nostrconnect probe: relay connected");
+        let filter = Filter::new()
+            .pubkey(client_keys.public_key())
+            .kind(Kind::NostrConnect)
+            .limit(0);
+        let Ok(output) = probe.subscribe(vec![filter]).await else {
+            crate::dlog!("nostrconnect probe: subscribe failed");
+            return;
+        };
+        crate::dlog!("nostrconnect probe: subscribed for responses");
+        let mut done = done;
+        let mut notifications = probe.notifications();
+        loop {
+            tokio::select! {
+                _ = &mut done => {
+                    crate::dlog!("nostrconnect probe: handshake resolved, standing down");
+                    let _ = probe.shutdown().await;
+                    return;
+                }
+                n = notifications.next() => {
+                    let Some(n) = n else {
+                        crate::dlog!("nostrconnect probe: notification stream ended");
+                        return;
+                    };
+                    match n {
+                        nostr_sdk::client::ClientNotification::Event { subscription_id, event, .. }
+                            if output.id() == &subscription_id =>
+                        {
+                            let event = *event;
+                            crate::dlog!(
+                                "nostrconnect probe: response event from {} — the relay DID deliver",
+                                event.pubkey
+                            );
+                            match nostr::nips::nip44::decrypt(
+                                client_keys.secret_key(),
+                                &event.pubkey,
+                                &event.content,
+                            ) {
+                                Ok(json) => {
+                                    match serde_json::from_str::<serde_json::Value>(&json) {
+                                        Ok(v) => crate::dlog!(
+                                            "nostrconnect probe: response type={:?} result={:?} error={:?}",
+                                            v.get("type"),
+                                            v.get("result"),
+                                            v.get("error"),
+                                        ),
+                                        Err(_) => crate::dlog!(
+                                            "nostrconnect probe: undecodable response: {}…",
+                                            &json[..json.len().min(120)]
+                                        ),
+                                    }
+                                }
+                                Err(e) => {
+                                    crate::dlog!("nostrconnect probe: decrypt failed: {e}");
+                                }
+                            }
+                        }
+                        nostr_sdk::client::ClientNotification::Shutdown => {
+                            crate::dlog!("nostrconnect probe: client shutdown");
+                            return;
+                        }
+                        _ => continue,
+                    }
+                }
+            }
+        }
     }
 
 
@@ -1499,7 +1718,15 @@ impl Core {
             .limit(100);
         let fetched = active.pool.get(filter).await.unwrap_or_default();
         if fetched.is_empty() {
-            let _ = tx.send(FeedEvent::NothingNew);
+            // Relays unreachable (post-suspend, offline): this used to end
+            // the refresh as NothingNew — which the feed swallows — so a
+            // new-notes chip click no-oped until the relays recovered. The
+            // live sub saves pushed notes to the store even while relays
+            // are down, so project from the store regardless: the missed
+            // notes appear with zero relay round-trips.
+            crate::dlog!("refresh: relay fetch empty; projecting the store");
+            let page = self.page_from_store(&active, None, &kinds).await?;
+            let _ = tx.send(FeedEvent::Loaded(page));
             return Ok(());
         }
         for ev in fetched {
@@ -3684,12 +3911,15 @@ impl Core {
     /// the next refresh's fetches until the next session.
     async fn start_live(&self, kinds: Vec<Kind>) {
         use futures_util::StreamExt as _;
+        // Resolve the session BEFORE arming the flag: a failed resolve must
+        // not wedge live_on true (it used to — the sub could never re-arm).
+        let Ok(active) = self.active().await else { return };
         if self.live_on.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        let Ok(active) = self.active().await else { return };
         let pool = active.pool.clone();
         let live = self.live.clone();
+        let live_on = self.live_on.clone();
         let me = active.me();
         let follows = active.follows.clone();
         self.rt.spawn(async move {
@@ -3709,7 +3939,8 @@ impl Core {
                     .since(now),
             ];
             let Ok(output) = pool.client().subscribe(filters).await else {
-                eprintln!("[core] live: subscribe failed");
+                eprintln!("[core] live: subscribe failed; re-arming");
+                live_on.store(false, std::sync::atomic::Ordering::SeqCst);
                 return;
             };
             let mut notifications = pool.client().notifications();
