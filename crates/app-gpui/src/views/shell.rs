@@ -29,6 +29,8 @@ use super::{
     search::SearchView,
     settings::SettingsView,
     thread::ThreadView,
+    wallet::WalletView,
+    zap::ZapSheet,
 };
 
 #[derive(Clone)]
@@ -43,6 +45,10 @@ pub enum Pane {
     Settings(Entity<SettingsView>),
     Article(Entity<ArticleView>),
     Composer(Entity<Composer>),
+    /// The zap amount sheet (bolt long-press).
+    ZapSheet(Entity<ZapSheet>),
+    /// The NWC wallet connect pane (D20).
+    Wallet(Entity<WalletView>),
 }
 
 /// Shell-to-root events. The root subscribes at both shell-creation sites
@@ -106,6 +112,8 @@ impl Shell {
             Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
+            Nav::OpenZapSheet(ev) => this.open_zap_sheet(ev.clone(), cx),
+            Nav::OpenWallet => this.open_wallet(cx),
             Nav::FeedDeep(deep) => {
                 this.feed_deep = *deep;
                 cx.notify();
@@ -183,6 +191,8 @@ impl Shell {
             Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
+            Nav::OpenZapSheet(ev) => this.open_zap_sheet(ev.clone(), cx),
+            Nav::OpenWallet => this.open_wallet(cx),
             Nav::FeedDeep(deep) => {
                 this.feed_deep = *deep;
                 cx.notify();
@@ -244,6 +254,22 @@ impl Shell {
         let view = cx.new(|cx| ArticleView::new(self.core.clone(), ev, cx));
         self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Article(view));
+        cx.notify();
+    }
+
+    /// The zap amount sheet (bolt long-press / right-click).
+    fn open_zap_sheet(&mut self, ev: Event, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| ZapSheet::new(self.core.clone(), ev, cx));
+        self.subscribe_nav(&view, cx);
+        self.stack.push(Pane::ZapSheet(view));
+        cx.notify();
+    }
+
+    /// The NWC wallet pane (settings door, or a bolt tap with no wallet).
+    fn open_wallet(&mut self, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| WalletView::new(self.core.clone(), cx));
+        self.subscribe_nav(&view, cx);
+        self.stack.push(Pane::Wallet(view));
         cx.notify();
     }
 
@@ -476,6 +502,8 @@ impl Shell {
             Some(Pane::Settings(_)) => "Settings",
             Some(Pane::Article(_)) => "Read",
             Some(Pane::Composer(_)) => "Compose",
+            Some(Pane::ZapSheet(_)) => "Zap",
+            Some(Pane::Wallet(_)) => "Wallet",
             None => "Satori",
         }
     }
@@ -896,6 +924,8 @@ impl Render for Shell {
                         Pane::Settings(view) => view.clone().into_any_element(),
                         Pane::Article(view) => view.clone().into_any_element(),
                         Pane::Composer(view) => view.clone().into_any_element(),
+                        Pane::ZapSheet(view) => view.clone().into_any_element(),
+                        Pane::Wallet(view) => view.clone().into_any_element(),
                     })
                     .when(
                         self.feed_deep

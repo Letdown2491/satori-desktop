@@ -24,6 +24,10 @@ pub enum Nav {
     /// The lightbox overlay: full-screen image viewer (lightbox.rs), the
     /// URL list plus the starting index.
     OpenLightbox(Vec<String>, usize),
+    /// The zap amount sheet for a note (bolt long-press / right-click).
+    OpenZapSheet(Event),
+    /// The NWC wallet connect pane (D20).
+    OpenWallet,
     /// The feed crossed the deep-scroll threshold (or came back): the shell
     /// shows/hides the floating back-to-top whisper.
     FeedDeep(bool),

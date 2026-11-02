@@ -104,6 +104,17 @@ fn quote(b: &mut PathBuilder, g: &Grid) {
     b.line_to(g.p(13.5, 17.5));
 }
 
+// NIP-57: the bolt — feather zap, straight lines on the stroke grid.
+fn bolt(b: &mut PathBuilder, g: &Grid) {
+    b.move_to(g.p(13.0, 2.0));
+    b.line_to(g.p(3.0, 14.0));
+    b.line_to(g.p(12.0, 14.0));
+    b.line_to(g.p(11.0, 22.0));
+    b.line_to(g.p(21.0, 10.0));
+    b.line_to(g.p(12.0, 10.0));
+    b.close();
+}
+
 /// A stroke-drawn glyph on the 24-unit grid — the GPUI twin of a symbolic SVG.
 /// All outline, no fill, per the icon rule.
 pub fn icon(glyph: Glyph, color: u32, size_px: f32) -> impl IntoElement {
@@ -143,6 +154,11 @@ pub fn repost_icon(color: u32) -> impl IntoElement {
 
 pub fn quote_icon(color: u32) -> impl IntoElement {
     icon(quote, color, 17.0)
+}
+
+/// The zap bolt (NIP-57) — action-row size.
+pub fn bolt_icon(color: u32) -> impl IntoElement {
+    icon(bolt, color, 17.0)
 }
 
 /// Rail glyphs at rail size (icons.rs rail pass — the sidebar icons).

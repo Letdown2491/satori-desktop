@@ -15,6 +15,7 @@ use gpui::{
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, PublishEvent};
+use satori_core::wallet::{self, Status};
 
 use std::str::FromStr;
 
@@ -47,6 +48,9 @@ pub struct SettingsView {
     // Notifications: reactions behind the bell's pref (core reads it
     // per stream — applies the next time the stream opens).
     reaction_notifs: bool,
+    // Wallet (D20): mirrored status for the row (the broadcast is truth;
+    // the manage pane owns the detail).
+    wallet: Status,
     // Set when the sign-out row is clicked: the pane freezes on "Signing
     // out…" while the shell tears the session down (the whole view is
     // replaced by the login doors a beat later).
@@ -99,6 +103,7 @@ impl SettingsView {
             machine_hidden: satori_core::store::machine_notes_hidden(),
             hidden_kinds: prefs::content_hidden(),
             reaction_notifs: prefs::get_bool("reactionNotifs"),
+            wallet: core.wallet().status(),
             signing_out: false,
             me_name: None,
             status: String::new(),
@@ -106,6 +111,7 @@ impl SettingsView {
         };
         view.pump_feed(core.fetch_media_servers(), cx);
         view.pump_me(cx);
+        view.pump_wallet(cx);
         // The pane is a projection — bootstrap may still be landing the
         // NIP-65 (settings.rs catch-up poll: 30 × 800ms).
         cx.spawn(async move |this, cx| {
@@ -132,6 +138,29 @@ impl SettingsView {
     }
 
     // --- pumps --------------------------------------------------------------
+
+    /// The wallet broadcast → the Wallet row's status (one line; the
+    /// manage pane owns the detail).
+    fn pump_wallet(&self, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        let mut rx = self.core.subscribe_wallet();
+        cx.spawn(async move |_, cx| {
+            loop {
+                match rx.recv().await {
+                    Ok(wallet::WalletEvent::Status(s)) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.wallet = s;
+                            cx.notify();
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(_) => continue,
+                }
+            }
+        })
+        .detach();
+    }
 
     /// The signed-in profile's name for the Session row. The profiles
     /// service resolves a miss once, so retry like the rail avatar does —
@@ -715,6 +744,52 @@ impl Render for SettingsView {
                                 )
                                 .when(!self.signing_out, |d| d.child("Sign out")),
                         ),
+                ),
+            )
+            // --- Wallet (NWC zaps, D20) --------------------------------------
+            .child(
+                group(
+                    "Wallet",
+                    "Connect a lightning wallet (NIP-47) and the bolt on every note zaps.",
+                )
+                .child(
+                    div()
+                        .id("wallet-row")
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(13.0))
+                                .text_color(rgb(theme::ink()))
+                                .child(match &self.wallet {
+                                    Status::Disconnected => "No wallet connected".to_string(),
+                                    Status::Connecting => "Reaching the wallet…".to_string(),
+                                    Status::Ready(info) => {
+                                        let mut line = if info.alias.is_empty() {
+                                            "Wallet connected".to_string()
+                                        } else {
+                                            format!("Wallet connected — {}", info.alias)
+                                        };
+                                        if let Some(msat) = info.balance_msat {
+                                            line.push_str(&format!(" · {} sats", msat / 1000));
+                                        }
+                                        line
+                                    }
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(rgb(theme::vermilion()))
+                                .child("Manage"),
+                        )
+                        .on_click(cx.listener(|_this, _, _, cx| {
+                            cx.emit(Nav::OpenWallet);
+                        })),
                 ),
             )
             // --- Composing (the undo window) --------------------------------

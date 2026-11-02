@@ -12,13 +12,14 @@ use std::{
 };
 
 use gpui::{
-    div, list, prelude::*, px, relative, rgb, Context, Entity, EventEmitter, FontWeight,
-    ListAlignment,
-    ListOffset, ListScrollEvent, ListState, Render, SharedString, Window, Div,
+    div, list, prelude::*, px, relative, rgb, AnimationExt, Context, Entity, EventEmitter,
+    FontWeight, ListAlignment, ListOffset, ListScrollEvent, ListState, Render, SharedString,
+    Window, Div,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Live, ParentNote, Profile, PublishEvent};
 use satori_core::nip::nip10;
+use satori_core::wallet::{Status, WalletEvent};
 
 use crate::{icons, media, theme};
 use super::{content, nav::Nav, cards};
@@ -54,6 +55,12 @@ pub struct Feed {
     liked: HashSet<String>,
     bookmarked: HashSet<String>,
     reposted: HashSet<String>,
+    /// Own zaps (D20): note id → settled (the ledger mirrors in core) and
+    /// note id → in flight (optimistic — the amber bolt).
+    zapped: HashSet<String>,
+    zap_pending: HashSet<String>,
+    /// Whether the NWC wallet answers (the dim-bolt affordance).
+    wallet_ready: bool,
     quotes: content::Quotes,
     // Rich-card interaction state (cards.rs): poll tallies + ballots, and
     // my RSVP per calendar event.
@@ -95,6 +102,9 @@ struct FeedSnap {
     liked: std::sync::Arc<HashSet<String>>,
     bookmarked: std::sync::Arc<HashSet<String>>,
     reposted: std::sync::Arc<HashSet<String>>,
+    zapped: std::sync::Arc<HashSet<String>>,
+    zap_pending: std::sync::Arc<HashSet<String>>,
+    wallet_ready: bool,
     quotes: std::sync::Arc<content::Quotes>,
     cards: std::sync::Arc<cards::CardState>,
     media: std::sync::Arc<media::Snapshot>,
@@ -119,6 +129,9 @@ impl Feed {
             liked: core.liked_set(),
             bookmarked: core.bookmarked_set(),
             reposted: core.reposted_set(),
+            zapped: core.zapped_set(),
+            zap_pending: HashSet::new(),
+            wallet_ready: core.wallet().is_ready(),
             core,
             notes: vec![],
             profiles: HashMap::new(),
@@ -174,6 +187,22 @@ impl Feed {
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(_) => continue, // lagged: still true that there's news
+                }
+            }
+        })
+        .detach();
+        // The wallet broadcast (D20): bolt glyphs follow every zap —
+        // theirs or the sheet's — wherever it started.
+        let this = cx.entity().downgrade();
+        let mut wallet_rx = feed.core.subscribe_wallet();
+        cx.spawn(async move |_, cx| {
+            loop {
+                match wallet_rx.recv().await {
+                    Ok(ev) => {
+                        let _ = this.update(cx, |feed, cx| feed.on_wallet(ev, cx));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(_) => continue, // lagged: the next event re-syncs
                 }
             }
         })
@@ -563,6 +592,50 @@ impl Feed {
         media::fetch(&self.core, url, cx.entity_id(), cx);
     }
 
+    /// The bolt's tap: 21 sats, no dialog — the money rule. No wallet
+    /// behind it? The dim glyph opens the wallet pane instead. Errors and
+    /// settle flow back on the wallet broadcast (on_wallet).
+    fn zap_tap(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        if !self.wallet_ready {
+            cx.emit(Nav::OpenWallet);
+            return;
+        }
+        // One zap in flight per note (the Feather rule; core enforces too).
+        if !self.zap_pending.insert(ev.id.to_string()) {
+            return;
+        }
+        self.touch();
+        self.core.zap(ev.clone(), super::zap::TAP_SATS * 1000);
+        cx.notify();
+    }
+
+    /// The wallet broadcast → glyph states + the quiet status whisper.
+    fn on_wallet(&mut self, ev: WalletEvent, cx: &mut Context<Self>) {
+        match ev {
+            WalletEvent::Status(s) => {
+                self.wallet_ready = matches!(s, Status::Ready(_));
+            }
+            WalletEvent::ZapPaid { note, .. } => {
+                self.zap_pending.remove(&note);
+                self.zapped.insert(note);
+            }
+            WalletEvent::ZapUncertain { note, .. } => {
+                self.zap_pending.remove(&note);
+                self.status = "zap state unknown — check your wallet before retrying".into();
+            }
+            WalletEvent::ZapFailed { note, reason } => {
+                self.zap_pending.remove(&note);
+                self.status = format!("zap didn't go through: {reason}");
+            }
+            WalletEvent::ZapReceipt { note, .. } => {
+                self.zapped.insert(note);
+            }
+            WalletEvent::ConnectFailed(_) => {} // the wallet pane's concern
+        }
+        self.touch();
+        cx.notify();
+    }
+
     /// Optimistic like, per §1.2: mutate state first (glyph flips vermilion
     /// now), reconcile against core's publish events later.
     fn toggle_like(&mut self, ev: &Event) {
@@ -647,6 +720,9 @@ pub(crate) fn rel_time(secs: u64) -> String {
     }
 }
 
+/// How long a bolt press reads as "deliberate" (the sheet, not the tap).
+const ZAP_HOLD: std::time::Duration = std::time::Duration::from_millis(500);
+
 // The card takes the full render-time snapshot — one struct would hide the
 // shape, and GPUI's no-entity-reads-during-render rule makes them explicit.
 #[allow(clippy::too_many_arguments)]
@@ -658,6 +734,10 @@ fn note_card(
     liked: &HashSet<String>,
     bookmarked: &HashSet<String>,
     reposted: &HashSet<String>,
+    zapped: &HashSet<String>,
+    zap_pending: &HashSet<String>,
+    wallet_ready: bool,
+    reduced_motion: bool,
     media: &media::Snapshot,
     quotes: &content::Quotes,
     cards: &cards::CardState,
@@ -675,6 +755,8 @@ fn note_card(
     let engaged = liked.contains(&ev.id.to_string());
     let saved = bookmarked.contains(&ev.id.to_string());
     let shared = reposted.contains(&ev.id.to_string());
+    let zapped = zapped.contains(&ev.id.to_string());
+    let zapping = zap_pending.contains(&ev.id.to_string());
     let ev_for_open = ev.clone();
     let ev_for_profile = ev.clone();
     let ev_for_like = ev.clone();
@@ -682,6 +764,7 @@ fn note_card(
     let ev_for_reply = ev.clone();
     let ev_for_repost = ev.clone();
     let ev_for_quote = ev.clone();
+    let ev_for_zap = ev.clone();
     let handle_open = handle.clone();
     let handle_profile = handle.clone();
     let handle_like = handle.clone();
@@ -689,6 +772,7 @@ fn note_card(
     let handle_reply = handle.clone();
     let handle_repost = handle.clone();
     let handle_quote = handle.clone();
+    let handle_zap = handle.clone();
 
     // No card box: posts sit directly on the washi, separated by whitespace
     // alone (sumi-e — the empty space carries the composition).
@@ -798,6 +882,76 @@ fn note_card(
                             theme::muted()
                         })),
                 )
+                // The bolt (NIP-57, D20): tap = 21 sats, no dialog; hold
+                // (~500ms) or right-click = the amount sheet. No wallet
+                // behind the tap → the dim glyph opens the wallet pane.
+                // States: dim (no wallet) / muted (idle) / amber breathing
+                // (in flight) / vermilion (settled).
+                .child({
+                    let color = if zapping {
+                        theme::warn()
+                    } else if zapped {
+                        theme::vermilion()
+                    } else if !wallet_ready {
+                        theme::hairline()
+                    } else {
+                        theme::muted()
+                    };
+                    let start = std::rc::Rc::new(std::cell::Cell::new(
+                        Option::<std::time::Instant>::None,
+                    ));
+                    let bolt = div()
+                        .id(SharedString::from(format!("zap-{idx}")))
+                        .cursor_pointer()
+                        // Right-click opens the sheet at once.
+                        .on_mouse_down(gpui::MouseButton::Right, {
+                            let ev = ev_for_zap.clone();
+                            let handle = handle_zap.clone();
+                            move |_, _, cx| {
+                                handle.update(cx, |_, cx| cx.emit(Nav::OpenZapSheet(ev.clone())));
+                            }
+                        })
+                        // Left: remember when the press began; the release
+                        // decides tap vs hold (no timer machinery, the
+                        // decision is honest at release).
+                        .on_mouse_down(gpui::MouseButton::Left, {
+                            let start = start.clone();
+                            move |_, _, _| start.set(Some(std::time::Instant::now()))
+                        })
+                        .on_mouse_up(gpui::MouseButton::Left, {
+                            let start = start.clone();
+                            let ev = ev_for_zap.clone();
+                            let handle = handle_zap.clone();
+                            move |_, _, cx| {
+                                let Some(t0) = start.get() else { return };
+                                start.set(None);
+                                let held = t0.elapsed() >= ZAP_HOLD;
+                                handle.update(cx, |feed, cx| {
+                                    if held {
+                                        cx.emit(Nav::OpenZapSheet(ev.clone()));
+                                    } else {
+                                        feed.zap_tap(&ev, cx);
+                                    }
+                                });
+                            }
+                        })
+                        .child(icons::bolt_icon(color));
+                    // In flight and motion allowed: breathe (a slow opacity
+                    // triangle — payment pending, nothing more).
+                    if zapping && !reduced_motion {
+                        bolt.with_animation(
+                            SharedString::from(format!("zap-pulse-{idx}")),
+                            gpui::Animation::new(std::time::Duration::from_millis(900)).repeat(),
+                            |el, delta| el.opacity(0.55 - 0.25 * (2.0 * delta - 1.0).abs()),
+                        )
+                        .into_any_element()
+                    } else if zapping {
+                        // Reduced motion: a steady mid-amber, no pulsing.
+                        div().opacity(0.7).child(bolt).into_any_element()
+                    } else {
+                        bolt.into_any_element()
+                    }
+                })
                 .child(
                     div()
                         .id(SharedString::from(format!("repost-{idx}")))
@@ -851,6 +1005,9 @@ impl Render for Feed {
         // and there are many, since every view notify repaints the shell —
         // just bump refcounts.
         let media_epoch = media::generation(cx);
+        // The pending bolt's breathing honors the desktop's motion pref
+        // (desktop.rs: the portal's prefers-reduced-motion).
+        let reduced_motion = crate::desktop::Desktop::get(cx).reduced_motion;
         let stale = self.snap_dirty
             || self.snap.as_ref().is_none_or(|s| s.media_epoch != media_epoch);
         if stale {
@@ -861,6 +1018,9 @@ impl Render for Feed {
                 liked: std::sync::Arc::new(self.liked.clone()),
                 bookmarked: std::sync::Arc::new(self.bookmarked.clone()),
                 reposted: std::sync::Arc::new(self.reposted.clone()),
+                zapped: std::sync::Arc::new(self.zapped.clone()),
+                zap_pending: std::sync::Arc::new(self.zap_pending.clone()),
+                wallet_ready: self.wallet_ready,
                 quotes: std::sync::Arc::new(self.quotes.clone()),
                 cards: std::sync::Arc::new(cards::CardState {
                     poll_tallies: self.poll_tallies.clone(),
@@ -960,6 +1120,9 @@ impl Render for Feed {
                         let liked = snap.liked.clone();
                         let reposted = snap.reposted.clone();
                         let bookmarked = snap.bookmarked.clone();
+                        let zapped = snap.zapped.clone();
+                        let zap_pending = snap.zap_pending.clone();
+                        let wallet_ready = snap.wallet_ready;
                         let quotes = snap.quotes.clone();
                         let cards = snap.cards.clone();
                         let media = snap.media.clone();
@@ -987,7 +1150,8 @@ impl Render for Feed {
                                 .into_any_element(),
                                 Some(ev) => note_card(
                                     idx, ev, &profiles, &parents, &liked, &bookmarked,
-                                    &reposted, &media,
+                                    &reposted, &zapped, &zap_pending, wallet_ready,
+                                    reduced_motion, &media,
                                     &quotes, &cards, handle.clone(),
                                 )
                                 .into_any_element(),

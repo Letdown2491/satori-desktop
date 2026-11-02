@@ -484,8 +484,12 @@ impl Core {
     pub fn zap(self: &Arc<Self>, note: Event, msat: u64) -> WalletResultRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
+        let w = Arc::clone(&self.wallet);
         self.rt.spawn(async move {
             if let Err(e) = this.zap_inner(&note, msat, &tx).await {
+                // Early failures never reach pay_stored's own emit — the
+                // feed's whisper still needs to hear them.
+                w.emit(e.clone());
                 let _ = tx.send(e);
             }
         });
@@ -498,8 +502,10 @@ impl Core {
     pub fn retry_zap(self: &Arc<Self>, note: String) -> WalletResultRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
+        let w = Arc::clone(&self.wallet);
         self.rt.spawn(async move {
             if let Err(e) = this.retry_inner(note, &tx).await {
+                w.emit(e.clone());
                 let _ = tx.send(e);
             }
         });
