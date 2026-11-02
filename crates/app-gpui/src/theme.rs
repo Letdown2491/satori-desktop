@@ -111,8 +111,14 @@ pub fn watch<V: 'static>(cx: &mut gpui::Context<V>) {
 // §fonts — host fontconfig fallbacks until the bundled OFL serif (D9) is
 // embedded and registered via `cx.text_system().add_fonts`. A missing family
 // fails silently to a default — check rendering after font changes.
-// P052: the Palatino face — a book serif with a big x-height, ink on washi
-// (was Nimbus Roman, a Times clone that read cramped at body sizes).
-pub const SANS: &str = "Cantarell";
-pub const SERIF: &str = "P052";
+// Crispness pass (owner report: text reads soft): gpui's Linux rasterizer
+// (cosmic-text/swash) is unhinted grayscale-only — softer than the
+// hinting + subpixel AA GTK apps get — so the faces have to carry the
+// sharpness. Adwaita Sans: the GNOME UI face, Inter-derived, sturdier than
+// Cantarell at scale-1.0 sizes. C059: the Century Schoolbook clone — thick
+// hairlines and a big x-height, made for legibility (P052's Palatino
+// hairlines were what grayscale AA ate first; Nimbus Roman before that read
+// cramped at body sizes).
+pub const SANS: &str = "Adwaita Sans";
+pub const SERIF: &str = "C059";
 pub const MONO: &str = "Noto Sans Mono";
