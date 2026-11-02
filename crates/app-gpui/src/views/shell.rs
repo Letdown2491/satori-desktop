@@ -877,7 +877,11 @@ impl Shell {
                 shell.pane_to_top(cx);
                 cx.notify();
             }))
-            .child(icons::arrow_up_icon(theme::muted()))
+            // The arrow in vermilion: the button's washi-on-washi surfaces
+            // are quiet by design, but a quiet GLYPH reads as furniture —
+            // the affordance lives in the color pop (the one loud accent
+            // the theme reserves for attention).
+            .child(icons::arrow_up_icon(theme::vermilion()))
     }
 }
 
