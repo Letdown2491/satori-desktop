@@ -335,13 +335,25 @@ impl Render for ArticleView {
             .get(&author_pk.to_string())
             .map(|p| p.picture.clone())
             .unwrap_or_default();
-        // Evicted media comes back on render (fetch is a silent no-op for
-        // entries the cache still holds): the byline avatar and the cover.
+        // Evicted media comes back on render (thread.rs render, same
+        // shape — fetch is a silent no-op for entries the cache holds, and
+        // only a landing notifies, so no render loop): the byline avatar,
+        // the cover, and every body image. A long read outlives the
+        // cache's photo budget; without the sweep an evicted mid-article
+        // image stayed dark for good (want_media only ran at construction).
         if !author_pic.is_empty() {
             media::fetch(&self.core, author_pic.clone(), cx.entity_id(), cx);
         }
         if let Some(url) = content::article_cover(&self.ev) {
             media::fetch(&self.core, url, cx.entity_id(), cx);
+        }
+        for url in content::media_urls(&self.ev) {
+            media::fetch(&self.core, url, cx.entity_id(), cx);
+        }
+        for block in markdown::blocks(&self.ev.content) {
+            if let markdown::Block::Image { url } = block {
+                media::fetch(&self.core, url, cx.entity_id(), cx);
+            }
         }
         // Mode-aware stamp; ensure refines Block mode from the bridge
         // (render-path spawns are silent no-ops when cached — media.rs's

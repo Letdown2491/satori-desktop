@@ -473,12 +473,25 @@ impl Render for NotificationsView {
         let rows = self.rows.clone();
         let profiles = self.profiles.clone();
         let media = media::Snapshot::new(cx);
-        // Evicted avatars come back on render — notifications are bounded
-        // content, so sweep the rows' authors (fetch is a silent no-op for
-        // entries the cache still holds).
+        // Evicted media comes back on render — a notifications page is
+        // bounded content, so sweep everything it paints (thread.rs render,
+        // same shape): the rows' authors AND the notes' own media. The
+        // sweep matters: want_media only runs at rebuild, and once the
+        // cache evicted a note's image under feed-photo pressure NOTHING
+        // asked again — the tile went dark mid-session (owner: the image
+        // "first loads, then disappears"). fetch is a silent no-op for
+        // entries the cache holds; only a landing notifies, so this can't
+        // loop a render.
         let viewer = cx.entity_id();
         for p in self.profiles.values() {
             media::fetch(&self.core, p.picture.clone(), viewer, cx);
+        }
+        for row in &self.rows {
+            if let Row::Note(ev, _) = row {
+                for url in content::media_urls(ev) {
+                    media::fetch(&self.core, url, viewer, cx);
+                }
+            }
         }
         let quotes = self.quotes.clone();
         let parents = self.parents.clone();
