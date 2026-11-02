@@ -10,7 +10,7 @@
 
 use std::{collections::HashMap, hash::{Hash, Hasher}};
 
-use gpui::{div, img, prelude::*, px, relative, rgb, AnyElement, Div, Entity, EventEmitter, FontWeight, ObjectFit, SharedString};
+use gpui::{div, img, prelude::*, px, relative, rgb, AnimationExt, AnyElement, Div, Entity, EventEmitter, FontWeight, ObjectFit, SharedString};
 use nostr::prelude::*;
 use satori_core::manager::Profile;
 use satori_core::nip::article;
@@ -355,6 +355,10 @@ pub(crate) fn token_el<V: EventEmitter<Nav> + 'static>(
             .line_height(relative(1.2))
             .text_color(rgb(theme::muted()))
             .underline()
+            // One link system for every token: quiet muted ink at rest,
+            // the seal color on hover — the same lift everywhere a click
+            // would leave the note.
+            .hover(|s| s.text_color(rgb(theme::vermilion())))
     };
     match tok {
         Tok::Word(w) => word(if punct.is_empty() { w } else { format!("{w}{punct}") }).into_any_element(),
@@ -520,6 +524,7 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
                     .cursor_pointer()
                     .text_size(px(13.5))
                     .text_color(rgb(theme::muted()))
+                    .hover(|s| s.text_color(rgb(theme::vermilion())))
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
                         seg_handle.update(cx, |_, cx| cx.emit(Nav::OpenProfile(pk)));
@@ -580,6 +585,7 @@ pub(crate) fn link_row(url: &str) -> AnyElement {
         .text_size(px(13.5))
         .text_color(rgb(theme::muted()))
         .underline()
+        .hover(|s| s.text_color(rgb(theme::vermilion())))
         .on_click(move |_, _, cx| cx.open_url(&target))
         .child(display_url(url))
         .into_any_element()
@@ -660,6 +666,7 @@ fn video_tile(
                             .cursor_pointer()
                             .text_size(px(13.0))
                             .text_color(rgb(theme::muted()))
+                            .hover(|s| s.text_color(rgb(theme::ink())))
                             .on_click(|_, _, cx| {
                                 cx.stop_propagation();
                                 crate::video::close(cx);
@@ -672,6 +679,7 @@ fn video_tile(
                             .cursor_pointer()
                             .text_size(px(13.0))
                             .text_color(rgb(theme::muted()))
+                            .hover(|s| s.text_color(rgb(theme::ink())))
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
                                 cx.open_url(&browser_target);
@@ -681,6 +689,31 @@ fn video_tile(
             )
             .into_any_element();
     }
+
+    // Opening: the pipeline is building (Video::new can take seconds). The
+    // tile stays exactly what it was, but the play mark breathes — the tap
+    // acknowledged without a spinner widget, honoring the motion pref like
+    // the zap bolt does (sumi-e: one living mark, no chrome).
+    let opening_now = crate::video::opening(url);
+    let reduced = crate::desktop::reduced_motion();
+    let play_mark = |size: f32| -> gpui::AnyElement {
+        let mark = div()
+            .text_size(px(size))
+            .text_color(rgb(theme::vermilion()))
+            .child("▶");
+        if !opening_now {
+            mark.into_any_element()
+        } else if reduced {
+            div().opacity(0.6).child(mark).into_any_element()
+        } else {
+            mark.with_animation(
+                seg_id("video-opening", url),
+                gpui::Animation::new(std::time::Duration::from_millis(1400)).repeat(),
+                |el, delta| el.opacity(0.65 - 0.3 * (2.0 * delta - 1.0).abs()),
+            )
+            .into_any_element()
+        }
+    };
 
     let frame = div()
         .id(seg_id("video-tile", url))
@@ -715,8 +748,7 @@ fn video_tile(
                             .items_center()
                             .justify_center()
                             .text_size(px(30.0))
-                            .text_color(rgb(theme::vermilion()))
-                            .child("▶"),
+                            .child(play_mark(30.0)),
                     ),
             )
             .into_any_element(),
@@ -728,18 +760,18 @@ fn video_tile(
                     .items_center()
                     .justify_center()
                     .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(18.0))
-                            .text_color(rgb(theme::vermilion()))
-                            .child("▶"),
-                    )
+                    .child(play_mark(18.0))
                     .child(
                         div()
                             .text_size(px(12.0))
                             .text_color(rgb(theme::muted()))
                             .underline()
-                            .child(display_url(url)),
+                            .hover(|s| s.text_color(rgb(theme::vermilion())))
+                            .child(if opening_now {
+                                "opening…".to_string()
+                            } else {
+                                display_url(url)
+                            }),
                     ),
             )
             .into_any_element(),
@@ -944,14 +976,10 @@ fn embed_card<V: EventEmitter<Nav> + 'static>(
     handle: Entity<V>,
 ) -> AnyElement {
     let id = e.event.id;
-    let mut text = e.event.content.clone();
-    if text.len() > 160 {
-        let mut cut = 160;
-        while !e.event.content.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        text = format!("{}…", &e.event.content[..cut]);
-    }
+    // The preview reads as text only — URLs never do (a raw blossom link
+    // used to leak into the serif line as “https//…” noise; core's
+    // plain_snippet drops them the way the whisper does).
+    let text = satori_core::manager::plain_snippet(&e.event.content, 160);
     div()
         .id(seg_id("embed", bech))
         .cursor_pointer()
@@ -963,6 +991,7 @@ fn embed_card<V: EventEmitter<Nav> + 'static>(
         .py_1()
         .border_l_2()
         .border_color(rgb(theme::hairline()))
+        .hover(|s| s.border_color(rgb(theme::vermilion())))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             handle.update(cx, |_, cx| cx.emit(Nav::OpenThread(id)))

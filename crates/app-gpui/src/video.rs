@@ -31,6 +31,11 @@ struct Player {
 
 static ACTIVE: RwLock<Option<Player>> = RwLock::new(None);
 
+/// A player that has been asked for but hasn't finished building (Video::new
+/// blocks up to ~5s on the pipeline's caps) — the tile renders a breathing
+/// play mark instead of sitting dead-silent between tap and first frame.
+static OPENING: RwLock<Option<String>> = RwLock::new(None);
+
 /// The wake-up global (theme.rs ThemeSignal pattern): set when the player
 /// opens/toggles/closes — every video-bearing view observes it and
 /// repaints poster ↔ player.
@@ -50,6 +55,15 @@ pub fn active(url: &str) -> Option<Video> {
     let guard = ACTIVE.read().ok()?;
     let p = guard.as_ref()?;
     (p.url == url).then(|| p.video.clone())
+}
+
+/// Is a player for `url` still being built? (The tile's breathing state.)
+pub fn opening(url: &str) -> bool {
+    OPENING
+        .read()
+        .ok()
+        .map(|g| g.as_deref() == Some(url))
+        .unwrap_or(false)
 }
 
 /// Can this video play inline (Phase 3 §5)? Video by extension or imeta
@@ -76,6 +90,16 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
         cx.open_url(&url);
         return;
     };
+    // Already open or opening — a second tap on the same tile is a no-op,
+    // not a second pipeline.
+    if active(&url).is_some() || opening(&url) {
+        return;
+    }
+    // The tile breathes while the pipeline builds (Signal wakes the views).
+    if let Ok(mut g) = OPENING.write() {
+        *g = Some(url.clone());
+    }
+    cx.set_global(Signal);
     // Video::new blocks up to ~5s (playbin state + caps) — the background
     // executor, never the UI thread.
     cx.spawn(async move |cx| {
@@ -83,28 +107,36 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
             .background_executor()
             .spawn(async move { Video::new(&parsed) })
             .await;
-        let _ = cx.update(|cx| match res {
-            Ok(video) => {
-                // One player per process: a replaced player's Drop joins
-                // its worker — defer that off the UI thread.
-                let old = {
-                    let mut guard = match ACTIVE.write() {
-                        Ok(g) => g,
-                        Err(_) => return,
-                    };
-                    guard.replace(Player {
-                        url: url.clone(),
-                        video,
-                    })
-                };
-                if let Some(old) = old {
-                    std::thread::spawn(move || drop(old));
-                }
-                cx.set_global(Signal);
+        let _ = cx.update(|cx| {
+            // Whatever the outcome, the wait is over.
+            if let Ok(mut g) = OPENING.write()
+                && g.as_deref() == Some(&url)
+            {
+                *g = None;
             }
-            // The pipeline failed (missing plugins, dead URL): the honest
-            // fallback is the browser — the pre-Phase-3 behavior.
-            Err(_) => cx.open_url(&url),
+            match res {
+                Ok(video) => {
+                    // One player per process: a replaced player's Drop joins
+                    // its worker — defer that off the UI thread.
+                    let old = {
+                        let mut guard = match ACTIVE.write() {
+                            Ok(g) => g,
+                            Err(_) => return,
+                        };
+                        guard.replace(Player {
+                            url: url.clone(),
+                            video,
+                        })
+                    };
+                    if let Some(old) = old {
+                        std::thread::spawn(move || drop(old));
+                    }
+                }
+                // The pipeline failed (missing plugins, dead URL): the honest
+                // fallback is the browser — the pre-Phase-3 behavior.
+                Err(_) => cx.open_url(&url),
+            }
+            cx.set_global(Signal);
         });
     })
     .detach();

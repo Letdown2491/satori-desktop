@@ -350,7 +350,22 @@ impl Feed {
             FeedEvent::Parents(p) => {
                 // Height-changing patches (the whisper appears) — the list
                 // re-measures; no reset, the anchor survives small shifts.
+                // The whisper's NAME resolves through the same profile map
+                // as the header — but only note authors and mentions were
+                // ever asked for, so every reply whisper fell back to raw
+                // hex forever. Ask for the parent authors we can't name.
+                let mut seen = HashSet::new();
+                let missing: Vec<PublicKey> = p
+                    .values()
+                    .map(|pn| pn.author.clone())
+                    .filter(|a| !self.profiles.contains_key(a) && seen.insert(a.clone()))
+                    .filter_map(|a| PublicKey::from_hex(&a).ok())
+                    .collect();
                 self.parents.extend(p);
+                if !missing.is_empty() {
+                    let rx = self.core.ensure_profiles(missing);
+                    self.pump(rx, cx);
+                }
                 cx.notify();
             }
             FeedEvent::Failed(e) => {
@@ -835,6 +850,7 @@ fn note_card(
                         .cursor_pointer()
                         .text_size(px(12.0))
                         .text_color(rgb(theme::muted()))
+                        .hover(|s| s.text_color(rgb(theme::ink())))
                         .on_click(|_, _, cx| crate::timefmt::cycle(cx))
                         .child(time),
                 ),
@@ -892,6 +908,7 @@ fn note_card(
                                 cx.emit(Nav::OpenComposer(Some(ev)));
                             });
                         })
+                        .hover(|s| s.opacity(0.72))
                         .child(icons::bubble_icon(theme::muted())),
                 )
                 .child(
@@ -902,6 +919,7 @@ fn note_card(
                             let ev = ev_for_like.clone();
                             handle_like.update(cx, |feed, _| feed.toggle_like(&ev));
                         })
+                        .hover(|s| s.opacity(0.72))
                         .child(icons::heart_icon(if engaged {
                             theme::vermilion()
                         } else {
@@ -929,6 +947,7 @@ fn note_card(
                     let bolt = div()
                         .id(SharedString::from(format!("zap-{idx}")))
                         .cursor_pointer()
+                        .hover(|s| s.opacity(0.72))
                         // Right-click opens the sheet at once.
                         .on_mouse_down(gpui::MouseButton::Right, {
                             let ev = ev_for_zap.clone();
@@ -986,6 +1005,7 @@ fn note_card(
                             let ev = ev_for_repost.clone();
                             handle_repost.update(cx, |feed, cx| feed.toggle_repost(&ev, cx));
                         })
+                        .hover(|s| s.opacity(0.72))
                         .child(icons::repost_icon(if shared {
                             theme::vermilion()
                         } else {
@@ -1002,6 +1022,7 @@ fn note_card(
                                 cx.emit(Nav::OpenQuote(ev));
                             });
                         })
+                        .hover(|s| s.opacity(0.72))
                         .child(icons::quote_icon(theme::muted())),
                 )
                 .child(
@@ -1012,6 +1033,7 @@ fn note_card(
                             let ev = ev_for_bookmark.clone();
                             handle_bookmark.update(cx, |feed, cx| feed.toggle_bookmark(&ev, cx));
                         })
+                        .hover(|s| s.opacity(0.72))
                         .child(icons::bookmark_icon(if saved {
                             theme::vermilion()
                         } else {
@@ -1299,6 +1321,7 @@ fn repost_card(
                         .cursor_pointer()
                         .text_size(px(12.0))
                         .text_color(rgb(theme::muted()))
+                        .hover(|s| s.text_color(rgb(theme::ink())))
                         .on_click(|_, _, cx| crate::timefmt::cycle(cx))
                         .child(format!("{name} boosted · {time}")),
                 ),
@@ -1352,12 +1375,13 @@ fn reply_whisper(
     }
     let (parent_id, _relays) = nip10::reply_parent(ev)?;
     let parent = parents.get(&parent_id);
-    let name = parent.as_ref().map(|p| {
-        profiles
-            .get(&p.author)
-            .map(|pr| pr.display())
-            .unwrap_or_else(|| format!("{}…", &p.author[..8]))
-    });
+    // The name waits for the parent author's profile (the Parents event
+    // hydrates it — see on_event); while it's away the whisper stays
+    // quiet "↳ reply" — raw hex was never text anyone reads.
+    let name = parent
+        .as_ref()
+        .and_then(|p| profiles.get(&p.author))
+        .map(|pr| pr.display());
     let snippet = parent.and_then(|p| (!p.snippet.is_empty()).then(|| p.snippet.clone()));
     let parent_for_open = parent_id.clone();
     let handle = handle.clone();
@@ -1380,36 +1404,39 @@ fn reply_whisper(
             // Two voices, no box: the addressed name in ink, the parent's
             // words in serif italic beneath — the quoted speaker gets their
             // own texture (sumi-e: whitespace and weight, not rules).
-            .children(match (&name, &snippet) {
-                (Some(name), Some(snippet)) => vec![
-                    div()
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::ink()))
-                        .child(format!("↳ replying to {name}")),
-                    div()
-                        .font_family(theme::SERIF)
-                        .italic()
-                        .text_size(px(12.5))
-                        .text_color(rgb(theme::muted()))
-                        .child(snippet.clone()),
-                ]
-                .into_iter()
-                .map(|d| d.into_any_element())
-                .collect::<Vec<_>>(),
-                (Some(name), None) => {
-                    vec![div()
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::ink()))
-                        .child(format!("↳ replying to {name}"))
-                        .into_any_element()]
+            .children({
+                let mut rows: Vec<gpui::AnyElement> = Vec::new();
+                match &name {
+                    Some(name) => rows.push(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme::ink()))
+                            .child(format!("↳ replying to {name}"))
+                            .into_any_element(),
+                    ),
+                    None => rows.push(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(theme::muted()))
+                            .child("↳ reply")
+                            .into_any_element(),
+                    ),
                 }
-                _ => vec![div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(theme::muted()))
-                    .child("↳ reply")
-                    .into_any_element()],
+                if let Some(snippet) = snippet {
+                    // Even before the name lands, the parent's own words
+                    // are worth their line.
+                    rows.push(
+                        div()
+                            .font_family(theme::SERIF)
+                            .italic()
+                            .text_size(px(12.5))
+                            .text_color(rgb(theme::muted()))
+                            .child(snippet.clone())
+                            .into_any_element(),
+                    );
+                }
+                rows
             })
             .into_any_element(),
     )
@@ -1417,7 +1444,8 @@ fn reply_whisper(
 
 /// The list's last row: the round-trip note while paging, the caught-up seal
 /// when the relays remember nothing older (the GTK app's caught_up box), and
-/// nothing visible while more pages wait quietly.
+/// nothing visible while more pages wait quietly. The seal wears a short
+/// hairline — the boundary is felt, not announced.
 fn end_cap(paging: bool, more: bool) -> Div {
     let words = if paging {
         "… fetching older posts"
@@ -1426,17 +1454,24 @@ fn end_cap(paging: bool, more: bool) -> Div {
     } else {
         "Caught up."
     };
-    div()
+    let mut cap = div()
         .w_full()
         .py_4()
         .flex()
-        .justify_center()
-        .child(
-            div()
-                .font_family(theme::SERIF)
-                .text_size(px(13.0))
-                .line_height(relative(1.2))
-                .text_color(rgb(theme::muted()))
-                .child(words.to_string()),
-        )
+        .flex_col()
+        .items_center()
+        .gap_2();
+    if !words.is_empty() {
+        cap = cap
+            .child(div().w(px(48.)).border_t_1().border_color(rgb(theme::hairline())))
+            .child(
+                div()
+                    .font_family(theme::SERIF)
+                    .text_size(px(13.0))
+                    .line_height(relative(1.2))
+                    .text_color(rgb(theme::muted()))
+                    .child(words.to_string()),
+            );
+    }
+    cap
 }

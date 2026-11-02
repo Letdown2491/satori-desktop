@@ -170,20 +170,25 @@ pub struct ParentNote {
     pub snippet: String,
 }
 
-/// Plain-text one-liner: whitespace collapsed, `nostr:` refs ellipsized,
-/// capped at ~140 chars.
-fn parent_snippet(content: &str) -> String {
+/// Plain-text one-liner for previews: whitespace collapsed, `nostr:` refs
+/// ellipsized, URLs dropped entirely (they never read as text — mangled
+/// “https//…” tails in a whisper or quote preview were pure noise; links get
+/// their own row/embed), capped at `cap` chars. Shared by the reply whisper
+/// (load_parents) and quote embeds (content.rs embed_card).
+pub fn plain_snippet(content: &str, cap: usize) -> String {
     let mut words: Vec<&str> = Vec::new();
     for w in content.split_whitespace() {
         if w.starts_with("nostr:") {
             words.push("…");
+        } else if w.starts_with("https://") || w.starts_with("http://") {
+            continue;
         } else {
             words.push(w);
         }
     }
     let mut s = words.join(" ");
-    if s.chars().count() > 140 {
-        s = s.chars().take(140).collect::<String>() + "…";
+    if s.chars().count() > cap {
+        s = s.chars().take(cap).collect::<String>() + "…";
     }
     s
 }
@@ -282,6 +287,10 @@ impl Core {
             .enable_all()
             .build()
             .expect("tokio runtime");
+        // One-time media-cache migration: the pre-polish cache could hold
+        // poisoned files (bytes written before decode validated them); the
+        // versioned dir starts clean, the legacy dir goes (media.rs).
+        rt.spawn(async { crate::media::purge_legacy_cache(); });
         let blocktime = Arc::new(Blocktime::new(rt.handle().clone()));
         Self {
             rt,
@@ -426,14 +435,18 @@ impl Core {
     }
 
     /// Fetch (and cache) an image — SSRF-guarded, sha256-keyed (media.rs).
-    /// Resolves with raw RGBA8 pixels + dimensions, or None on failure.
+    /// The outcome carries the failure KIND: Transient failures cool off and
+    /// get another look in the UI; NotMedia is a verdict (the bytes arrived
+    /// whole and are not an image).
     pub fn fetch_image(
         self: &Arc<Self>,
         url: String,
-    ) -> mpsc::UnboundedReceiver<Option<crate::media::DecodedImage>> {
+    ) -> mpsc::UnboundedReceiver<
+        std::result::Result<crate::media::DecodedImage, crate::media::MediaError>,
+    > {
         let (tx, rx) = mpsc::unbounded_channel();
         self.rt.spawn(async move {
-            let res = crate::media::fetch_image(&url).await.ok();
+            let res = crate::media::fetch_image(&url).await;
             let _ = tx.send(res);
         });
         rx
@@ -2337,7 +2350,7 @@ impl Core {
                     events.extend(fetched);
                 }
                 for ev in events {
-                    let snippet = parent_snippet(&ev.content);
+                    let snippet = plain_snippet(&ev.content, 140);
                     resolved.insert(
                         ev.id.to_string(),
                         ParentNote { author: ev.pubkey.to_string(), snippet },

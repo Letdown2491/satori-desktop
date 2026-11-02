@@ -19,6 +19,16 @@ pub struct Desktop {
 
 impl Global for Desktop {}
 
+/// Mirror of `Desktop.reduced_motion` set at probe time — a cx-less read for
+/// render helpers that have no App (video.rs's breathing glyphs; the same
+/// pattern as prefs::privacy_mode). The probe runs once, before the window.
+static REDUCED_MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The portal's prefers-reduced-motion, without an App.
+pub fn reduced_motion() -> bool {
+    REDUCED_MOTION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Desktop {
     pub fn get(cx: &App) -> &Desktop {
         cx.global::<Desktop>()
@@ -52,5 +62,6 @@ fn read_one(name: &str) -> Option<u32> {
 pub fn probe() -> Desktop {
     let dark = read_one("color-scheme").map(|v| v == 1);
     let reduced_motion = read_one("prefers-reduced-motion") == Some(1);
+    REDUCED_MOTION.store(reduced_motion, std::sync::atomic::Ordering::Relaxed);
     Desktop { dark, reduced_motion }
 }
