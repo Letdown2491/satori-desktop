@@ -669,9 +669,14 @@ impl Shell {
             _ => (String::new(), "You".to_string()),
         };
         // The rail avatar comes back if the cache evicted it (silent no-op
-        // when the cache still holds it).
+        // when the cache still holds it). Pin it too: the shell only
+        // re-renders on events, so while the feed idles or scrolls the
+        // LRU touch freezes and the grace expires — photo pressure then
+        // flashed the avatar to the ink initial and refetched, repeating.
+        // Pinned, eviction skips it for the session.
         if !me_pic.is_empty() {
             media::fetch(&self.core, me_pic.clone(), cx.entity_id(), cx);
+            media::pin(&me_pic, cx);
         }
         let me_avatar =
             media::avatar(self.rail_snap.as_ref().unwrap(), &me_pic, &me_name, 26.0);

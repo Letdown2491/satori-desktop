@@ -148,6 +148,13 @@ pub struct Cache {
     /// Last fetch-or-landing per URL — the eviction grace window's clock
     /// (the deque is the recency ORDER; this is the recency TIME).
     touched: std::cell::RefCell<HashMap<String, Instant>>,
+    /// URLs (and their disc-thumb keys) pinned against eviction: the
+    /// always-on-screen images. The rail avatar's LRU touch only refreshes
+    /// when the shell re-renders — never while the feed idles or scrolls —
+    /// so its grace expires and photo pressure flashed it initial →
+    /// photo → initial for the whole scroll. Pinned entries survive every
+    /// sweep, desperate included; they are thumb-class by policy.
+    pinned: std::cell::RefCell<std::collections::HashSet<String>>,
     bytes: std::cell::Cell<u64>,
     epoch: std::cell::Cell<u64>,
 }
@@ -157,6 +164,7 @@ impl Default for Cache {
             map: std::cell::RefCell::new(HashMap::new()),
             order: std::cell::RefCell::new(std::collections::VecDeque::new()),
             touched: std::cell::RefCell::new(HashMap::new()),
+            pinned: std::cell::RefCell::new(std::collections::HashSet::new()),
             bytes: std::cell::Cell::new(0),
             epoch: std::cell::Cell::new(0),
         }
@@ -167,17 +175,17 @@ impl gpui::Global for Cache {}
 /// Decoded-entry caps, by size class. BIG (photos, articles' covers —
 /// anything decoding over SMALL_DECODED_MAX) lives under the main budget:
 /// 128 images / 96MB of decoded RGBA. SMALL (avatars, disc thumbs — 128px
-/// is ~64KB) has its own budget (256 / 16MB) so photo pressure can NEVER
+/// is ~64KB) has its own budget (1024 / 64MB) so photo pressure can NEVER
 /// evict them: an avatar is painted on many surfaces at once (the rail,
-/// every visible row) and its re-decode flashes visibly; 16MB of thumbs
+/// every visible row) and its re-decode flashes visibly; 64MB of thumbs
 /// does not compete with the 96MB photo budget. (The disk cache is the
 /// real reservoir; eviction only costs a re-decode on scroll-back.)
 const BIG_MAX_ENTRIES: usize = 128;
 const BIG_MAX_BYTES: u64 = 96 * 1024 * 1024;
 /// A Ready entry decoding over this many bytes (w·h·4) is big class.
 const SMALL_DECODED_MAX: u64 = 256 * 1024;
-const SMALL_MAX_ENTRIES: usize = 256;
-const SMALL_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const SMALL_MAX_ENTRIES: usize = 1024;
+const SMALL_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Eviction grace: entries fetched/touched within this window are
 /// immune, even over budget. Eviction runs INSIDE a landing's update —
@@ -189,12 +197,28 @@ const SMALL_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// refetch flicker. Grace makes visible images un-evictable; the
 /// overshoot is bounded by the in-flight window and collected at the
 /// next landing once the burst goes stale.
-const EVICT_GRACE: Duration = Duration::from_secs(10);
+///
+/// 120s, not 10s: an idle pane stops rendering, and only renders touch —
+/// its on-screen images age past a short grace and become the permanent
+/// victims of every landing (the search pane's People rows blinked on
+/// each feed landing while the pane sat unrendered). Two quiet minutes
+/// covers any idle a user sits in; the caps and the desperate valve
+/// below still bound memory.
+const EVICT_GRACE: Duration = Duration::from_secs(120);
 /// Safety valve: past double budget the grace is ignored (a pathological
 /// burst can hold everything fresh for a while; memory must stay bounded).
 const EVICT_DESPERATE_BYTES: u64 = 2 * BIG_MAX_BYTES;
 
 impl Cache {
+    /// Unpin urls (and their disc-thumb keys) — `unpin`'s App-less core.
+    fn unpin_urls(&self, urls: &[String]) {
+        let mut pinned = self.pinned.borrow_mut();
+        for url in urls {
+            pinned.remove(url.as_str());
+            pinned.remove(&thumb_key(url));
+        }
+    }
+
     /// Least-recently-used-first eviction past the caps, per size class.
     /// Loading entries rotate to the back (they're transient);
     /// Ready/NotMedia/Failed drop. Bounded passes. Takes cx: gpui's own
@@ -231,6 +255,12 @@ impl Cache {
             {
                 let order = self.order.borrow();
                 for url in order.iter() {
+                    if self.pinned.borrow().contains(url) {
+                        // Pinned: on screen for the session, never a victim
+                        // (the rail avatar's touch freezes while the shell
+                        // idles — the grace window can't protect it).
+                        continue;
+                    }
                     let class = {
                         let map = self.map.borrow();
                         match map.get(url) {
@@ -365,6 +395,32 @@ const THUMB_DIMS: (u32, u32) = (128, 128);
 /// An evicted URL re-enters through the disk cache — a cheap background
 /// re-decode. (Eviction is the RAM budget working; THIS is what brings
 /// evicted avatars and pictures back when they're seen again.)
+/// Pin an always-on-screen image (and its disc thumb) against eviction.
+/// For the rail avatar: the shell only re-renders on events, so while you
+/// idle or scroll the feed its LRU touch freezes, the 10s grace expires,
+/// and timeline photo pressure evicted it — remove_asset flashing it to
+/// the ink initial, the next sweep fetching it back, repeating. Pinned
+/// urls skip every eviction sweep.
+pub fn pin(url: &str, cx: &mut gpui::App) {
+    if url.is_empty() {
+        return;
+    }
+    let cache = cx.global_mut::<Cache>();
+    let mut pinned = cache.pinned.borrow_mut();
+    pinned.insert(url.to_string());
+    pinned.insert(thumb_key(url));
+}
+
+/// Release pins (the inverse of `pin`): a surface handing its visible
+/// rows to a new set unpins the old first, so the pinned set stays
+/// bounded by what is actually on screen.
+pub fn unpin(urls: &[String], cx: &mut gpui::App) {
+    if urls.is_empty() {
+        return;
+    }
+    cx.global_mut::<Cache>().unpin_urls(urls);
+}
+
 pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) {
     if url.is_empty() {
         return;
@@ -661,7 +717,7 @@ mod tests {
     #[test]
     fn evict_takes_stale_before_fresh() {
         let cache = Cache::default();
-        insert(&cache, "stale", 3000, 3000, Duration::from_secs(30));
+        insert(&cache, "stale", 3000, 3000, Duration::from_secs(7200));
         insert(&cache, "fresh", 3000, 3000, Duration::from_secs(1));
         insert(&cache, "f2", 2000, 2000, Duration::from_secs(2));
         insert(&cache, "f3", 2000, 2000, Duration::from_secs(3)); // 104MB
@@ -682,6 +738,46 @@ mod tests {
         let dropped = cache.evict();
         assert!(!dropped.is_empty(), "desperation must evict");
         assert!(cache.bytes.get() <= EVICT_DESPERATE_BYTES);
+    }
+
+    /// The rail-avatar glitch: a pinned entry (the always-on-screen disc,
+    /// whose LRU touch freezes while the shell idles) must survive even a
+    /// desperate sweep — photo pressure flashed it to the ink initial and
+    /// refetched, photo → initial → photo, for the whole scroll.
+    #[test]
+    fn pinned_entries_survive_desperate_eviction() {
+        let cache = Cache::default();
+        for i in 0..6 {
+            insert(&cache, &format!("e{i}"), 3000, 3000, Duration::from_secs(1));
+        } // 216MB = over the 192MB desperation line
+        cache
+            .pinned
+            .borrow_mut()
+            .insert("e0".to_string());
+        let dropped = cache.evict();
+        assert!(!dropped.is_empty(), "desperation must still evict");
+        assert!(cache.map.borrow().contains_key("e0"), "pinned survives");
+    }
+
+    /// Unpin releases the guard: url AND its disc-thumb key leave the
+    /// set, so a pane's old rows become evictable when the next query
+    /// lands — pinned stays bounded by what is on screen.
+    #[test]
+    fn unpin_releases_url_and_thumb_key() {
+        let cache = Cache::default();
+        cache
+            .pinned
+            .borrow_mut()
+            .insert("https://x/a.png".to_string());
+        cache
+            .pinned
+            .borrow_mut()
+            .insert(thumb_key("https://x/a.png").to_string());
+        cache.unpin_urls(&["https://x/a.png".to_string()]);
+        assert!(
+            cache.pinned.borrow().is_empty(),
+            "url and thumb key both go"
+        );
     }
 
     /// The notifications-page flicker regression: photo pressure must
