@@ -270,6 +270,8 @@ pub(crate) enum Tok {
     AddrRef(String),
     /// Plain https link.
     Url(String),
+    /// A #hashtag — opens the hashtag timeline (Phase 2 §4.2).
+    Hashtag(String),
     Word(String),
 }
 
@@ -297,6 +299,13 @@ pub(crate) fn classify_token(core: &str) -> Tok {
     }
     if core.starts_with("https://") || core.starts_with("http://") {
         return Tok::Url(core.to_string());
+    }
+    // #tag — the note's t tags mirror these (Phase 2 §4.2). Alphanumerics
+    // and underscore, at least one; `##` or a bare `#` stays a word.
+    if let Some(tag) = core.strip_prefix('#').filter(|t| {
+        !t.is_empty() && t.chars().all(|c| c.is_alphanumeric() || c == '_')
+    }) {
+        return Tok::Hashtag(tag.to_string());
     }
     Tok::Word(core.to_string())
 }
@@ -381,6 +390,18 @@ pub(crate) fn token_el<V: EventEmitter<Nav> + 'static>(
                     handle.update(cx, |_, cx| cx.emit(Nav::OpenThread(id)));
                 })
                 .child("↗ note");
+            with_punct(el, punct)
+        }
+        Tok::Hashtag(tag) => {
+            let handle = handle.clone();
+            let label = format!("#{tag}");
+            let el = base(seg_id("tag", &format!("{n}{tag}")))
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    let tag = tag.clone();
+                    handle.update(cx, |_, cx| cx.emit(Nav::OpenHashtag(tag)));
+                })
+                .child(label);
             with_punct(el, punct)
         }
         Tok::AddrRef(bech) => {

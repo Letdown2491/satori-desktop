@@ -2490,6 +2490,94 @@ impl Core {
 
     // --- profiles ---------------------------------------------------------------
 
+    /// A hashtag timeline (Phase 2 §4.2): the `#t` filter across the
+    /// visible catalog, any author — the profile() shape with a tag filter
+    /// instead of an author set. Relay fetch into the store, then project
+    /// straight off the fetch (the store's matcher isn't trusted for tags);
+    /// mutes and deletions gate like every feed page.
+    pub fn hashtag(self: &Arc<Self>, tag: String) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<FeedPage> = async {
+                let active = this.active().await?;
+                // t tags are conventionally lowercase (NIP-24); the tap
+                // keeps its raw case for display, the filter normalizes.
+                let filter = Filter::new()
+                    .kinds(crate::store::visible_kinds())
+                    .custom_tag(SingleLetterTag::LOWERCASE_T, tag.to_lowercase())
+                    .limit(PAGE + 1);
+                let mut notes: Vec<Event> =
+                    active.pool.get(filter).await.unwrap_or_default().into_iter().collect();
+                for ev in &notes {
+                    let _ = active.pool.store.save(ev).await;
+                }
+                {
+                    let muted = this.muted.lock().unwrap();
+                    notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
+                }
+                let mut notes = this.drop_deleted(&active, notes).await;
+                notes.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
+                let profiles = Self::profiles_for(&active, &notes).await;
+                Ok(FeedPage { notes, profiles })
+            }
+            .await;
+            match res {
+                Ok(page) => {
+                    let _ = tx.send(FeedEvent::Loaded(page));
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
+    /// The hashtag timeline's older page — the home feed's scroll
+    /// pagination (older()), with the tag filter standing in for the
+    /// follow set. A full page keeps `has_more` lit; the next probe
+    /// refetches around the oldest shown.
+    pub fn hashtag_older(self: &Arc<Self>, tag: String, until: u64) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<FeedEvent> = async {
+                let active = this.active().await?;
+                let filter = Filter::new()
+                    .kinds(crate::store::visible_kinds())
+                    .custom_tag(SingleLetterTag::LOWERCASE_T, tag.to_lowercase())
+                    .until(Timestamp::from(until))
+                    .limit(PAGE + 1);
+                let mut notes: Vec<Event> =
+                    active.pool.get(filter).await.unwrap_or_default().into_iter().collect();
+                for ev in &notes {
+                    let _ = active.pool.store.save(ev).await;
+                }
+                {
+                    let muted = this.muted.lock().unwrap();
+                    notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
+                }
+                let mut notes = this.drop_deleted(&active, notes).await;
+                notes.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
+                let has_more = notes.len() > PAGE;
+                notes.truncate(PAGE);
+                let profiles = Self::profiles_for(&active, &notes).await;
+                Ok(FeedEvent::Older(FeedPage { notes, profiles }, has_more))
+            }
+            .await;
+            match res {
+                Ok(ev) => {
+                    let _ = tx.send(ev);
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
     /// A profile page's projection: their recent notes + their metadata.
     pub fn profile(self: &Arc<Self>, who: PublicKey) -> FeedRx {
         let (tx, rx) = mpsc::unbounded_channel();

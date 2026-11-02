@@ -38,6 +38,8 @@ pub enum Pane {
     Feed(Entity<Feed>),
     /// The articles shelf — a second Feed entity in articles mode.
     Articles(Entity<Feed>),
+    /// A hashtag timeline — a third Feed entity in hashtag mode (Phase 2 §4.2).
+    Hashtag(Entity<Feed>),
     Thread(Entity<ThreadView>),
     Profile(Entity<ProfileView>),
     Notifications(Entity<NotificationsView>),
@@ -108,6 +110,7 @@ impl Shell {
         cx.subscribe(&feed, |this, _feed, ev: &Nav, cx| match ev {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
+            Nav::OpenHashtag(tag) => this.open_hashtag(tag.clone(), cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), None, cx),
             Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
@@ -187,6 +190,7 @@ impl Shell {
         cx.subscribe(view, |this, _view, ev: &Nav, cx| match ev {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
+            Nav::OpenHashtag(tag) => this.open_hashtag(tag.clone(), cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), None, cx),
             Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
@@ -240,6 +244,15 @@ impl Shell {
         let view = cx.new(|cx| Feed::articles(self.core.clone(), cx));
         self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Articles(view));
+        cx.notify();
+    }
+
+    /// The hashtag timeline: a Feed entity in hashtag mode — a #tag tap in
+    /// a note body lands here (Phase 2 §4.2).
+    fn open_hashtag(&mut self, tag: String, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| Feed::hashtag(self.core.clone(), tag, cx));
+        self.subscribe_nav(&view, cx);
+        self.stack.push(Pane::Hashtag(view));
         cx.notify();
     }
 
@@ -508,20 +521,21 @@ impl Shell {
         }
     }
 
-    fn title(&self) -> &'static str {
+    fn title(&self, cx: &App) -> SharedString {
         match self.stack.last() {
-            Some(Pane::Feed(_)) => "Feed",
-            Some(Pane::Articles(_)) => "Articles",
-            Some(Pane::Thread(_)) => "Thread",
-            Some(Pane::Profile(_)) => "Profile",
-            Some(Pane::Notifications(_)) => "Notifications",
-            Some(Pane::Search(_)) => "Search",
-            Some(Pane::Settings(_)) => "Settings",
-            Some(Pane::Article(_)) => "Read",
-            Some(Pane::Composer(_)) => "Compose",
-            Some(Pane::ZapSheet(_)) => "Zap",
-            Some(Pane::Wallet(_)) => "Wallet",
-            None => "Satori",
+            Some(Pane::Feed(_)) => "Feed".into(),
+            Some(Pane::Articles(_)) => "Articles".into(),
+            Some(Pane::Hashtag(f)) => f.read(cx).header().into(),
+            Some(Pane::Thread(_)) => "Thread".into(),
+            Some(Pane::Profile(_)) => "Profile".into(),
+            Some(Pane::Notifications(_)) => "Notifications".into(),
+            Some(Pane::Search(_)) => "Search".into(),
+            Some(Pane::Settings(_)) => "Settings".into(),
+            Some(Pane::Article(_)) => "Read".into(),
+            Some(Pane::Composer(_)) => "Compose".into(),
+            Some(Pane::ZapSheet(_)) => "Zap".into(),
+            Some(Pane::Wallet(_)) => "Wallet".into(),
+            None => "Satori".into(),
         }
     }
 
@@ -588,7 +602,7 @@ impl Shell {
     /// The feed pane's scroll-to-top (rail re-click, ensō, the whisper).
     fn feed_to_top(&self, cx: &mut Context<Self>) {
         match self.stack.last().cloned() {
-            Some(Pane::Feed(view)) | Some(Pane::Articles(view)) => {
+            Some(Pane::Feed(view)) | Some(Pane::Articles(view)) | Some(Pane::Hashtag(view)) => {
                 view.update(cx, |feed, _| feed.scroll_top());
             }
             _ => {}
@@ -792,7 +806,7 @@ impl Shell {
                     .flex_1()
                     .text_size(px(13.0))
                     .text_color(rgb(theme::ink()))
-                    .child(self.title()),
+                    .child(self.title(cx)),
             )
     }
 
@@ -933,6 +947,7 @@ impl Render for Shell {
                     .child(match pane {
                         Pane::Feed(view) => view.clone().into_any_element(),
                         Pane::Articles(view) => view.clone().into_any_element(),
+                        Pane::Hashtag(view) => view.clone().into_any_element(),
                         Pane::Thread(view) => view.clone().into_any_element(),
                         Pane::Profile(view) => view.clone().into_any_element(),
                         Pane::Notifications(view) => view.clone().into_any_element(),
@@ -945,7 +960,7 @@ impl Render for Shell {
                     })
                     .when(
                         self.feed_deep
-                            && matches!(pane, Pane::Feed(_) | Pane::Articles(_)),
+                            && matches!(pane, Pane::Feed(_) | Pane::Articles(_) | Pane::Hashtag(_)),
                         |d| d.child(self.floating_top(cx)),
                     ),
             )

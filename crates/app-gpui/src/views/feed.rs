@@ -24,18 +24,23 @@ use satori_core::wallet::{Status, WalletEvent};
 use crate::{icons, media, theme};
 use super::{content, nav::Nav, cards};
 
-/// Which surface a feed pane carries: the timeline (the visible catalog)
-/// or the articles shelf (kind 30023 from the same follows).
-#[derive(Clone, Copy, PartialEq)]
+/// Which surface a feed pane carries: the timeline (the visible catalog),
+/// the articles shelf (kind 30023 from the same follows), or a hashtag
+/// timeline (Phase 2 §4.2 — the `#t` filter, any author).
+#[derive(Clone, PartialEq)]
 pub(crate) enum FeedMode {
     Timeline,
     Articles,
+    Hashtag(String),
 }
 impl FeedMode {
     pub(crate) fn kinds(&self) -> Vec<Kind> {
         match self {
             FeedMode::Timeline => satori_core::store::visible_kinds(),
             FeedMode::Articles => vec![Kind::Custom(30023)],
+            // Never dispatched on — hashtag fetches switch on the mode
+            // (the tag filter is the query; there's no follow set).
+            FeedMode::Hashtag(_) => satori_core::store::visible_kinds(),
         }
     }
 }
@@ -124,6 +129,12 @@ impl Feed {
         Self::with_mode(core, FeedMode::Articles, cx)
     }
 
+    /// The hashtag timeline (Phase 2 §4.2): the `#t` filter, any author —
+    /// opened by tapping a #tag in a note body.
+    pub fn hashtag(core: Arc<Core>, tag: String, cx: &mut Context<Self>) -> Self {
+        Self::with_mode(core, FeedMode::Hashtag(tag), cx)
+    }
+
     fn with_mode(core: Arc<Core>, mode: FeedMode, cx: &mut Context<Self>) -> Self {
         let feed = Self {
             liked: core.liked_set(),
@@ -180,6 +191,11 @@ impl Feed {
                 match live_rx.recv().await {
                     Ok(Live::Post) => {
                         let _ = this.update(cx, |feed, cx| {
+                            // A follow's fresh post needn't carry this
+                            // hashtag — no new-notes pill on hashtag feeds.
+                            if matches!(feed.mode, FeedMode::Hashtag(_)) {
+                                return;
+                            }
                             feed.live_new += 1;
                             cx.notify();
                         });
@@ -207,9 +223,23 @@ impl Feed {
             }
         })
         .detach();
-        let boot = feed.core.bootstrap(mode.kinds());
+        // Hashtag feeds have no follow set to deep-fetch — the tag filter
+        // IS the query (profile()-shaped); the rest bootstrap as usual.
+        let boot = match &feed.mode {
+            FeedMode::Hashtag(tag) => feed.core.hashtag(tag.clone()),
+            _ => feed.core.bootstrap(feed.mode.kinds()),
+        };
         feed.pump(boot, cx);
         feed
+    }
+
+    /// The shell header's title — the raw-cased tag on hashtag panes.
+    pub fn header(&self) -> String {
+        match &self.mode {
+            FeedMode::Hashtag(tag) => format!("#{tag}"),
+            FeedMode::Timeline => "Feed".into(),
+            FeedMode::Articles => "Articles".into(),
+        }
     }
 
     /// The list's item count: one row per note + the end cap.
@@ -248,7 +278,11 @@ impl Feed {
             .last()
             .map(|n| n.created_at.as_secs())
             .unwrap_or(0);
-        self.pump(self.core.older(oldest, self.mode.kinds()), cx);
+        let rx = match &self.mode {
+            FeedMode::Hashtag(tag) => self.core.hashtag_older(tag.clone(), oldest),
+            _ => self.core.older(oldest, self.mode.kinds()),
+        };
+        self.pump(rx, cx);
         cx.notify();
     }
 

@@ -28,6 +28,8 @@ pub enum Nav {
     OpenZapSheet(Event),
     /// The NWC wallet connect pane (D20).
     OpenWallet,
+    /// A #tag tapped in a note body — the hashtag timeline (Phase 2 §4.2).
+    OpenHashtag(String),
     /// The feed crossed the deep-scroll threshold (or came back): the shell
     /// shows/hides the floating back-to-top whisper.
     FeedDeep(bool),
