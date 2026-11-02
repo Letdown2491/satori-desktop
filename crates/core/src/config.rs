@@ -70,6 +70,31 @@ pub fn state_file(name: &str) -> PathBuf {
     data_dir().join(name)
 }
 
+/// The prefs file, parsed once per file change. The feed projection reads
+/// it per page, `replies()` per query, the notifications sweep twice per
+/// run — each read was a full file read + JSON parse. The cache keys on
+/// mtime + size, so a settings Publish lands on the next read; the cost
+/// between changes is one metadata syscall.
+pub fn prefs() -> Option<serde_json::Value> {
+    static CACHE: std::sync::Mutex<
+        Option<(std::time::SystemTime, u64, serde_json::Value)>,
+    > = std::sync::Mutex::new(None);
+    let path = state_file(files::PREFS);
+    let meta = std::fs::metadata(&path).ok()?; // no file = no prefs
+    let modified = meta.modified().ok()?;
+    let mut held = CACHE.lock().unwrap();
+    if let Some((at, len, value)) = held.as_ref()
+        && *at == modified
+        && *len == meta.len()
+    {
+        return Some(value.clone());
+    }
+    let value =
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).ok()?).ok()?;
+    *held = Some((modified, meta.len(), value.clone()));
+    Some(value)
+}
+
 /// Parent of the data dir (for mkdir before files exist).
 pub fn data_dir_parent() -> Option<PathBuf> {
     data_dir().parent().map(PathBuf::from)

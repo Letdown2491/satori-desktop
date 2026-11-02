@@ -141,6 +141,22 @@ impl Store {
         Ok(events)
     }
 
+    /// Replies to ANY of the notes: same shape as `replies`, one index
+    /// pass for the whole id set. The notifications cached phase ran one
+    /// query per category PER NOTE — up to 300 sequential LMDB
+    /// transactions for a 100-note window; these batch it to three.
+    pub async fn replies_of(&self, ids: Vec<EventId>) -> NostrResult<Vec<Event>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let filter = Filter::new().kind(Kind::TextNote).events(ids);
+        let mut events: Vec<Event> = self.query(filter).await?.into_iter().collect();
+        let drop_machines = machine_notes_hidden();
+        events.retain(|e| !(drop_machines && is_machine_note(e)));
+        events.sort_by_key(|e| e.created_at.as_secs());
+        Ok(events)
+    }
+
     /// Kind-5 delete requests from the given authors (NIP-09). Synced
     /// alongside the feed kinds (deletions are rare); the render filter
     /// matches their `e` tags against displayed events.
@@ -161,6 +177,18 @@ impl Store {
         Ok(events)
     }
 
+    /// The batched twin: NIP-22 comments addressing ANY of the notes
+    /// (kind 1111, any `e` tag — parent or root scope). Oldest first.
+    pub async fn comments_of(&self, ids: Vec<EventId>) -> NostrResult<Vec<Event>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let filter = Filter::new().kind(Kind::Custom(1111)).events(ids);
+        let mut events: Vec<Event> = self.query(filter).await?.into_iter().collect();
+        events.sort_by_key(|e| e.created_at.as_secs());
+        Ok(events)
+    }
+
     /// Engagement-not-addressing-a-reply candidates for the notifications
     /// cached phase: reactions (7), zaps (9735), poll votes (1018) whose
     /// `e` tag targets the note. The cached phase was replies+comments
@@ -170,6 +198,17 @@ impl Store {
         let filter = Filter::new()
             .kinds([Kind::Reaction, Kind::Custom(9735), Kind::Custom(1018)])
             .event(id);
+        Ok(self.query(filter).await?.into_iter().collect())
+    }
+
+    /// The batched twin: engagement for ANY of the notes, one pass.
+    pub async fn engagement_of(&self, ids: Vec<EventId>) -> NostrResult<Vec<Event>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let filter = Filter::new()
+            .kinds([Kind::Reaction, Kind::Custom(9735), Kind::Custom(1018)])
+            .events(ids);
         Ok(self.query(filter).await?.into_iter().collect())
     }
 
@@ -248,15 +287,11 @@ pub fn is_machine_note(ev: &Event) -> bool {
             .is_ok_and(|n| matches!(n, Nip19::Pubkey(_) | Nip19::Profile(_)))
 }
 
-/// The pref, read once per page (not per event).
+/// The pref, read through the config cache (one metadata syscall between
+/// file changes; it used to be a full file parse per page).
 pub fn machine_notes_hidden() -> bool {
-    std::fs::read_to_string(config::state_file(config::files::PREFS))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .and_then(|v| {
-            v.get("machine_notes_hidden")
-                .and_then(|h| h.as_bool())
-        })
+    config::prefs()
+        .and_then(|v| v.get("machine_notes_hidden").and_then(|h| h.as_bool()))
         .unwrap_or(true)
 }
 

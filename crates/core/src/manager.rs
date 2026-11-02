@@ -27,6 +27,12 @@ const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Feed page size; the bootstrap fetch keeps depth for "view older".
 const PAGE: usize = 40;
+/// How long the cached NIP-09 deletion set stands (drop_deleted).
+const DELETED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The follows' deletion pairs (author, deleted event id) — shared out of
+/// the cache as an Arc so the per-page hit path costs one bump.
+type DeletedSet = Arc<HashSet<(PublicKey, EventId)>>;
 /// How deep one older-page top-up reaches into the relays (the web app's
 /// fetchRoutedPage asked limit*2 per author shard — same spirit: each round
 /// trip should feed several pages before the next one).
@@ -326,6 +332,13 @@ pub struct Core {
     /// Own zaps: note id (hex) → zapped. The ledger (zaps.json) is the
     /// durable authority; this mirrors it for render, like own_liked.
     own_zapped: Mutex<HashSet<String>>,
+    /// The follows' NIP-09 deletion pairs, cached for DELETED_TTL. The
+    /// feed projection drops deleted notes per page — twice per scroll
+    /// past the store's depth (the top-up re-projects) — and each miss
+    /// was a full kind-5 query + hash rebuild. A fresh deletion lands
+    /// via the live sub or a refresh save and is honored at the next
+    /// projection, worst case a TTL later.
+    deleted_cache: Mutex<Option<(std::time::Instant, DeletedSet)>>,
     /// The NIP-47 wallet handle (D20) — one per process, like the pool.
     wallet: Arc<Wallet>,
     /// Bitcoin timestamp→height service (blocktime, Phase 2 §4.4) — one
@@ -381,6 +394,7 @@ impl Core {
             own_bookmarked: Mutex::new(HashSet::new()),
             muted: Mutex::new(HashSet::new()),
             own_zapped: Mutex::new(HashSet::new()),
+            deleted_cache: Mutex::new(None),
             wallet: Arc::new(Wallet::new()),
             profiles_mem: Mutex::new(ProfileMem::new()),
             holds: Mutex::new(std::collections::HashMap::new()),
@@ -443,6 +457,8 @@ impl Core {
         crate::secrets::delete(crate::secrets::NSEC);
         crate::secrets::delete(crate::secrets::BUNKER_CLIENT_SECRET);
         *self.active.lock().unwrap() = None;
+        // The deletion cache was built from the OLD session's follow set.
+        *self.deleted_cache.lock().unwrap() = None;
     }
 
     pub fn init(&self) -> (Option<Session>, Option<String>) {
@@ -1915,20 +1931,30 @@ impl Core {
         if notes.is_empty() {
             return notes;
         }
-        let dels = active
-            .pool
-            .store
-            .deletions(&active.follows)
-            .await
-            .unwrap_or_default();
-        if dels.is_empty() {
-            return notes;
-        }
-        let mut deleted: HashSet<(PublicKey, EventId)> = HashSet::new();
-        for d in &dels {
-            for id in d.tags.clone().event_ids() {
-                deleted.insert((d.pubkey, id));
+        let hit = self.deleted_cache.lock().unwrap().clone();
+        let deleted = match hit {
+            Some((at, set)) if at.elapsed() < DELETED_TTL => set,
+            _ => {
+                let dels = active
+                    .pool
+                    .store
+                    .deletions(&active.follows)
+                    .await
+                    .unwrap_or_default();
+                let mut map: HashSet<(PublicKey, EventId)> = HashSet::new();
+                for d in &dels {
+                    for id in d.tags.clone().event_ids() {
+                        map.insert((d.pubkey, id));
+                    }
+                }
+                let set: DeletedSet = Arc::new(map);
+                *self.deleted_cache.lock().unwrap() =
+                    Some((std::time::Instant::now(), Arc::clone(&set)));
+                set
             }
+        };
+        if deleted.is_empty() {
+            return notes;
         }
         notes.retain(|ev| !deleted.contains(&(ev.pubkey, ev.id)));
         notes
@@ -2048,19 +2074,35 @@ impl Core {
                 // replies, NIP-22 comments — the Amethyst migration
                 // made 1111 the carrier for non-kind-1 replies — and the
                 // engagement kinds: reactions/zaps/votes by `e` tag).
+                // Three batched index passes for the whole id set: this
+                // used to run one query per category PER NOTE — up to 300
+                // sequential LMDB transactions for a 100-note window.
                 let reaction_notifs = this.reaction_notifs();
                 let mut cached: Vec<Event> = Vec::new();
-                for id in &ids {
-                    if let Ok(replies) = active.pool.store.replies(*id).await {
-                        cached.extend(replies);
-                    }
-                    if let Ok(comments) = active.pool.store.comments(*id).await {
-                        cached.extend(comments);
-                    }
-                    if let Ok(engagement) = active.pool.store.engagement_notifs(*id).await {
-                        cached.extend(engagement);
-                    }
-                }
+                cached.extend(
+                    active
+                        .pool
+                        .store
+                        .replies_of(ids.clone())
+                        .await
+                        .unwrap_or_default(),
+                );
+                cached.extend(
+                    active
+                        .pool
+                        .store
+                        .comments_of(ids.clone())
+                        .await
+                        .unwrap_or_default(),
+                );
+                cached.extend(
+                    active
+                        .pool
+                        .store
+                        .engagement_of(ids.clone())
+                        .await
+                        .unwrap_or_default(),
+                );
                 cached.retain(|ev| ev.pubkey != me);
                 // The relay phase filters these too — the cached phase
                 // must wear the same gates (a cold start previously showed
@@ -2095,8 +2137,10 @@ impl Core {
                     .saturating_sub(7 * 86400);
 
                 // Mentions (#p=me) and replies (#e=my notes): PARALLEL.
+                // (The pref was already read for the cached phase — no
+                // second disk read here.)
                 let mut mention_kinds = vec![Kind::TextNote, Kind::Custom(1111), Kind::Custom(9735)];
-                if this.reaction_notifs() {
+                if reaction_notifs {
                     mention_kinds.push(Kind::Reaction);
                 }
                 let mention_q = Box::pin(active.pool.get(
@@ -2203,9 +2247,7 @@ impl Core {
     /// The "Show reactions in notifications" pref (prefs.json
     /// reactionNotifs, default off — render/settings.ts PREF_LABELS).
     fn reaction_notifs(&self) -> bool {
-        std::fs::read_to_string(crate::config::state_file(crate::config::files::PREFS))
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        crate::config::prefs()
             .and_then(|v| v.get("reactionNotifs").and_then(|b| b.as_bool()))
             .unwrap_or(false)
     }
