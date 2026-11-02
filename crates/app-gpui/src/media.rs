@@ -154,15 +154,20 @@ impl Default for Cache {
 }
 impl gpui::Global for Cache {}
 
-/// Decoded-entry caps: 128 images / 96MB of decoded RGBA (the disk cache
-/// is the reservoir; eviction only costs a re-decode on scroll-back).
-/// 96MB decoded lands the session plateau ≈ baseline + cap + encoded
-/// bytes — measured against the ~240MB gpui/tokio/LMDB floor, that keeps
-/// a hard-scrolled evening under ~400MB total. (Avatars stop competing
-/// for this budget at full-photo scale once their thumbs exist — a disc
-/// thumb decodes at 128px, ~64KB.)
-const CACHE_MAX_ENTRIES: usize = 128;
-const CACHE_MAX_BYTES: u64 = 96 * 1024 * 1024;
+/// Decoded-entry caps, by size class. BIG (photos, articles' covers —
+/// anything decoding over SMALL_DECODED_MAX) lives under the main budget:
+/// 128 images / 96MB of decoded RGBA. SMALL (avatars, disc thumbs — 128px
+/// is ~64KB) has its own budget (256 / 16MB) so photo pressure can NEVER
+/// evict them: an avatar is painted on many surfaces at once (the rail,
+/// every visible row) and its re-decode flashes visibly; 16MB of thumbs
+/// does not compete with the 96MB photo budget. (The disk cache is the
+/// real reservoir; eviction only costs a re-decode on scroll-back.)
+const BIG_MAX_ENTRIES: usize = 128;
+const BIG_MAX_BYTES: u64 = 96 * 1024 * 1024;
+/// A Ready entry decoding over this many bytes (w·h·4) is big class.
+const SMALL_DECODED_MAX: u64 = 256 * 1024;
+const SMALL_MAX_ENTRIES: usize = 256;
+const SMALL_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Eviction grace: entries fetched/touched within this window are
 /// immune, even over budget. Eviction runs INSIDE a landing's update —
@@ -177,18 +182,19 @@ const CACHE_MAX_BYTES: u64 = 96 * 1024 * 1024;
 const EVICT_GRACE: Duration = Duration::from_secs(10);
 /// Safety valve: past double budget the grace is ignored (a pathological
 /// burst can hold everything fresh for a while; memory must stay bounded).
-const EVICT_DESPERATE_BYTES: u64 = 2 * CACHE_MAX_BYTES;
+const EVICT_DESPERATE_BYTES: u64 = 2 * BIG_MAX_BYTES;
 
 impl Cache {
-    /// Least-recently-used-first eviction past the caps. Loading entries
-    /// rotate to the back (they're transient); Ready/NotMedia/Failed drop.
-    /// Bounded passes. Takes cx: gpui's own asset cache NEVER evicts —
-    /// fetch_asset inserts the decoded RenderImage and nothing removes it —
-    /// so ours must evict gpui's decoded copy too, or every photo ever seen
-    /// stays in RAM as RGBA for the whole session (measured: 400+MB anon
-    /// after an evening of scrolling; the timeline leak was gpui's cache,
-    /// not ours). The evicted handles come back to the caller — remove_asset
-    /// needs the App, and the cache borrow must be dead first.
+    /// Least-recently-used-first eviction past the caps, per size class.
+    /// Loading entries rotate to the back (they're transient);
+    /// Ready/NotMedia/Failed drop. Bounded passes. Takes cx: gpui's own
+    /// asset cache NEVER evicts — fetch_asset inserts the decoded
+    /// RenderImage and nothing removes it — so ours must evict gpui's
+    /// decoded copy too, or every photo ever seen stays in RAM as RGBA
+    /// for the whole session (measured: 400+MB anon after an evening of
+    /// scrolling; the timeline leak was gpui's cache, not ours). The
+    /// evicted handles come back to the caller — remove_asset needs the
+    /// App, and the cache borrow must be dead first.
     fn evict(&self) -> Vec<Png> {
         // The round count borrows `order`; the temporary must be dropped
         // BEFORE the loop — a `for _ in 0..self.order.borrow().len()`
@@ -198,36 +204,63 @@ impl Cache {
         let mut dropped: Vec<Png> = Vec::new();
         let rounds = self.order.borrow().len() * 2;
         for _ in 0..rounds {
-            let over =
-                self.map.borrow().len() > CACHE_MAX_ENTRIES || self.bytes.get() > CACHE_MAX_BYTES;
-            if !over {
+            let (big_over, small_over, total_bytes) = self.pressure();
+            if !big_over && !small_over {
                 break;
             }
-            // Grace: the front is the least-recently-used entry (every
-            // render-path fetch rotates it to the back). If even THAT one
-            // was touched inside the grace window, everything is fresh —
-            // a landing burst between two renders must not evict painted
-            // images. Desperation ignores the grace.
-            let desperate = self.bytes.get() > EVICT_DESPERATE_BYTES;
-            if !desperate {
-                let front_fresh = self
-                    .order
-                    .borrow()
-                    .front()
-                    .and_then(|url| self.touched.borrow().get(url).copied())
-                    .is_some_and(|t| t.elapsed() < EVICT_GRACE);
-                if front_fresh {
+            // Safety valve: memory stays bounded no matter how long a
+            // burst keeps everything "fresh".
+            let desperate = total_bytes > EVICT_DESPERATE_BYTES;
+            // The victim: the LRU-front droppable entry of an over-budget
+            // class. The deque is the global recency order, so the first
+            // over-class entry IS that class's oldest; a fresh one means
+            // the whole class is fresh (a landing burst between two
+            // renders must not evict painted images — skip the class).
+            // Desperation ignores the grace.
+            let mut victim: Option<String> = None;
+            {
+                let order = self.order.borrow();
+                for url in order.iter() {
+                    let class = {
+                        let map = self.map.borrow();
+                        match map.get(url) {
+                            Some(Entry::Loading(_)) => None, // transient: rotate past
+                            Some(Entry::Ready(c)) => {
+                                let (w, h) = c.size;
+                                Some(w as u64 * h as u64 * 4 > SMALL_DECODED_MAX)
+                            }
+                            // Byte-free entries ride the small class.
+                            Some(_) | None => Some(false),
+                        }
+                    };
+                    let Some(big) = class else { continue };
+                    let over = if big { big_over } else { small_over };
+                    if !over {
+                        continue; // this class has room — its entries stay
+                    }
+                    if !desperate
+                        && self
+                            .touched
+                            .borrow()
+                            .get(url)
+                            .is_some_and(|t| t.elapsed() < EVICT_GRACE)
+                    {
+                        // Fresh over-class entry: skip it (landings freshen
+                        // `touched` without rotating the deque, so keep
+                        // scanning — another class may still have a stale
+                        // candidate deeper).
+                        continue;
+                    }
+                    victim = Some(url.clone());
                     break;
                 }
             }
-            let Some(url) = self.order.borrow_mut().pop_front() else {
+            let Some(url) = victim else {
                 break;
             };
-            let loading = matches!(self.map.borrow().get(&url), Some(Entry::Loading(_)));
-            if loading {
-                self.order.borrow_mut().push_back(url);
-                continue;
-            }
+            // The victim may sit mid-deque (an over class's front behind
+            // another class's fresher entries) — retain, not pop_front.
+            self.order.borrow_mut().retain(|u| u != &url);
             if let Some(Entry::Ready(c)) = self.map.borrow_mut().remove(&url) {
                 let (w, h) = c.size;
                 self.bytes
@@ -241,6 +274,36 @@ impl Cache {
             self.epoch.set(self.epoch.get() + 1);
         }
         dropped
+    }
+
+    /// Class pressures: (big over, small over, total Ready bytes). Big =
+    /// decodes over SMALL_DECODED_MAX; small = avatars/thumbs and the
+    /// byte-free verdict entries.
+    fn pressure(&self) -> (bool, bool, u64) {
+        let map = self.map.borrow();
+        let (mut big_n, mut big_b, mut small_n, mut small_b) = (0usize, 0u64, 0usize, 0u64);
+        for e in map.values() {
+            match e {
+                Entry::Ready(c) => {
+                    let (w, h) = c.size;
+                    let b = w as u64 * h as u64 * 4;
+                    if b > SMALL_DECODED_MAX {
+                        big_n += 1;
+                        big_b += b;
+                    } else {
+                        small_n += 1;
+                        small_b += b;
+                    }
+                }
+                Entry::NotMedia | Entry::Failed { .. } => small_n += 1,
+                Entry::Loading(_) => {}
+            }
+        }
+        (
+            big_n > BIG_MAX_ENTRIES || big_b > BIG_MAX_BYTES,
+            small_n > SMALL_MAX_ENTRIES || small_b > SMALL_MAX_BYTES,
+            big_b + small_b,
+        )
     }
 }
 
@@ -538,5 +601,44 @@ mod tests {
         let dropped = cache.evict();
         assert!(!dropped.is_empty(), "desperation must evict");
         assert!(cache.bytes.get() <= EVICT_DESPERATE_BYTES);
+    }
+
+    /// The notifications-page flicker regression: photo pressure must
+    /// never evict avatars. Thirty 128px thumbs (the rail avatar's shape,
+    /// stale — an idle pane's touches are old) plus stale bigs over the
+    /// 96MB budget: the bigs go, every avatar stays.
+    #[test]
+    fn photo_pressure_never_evicts_avatars() {
+        let cache = Cache::default();
+        for i in 0..30 {
+            insert(&cache, &format!("av{i}"), 128, 128, Duration::from_secs(3600));
+        }
+        for i in 0..4 {
+            insert(&cache, &format!("ph{i}"), 3000, 3000, Duration::from_secs(3600));
+        } // 144MB of bigs — over budget, all past grace
+        let dropped = cache.evict();
+        assert!(!dropped.is_empty(), "stale bigs must go");
+        for i in 0..30 {
+            assert!(
+                cache.map.borrow().contains_key(&format!("av{i}")),
+                "avatar av{i} was evicted by photo pressure"
+            );
+        }
+    }
+
+    /// Avatars have their own ceiling: past it the STALE ones go (LRU
+    /// within the class), fresh ones stay — an avatar burst can't push
+    /// painted avatars out either.
+    #[test]
+    fn small_cap_evicts_stale_avatars_first() {
+        let cache = Cache::default();
+        for i in 0..SMALL_MAX_ENTRIES {
+            insert(&cache, &format!("a{i}"), 128, 128, Duration::from_secs(3600));
+        }
+        insert(&cache, "fresh", 128, 128, Duration::from_secs(1));
+        let dropped = cache.evict();
+        assert_eq!(dropped.len(), 1, "only the overflow avatar goes");
+        assert!(!cache.map.borrow().contains_key("a0"), "LRU small goes first");
+        assert!(cache.map.borrow().contains_key("fresh"));
     }
 }
