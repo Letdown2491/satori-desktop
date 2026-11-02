@@ -8,7 +8,6 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use gpui::{
@@ -121,6 +120,7 @@ impl EventEmitter<Nav> for Feed {}
 impl Feed {
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
+        crate::timefmt::watch(cx); // repaint on mode/height change
         Self::with_mode(core, FeedMode::Timeline, cx)
     }
 
@@ -738,22 +738,6 @@ impl Feed {
     }
 }
 
-pub(crate) fn rel_time(secs: u64) -> String {
-    // TODO(port): render/util.ts relative time — P0 minimal form.
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let d = now.saturating_sub(secs);
-    match d {
-        0..60 => "now".into(),
-        _ if d < 3600 => format!("{}m", d / 60),
-        _ if d < 86400 => format!("{}h", d / 3600),
-        _ if d < 604_800 => format!("{}d", d / 86400),
-        _ => format!("{}w", d / 604_800),
-    }
-}
-
 /// How long a bolt press reads as "deliberate" (the sheet, not the tap).
 const ZAP_HOLD: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -775,6 +759,9 @@ fn note_card(
     media: &media::Snapshot,
     quotes: &content::Quotes,
     cards: &cards::CardState,
+    // The display timestamp under the current timefmt mode (the item
+    // closure computes it — this fn has no cx to read the mode with).
+    time: String,
     handle: Entity<Feed>,
 ) -> impl IntoElement {
     // TODO(port): note_card.rs layout — P0 minimal card; name fallback chain
@@ -785,7 +772,6 @@ fn note_card(
         .map(|p| p.display())
         .unwrap_or_else(|| format!("{}…", &key[..8]));
     let picture = profile.map(|p| p.picture.clone()).unwrap_or_default();
-    let time = rel_time(ev.created_at.as_secs());
     let engaged = liked.contains(&ev.id.to_string());
     let saved = bookmarked.contains(&ev.id.to_string());
     let shared = reposted.contains(&ev.id.to_string());
@@ -841,9 +827,14 @@ fn note_card(
                         .child(name),
                 )
                 .child(
+                    // The timestamp is the third mode toggle (timefmt.rs):
+                    // tap cycles relative → date → block height.
                     div()
+                        .id(SharedString::from(format!("time-{idx}")))
+                        .cursor_pointer()
                         .text_size(px(12.0))
                         .text_color(rgb(theme::muted()))
+                        .on_click(|_, _, cx| crate::timefmt::cycle(cx))
                         .child(time),
                 ),
         )
@@ -1177,18 +1168,31 @@ impl Render for Feed {
                                 }
                             }
                             match notes.get(idx) {
-                                Some(ev) if u16::from(ev.kind) == 6 => repost_card(
-                                    ev, &profiles,  &media, &quotes, &cards,
-                                    handle.clone(),
-                                )
-                                .into_any_element(),
-                                Some(ev) => note_card(
-                                    idx, ev, &profiles, &parents, &liked, &bookmarked,
-                                    &reposted, &zapped, &zap_pending, wallet_ready,
-                                    reduced_motion, &media,
-                                    &quotes, &cards, handle.clone(),
-                                )
-                                .into_any_element(),
+                                Some(ev) if u16::from(ev.kind) == 6 => {
+                                    // The stamp reads the current mode +
+                                    // blocktime cache per frame; ensure
+                                    // refines Block mode from the bridge.
+                                    let secs = ev.created_at.as_secs();
+                                    let time = crate::timefmt::stamp(secs, cx);
+                                    crate::timefmt::ensure(secs, cx);
+                                    repost_card(
+                                        ev, &profiles, &media, &quotes, &cards,
+                                        time, handle.clone(),
+                                    )
+                                    .into_any_element()
+                                }
+                                Some(ev) => {
+                                    let secs = ev.created_at.as_secs();
+                                    let time = crate::timefmt::stamp(secs, cx);
+                                    crate::timefmt::ensure(secs, cx);
+                                    note_card(
+                                        idx, ev, &profiles, &parents, &liked, &bookmarked,
+                                        &reposted, &zapped, &zap_pending, wallet_ready,
+                                        reduced_motion, &media,
+                                        &quotes, &cards, time, handle.clone(),
+                                    )
+                                    .into_any_element()
+                                }
                                 None => end_cap(paging, has_more).into_any_element(),
                             }
                         })
@@ -1244,6 +1248,7 @@ fn repost_card(
     media: &media::Snapshot,
     quotes: &content::Quotes,
     cards: &cards::CardState,
+    time: String,
     handle: Entity<Feed>,
 ) -> impl IntoElement {
     let key = ev.pubkey.to_string();
@@ -1255,7 +1260,6 @@ fn repost_card(
         .get(&key)
         .map(|p| p.picture.clone())
         .unwrap_or_default();
-    let time = rel_time(ev.created_at.as_secs());
     let inner = repost_inner(ev);
     let open = inner.clone();
     let open_handle = handle.clone();
@@ -1286,12 +1290,17 @@ fn repost_card(
                         .items_center()
                         .gap_2()
                         .child(media::avatar(media, &picture, &name, 28.0))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(rgb(theme::muted()))
-                                .child(format!("{name} boosted · {time}")),
-                        ),
+                .child(
+                    // The timestamp is the third mode toggle (timefmt.rs):
+                    // tap cycles relative → date → block height.
+                    div()
+                        .id(SharedString::from(format!("boost-time-{}", ev.id)))
+                        .cursor_pointer()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme::muted()))
+                        .on_click(|_, _, cx| crate::timefmt::cycle(cx))
+                        .child(format!("{name} boosted · {time}")),
+                ),
                 )
                 .child(
                     div()

@@ -35,6 +35,7 @@ impl EventEmitter<Nav> for SearchView {}
 impl SearchView {
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
+        crate::timefmt::watch(cx); // repaint on mode/height change
         let input = cx.new(|cx| {
             let mut i = Input::new(cx);
             i.multiline = false; // Enter runs the question, no newline
@@ -231,11 +232,20 @@ impl Render for SearchView {
                     .flex()
                     .justify_center()
                     .child(
-                        list(self.list.clone(), move |idx, _w, _cx| {
+                        list(self.list.clone(), move |idx, _w, cx| {
                             match results.get(idx) {
-                                Some(ev) => content::compact_card(
-                                    idx, "search", ev, &profiles, &media, &quotes, handle.clone(),
-                                ),
+                                Some(ev) => {
+                                    // The stamp reads the current mode +
+                                    // blocktime cache per frame; ensure
+                                    // refines Block mode from the bridge.
+                                    let secs = ev.created_at.as_secs();
+                                    let time = crate::timefmt::stamp(secs, cx);
+                                    crate::timefmt::ensure(secs, cx);
+                                    content::compact_card(
+                                        idx, "search", ev, &profiles, &media, &quotes,
+                                        time, handle.clone(),
+                                    )
+                                }
                                 None => div().into_any_element(),
                             }
                         })

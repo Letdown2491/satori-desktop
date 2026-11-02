@@ -34,6 +34,7 @@ impl EventEmitter<Nav> for ArticleView {}
 impl ArticleView {
     pub fn new(core: Arc<Core>, ev: Event, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
+        crate::timefmt::watch(cx); // repaint on mode/height change
         let data = article::parse(&ev).unwrap_or_else(|| article::ArticleData {
             title: "Untitled".into(),
             summary: String::new(),
@@ -337,7 +338,13 @@ impl Render for ArticleView {
         if let Some(url) = content::article_cover(&self.ev) {
             media::fetch(&self.core, url, cx.entity_id(), cx);
         }
-        let published = self.data.published_at.map(super::feed::rel_time);
+        // Mode-aware stamp; ensure refines Block mode from the bridge
+        // (render-path spawns are silent no-ops when cached — media.rs's
+        // eviction re-request is the same pattern).
+        let published = self.data.published_at.map(|ts| {
+            crate::timefmt::ensure(ts, cx);
+            crate::timefmt::stamp(ts, cx)
+        });
         // Reading time at ~220 wpm (content.ts's readingMinutes rate).
         let minutes = self.ev.content.split_whitespace().count() / 220 + 1;
         let cover = content::article_cover(&self.ev);
@@ -413,9 +420,19 @@ impl Render for ArticleView {
                                                         .child(author.clone()),
                                                 )
                                                 .children(
-                                                    published
-                                                        .clone()
-                                                        .map(|t| format!("· {t}")),
+                                                    published.clone().map(|t| {
+                                                        // The timestamp is
+                                                        // the third mode
+                                                        // toggle (timefmt.rs):
+                                                        // tap cycles.
+                                                        div()
+                                                            .id("reader-published")
+                                                            .cursor_pointer()
+                                                            .on_click(|_, _, cx| {
+                                                                crate::timefmt::cycle(cx)
+                                                            })
+                                                            .child(format!("· {t}"))
+                                                    }),
                                                 )
                                                 .child(format!("· {minutes} min read")),
                                         ),

@@ -29,3 +29,5 @@ zbus = { version = "5", default-features = false, features = ["blocking", "tokio
 # trim timer hands it back to the OS on a slow clock (main.rs).
 libc = "0.2"
 tokio = { workspace = true }
+# The Date timestamp mode (timefmt.rs) — local-time rendering.
+chrono = { workspace = true }

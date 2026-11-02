@@ -53,6 +53,7 @@ impl EventEmitter<Nav> for ProfileView {}
 impl ProfileView {
     pub fn new(core: Arc<Core>, who: PublicKey, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
+        crate::timefmt::watch(cx); // repaint on mode/height change
         let view = Self {
             following: core.is_following(&who),
             who,
@@ -429,10 +430,15 @@ impl Render for ProfileView {
                             })
                             .into_any_element()
                     } else {
-                        list(self.list.clone(), move |idx, _w, _cx| {
+                        list(self.list.clone(), move |idx, _w, cx| {
                     match rows.get(idx) {
                         Some(Row::Note(ev)) => {
-                            let time = super::feed::rel_time(ev.created_at.as_secs());
+                            // The stamp reads the current mode + blocktime
+                            // cache per frame; ensure refines Block mode
+                            // from the bridge.
+                            let secs = ev.created_at.as_secs();
+                            let time = crate::timefmt::stamp(secs, cx);
+                            crate::timefmt::ensure(secs, cx);
                             let ev_for_click = ev.clone();
                             let body_handle = handle.clone();
                             div()
@@ -447,9 +453,15 @@ impl Render for ProfileView {
                                 .border_b_1()
                                 .border_color(rgb(theme::hairline()))
                                 .child(
+                                    // The timestamp is the third mode
+                                    // toggle (timefmt.rs): tap cycles
+                                    // relative → date → block height.
                                     div()
+                                        .id(SharedString::from(format!("pnote-time-{idx}")))
+                                        .cursor_pointer()
                                         .text_size(px(11.5))
                                         .text_color(rgb(theme::muted()))
+                                        .on_click(|_, _, cx| crate::timefmt::cycle(cx))
                                         .child(time),
                                 )
                                 .child(

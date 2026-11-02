@@ -18,7 +18,7 @@ use satori_core::nip::{article, calendar, classified, highlight, imeta, poll, re
 
 use crate::{markdown, theme};
 use super::content::{self, Body};
-use super::feed::{rel_time, Feed};
+use super::feed::Feed;
 use super::nav::Nav;
 
 /// Read-only card state, cloned out of the feed each frame (the list closure
@@ -345,7 +345,9 @@ fn article_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) ->
             .child(summary),
     );
     if let Some(ts) = data.published_at {
-        card = card.child(meta_line(rel_time(ts)));
+        // Mode-aware without a cx (no bridge on card paths): date mode
+        // shows dates, block keeps relative.
+        card = card.child(meta_line(crate::timefmt::stamp_text(ts)));
     }
     // The Read seal opens the reader page (markdown). Quiet on purpose —
     // a serif word, underlined, the only door out of the summary.

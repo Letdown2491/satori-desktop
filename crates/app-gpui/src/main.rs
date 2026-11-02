@@ -10,6 +10,7 @@ mod media;
 mod markdown;
 mod prefs;
 mod theme;
+mod timefmt;
 mod views;
 
 use std::sync::Arc;
@@ -134,6 +135,9 @@ fn main() {
         if let Some(false) = crate::prefs::load().dark.or(desktop.dark) { crate::theme::select(crate::theme::LIGHT) }
         cx.set_global(desktop);
         let core = Arc::new(Core::new());
+        // The blocktime bridge (timefmt.rs): the core handle + ask dedup
+        // behind every tappable timestamp, before any window renders.
+        crate::timefmt::init(core.clone(), cx);
         let (session, err) = core.init();
         if err.is_some() {
             eprintln!("[satori-gpui] resume error (surfaced on the login doors)");

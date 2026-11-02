@@ -35,6 +35,9 @@ pub mod files {
     /// rule: an explicit retry after a crash reuses the same event ID —
     /// no duplicate zap events).
     pub const ZAPS: &str = "zaps.json";
+    /// Bitcoin timestamp→height table (blocktime, Phase 2 §4.4) — permanent,
+    /// tiny, seeded from a compiled-in anchor.
+    pub const BLOCKTIME: &str = "blocktime.json";
 }
 
 fn home() -> Option<PathBuf> {

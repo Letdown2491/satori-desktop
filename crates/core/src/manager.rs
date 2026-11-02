@@ -13,6 +13,7 @@ use nostr::prelude::*;
 use nostr_connect::prelude::*;
 use tokio::sync::mpsc;
 
+use crate::blocktime::Blocktime;
 use crate::error::{LoginError, Result};
 use crate::nip::nip78;
 use crate::pool::Pool;
@@ -252,6 +253,9 @@ pub struct Core {
     own_zapped: Mutex<HashSet<String>>,
     /// The NIP-47 wallet handle (D20) — one per process, like the pool.
     wallet: Arc<Wallet>,
+    /// Bitcoin timestamp→height service (blocktime, Phase 2 §4.4) — one
+    /// per process; its table outlives sessions like the ledger.
+    blocktime: Arc<Blocktime>,
     /// Resolved profiles (mentions/name display) — absorbed as they stream in.
     profiles_mem: Mutex<std::collections::HashMap<String, Profile>>,
     /// Live undo holds: token → cancel signal.
@@ -270,12 +274,18 @@ impl Default for Core {
 
 impl Core {
     pub fn new() -> Self {
+        // The runtime is built first — the blocktime service needs its
+        // handle for the single-flight spawns (Handle::current would panic
+        // outside a runtime).
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let blocktime = Arc::new(Blocktime::new(rt.handle().clone()));
         Self {
-            rt: tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()
-                .expect("tokio runtime"),
+            rt,
+            blocktime,
             active: Mutex::new(None),
             pending: Mutex::new(None),
             hold_seq: AtomicU64::new(1),
@@ -434,6 +444,27 @@ impl Core {
     /// The wallet handle (the settings pane reads status/balance directly).
     pub fn wallet(&self) -> Arc<Wallet> {
         Arc::clone(&self.wallet)
+    }
+
+    // --- blocktime (Phase 2 §4.4) ----------------------------------------------
+
+    /// Resolve a timestamp to a Bitcoin block height (Feather's blocktime
+    /// spec): hot answers immediately, otherwise one guarded single-flight
+    /// fetch to mempool.space. The answer lands on every waiter.
+    pub fn block_height(self: &Arc<Self>, ts: u64) -> crate::blocktime::BlockRx {
+        self.blocktime.get(ts)
+    }
+
+    /// The display-ready answer: exact when known, interpolated from the
+    /// nearest point otherwise. Pure read — per-frame safe, never fetches.
+    pub fn block_height_cached(&self, ts: u64) -> Option<u64> {
+        self.blocktime.cached(ts)
+    }
+
+    /// Is there an exact (fetched or recorded) height for this timestamp?
+    /// The ensure path's skip test — interpolation doesn't count.
+    pub fn block_height_known(&self, ts: u64) -> bool {
+        self.blocktime.known(ts)
     }
 
     /// Wallet event stream: status changes, pay outcomes, verified

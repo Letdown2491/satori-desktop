@@ -15,7 +15,7 @@ use satori_core::nip::{comment, nip10};
 use satori_core::notifications::parse_zap_receipt;
 
 use crate::{media, theme};
-use super::{content, nav::Nav, feed::rel_time};
+use super::{content, nav::Nav};
 
 /// What the event did to you (notifications.ts `add`): a comment is always
 /// a reply; kind 1 splits by whether it carries an `e` tag.
@@ -87,6 +87,7 @@ impl NotificationsView {
     /// pre-visit high-water splits the page into New / Earlier.
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
+        crate::timefmt::watch(cx); // repaint on mode/height change
         let prev = satori_core::read_state::load().notif;
         core.mark_notifications_seen();
         let view = Self {
@@ -314,6 +315,7 @@ fn notif_card(
     media: &media::Snapshot,
     quotes: &content::Quotes,
     me: &str,
+    time: String,
     handle: Entity<NotificationsView>,
 ) -> gpui::AnyElement {
     let key = ev.pubkey.to_string();
@@ -325,7 +327,6 @@ fn notif_card(
         .get(&key)
         .map(|p| p.picture.clone())
         .unwrap_or_default();
-    let time = rel_time(ev.created_at.as_secs());
     let parent_id = notif_parent_id(ev);
     // Clicking opens the conversation: the parent's thread when there is
     // one (your note's thread, for a reply), else the note itself. A
@@ -368,9 +369,14 @@ fn notif_card(
                         .child(name),
                 )
                 .child(
+                    // The timestamp is the third mode toggle (timefmt.rs):
+                    // tap cycles relative → date → block height.
                     div()
+                        .id(SharedString::from(format!("notif-time-{idx}")))
+                        .cursor_pointer()
                         .text_size(px(12.0))
                         .text_color(rgb(theme::muted()))
+                        .on_click(|_, _, cx| crate::timefmt::cycle(cx))
                         .child(time),
                 ),
         );
@@ -477,7 +483,7 @@ impl Render for NotificationsView {
                             })
                             .into_any_element()
                     } else {
-                        list(self.list.clone(), move |idx, _w, _cx| {
+                        list(self.list.clone(), move |idx, _w, cx| {
                             match rows.get(idx) {
                                 Some(Row::Label(text)) => div()
                                     .w_full()
@@ -489,17 +495,26 @@ impl Render for NotificationsView {
                                     .text_color(rgb(theme::muted()))
                                     .child(text.to_string())
                                     .into_any_element(),
-                                Some(Row::Note(ev, t)) => notif_card(
-                                    idx,
-                                    ev,
-                                    *t,
-                                    &profiles,
-                                    &parents,
-                                    &media,
-                                    &quotes,
-                                    &me,
-                                    handle.clone(),
-                                ),
+                                Some(Row::Note(ev, t)) => {
+                                    // The stamp reads the current mode +
+                                    // blocktime cache per frame; ensure
+                                    // refines Block mode from the bridge.
+                                    let secs = ev.created_at.as_secs();
+                                    let time = crate::timefmt::stamp(secs, cx);
+                                    crate::timefmt::ensure(secs, cx);
+                                    notif_card(
+                                        idx,
+                                        ev,
+                                        *t,
+                                        &profiles,
+                                        &parents,
+                                        &media,
+                                        &quotes,
+                                        &me,
+                                        time,
+                                        handle.clone(),
+                                    )
+                                }
                                 None => div().into_any_element(),
                             }
                         })

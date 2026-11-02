@@ -17,7 +17,7 @@ use satori_core::nip::article;
 use satori_core::nip::imeta::{self, ImageMeta};
 
 use crate::{media, theme};
-use super::{feed::rel_time, nav::Nav};
+use super::nav::Nav;
 
 /// Timeline column width (web app's centered column; media_picture sized
 /// against 720px there — the desktop column is a touch narrower).
@@ -882,7 +882,12 @@ fn embed_card<V: EventEmitter<Nav> + 'static>(
                     div()
                         .text_size(px(11.0))
                         .text_color(rgb(theme::muted()))
-                        .child(rel_time(e.event.created_at.as_secs())),
+                        // Mode-aware without a cx (no bridge on embed
+                        // paths): date mode shows dates, block keeps
+                        // relative.
+                        .child(crate::timefmt::stamp_text(
+                            e.event.created_at.as_secs(),
+                        )),
                 ),
         )
         .child(
@@ -899,6 +904,7 @@ fn embed_card<V: EventEmitter<Nav> + 'static>(
 /// name, time, word-flow body; the author row opens the profile, the body
 /// opens the thread (the GTK panes re-use the full note card — the desktop
 /// keeps them lighter: no action glyphs on secondary surfaces).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
     idx: usize,
     tag: &str,
@@ -906,6 +912,7 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
     profiles: &HashMap<String, Profile>,
     media: &media::Snapshot,
     quotes: &Quotes,
+    time: String,
     handle: Entity<V>,
 ) -> AnyElement {
     let key = ev.pubkey.to_string();
@@ -917,7 +924,6 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
         .get(&key)
         .map(|p| p.picture.clone())
         .unwrap_or_default();
-    let time = rel_time(ev.created_at.as_secs());
     let ev_for_open = ev.clone();
     let ev_for_profile = ev.clone();
     let handle_open = handle.clone();
@@ -952,9 +958,14 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
                         .child(name),
                 )
                 .child(
+                    // The timestamp is the third mode toggle (timefmt.rs):
+                    // tap cycles relative → date → block height.
                     div()
+                        .id(SharedString::from(format!("{tag}-time-{idx}")))
+                        .cursor_pointer()
                         .text_size(px(12.0))
                         .text_color(rgb(theme::muted()))
+                        .on_click(|_, _, cx| crate::timefmt::cycle(cx))
                         .child(time),
                 ),
         )

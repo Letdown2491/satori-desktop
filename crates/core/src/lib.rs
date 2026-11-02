@@ -11,6 +11,7 @@
 
 #![allow(dead_code)]
 
+pub mod blocktime;
 pub mod config;
 pub mod error;
 pub mod manager;

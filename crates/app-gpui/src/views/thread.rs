@@ -37,6 +37,7 @@ impl EventEmitter<Nav> for ThreadView {}
 impl ThreadView {
     pub fn new(core: Arc<Core>, id: EventId, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
+        crate::timefmt::watch(cx); // repaint on mode/height change
         let view = Self {
             core,
             anchor: None,
@@ -227,9 +228,9 @@ fn reply_row(
     media: &media::Snapshot,
     quotes: &content::Quotes,
     profiles: &HashMap<String, Profile>,
+    time: String,
     handle: Entity<ThreadView>,
 ) -> impl IntoElement {
-    let time = super::feed::rel_time(ev.created_at.as_secs());
     let picture = profiles
         .get(&ev.pubkey.to_string())
         .map(|p| p.picture.clone())
@@ -270,9 +271,14 @@ fn reply_row(
                         ),
                 )
                 .child(
+                    // The timestamp is the third mode toggle (timefmt.rs):
+                    // tap cycles relative → date → block height.
                     div()
+                        .id(SharedString::from(format!("reply-time-{idx}")))
+                        .cursor_pointer()
                         .text_size(px(11.5))
                         .text_color(rgb(theme::muted()))
+                        .on_click(|_, _, cx| crate::timefmt::cycle(cx))
                         .child(time),
                 ),
         )
@@ -458,7 +464,7 @@ impl Render for ThreadView {
                             })
                             .into_any_element()
                     } else {
-                        list(self.list.clone(), move |idx, _w, _cx| {
+                        list(self.list.clone(), move |idx, _w, cx| {
                             match replies.get(idx) {
                                 Some((ev, depth)) => {
                                     let key = ev.pubkey.to_string();
@@ -466,6 +472,12 @@ impl Render for ThreadView {
                                         .get(&key)
                                         .map(|p| p.display())
                                         .unwrap_or_else(|| format!("{}…", &key[..8]));
+                                    // The stamp reads the current mode +
+                                    // blocktime cache per frame; ensure
+                                    // refines Block mode from the bridge.
+                                    let secs = ev.created_at.as_secs();
+                                    let time = crate::timefmt::stamp(secs, cx);
+                                    crate::timefmt::ensure(secs, cx);
                                     reply_row(
                                         idx,
                                         ev,
@@ -474,6 +486,7 @@ impl Render for ThreadView {
                                         &media,
                                         &quotes,
                                         &profiles,
+                                        time,
                                         anchor_handle.clone(),
                                     )
                                     .into_any_element()
