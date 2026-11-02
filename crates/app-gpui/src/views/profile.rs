@@ -7,8 +7,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use gpui::{
-    div, list, prelude::*, px, rgb, Context, EventEmitter, FontWeight, ListAlignment,
-    ListState, Render, SharedString, Window,
+    div, img, list, prelude::*, px, rgb, AnyElement, Context, Div, Entity, EventEmitter,
+    FontWeight, ListAlignment, ListState, ObjectFit, Render, SharedString, Window,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
@@ -16,11 +16,30 @@ use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
 use crate::{media, theme};
 use super::{content, nav::Nav};
 
+/// Which profile surface is up: the notes body or the media strips
+/// (Phase 2 §4.3 — Photos/Videos, three-column thumbnails).
+#[derive(Clone, Copy, PartialEq)]
+enum ProfileTab {
+    Notes,
+    Photos,
+    Videos,
+}
+
+/// One list row of the active tab (render-time projection).
+enum Row {
+    Note(Event),
+    /// Up to three thumbnails: (url, index into the tab's lightbox list).
+    Pics(Vec<(String, usize)>),
+    Vid(String, Option<String>),
+}
+
 pub struct ProfileView {
     core: Arc<Core>,
     who: PublicKey,
     profile: Option<Profile>,
     notes: Vec<Event>,
+    /// The active surface (notes body / media strips — Phase 2 §4.3).
+    tab: ProfileTab,
     following: bool,
     /// Known profiles — mention names in note bodies (word_flow).
     profiles: HashMap<String, Profile>,
@@ -39,6 +58,7 @@ impl ProfileView {
             who,
             profile: None,
             notes: vec![],
+            tab: ProfileTab::Notes,
             profiles: HashMap::new(),
             quotes: HashMap::new(),
             status: "loading…".into(),
@@ -73,13 +93,9 @@ impl ProfileView {
                 if let Some(p) = self.profile.clone() {
                     self.want_avatar(&p, cx);
                 }
-                // TODO(port): profile.rs renders all visible kinds; the GPUI
-                // port covers text + picture notes (P2).
-                self.notes = page
-                    .notes
-                    .into_iter()
-                    .filter(|n| n.kind == Kind::TextNote || u16::from(n.kind) == 20)
-                    .collect();
+                // All visible kinds land; each tab filters (the strips read
+                // kind 20 + imeta-bearing kind 1 — Phase 2 §4.3).
+                self.notes = page.notes;
                 for note in self.notes.clone() {
                     self.want_media(&note, cx);
                     self.want_quotes(&note, cx);
@@ -89,8 +105,58 @@ impl ProfileView {
             FeedEvent::Failed(e) => self.status = format!("… {e}"),
             _ => {}
         }
-        self.list.reset(self.notes.len());
+        self.list.reset(self.row_count());
         cx.notify();
+    }
+
+    // --- the strips' projections (Phase 2 §4.3) -------------------------------
+
+    /// The Notes tab's rows: text + picture notes.
+    fn note_rows(&self) -> Vec<Event> {
+        self.notes
+            .iter()
+            .filter(|n| n.kind == Kind::TextNote || u16::from(n.kind) == 20)
+            .cloned()
+            .collect()
+    }
+
+    /// The Photos strip: every picture URL in timeline order (kind 20 +
+    /// imeta-bearing kind 1), flat — the grid chunks it into threes.
+    fn photo_urls(&self) -> Vec<String> {
+        self.notes
+            .iter()
+            .filter(|n| u16::from(n.kind) == 20 || n.kind == Kind::TextNote)
+            .flat_map(content::media_assets)
+            .filter_map(|a| match a {
+                content::MediaAsset::Picture { url } => Some(url),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The Videos strip: one tile per video-bearing note (kind 21/22, plus
+    /// imeta/link videos on kind 1) — url + poster. Video files themselves
+    /// are never fetched (the tile opens the browser).
+    fn video_rows(&self) -> Vec<(String, Option<String>)> {
+        self.notes
+            .iter()
+            .filter(|n| matches!(u16::from(n.kind), 1 | 21 | 22))
+            .filter_map(|n| {
+                content::media_assets(n).into_iter().find_map(|a| match a {
+                    content::MediaAsset::Video { url, poster } => Some((url, poster)),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    /// The active tab's list-row count (list.reset wants it at event time).
+    fn row_count(&self) -> usize {
+        match self.tab {
+            ProfileTab::Notes => self.note_rows().len(),
+            ProfileTab::Photos => self.photo_urls().len().div_ceil(3),
+            ProfileTab::Videos => self.video_rows().len(),
+        }
     }
 
     /// Queue the profile picture fetch (core's guarded, disk-cached path).
@@ -144,6 +210,32 @@ impl ProfileView {
             self.pump_quote(bech, rx, cx);
         }
     }
+
+    /// One strip tab: a quiet label, the active one ink + underlined.
+    fn tab_btn(
+        &self,
+        which: ProfileTab,
+        label: &'static str,
+        active: ProfileTab,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let on = which == active;
+        div()
+            .id(SharedString::from(format!("tab-{label}")))
+            .cursor_pointer()
+            .text_size(px(12.5))
+            .text_color(rgb(if on { theme::ink() } else { theme::muted() }))
+            .when(on, |d| d.underline())
+            .child(label)
+            .on_click(cx.listener(move |view, _, _, cx| {
+                if view.tab != which {
+                    view.tab = which;
+                    view.list.reset(view.row_count());
+                    cx.notify();
+                }
+            }))
+            .into_any_element()
+    }
 }
 
 impl Render for ProfileView {
@@ -156,8 +248,32 @@ impl Render for ProfileView {
             .unwrap_or_else(|| format!("{}…", &who_hex[..8]));
         let about = self.profile.as_ref().map(|p| p.about.clone()).unwrap_or_default();
         let picture = self.profile.as_ref().map(|p| p.picture.clone()).unwrap_or_default();
-        let notes = self.notes.clone();
-        let empty = notes.is_empty();
+        let tab = self.tab;
+        let rows: Vec<Row> = match tab {
+            ProfileTab::Notes => self.note_rows().into_iter().map(Row::Note).collect(),
+            ProfileTab::Photos => self
+                .photo_urls()
+                .chunks(3)
+                .enumerate()
+                .map(|(r, chunk)| {
+                    Row::Pics(
+                        chunk
+                            .iter()
+                            .enumerate()
+                            .map(|(i, u)| (u.clone(), r * 3 + i))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            ProfileTab::Videos => self
+                .video_rows()
+                .into_iter()
+                .map(|(u, p)| Row::Vid(u, p))
+                .collect(),
+        };
+        // The Photos strip's lightbox list (tile taps index into it).
+        let pics_all = self.photo_urls();
+        let empty = rows.is_empty();
         let following = self.following;
         let media = media::Snapshot::new(cx);
         // Evicted media comes back on render — the profile header avatar,
@@ -268,6 +384,28 @@ impl Render for ProfileView {
                         ),
             )
             .child(
+                // The strips' tabs (Phase 2 §4.3): quiet labels, the active
+                // one ink + underlined.
+                div()
+                    .w_full()
+                    .border_b_1()
+                    .border_color(rgb(theme::hairline()))
+                    .bg(rgb(theme::panel()))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(content::COL_W))
+                            .flex()
+                            .gap_4()
+                            .px_4()
+                            .py_2()
+                            .child(self.tab_btn(ProfileTab::Notes, "Notes", tab, cx))
+                            .child(self.tab_btn(ProfileTab::Photos, "Photos", tab, cx))
+                            .child(self.tab_btn(ProfileTab::Videos, "Videos", tab, cx)),
+                    ),
+            )
+            .child(
                 div()
                     .flex_1()
                     .min_h_0()
@@ -280,15 +418,20 @@ impl Render for ProfileView {
                             .p_4()
                             .text_color(rgb(theme::muted()))
                             .child(if self.status.is_empty() {
-                                "No notes here yet.".to_string()
+                                match tab {
+                                    ProfileTab::Notes => "No notes here yet.",
+                                    ProfileTab::Photos => "No pictures yet.",
+                                    ProfileTab::Videos => "No videos yet.",
+                                }
+                                .to_string()
                             } else {
                                 self.status.clone()
                             })
                             .into_any_element()
                     } else {
                         list(self.list.clone(), move |idx, _w, _cx| {
-                    match notes.get(idx) {
-                        Some(ev) => {
+                    match rows.get(idx) {
+                        Some(Row::Note(ev)) => {
                             let time = super::feed::rel_time(ev.created_at.as_secs());
                             let ev_for_click = ev.clone();
                             let body_handle = handle.clone();
@@ -331,6 +474,48 @@ impl Render for ProfileView {
                                 )
                                 .into_any_element()
                         }
+                        Some(Row::Pics(tiles)) => {
+                            let mut grid = div()
+                                .w_full()
+                                .flex()
+                                .gap_1()
+                                .px_4()
+                                .py_1()
+                                .border_b_1()
+                                .border_color(rgb(theme::hairline()));
+                            for (url, gix) in tiles {
+                                grid = grid.child(thumb_tile(
+                                    &media,
+                                    SharedString::from(format!("pic-{gix}")),
+                                    url,
+                                    Some((&pics_all, *gix)),
+                                    None,
+                                    handle.clone(),
+                                ));
+                            }
+                            grid.into_any_element()
+                        }
+                        Some(Row::Vid(url, poster)) => {
+                            let mut grid = div()
+                                .w_full()
+                                .flex()
+                                .gap_1()
+                                .px_4()
+                                .py_1()
+                                .border_b_1()
+                                .border_color(rgb(theme::hairline()));
+                            // One tile per video note: the poster thumb when
+                            // the bytes landed, the quiet play frame otherwise.
+                            grid = grid.child(thumb_tile(
+                                &media,
+                                SharedString::from(format!("vid-{idx}")),
+                                poster.as_deref().unwrap_or(""),
+                                None,
+                                Some(url),
+                                handle.clone(),
+                            ));
+                            grid.into_any_element()
+                        }
                         None => div().into_any_element(),
                     }
                 })
@@ -340,5 +525,87 @@ impl Render for ProfileView {
                 .into_any_element()
                     }),
             )
+    }
+}
+
+/// One 3-column strip thumbnail (Phase 2 §4.3): the cached bytes
+/// cover-cropped to a square, a quiet frame until they land. Photos tap
+/// into the lightbox at their strip index; videos open the browser (the
+/// play badge marks them, the poster is the thumb).
+fn thumb_tile(
+    snap: &media::Snapshot,
+    key: SharedString,
+    thumb: &str,
+    lightbox: Option<(&[String], usize)>,
+    video_url: Option<&str>,
+    handle: Entity<ProfileView>,
+) -> AnyElement {
+    let size = (content::COL_W - 32.0 - 8.0) / 3.0;
+    let video = video_url.is_some();
+    let target = video_url.unwrap_or_default().to_string();
+    let urls: Vec<String> = lightbox.map(|(l, _)| l.to_vec()).unwrap_or_default();
+    let idx = lightbox.map(|(_, i)| i).unwrap_or(0);
+    let frame = div()
+        .id(key)
+        .cursor_pointer()
+        .flex_none()
+        .overflow_hidden()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(rgb(theme::hairline()))
+        .bg(rgb(theme::panel()))
+        .size(px(size))
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            if video {
+                cx.open_url(&target);
+            } else {
+                let urls = urls.clone();
+                handle.update(cx, |_, cx| cx.emit(Nav::OpenLightbox(urls, idx)));
+            }
+        });
+    let badge = |f: Div| {
+        if video {
+            f.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(22.0))
+                    .text_color(rgb(theme::vermilion()))
+                    .child("▶"),
+            )
+        } else {
+            f
+        }
+    };
+    match snap.png(thumb) {
+        Some(png) => frame
+            .child(
+                div()
+                    .relative()
+                    .size_full()
+                    .child(img(png).size_full().object_fit(ObjectFit::Cover))
+                    .map(badge),
+            )
+            .into_any_element(),
+        None => frame
+            .child(
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(if video { 22.0 } else { 11.0 }))
+                    .text_color(rgb(if video {
+                        theme::vermilion()
+                    } else {
+                        theme::muted()
+                    }))
+                    .child(if video { "▶" } else { "…" }),
+            )
+            .into_any_element(),
     }
 }
