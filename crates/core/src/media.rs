@@ -158,8 +158,12 @@ async fn guarded_get(url: &str) -> Result<reqwest::Response, MediaError> {
 }
 
 /// Read the body under a hard cap (declared length rejected up-front, the
-/// chunk stream cut off if it lies).
-async fn read_capped(mut res: reqwest::Response, cap: usize) -> Result<Vec<u8>, MediaError> {
+/// chunk stream cut off if it lies). Shared with the upload path — a
+/// server's response is bounded the same way its fetches are.
+pub(crate) async fn read_capped(
+    mut res: reqwest::Response,
+    cap: usize,
+) -> Result<Vec<u8>, MediaError> {
     if let Some(len) = res.content_length()
         && len as usize > cap
     {

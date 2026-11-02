@@ -17,6 +17,8 @@
 use base64::Engine as _;
 use nostr::prelude::*;
 use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::media;
 
@@ -29,6 +31,42 @@ pub const KIND_BLOSSOM_AUTH: u16 = 24242;
 pub const DEFAULT_BLOSSOM_SERVER: &str = "https://blossom.primal.net";
 /// The web app's upload cap (`upload.ts` MAX_BYTES).
 pub const MAX_BYTES: u64 = 25 * 1024 * 1024;
+/// Response read cap: a BUD-01 upload response is a small JSON descriptor
+/// (url, sha256, mime, dim). A hostile server streaming an unbounded body
+/// used to be read with `res.text()` — memory balloon at the server's whim.
+const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+/// The upload HTTP client. Same browser UA as media.rs (blossoms sit behind
+/// CDNs that 403 UA-less requests), a connect timeout and a total timeout —
+/// the bare `Client::new()` before had NONE, so one stalling server pinned
+/// the upload task (and its ≤25MB buffer) forever. The total is generous
+/// (300s: 25MB over a slow home uplink is minutes; the fetch client's 20s
+/// is a download bound), but bounded. Redirects re-run the SSRF guard per
+/// hop, like the image fetcher — a 302 to localhost must not carry a
+/// signed upload.
+fn http() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            )
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() > 5
+                    || !media::is_safe_media_url(attempt.url().as_str())
+                {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 /// One successful upload: the blob URL + the full NIP-92 `imeta` tag built for
 /// it (upload.ts `Upload` — a single imeta tag, kept as a string vector).
@@ -146,7 +184,7 @@ async fn blossom_put(
         "Nostr {}",
         base64::engine::general_purpose::STANDARD.encode(json)
     );
-    let res = reqwest::Client::new()
+    let res = http()
         .put(&url)
         .header("Authorization", auth)
         .header(
@@ -165,7 +203,12 @@ async fn blossom_put(
     if !status.is_success() {
         return Err(format!("blossom upload failed ({status})"));
     }
-    let body = res.text().await.map_err(|e| e.to_string())?;
+    // Bounded read: the response is a small JSON descriptor; the unbounded
+    // `res.text()` let a server decide how much RAM this task deserves.
+    let body = media::read_capped(res, MAX_RESPONSE_BYTES)
+        .await
+        .map_err(|_| "blossom response too large or unreadable".to_string())?;
+    let body = String::from_utf8(body).map_err(|e| e.to_string())?;
     let j: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     let url = j
         .get("url")
