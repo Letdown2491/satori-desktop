@@ -848,13 +848,20 @@ impl Shell {
 
     /// The floating back-to-top whisper — bottom-right of the content
     /// column, only when the feed is scrolled well down.
+    /// The floating back-to-top whisper — bottom-right of the content
+    /// column, only when the active pane is scrolled deep. The click is
+    /// SEALED (stop_propagation): the button floats OVER the note cards,
+    /// and an unsealed click falls through to the card beneath — the
+    /// owner saw the thread open instead of a scroll-to-top. (Same house
+    /// rule as the cards' own click seals.) 44px, not 38: a round target
+    /// this small catches edge misses on the card under it.
     fn floating_top(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         div()
             .id("back-to-top")
             .absolute()
             .bottom(px(20.0))
             .right(px(24.0))
-            .size(px(38.0))
+            .size(px(44.0))
             .rounded_full()
             .cursor_pointer()
             .border_1()
@@ -865,6 +872,7 @@ impl Shell {
             .justify_center()
             .tooltip(tip("Back to top"))
             .on_click(cx.listener(|shell, _, _, cx| {
+                cx.stop_propagation();
                 shell.pane_to_top(cx);
                 cx.notify();
             }))

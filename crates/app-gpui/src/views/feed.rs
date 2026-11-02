@@ -181,8 +181,10 @@ impl Feed {
             let _ = this.update(cx, |feed, cx| {
                 feed.last_visible_end = ev.visible_range.end;
                 // Deep-scroll whisper: the shell floats a back-to-top button
-                // once the reader is a dozen items down. Emit on change only.
-                let deep = ev.visible_range.start >= 10;
+                // once the reader is a few items down — a dozen was too
+                // deep (the owner kept scrolling before thinking "where is
+                // it"). Emit on change only.
+                let deep = ev.visible_range.start >= 3;
                 if feed.deep != deep {
                     feed.deep = deep;
                     cx.emit(Nav::PaneDeep);

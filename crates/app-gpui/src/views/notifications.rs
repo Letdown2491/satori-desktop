@@ -109,11 +109,13 @@ impl NotificationsView {
         };
         view.pump_at(prev, cx);
         // Deep-scroll whisper: same threshold and emission shape as the
-        // feed's (feed.rs set_scroll_handler) — emit on change only.
+        // feed's (feed.rs set_scroll_handler) — emit on change only. The
+        // threshold is shallow (three rows): the button should arrive
+        // early, not after the reader has given up looking for it.
         let this = cx.entity().downgrade();
         view.list.set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
             let _ = this.update(cx, |n, cx| {
-                let deep = ev.visible_range.start >= 10;
+                let deep = ev.visible_range.start >= 3;
                 if n.deep != deep {
                     n.deep = deep;
                     cx.emit(Nav::PaneDeep);
