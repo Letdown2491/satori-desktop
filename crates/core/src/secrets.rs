@@ -14,9 +14,12 @@ use std::path::PathBuf;
 use crate::config;
 use crate::error::{LoginError, Result};
 
-// Renamed with the app ID (D12): entries under the old service string are
-// orphaned — a one-time re-login on first launch after this change.
+// Renamed with the app ID (D12). Entries under the old capitalized service
+// are NOT orphaned anymore: load() migrates them on first miss (below).
 const SERVICE: &str = "io.github.Letdown2491.satori";
+/// The pre-D12 service string. Read-only — migrate_legacy_service clears
+/// each slot as it copies it across.
+const LEGACY_SERVICE: &str = "io.github.Letdown2491.Satori";
 pub const BUNKER_CLIENT_SECRET: &str = "bunker-client-secret";
 pub const NSEC: &str = "nsec";
 /// The NWC wallet's connection secret (NIP-47). D20: a separate, revocable
@@ -70,7 +73,8 @@ pub async fn store(name: &str, secret: &str) -> Result<()> {
     Ok(())
 }
 
-/// Load a secret; `None` when never stored.
+/// Load a secret; `None` when never stored. A keyring miss first tries the
+/// pre-rename (D12) service — one-time migration, invisible to callers.
 pub async fn load(name: &str) -> Result<Option<String>> {
     let from_keyring: Option<String> = {
         let name = name.to_string();
@@ -85,10 +89,53 @@ pub async fn load(name: &str) -> Result<Option<String>> {
         .await
         .unwrap_or(None) // no service / timeout → file fallback
     };
+    let from_keyring = match from_keyring {
+        Some(v) => Some(v),
+        None => migrate_legacy_service(name).await?,
+    };
     match from_keyring {
         Some(v) => Ok(Some(v)),
         None => file_load(name),
     }
+}
+
+/// One-time migration for the D12 app-id rename: the keyring service was
+/// `io.github.Letdown2491.Satori` (capital S) before it, so a miss under the
+/// current service reads the legacy entry, copies the secret across, and
+/// clears the orphan. Best-effort in both directions: any legacy-read
+/// trouble is a clean miss (the file fallback still runs), and a failed
+/// copy keeps the legacy entry for the next attempt.
+async fn migrate_legacy_service(name: &str) -> Result<Option<String>> {
+    let name = name.to_string();
+    let migrated: Option<String> = with_deadline(move || {
+        let legacy = match keyring::Entry::new(LEGACY_SERVICE, &name) {
+            Ok(e) => e,
+            Err(_) => return Ok(None),
+        };
+        match legacy.get_password() {
+            Ok(secret) => {
+                let copied = entry(&name)
+                    .ok()
+                    .and_then(|cur| cur.set_password(&secret).ok());
+                if copied.is_some() {
+                    let _ = legacy.delete_credential();
+                } else {
+                    eprintln!("[secrets] legacy migration: copy failed, orphan kept");
+                }
+                // Resume with the legacy secret either way — this launch
+                // works, and a failed copy migrates on the next one.
+                Ok(Some(secret))
+            }
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => {
+                eprintln!("[secrets] legacy migration read failed: {e}");
+                Ok(None)
+            }
+        }
+    })
+    .await
+    .unwrap_or(None); // no service / timeout → treat as no legacy entry
+    Ok(migrated)
 }
 
 /// Best-effort delete from both stores (logout must not leave residue).

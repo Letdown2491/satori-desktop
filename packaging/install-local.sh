@@ -38,4 +38,3 @@ if command -v update-desktop-database >/dev/null 2>&1; then
 fi
 
 echo "installed: $HOME/.local/bin/satori (+ desktop file, hicolor icons)"
-echo "note: the keyring service was renamed with the app id (D12) — first launch asks for login once."

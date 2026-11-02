@@ -341,7 +341,29 @@ impl Core {
             }
             Err(e) => {
                 eprintln!("[core] resume failed: {e}");
-                (None, Some(e.to_string()))
+                // The notice copy is human on purpose (the doors show it
+                // verbatim); the technical detail is the stderr line above.
+                match e {
+                    // Definitive — retrying can never succeed: forget the
+                    // session so the notice shows once, not every launch.
+                    LoginError::CredentialGone(_) => {
+                        session::clear();
+                        (
+                            None,
+                            Some("Couldn't unlock your saved session — sign in again \
+                                  below. Your keys stay with your signer."
+                                .into()),
+                        )
+                    }
+                    // Transient (relay down at launch, store timeout): keep
+                    // the session — the next launch retries the resume.
+                    _ => (
+                        None,
+                        Some("Couldn't reach your signer just now — Satori retries \
+                              on next launch, or sign in below."
+                            .into()),
+                    ),
+                }
             }
         }
     }
@@ -981,7 +1003,7 @@ impl Core {
             SessionMode::Bunker { remote, relays } => {
                 let secret = secrets::load(secrets::BUNKER_CLIENT_SECRET)
                     .await?
-                    .ok_or_else(|| LoginError::Resume("transport secret missing".into()))?;
+                    .ok_or(LoginError::CredentialGone("transport secret"))?;
                 let client_keys = signer::client_keys_from_secret(&secret)?;
                 // Repeated relays join with & (query params, not extra ?s).
                 let mut uri = format!("bunker://{remote}");
@@ -998,7 +1020,7 @@ impl Core {
             SessionMode::Local => {
                 let secret = secrets::load(secrets::NSEC)
                     .await?
-                    .ok_or_else(|| LoginError::Resume("local key missing".into()))?;
+                    .ok_or(LoginError::CredentialGone("local key"))?;
                 Ok(Signer::Local(signer::parse_local_secret(&secret)?))
             }
         }

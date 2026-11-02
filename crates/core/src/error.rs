@@ -9,6 +9,11 @@ pub enum LoginError {
     Connect(String),
     Store(String),
     Resume(String),
+    /// The stored credential is definitively gone (deleted store, orphaned
+    /// keyring entry): resume can never succeed by retrying. Unlike `Resume`
+    /// (relay down at launch, transient store trouble), the session should
+    /// be forgotten and the user signs in again.
+    CredentialGone(&'static str),
     Other(String),
 }
 
@@ -20,6 +25,7 @@ impl fmt::Display for LoginError {
             Self::Connect(s) => write!(f, "bunker connect failed: {s}"),
             Self::Store(s) => write!(f, "secret store: {s}"),
             Self::Resume(s) => write!(f, "session resume failed: {s}"),
+            Self::CredentialGone(what) => write!(f, "{what} is gone from the secret store"),
             Self::Other(s) => write!(f, "{s}"),
         }
     }

@@ -38,6 +38,9 @@ pub struct LoginView {
     /// to stderr behind a TODO; here it's a clickable chip).
     auth_url: Option<String>,
     error: String,
+    /// The banner's severity: the startup resume notice is a state (amber),
+    /// a runtime handshake failure is an error (red). on_event flips this.
+    error_is_notice: bool,
     /// Each connect run invalidates the previous pump (same seam as search).
     generation: u64,
     autofocused: bool,
@@ -60,6 +63,7 @@ impl LoginView {
             i.placeholder("bunker://…")
         });
         let focus = bunker.read(cx).focus_handle(cx);
+        let resume_notice = resume_error.is_some();
         let mut view = Self {
             core,
             bunker,
@@ -70,6 +74,7 @@ impl LoginView {
             copied: false,
             auth_url: None,
             error: resume_error.unwrap_or_default(),
+            error_is_notice: resume_notice,
             generation: 0,
             autofocused: false,
         };
@@ -150,6 +155,7 @@ impl LoginView {
             }
             ConnectEvent::Failed(msg) => {
                 self.error = msg;
+                self.error_is_notice = false; // a real failure — red banner
                 self.waiting = None;
                 // A dead handshake leaves a stale QR on the doors — drop it;
                 // the URI strip now reads "generating…" and re-arms on click.
@@ -194,6 +200,11 @@ impl Render for LoginView {
             window.focus(&self.focus);
         }
         let error = self.error.clone();
+        let err_color = if self.error_is_notice {
+            theme::warn()
+        } else {
+            theme::err()
+        };
         let waiting = self.waiting.clone();
         let auth_url = self.auth_url.clone();
         let bunker = self.bunker.clone();
@@ -240,10 +251,23 @@ impl Render for LoginView {
                             // the breathing ensō (the breath animates the
                             // wrapper's opacity — canvas glyphs aren't
                             // styleable directly).
-                            if let Some(code) = qr {
-                                img(code)
-                                    .size(px(280.0))
+                            if let Some(code) = qr.clone() {
+                                let open = qr_uri.clone();
+                                div()
+                                    .id("waiting-qr-open")
+                                    .cursor_pointer()
                                     .rounded_sm()
+                                    .border_1()
+                                    .border_color(rgb(theme::hairline()))
+                                    .hover(|s| s.border_color(rgb(theme::muted())))
+                                    .on_click(move |_, _, cx| {
+                                        // Same contract as the doors QR: click
+                                        // opens the system's nostrconnect handler.
+                                        if let Some(uri) = open.clone() {
+                                            cx.open_url(&uri);
+                                        }
+                                    })
+                                    .child(img(code).size(px(280.0)).rounded_sm())
                                     .into_any_element()
                             } else {
                                 // Reduced motion (the portal's
@@ -343,7 +367,7 @@ impl Render for LoginView {
                                     d.child(
                                         div()
                                             .text_size(px(12.0))
-                                            .text_color(rgb(theme::err()))
+                                            .text_color(rgb(err_color))
                                             .text_align(TextAlign::Center)
                                             .child(error),
                                     )
@@ -386,8 +410,8 @@ impl Render for LoginView {
                                 .into_any_element(),
                             // The nostrconnect door, always on: the QR is
                             // generated the moment the doors show — click the
-                            // URI below to copy it into a signer that can't
-                            // scan its own screen.
+                            // code to open the system signer; the URI row
+                            // below copies it for signers that can't.
                             div()
                                 .w_full()
                                 .flex()
@@ -405,11 +429,21 @@ impl Render for LoginView {
                                         Some(code) => div()
                                             .id("qr-open")
                                             .cursor_pointer()
-                                            .child(img(code.clone()).size(px(240.0)))
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(rgb(theme::hairline()))
+                                            .hover(|s| {
+                                                s.border_color(rgb(theme::muted()))
+                                            })
+                                            .child(
+                                                img(code.clone())
+                                                    .size(px(240.0))
+                                                    .rounded_sm(),
+                                            )
                                             // The desktop's nostrconnect:// handler
                                             // (kumaOS: the built-in signer panel) pops
                                             // on click; signers without a scheme
-                                            // handler fall back to the copy below.
+                                            // handler fall back to the copy row below.
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 if let Some(uri) = this.qr_uri.clone() {
                                                     cx.open_url(&uri);
@@ -453,10 +487,9 @@ impl Render for LoginView {
                                         .rounded_sm()
                                         .border_1()
                                         .border_color(rgb(theme::hairline()))
+                                        .hover(|s| s.border_color(rgb(theme::muted())))
                                         .text_size(px(11.0))
                                         .text_color(rgb(theme::muted()))
-                                        .overflow_x_scroll()
-                                        .max_w(px(360.))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             // Handshake dead (timeout, relay loss)?
                                             // The click re-arms it.
@@ -484,8 +517,12 @@ impl Render for LoginView {
                                             reset.detach();
                                         }))
                                         .child(match (&qr_uri, self.copied) {
-                                            (_, true) => "Copied — paste it in your signer".to_string(),
-                                            (Some(uri), _) => uri.clone(),
+                                            (_, true) => {
+                                                "Copied — paste it in your signer".to_string()
+                                            }
+                                            (Some(uri), _) => {
+                                                format!("{} · click to copy", uri_brief(uri))
+                                            }
                                             (None, _) => "generating…".to_string(),
                                         }),
                                 )
@@ -496,8 +533,8 @@ impl Render for LoginView {
                                 .text_color(rgb(theme::muted()))
                                 .text_align(TextAlign::Center)
                                 .child(
-                                    "Click the code to open your signer, or click the URI \
-                                     to copy it. The key never touches Satori.",
+                                    "Click to open your signer — the key never \
+                                     touches Satori.",
                                 )
                                 .into_any_element(),
                         ]
@@ -522,6 +559,17 @@ fn field(input: Entity<Input>) -> impl IntoElement {
         .border_1()
         .border_color(rgb(theme::hairline()))
         .child(input)
+}
+
+/// One-line display form of the (long) handshake URI: scheme + leading id,
+/// then an ellipsis. The full URI still rides the clipboard on click —
+/// the brief form is only ever shown, never transmitted.
+fn uri_brief(uri: &str) -> String {
+    const KEEP: usize = 26;
+    if uri.chars().count() <= KEEP {
+        return uri.to_string();
+    }
+    format!("{}…", uri.chars().take(KEEP).collect::<String>())
 }
 
 /// The nostrconnect URI as a QR image — PNG bytes at 4px/module with the
