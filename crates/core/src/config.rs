@@ -5,8 +5,11 @@
 
 use std::path::PathBuf;
 
-/// Placeholder until a real domain is chosen (DESIGN.md D12).
-pub const APP_ID: &str = "io.github.Letdown2491.Satori";
+/// The application identity (D12): reverse-DNS, lowercase app name — the
+/// house style (io.github.Letdown2491.gertie / .riddim). Must stay
+/// byte-identical across the .desktop file's ID, the Icon= name, and the
+/// window's Wayland app_id (WindowOptions.app_id) so GNOME matches them.
+pub const APP_ID: &str = "io.github.Letdown2491.satori";
 
 /// App-state JSON files (0600, debounced flush, flush-on-exit — the port of
 /// `src/data/json-store.ts` conventions). Event cache is separate: LMDB.

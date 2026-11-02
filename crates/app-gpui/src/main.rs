@@ -153,6 +153,10 @@ fn main() {
                     title: Some("Satori".into()),
                     ..Default::default()
                 }),
+                // The window's Wayland app_id — byte-identical to the
+                // .desktop file's ID so GNOME matches dash icon, grouping,
+                // and startup notification to this window (D12).
+                app_id: Some(satori_core::config::APP_ID.into()),
                 ..Default::default()
             },
             |_window, cx| {

@@ -4,7 +4,11 @@ Name=Satori
 GenericName=Nostr Client
 Comment=A quiet Nostr client — ink on washi
 Exec=satori
-Icon=io.github.Letdown2491.Satori
+Icon=io.github.Letdown2491.satori
 Terminal=false
 Categories=Network;InstantMessaging;
 Keywords=nostr;satori;social;
+MimeType=x-scheme-handler/nostr;
+StartupNotify=true
+# X11 sessions fall back to WM_CLASS; Wayland matches the app_id (main.rs).
+StartupWMClass=satori-desktop

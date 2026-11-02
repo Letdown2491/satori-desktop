@@ -14,7 +14,9 @@ use std::path::PathBuf;
 use crate::config;
 use crate::error::{LoginError, Result};
 
-const SERVICE: &str = "io.github.Letdown2491.Satori";
+// Renamed with the app ID (D12): entries under the old service string are
+// orphaned — a one-time re-login on first launch after this change.
+const SERVICE: &str = "io.github.Letdown2491.satori";
 pub const BUNKER_CLIENT_SECRET: &str = "bunker-client-secret";
 pub const NSEC: &str = "nsec";
 /// The NWC wallet's connection secret (NIP-47). D20: a separate, revocable
