@@ -96,6 +96,7 @@ url = { workspace = true }
 # malloc_trim: glibc arenas retain freed heap (35 threads of arenas); the
 # trim timer hands it back to the OS on a slow clock (main.rs).
 libc = "0.2"
+mimalloc = { workspace = true }
 tokio = { workspace = true }
 # The Date timestamp mode (timefmt.rs) — local-time rendering.
 chrono = { workspace = true }

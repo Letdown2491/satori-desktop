@@ -32,6 +32,9 @@ nostr-database = "0.45"
 nwc = "0.45"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 tokio-socks = "0.5"
+# Rust-side global allocator (app-gpui): glibc's per-thread arenas retained
+# ~2GB of freed churn in a long session (37 arenas x ~50MB; audit Nov 2026).
+mimalloc = "0.1"
 futures-util = "0.3"
 qrcode = { version = "0.14", default-features = false }
 keyring = "4"

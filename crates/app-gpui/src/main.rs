@@ -171,7 +171,21 @@ impl Render for Root {
     }
 }
 
+/// Allocator: mimalloc owns every Rust-side allocation (nostr-sdk serde
+/// churn, event deserialization, gpui element trees). glibc's per-thread
+/// arenas were the multi-GB RSS source: 37 arenas x ~50MB of freed-but-
+/// retained churn after an evening of feed use (audit Nov 2026) — mimalloc
+/// keeps per-thread pages compact and hands them back to the OS eagerly.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
+    // The C side (glib, gstreamer, lmdb) keeps glibc malloc: cap its arena
+    // count so its retention stays bounded too (default 8x ncores = 96
+    // possible 64MB arenas). The malloc_trim loop below keeps cycling it.
+    unsafe {
+        let _ = libc::mallopt(libc::M_ARENA_MAX, 4);
+    }
     Application::new().run(|cx: &mut App| {
         // Return glibc arena heap to the OS on a slow clock. gpui's image
         // work allocates/frees large blocks on many threads; glibc retains
