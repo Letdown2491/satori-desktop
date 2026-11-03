@@ -633,6 +633,17 @@ fn fmt_when(data: &calendar::CalendarData) -> String {
 fn highlight_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) -> Div {
     let data = highlight::parse(ev);
     let mut card = div().w_full().flex().flex_col().gap_2();
+    // NIP-84 `comment` (highlight.ts commentEl): the highlighter's own
+    // words ARE the post; the passage beneath is the quote. An empty or
+    // whitespace comment renders nothing.
+    if let Some(comment) = data
+        .comment
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        card = card.child(content::word_flow(comment, &[], ctx, feed));
+    }
     // Serif blockquote with a vermilion rule (highlight.ts quote-first): when
     // the context carries the quote verbatim, mark it in place.
     let marked = data

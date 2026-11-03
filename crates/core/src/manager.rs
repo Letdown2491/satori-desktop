@@ -550,6 +550,13 @@ impl Core {
                 self.rt
                     .spawn(async move { Arc::unwrap_or_clone(connect).shutdown().await });
             }
+        // The pool answered NIP-42 AUTH challenges as this session's
+        // identity (pool.rs): drop it now, before the bunker transport
+        // finishes dying and before session::clear drops the session
+        // record — never answer as a stale account.
+        if let Some(p) = self.pool.lock().unwrap().as_ref() {
+            p.clear_identity();
+        }
         session::clear();
         secrets::delete(secrets::BUNKER_CLIENT_SECRET);
         secrets::delete(secrets::NSEC);
@@ -1423,6 +1430,10 @@ impl Core {
             .map_err(|e| LoginError::Resume(format!("session pubkey: {e}")))?;
         let signer = self.build_signer(session).await?;
         let pool = self.pool().await?;
+        // The pool's NIP-42 authenticator now answers challenges AS this
+        // account (pool.rs): strict relays serve kinds 78/30078 only to
+        // the authenticated owner (NIP-78, Sep 2026).
+        pool.set_identity(signer.clone());
         let profiles = crate::profiles::ProfileService::new(Arc::clone(&pool));
         // Undo-window prefs live in prefs.json (theme.ts semantics); core
         // reads its slice at session build — TODO(M1): cleaner pref split.

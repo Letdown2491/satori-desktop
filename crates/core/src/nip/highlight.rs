@@ -20,6 +20,10 @@ pub struct HighlightData {
     pub content: String,
     /// Surrounding context, if the highlighter included it.
     pub context: Option<String>,
+    /// The highlighter's own words (NIP-84 `comment` tag): the quote-repost
+    /// form, comment as the post, passage quoted beneath. First tag wins
+    /// (highlight.ts `tag1`); the render trims and skips empties.
+    pub comment: Option<String>,
     /// The source citation (first present: marked `r` > bare `r` > `a` > `e`).
     pub source: Option<Source>,
     /// The ORIGINAL author(s) (NIP-84 `p` tags), hex pubkeys — "by X".
@@ -30,6 +34,7 @@ pub fn parse(ev: &Event) -> HighlightData {
     let mut d = HighlightData {
         content: ev.content.clone(),
         context: None,
+        comment: None,
         source: None,
         authors: Vec::new(),
     };
@@ -40,6 +45,9 @@ pub fn parse(ev: &Event) -> HighlightData {
         let parts = tag.as_slice();
         match parts.first().map(String::as_str) {
             Some("context") if parts.len() >= 2 => d.context = Some(parts[1..].join(" ")),
+            Some("comment") if parts.len() >= 2 && d.comment.is_none() => {
+                d.comment = Some(parts[1..].join(" "))
+            }
             Some("r") if parts.len() >= 2 && !parts[1].is_empty() => {
                 match parts.get(2).map(String::as_str) {
                     // The highlighted page's url carries the `source` marker;
@@ -162,6 +170,20 @@ mod tests {
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn comment_tag_takes_the_first_value() {
+        let e = ev(vec![
+            ("comment", vec!["worth a listen"]),
+            ("comment", vec!["second one ignored (tag1)"]),
+        ]);
+        assert_eq!(parse(&e).comment.as_deref(), Some("worth a listen"));
+        // An empty first comment renders as nothing (the card trims).
+        let e = ev(vec![("comment", vec!["   "])]);
+        assert_eq!(parse(&e).comment.as_deref(), Some("   "));
+        let e = ev(vec![]);
+        assert_eq!(parse(&e).comment, None);
     }
 
     #[test]
