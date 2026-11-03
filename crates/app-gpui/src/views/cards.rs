@@ -630,7 +630,7 @@ fn fmt_when(data: &calendar::CalendarData) -> String {
 
 // --- highlight (kind 9802) ---------------------------------------------------
 
-fn highlight_card(ev: &Event, ctx: &Body, _feed: &Entity<Feed>, _st: &CardState) -> Div {
+fn highlight_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) -> Div {
     let data = highlight::parse(ev);
     let mut card = div().w_full().flex().flex_col().gap_2();
     // Serif blockquote with a vermilion rule (highlight.ts quote-first): when
@@ -682,22 +682,55 @@ fn highlight_card(ev: &Event, ctx: &Body, _feed: &Entity<Feed>, _st: &CardState)
             }
         }
     }
-    if let Some(author) = &data.author {
-        let name = ctx.profiles.get(author).map(|p| p.display());
-        card = card.child(meta_line(format!("— {}", name.unwrap_or_else(|| short(author)))));
+    // The citation (highlight.ts): "— by X, Y" from the role-filtered p
+    // tags, then the source row — a web page opens the browser, an `e` ref
+    // opens the thread in-app, anything else lands on njump.
+    if !data.authors.is_empty() {
+        let names: Vec<String> = data
+            .authors
+            .iter()
+            .map(|pk| {
+                ctx.profiles
+                    .get(pk)
+                    .map(|p| p.display())
+                    .unwrap_or_else(|| short(pk))
+            })
+            .collect();
+        card = card.child(meta_line(format!("— by {}", names.join(", "))));
     }
-    if let Some(source) = &data.source
-        && source.starts_with("http")
-    {
-        card = card.child(content::link_row(source));
+    match &data.source {
+        Some(highlight::Source::Url(url)) if url.starts_with("http") => {
+            card = card.child(content::link_row(url));
+        }
+        Some(highlight::Source::Nostr(raw)) => {
+            if let Ok(id) = EventId::from_hex(raw) {
+                let feed = feed.downgrade();
+                card = card.child(
+                    div()
+                        .id(SharedString::from(format!("hl-src-{}", ev.id)))
+                        .cursor_pointer()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme::muted()))
+                        .hover(|s| s.text_color(rgb(theme::vermilion())))
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            let _ = feed.update(cx, |_, cx| cx.emit(Nav::OpenThread(id)));
+                        })
+                        .child("↗ quoted note"),
+                );
+            } else {
+                card = card.child(content::link_row(&format!("https://njump.me/nostr:{raw}")));
+            }
+        }
+        _ => {}
     }
     card
 }
 
-/// First 8 chars + ellipsis. Char cut, not byte cut: the highlight
-/// author tag is relay-controlled text (nip/highlight.rs), and a byte
-/// slice at 8 landed mid-character on multi-byte names — a panic that
-/// took the whole window down on render.
+/// First 8 chars + ellipsis. Char cut, not byte cut: the highlight's
+/// relay-controlled tag text (nip/highlight.rs p tags) once landed a byte
+/// slice at 8 mid-character on multi-byte names — a panic that took the
+/// whole window down on render.
 fn short(key: &str) -> String {
     let cut = key
         .char_indices()

@@ -385,6 +385,8 @@ impl Render for ProfileView {
         let about = self.profile.as_ref().map(|p| p.about.clone()).unwrap_or_default();
         let picture = self.profile.as_ref().map(|p| p.picture.clone()).unwrap_or_default();
         let banner = self.profile.as_ref().map(|p| p.banner.clone()).unwrap_or_default();
+        let banner_blurhash =
+            self.profile.as_ref().and_then(|p| p.banner_blurhash.clone());
         let nip05 = self.profile.as_ref().map(|p| p.nip05.clone()).unwrap_or_default();
         let lud = self.profile.as_ref().map(|p| p.lud.clone()).unwrap_or_default();
         // The share payload: the profile as a NIP-21 URI (npub form — D27's
@@ -451,6 +453,11 @@ impl Render for ProfileView {
         if let Some(p) = self.profile.as_ref() {
             media::fetch(&self.core, p.picture.clone(), viewer, cx);
             media::fetch(&self.core, p.banner.clone(), viewer, cx);
+            // NIP-92: the banner's blurhash placeholder decodes locally
+            // (virtual key, no network).
+            if let Some(h) = &p.banner_blurhash {
+                media::fetch(&self.core, crate::poster::blurhash_key(h), viewer, cx);
+            }
         }
         for p in self.profiles.values() {
             media::fetch(&self.core, p.picture.clone(), viewer, cx);
@@ -512,7 +519,21 @@ impl Render for ProfileView {
                                         .h_full()
                                         .object_fit(ObjectFit::Cover)
                                         .into_any_element(),
-                                    None => div().into_any_element(), // bytes in flight
+                                    // Bytes in flight: the banner's blurhash
+                                    // gradient (NIP-92 kind-0 imeta) stands in
+                                    // for the flat panel.
+                                    None => {
+                                        match banner_blurhash.as_deref().and_then(|h| {
+                                            media.png(&crate::poster::blurhash_key(h))
+                                        }) {
+                                            Some(png) => img(png)
+                                                .w_full()
+                                                .h_full()
+                                                .object_fit(ObjectFit::Cover)
+                                                .into_any_element(),
+                                            None => div().into_any_element(),
+                                        }
+                                    }
                                 }),
                         )
                     })

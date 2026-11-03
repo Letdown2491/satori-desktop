@@ -104,6 +104,9 @@ impl ProfileService {
                                     banner: r.banner,
                                     nip05: r.nip05,
                                     lud: r.lud,
+                                    // Event-derived (kind-0 imeta); the
+                                    // cache bootstrap renders without it.
+                                    banner_blurhash: None,
                                 },
                                 at: r.at,
                             },

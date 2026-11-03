@@ -214,6 +214,10 @@ pub struct Profile {
     /// The lightning pointer, lud16 before lud06 (NIP-57's order) — the
     /// profile page's zap row (same field the zap request reads).
     pub lud: String,
+    /// The banner's blurhash, from a kind-0 imeta tag whose url IS the
+    /// banner (NIP-92, Oct 2026) — the header's placeholder while the
+    /// bytes are in flight.
+    pub banner_blurhash: Option<String>,
 }
 
 impl Profile {
@@ -230,6 +234,14 @@ impl Profile {
             lud06: Option<String>,
         }
         let raw: RawMeta = serde_json::from_str(&ev.content).ok()?;
+        // NIP-92 (Oct 2026): a kind-0 MAY carry imeta describing its
+        // picture and banner — a tag describes a field only when its url
+        // matches exactly. We adopt the banner's blurhash (the header
+        // placeholder); `dim` is moot under the cover-fit strip.
+        let banner_blurhash = crate::nip::imeta::parse(ev)
+            .into_iter()
+            .find(|m| Some(m.url.as_str()) == raw.banner.as_deref())
+            .and_then(|m| m.blurhash);
         Some(Self {
             pubkey: ev.pubkey.to_string(),
             name: raw.display_name.or(raw.name).unwrap_or_default(),
@@ -238,6 +250,7 @@ impl Profile {
             banner: raw.banner.unwrap_or_default(),
             nip05: raw.nip05.unwrap_or_default(),
             lud: raw.lud16.or(raw.lud06).unwrap_or_default(),
+            banner_blurhash,
         })
     }
 
@@ -1773,12 +1786,18 @@ impl Core {
             .first()
             .map(|e| e.created_at.as_secs())
             .unwrap_or(0);
-        let filter = Filter::new()
-            .kinds(kinds.clone())
-            .authors(follows.clone())
-            .since(Timestamp::from(since))
-            .limit(100);
-        let fetched = active.pool.get(filter).await.unwrap_or_default();
+        // NIP-01: an empty filter list can never match — never send
+        // `authors: []`; a no-follow account just projects the store.
+        let fetched = if follows.is_empty() {
+            Default::default()
+        } else {
+            let filter = Filter::new()
+                .kinds(kinds.clone())
+                .authors(follows.clone())
+                .since(Timestamp::from(since))
+                .limit(100);
+            active.pool.get(filter).await.unwrap_or_default()
+        };
         if fetched.is_empty() {
             // Relays unreachable (post-suspend, offline): this used to end
             // the refresh as NothingNew — which the feed swallows — so a
@@ -1795,13 +1814,16 @@ impl Core {
             let _ = active.pool.store.save(&ev).await;
         }
         // Deletions ride along (NIP-09) — a follow's kind-5s since the
-        // newest note cover everything the refresh window can carry.
-        let del_filter = Filter::new()
-            .kind(Kind::EventDeletion)
-            .authors(follows.clone())
-            .since(Timestamp::from(since.saturating_sub(86400)));
-        for ev in active.pool.get(del_filter).await.unwrap_or_default() {
-            let _ = active.pool.store.save(&ev).await;
+        // newest note cover everything the refresh window can carry
+        // (skipped with no follows: NIP-01, never send an empty list).
+        if !follows.is_empty() {
+            let del_filter = Filter::new()
+                .kind(Kind::EventDeletion)
+                .authors(follows.clone())
+                .since(Timestamp::from(since.saturating_sub(86400)));
+            for ev in active.pool.get(del_filter).await.unwrap_or_default() {
+                let _ = active.pool.store.save(&ev).await;
+            }
         }
         let page = self.page_from_store(&active, None, &kinds).await?;
         eprintln!("[core] bootstrap page: {} notes", page.notes.len());
@@ -1820,7 +1842,9 @@ impl Core {
             let res: Result<FeedEvent> = async {
                 let active = this.active().await?;
                 let mut notes = this.project_page(&active, Some(until), &kinds).await?;
-                if notes.len() <= PAGE {
+                // NIP-01: an empty list can never match — with no follows
+                // there is nothing to top up from the relays.
+                if notes.len() <= PAGE && !active.follows.is_empty() {
                     let filter = Filter::new()
                         .kinds(kinds.clone())
                         .authors(active.follows.clone())
@@ -4016,20 +4040,26 @@ impl Core {
         let follows = active.follows.clone();
         self.rt.spawn(async move {
             let now = Timestamp::now();
-            let filters = vec![
-                Filter::new()
-                    .kinds(kinds.clone())
-                    .authors(follows.clone())
-                    .since(now),
-                Filter::new()
-                    .kinds([Kind::TextNote, Kind::Custom(1111), Kind::Custom(9735)])
-                    .pubkey(me)
-                    .since(now),
-                Filter::new()
-                    .kind(Kind::EventDeletion)
-                    .authors(follows.clone())
-                    .since(now),
-            ];
+            // NIP-01: an empty list can never match — the follows-scoped
+            // filters join only when there are follows to scope by.
+            let mut filters = vec![Filter::new()
+                .kinds([Kind::TextNote, Kind::Custom(1111), Kind::Custom(9735)])
+                .pubkey(me)
+                .since(now)];
+            if !follows.is_empty() {
+                filters.push(
+                    Filter::new()
+                        .kinds(kinds.clone())
+                        .authors(follows.clone())
+                        .since(now),
+                );
+                filters.push(
+                    Filter::new()
+                        .kind(Kind::EventDeletion)
+                        .authors(follows.clone())
+                        .since(now),
+                );
+            }
             let Ok(output) = pool.client().subscribe(filters).await else {
                 eprintln!("[core] live: subscribe failed; re-arming");
                 live_on.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -4256,6 +4286,49 @@ impl Core {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// NIP-92 kind-0 adoption: the banner's blurhash arrives only from an
+    /// imeta tag whose url matches the banner field exactly (Oct 2026 spec
+    /// section; the TS reference predates it).
+    #[test]
+    fn profile_banner_blurhash_needs_an_exact_url_match() {
+        use nostr::prelude::*;
+        let banner = "https://b/banner.webp";
+        let content = format!(
+            "{{\"name\":\"luna\",\"banner\":\"{banner}\"}}"
+        );
+        let build = |imeta: &[&str]| {
+            let keys = Keys::generate();
+            let mut tags = Tags::new();
+            tags.push(Tag::custom("imeta", imeta.iter().copied()));
+            let unsigned = UnsignedEvent::new(
+                keys.public_key(),
+                Timestamp::from_secs(1),
+                Kind::Metadata,
+                tags,
+                content.clone(),
+            );
+            keys.sign_event(unsigned).unwrap()
+        };
+        let hit = Profile::from_event(&build(&[
+            "url https://b/banner.webp",
+            "m image/webp",
+            "blurhash LEHV6nWB2yk8pyo0adR*.7kCMdnj",
+        ]))
+        .unwrap();
+        assert_eq!(
+            hit.banner_blurhash.as_deref(),
+            Some("LEHV6nWB2yk8pyo0adR*.7kCMdnj")
+        );
+        // A tag describing the PICTURE (or any other url) says nothing
+        // about the banner.
+        let miss = Profile::from_event(&build(&[
+            "url https://b/picture.jpg",
+            "blurhash LEHV6nWB2yk8pyo0adR*.7kCMdnj",
+        ]))
+        .unwrap();
+        assert_eq!(miss.banner_blurhash, None);
+    }
 
 
     /// The D32 crash seam: the poster job must run on THIS runtime no
