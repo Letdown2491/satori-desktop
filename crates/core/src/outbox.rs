@@ -84,24 +84,44 @@ pub fn parse_relay_list(ev: &nostr::prelude::Event) -> RelayList {
 /// (Settings, the session's own NIP-65 via connect_reads) never pass
 /// through here — the user chose those.
 ///
+/// The structural checks mirror the SDK's own RelayUrl::parse (nostr
+/// types/url.rs): a second "://" anywhere is rejected, then the url-crate
+/// parse must succeed. Hand-splitting the prefix let
+/// `wss://wss://relay.example` through as host "wss" — and the SDK
+/// rejected the WHOLE routed fan-out at subscribe time on that one url,
+/// dropping the live bell to indexers-only. The url crate also canonicalizes
+/// sneaky IPv4 hosts (decimal `2130706433`, hex `0x7f.0.0.1`, short
+/// `127.1`) before the literal check, so they cannot pose as names.
+///
 /// Names (non-IP hosts) pass for now; pinning resolved IPs per hop is the
 /// SSRF-guard M5 item (same gap as the media guard).
 pub fn routable_relay(url: &str) -> bool {
-    if !url.starts_with("wss://") {
+    // RelayUrl::parse check 1: at most one "://".
+    if url.matches("://").count() > 1 {
         return false;
     }
-    let rest = &url["wss://".len()..];
-    let host = if let Some(bracketed) = rest.strip_prefix('[') {
-        bracketed.split(']').next().unwrap_or("")
-    } else {
-        rest.split(['/', ':', '?']).next().unwrap_or("")
+    // Check 2: a real url-crate parse (schemes, brackets, ports, IPv4 forms).
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
     };
-    if host.is_empty() {
+    // Check 3: the scheme (RelayUrlScheme accepts ws/wss; routed relays are
+    // wss-only).
+    if parsed.scheme() != "wss" {
         return false;
     }
-    match host.parse::<std::net::IpAddr>() {
-        Ok(ip) => is_public_ip(&ip),
-        Err(_) => true,
+    // Check 4: a host is present ("wss://" is Malformed there).
+    let Some(host) = parsed.host() else {
+        return false;
+    };
+    // Screen 5 (ours): IP literals must be public unicast. host() is the
+    // typed form (host_str brackets IPv6, which then fails IpAddr::from_str
+    // and would pose as a name), and the url crate already canonicalized
+    // decimal/hex/short IPv4 into it.
+    match host {
+        url::Host::Ipv4(v4) => is_public_ip(&std::net::IpAddr::V4(v4)),
+        url::Host::Ipv6(v6) => is_public_ip(&std::net::IpAddr::V6(v6)),
+        // Domains (incl. IDN) pass for now; resolved-IP pinning is M5.
+        url::Host::Domain(_) => true,
     }
 }
 
@@ -459,17 +479,27 @@ mod tests {
         assert_eq!(l.read, vec!["wss://both.example", "wss://read.example"]);
     }
 
-    /// The SSRF screen: wss only, and IP literals must be public — a
-    /// followed author's list cannot aim the client at loopback, the
-    /// metadata endpoint, RFC1918/CGNAT space, or plain-ws cleartext.
+    /// The SSRF screen: wss only, structurally valid (the SDK's RelayUrl
+    /// checks), and IP literals must be public — a followed author's list
+    /// cannot aim the client at loopback, the metadata endpoint,
+    /// RFC1918/CGNAT space, or plain-ws cleartext, and a mangled url cannot
+    /// kill the whole fan-out at subscribe time.
     #[test]
     fn routable_screen() {
         assert!(routable_relay("wss://relay.example.com"));
         assert!(routable_relay("wss://relay.example.com/path"));
         assert!(routable_relay("wss://8.8.8.8:443"));
-        assert!(routable_relay("wss://2606:4700::1111"));
+        assert!(routable_relay("wss://[2606:4700::1111]"));
+        assert!(routable_relay("wss://[2606:4700::1111]:7777"));
+        // Cleartext / wrong scheme.
         assert!(!routable_relay("ws://relay.example.com"));
         assert!(!routable_relay("http://relay.example.com"));
+        // The live-bell killer: a mangled double scheme passed the old
+        // hand-split screen as host "wss", then the SDK rejected the WHOLE
+        // fan-out at subscribe time ("multiple scheme separators").
+        assert!(!routable_relay("wss://wss://relay.example"));
+        assert!(!routable_relay("wss://test://again"));
+        // Private / reserved IPv4 literals.
         assert!(!routable_relay("wss://127.0.0.1:8080"));
         assert!(!routable_relay("wss://169.254.169.254"));
         assert!(!routable_relay("wss://10.0.0.5"));
@@ -477,10 +507,19 @@ mod tests {
         assert!(!routable_relay("wss://172.16.0.9"));
         assert!(!routable_relay("wss://100.100.1.1"));
         assert!(!routable_relay("wss://0.0.0.0"));
+        // Sneaky IPv4 encodings the url crate canonicalizes before the
+        // check (all 127.0.0.1).
+        assert!(!routable_relay("wss://2130706433"));
+        assert!(!routable_relay("wss://0x7f.0.0.1"));
+        assert!(!routable_relay("wss://127.1"));
+        // IPv6 literals (host_str arrives bracketless) and malformed hosts.
         assert!(!routable_relay("wss://[::1]:7777"));
         assert!(!routable_relay("wss://[fe80::1]:7777"));
         assert!(!routable_relay("wss://[fc00::1]"));
         assert!(!routable_relay("wss://[::ffff:127.0.0.1]"));
-        assert!(!routable_relay("wss://"));
+        assert!(!routable_relay("wss://2606:4700::1111")); // bare: invalid
+        assert!(!routable_relay("wss://[::1")); // unbalanced bracket
+        assert!(!routable_relay("wss://")); // empty host
     }
 }
+
