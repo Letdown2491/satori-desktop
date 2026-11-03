@@ -22,6 +22,8 @@ use nostr_sdk::error::Error as SdkError;
 use nostr_sdk::prelude::*;
 
 use crate::outbox::{self, RelayList, Route};
+use crate::relay_latency;
+use crate::seen;
 use crate::signer::Signer;
 use crate::store::Store;
 
@@ -36,8 +38,13 @@ pub const INDEXERS: [&str; 5] = [
     "wss://purplepag.es",
 ];
 
-/// Per-query deadline (pool.ts 'page' budget).
+/// Per-query deadline (pool.ts 'page' budget): the DEFAULT (base) cap.
 const READ_BUDGET: Duration = Duration::from_secs(4);
+/// Adaptive-budget ends (pool.ts PAGE_MAX_WAIT / LIST_CEILING): a
+/// profiled-empty relay bails fast to the floor; a rich-but-truncating
+/// one gets rope toward the ceiling.
+const PAGE_BUDGET: Duration = Duration::from_secs(2);
+const CEILING_BUDGET: Duration = Duration::from_secs(8);
 
 /// Routed-relay retention (audit Nov 2026: nothing ever removed a relay —
 /// the client's set grew for the process lifetime, sockets/fds/timers and
@@ -367,6 +374,8 @@ impl Pool {
         limit: usize,
     ) -> BTreeSet<Event> {
         let mut queries = Vec::new();
+        // The client reference copies into every timed shard future.
+        let client = &self.client;
         self.trim_routed().await;
         for (url, author_set) in route {
             // Bad relay = skip; read-scoped capability (add_relay is
@@ -376,7 +385,18 @@ impl Pool {
             if !outbox::routable_relay(url.as_str()) {
                 continue;
             }
+            // The mid-session shard skip (feeds.ts fetchRoutedPage): a
+            // relay we've LEARNED is read-dead gets none of this query's
+            // budget.
+            if relay_latency::is_read_dead(url.as_str()) {
+                continue;
+            }
             self.add_routed(url.as_str()).await;
+            // Adaptive per-relay budget (relay-latency.ts relayBudget; the
+            // knobs are pool.ts's caps): a profiled-empty relay bails fast
+            // (floor), a rich-but-truncating one earns rope toward the
+            // ceiling, unknown relays get the default.
+            let budget = relay_latency::budget(url.as_str(), PAGE_BUDGET, READ_BUDGET, CEILING_BUDGET);
             let authors: Vec<String> = author_set.iter().cloned().collect();
             for shard in outbox::chunk(&authors, outbox::MAX_AUTHORS_PER_FILTER) {
                 let pks: Vec<PublicKey> = shard
@@ -396,12 +416,86 @@ impl Pool {
                 if let Some(u) = until {
                     filter = filter.until(u);
                 }
-                queries.push(self.client.fetch_events(filter).timeout(READ_BUDGET).into_future());
+                // ONE relay per query, manually targeted — the fan-out's
+                // whole point. fetch_events(filter) without the target is
+                // a client-level req that went to EVERY read relay per
+                // shard (the routing was silently undone); manual targets
+                // also give per-shard attribution for the latency profile
+                // and seen-on memory.
+                let shard_url = url.as_str().to_string();
+                queries.push(async move {
+                    let started = std::time::Instant::now();
+                    let res = client
+                        .fetch_events(ReqTarget::manual(vec![(
+                            shard_url.as_str(),
+                            vec![filter],
+                        )]))
+                        .timeout(budget)
+                        .into_future()
+                        .await;
+                    (shard_url, budget, started.elapsed(), res)
+                });
             }
         }
         let results = futures_util::future::join_all(queries).await;
         let mut merged: BTreeSet<Event> = BTreeSet::new();
-        for events in results.into_iter().flatten() {
+        for (url, budget, elapsed, res) in results {
+            // `truncated` = rode to the hard cap while (evidently) still
+            // delivering — TS's finish()-on-timer flag, read off the clock
+            // (nostr-sdk merges internally; the EOSE-quiet tail is not
+            // observable, so ms is time-to-complete, a slightly LOOSER
+            // measure than pool.ts's time-to-last-event).
+            let truncated = elapsed >= budget;
+            let events = res.unwrap_or_default();
+            relay_latency::record(&url, elapsed.as_millis() as u64, truncated, events.len());
+            for ev in &events {
+                seen::record(&ev.pubkey, &[url.as_str()]);
+            }
+            merged.extend(events);
+        }
+        merged
+    }
+
+    /// The `pool.get(urls, filter, maxWait)` port (feeds.ts resolveEvent /
+    /// fetchEventsByIds): a targeted race against EXPLICITLY listed relays
+    /// — the single-event fetch path. Each listed relay runs its own
+    /// query with its own adaptive budget, so latency attribution and
+    /// seen-on recording stay exact (the fan-out discipline, one relay
+    /// per query); read-dead relays are dropped from the list before
+    /// spending a round trip on them. Read-dead here covers learned
+    /// denials/blasters only; an unprofiled relay races normally.
+    pub async fn get_from(&self, urls: &[String], filter: &Filter) -> BTreeSet<Event> {
+        let mut queries = Vec::new();
+        let client = &self.client;
+        for url in urls {
+            // Same screen + read-scoped add as fetch_route (an un-added
+            // url is rejected at REQ time).
+            if !outbox::routable_relay(url) || relay_latency::is_read_dead(url) {
+                continue;
+            }
+            self.add_routed(url).await;
+            let budget = relay_latency::budget(url, PAGE_BUDGET, READ_BUDGET, CEILING_BUDGET);
+            let shard_url = url.clone();
+            let filter = filter.clone();
+            queries.push(async move {
+                let started = std::time::Instant::now();
+                let res = client
+                    .fetch_events(ReqTarget::manual(vec![(shard_url.as_str(), vec![filter])]))
+                    .timeout(budget)
+                    .into_future()
+                    .await;
+                (shard_url, budget, started.elapsed(), res)
+            });
+        }
+        let results = futures_util::future::join_all(queries).await;
+        let mut merged: BTreeSet<Event> = BTreeSet::new();
+        for (url, budget, elapsed, res) in results {
+            let truncated = elapsed >= budget;
+            let events = res.unwrap_or_default();
+            relay_latency::record(&url, elapsed.as_millis() as u64, truncated, events.len());
+            for ev in &events {
+                seen::record(&ev.pubkey, &[url.as_str()]);
+            }
             merged.extend(events);
         }
         merged
@@ -426,7 +520,10 @@ impl Pool {
         let keys: Vec<String> = authors.iter().map(|p| p.to_string()).collect();
         let lists = self.relay_lists(authors).await;
         let fallback: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
-        let route = outbox::route(&lists, &keys, &fallback, |_| 1.0);
+        // relay_score = the learned quality profile (relay-latency.ts
+        // relayQuality): known-empty relays deprioritized (0.15), never
+        // picked over live ones, still there for orphans.
+        let route = outbox::route(&lists, &keys, &fallback, relay_latency::quality);
         self.fetch_route(&route, &kinds, since, until, limit).await
     }
 
@@ -447,12 +544,16 @@ impl Pool {
         let keys: Vec<String> = authors.iter().map(|p| p.to_string()).collect();
         let lists = self.relay_lists(authors).await;
         let fallback: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
-        let route = outbox::route(&lists, &keys, &fallback, |_| 1.0);
+        // Same learned quality as get_routed.
+        let route = outbox::route(&lists, &keys, &fallback, relay_latency::quality);
         let mut targets: Vec<(&str, Vec<Filter>)> = Vec::new();
         self.trim_routed().await;
         for (url, author_set) in &route {
-            // Same screen as fetch_route (defense in depth).
-            if !outbox::routable_relay(url.as_str()) {
+            // Same screen as fetch_route (defense in depth); the
+            // mid-session shard skip drops read-dead relays here too —
+            // the live bell stops paying for dead sockets (feeds.ts).
+            if !outbox::routable_relay(url.as_str()) || relay_latency::is_read_dead(url.as_str())
+            {
                 continue;
             }
             self.add_routed(url.as_str()).await;

@@ -49,7 +49,7 @@ impl ThreadView {
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
         // The anchor rides in with its author's profile; replies follow.
-        view.pump(view.core.event_by_id(id), cx);
+        view.pump(view.core.event_by_id(id, Vec::new(), None), cx);
         view.pump(view.core.thread(id), cx);
         view
     }

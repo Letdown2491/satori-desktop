@@ -33,6 +33,8 @@ pub mod notifications;
 pub mod outbox;
 pub mod pool;
 pub mod publish;
+pub mod relay_latency;
+pub mod seen;
 pub mod store;
 pub mod tor;
 pub mod upload;

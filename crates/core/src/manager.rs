@@ -17,7 +17,9 @@ use crate::blocktime::Blocktime;
 use crate::error::{LoginError, Result};
 use crate::nip::nip78;
 use crate::outbox;
-use crate::pool::Pool;
+use crate::pool::{Pool, INDEXERS};
+use crate::relay_latency;
+use crate::seen;
 use crate::secrets;
 use crate::session::{self, Session, SessionMode};
 use crate::signer::{self, Signer};
@@ -455,6 +457,87 @@ impl Core {
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
+            }
+        });
+    }
+
+    /// The follows' kind:10002 relay lists age out of the store, and
+    /// routed reads go stale with them (pool.rs relay_lists: "no background
+    /// refresher yet — that lands with the seen-on memory slice"). This is
+    /// that refresher: hourly (first pass ~90s after launch, bootstraps
+    /// settle first, like the prune), every follow whose cached list is
+    /// older than 7 days - or missing - gets one TARGETED indexer query for
+    /// a fresh list; the SDK persists what it receives, so the routed reads
+    /// warm again on their own. Chunks of 200 (the store's per-query author
+    /// cap). Desktop-only divergence from the TS (which cached per pubkey
+    /// in memory and never refreshed): the daemon-sized process can afford
+    /// the hourly sweep, and a long-lived session SHOULD heal its routing.
+    /// Call once, from main, on the Arc'd core.
+    pub fn spawn_list_refresher(self: &Arc<Self>) {
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+                // Logged out = nothing to refresh (the watchdog's rule).
+                let active = match this.active().await {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+                let pool = Arc::clone(&active.pool);
+                let me = active.me();
+                // The active account's follows (same store read the
+                // bootstrap paints from).
+                let follows: Vec<PublicKey> = pool
+                    .store
+                    .latest_by_kind(me, Kind::ContactList)
+                    .await
+                    .unwrap_or(None)
+                    .map(|ev| ev.tags.public_keys().collect())
+                    .unwrap_or_default();
+                if follows.is_empty() {
+                    continue;
+                }
+                // Stale = no cached list, or one older than the window.
+                let have = pool.store.relay_lists(&follows).await.unwrap_or_default();
+                let cutoff =
+                    Timestamp::now() - std::time::Duration::from_secs(7 * 24 * 3600).as_secs();
+                let stale: Vec<PublicKey> = follows
+                    .iter()
+                    .filter(|pk| {
+                        have.iter()
+                            .any(|ev| ev.pubkey == **pk && ev.created_at < cutoff)
+                            || !have.iter().any(|ev| ev.pubkey == **pk)
+                    })
+                    .copied()
+                    .collect();
+                if stale.is_empty() {
+                    continue;
+                }
+                eprintln!("[core] list refresher: {} stale list(s)", stale.len());
+                let fallback: Vec<String> =
+                    crate::pool::INDEXERS.iter().map(|s| s.to_string()).collect();
+                for chunk in crate::outbox::chunk(
+                    &stale.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                    200,
+                ) {
+                    let pks: Vec<PublicKey> = chunk
+                        .iter()
+                        .filter_map(|a| PublicKey::from_str(a).ok())
+                        .collect();
+                    if pks.is_empty() {
+                        continue;
+                    }
+                    let n = pks.len();
+                    let filter = Filter::new()
+                        .kind(Kind::RelayList)
+                        .authors(pks)
+                        .limit(n);
+                    // The SDK persists what it receives; the store's
+                    // per-author newest-list read warms by itself.
+                    let got = pool.get_from(&fallback, &filter).await;
+                    eprintln!("[core] list refresher: {} fresh list(s)", got.len());
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             }
         });
     }
@@ -2767,7 +2850,11 @@ impl Core {
         self.rt.spawn(async move {
             let res: Result<()> = async {
                 let active = this.active().await?;
-                let mut tags = vec![Tag::event(poll.id), Tag::public_key(poll.pubkey)];
+                // The vote's e tag hints the poll author's most-recent
+                // seen relay (actions.ts:118) so clients that never saw
+                // the poll can still ask where it lives.
+                let mut tags =
+                    vec![seen::hint_tag(poll.id, &poll.pubkey), Tag::public_key(poll.pubkey)];
                 for opt in option_ids {
                     tags.push(Tag::custom("response", [opt]));
                 }
@@ -2836,7 +2923,10 @@ impl Core {
             let res: Result<()> = async {
                 let active = this.active().await?;
                 let note = u16::from(target.kind) == 1;
-                let mut tags = vec![Tag::event(target.id), Tag::public_key(target.pubkey)];
+                let mut tags = vec![
+                    seen::hint_tag(target.id, &target.pubkey),
+                    Tag::public_key(target.pubkey),
+                ];
                 if !note {
                     tags.push(Tag::custom("k", [u16::from(target.kind).to_string()]));
                 }
@@ -2883,14 +2973,17 @@ impl Core {
     /// Resolve a note/nevent bech32 to its event (embed/quote previews).
     pub fn event_by_id_dech32(self: &Arc<Self>, bech32: &str) -> FeedRx {
         use nostr::prelude::*;
-        let id = match Nip19::from_bech32(bech32) {
-            Ok(Nip19::EventId(id)) => Some(id),
-            Ok(Nip19::Event(e)) => Some(e.event_id),
-            _ => None,
-        };
-        match id {
-            Some(id) => self.event_by_id(id),
-            None => {
+        match Nip19::from_bech32(bech32) {
+            // The nevent carries author + relay hints when the publisher
+            // was polite (NIP-01 recommends both) — resolveEvent uses
+            // them to skip the indexer fallback entirely.
+            Ok(Nip19::Event(e)) => self.event_by_id(
+                e.event_id,
+                e.relays.iter().map(|r| r.to_string()).collect(),
+                e.author,
+            ),
+            Ok(Nip19::EventId(id)) => self.event_by_id(id, Vec::new(), None),
+            _ => {
                 let (tx, rx) = mpsc::unbounded_channel();
                 let _ = tx.send(FeedEvent::One(None, None));
                 rx
@@ -2938,12 +3031,20 @@ impl Core {
                 let missing: Vec<EventId> =
                     want.iter().filter(|id| !have.contains(id)).cloned().collect();
                 if !missing.is_empty() {
+                    // feeds.ts fetchEventsByIds: a TARGETED query on the
+                    // indexers (parents' authors are unknown until they
+                    // resolve, so seen-on can't narrow this one) instead of
+                    // the client-level broadcast.
                     let n = missing.len();
-                    let fetched = active
+                    let filter = Filter::new().ids(missing).limit(n);
+                    let fallback: Vec<String> =
+                        INDEXERS.iter().map(|s| s.to_string()).collect();
+                    let fetched: Vec<Event> = active
                         .pool
-                        .get(Filter::new().ids(missing).limit(n))
+                        .get_from(&fallback, &filter)
                         .await
-                        .unwrap_or_default();
+                        .into_iter()
+                        .collect();
                     // (no explicit save: the SDK persists what it receives)
                     events.extend(fetched);
                 }
@@ -2964,7 +3065,12 @@ impl Core {
         rx
     }
 
-    pub fn event_by_id(self: &Arc<Self>, id: EventId) -> FeedRx {
+    pub fn event_by_id(
+        self: &Arc<Self>,
+        id: EventId,
+        hints: Vec<String>,
+        author: Option<PublicKey>,
+    ) -> FeedRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
@@ -2974,13 +3080,47 @@ impl Core {
                 let ev = match cached {
                     Some(ev) => Some(ev),
                     None => {
-                        let fetched = active
-                            .pool
-                            .get(Filter::new().id(id).limit(1))
-                            .await
-                            .unwrap_or_default();
-                        let ev = fetched.into_iter().next();
-                        // (no explicit save: the SDK persists what it receives)
+                        // feeds.ts resolveEvent: with a known author, race
+                        // their DECLARED write relays + the relays we've
+                        // empirically SEEN them on (+ nevent hints) first —
+                        // read-dead relays dropped, a get against one just
+                        // burns its share of the race. The big indexers are
+                        // the fallback (an aggregator that can miss), not
+                        // the primary.
+                        let filter = Filter::new().id(id).limit(1);
+                        let mut primary = hints.clone();
+                        if let Some(pk) = author {
+                            let lists = active.pool.relay_lists(&[pk]).await;
+                            if let Some(list) = lists.get(&pk.to_string()) {
+                                primary.extend(list.write.iter().cloned());
+                            }
+                            primary.extend(seen::for_pubkey(&pk));
+                        }
+                        primary.retain(|u| !relay_latency::is_read_dead(u));
+                        primary.sort();
+                        primary.dedup();
+                        let mut ev = if primary.is_empty() {
+                            None
+                        } else {
+                            active
+                                .pool
+                                .get_from(&primary, &filter)
+                                .await
+                                .into_iter()
+                                .next()
+                        };
+                        if ev.is_none() {
+                            let mut fallback = hints;
+                            fallback.extend(INDEXERS.iter().map(|s| s.to_string()));
+                            fallback.sort();
+                            fallback.dedup();
+                            ev = active
+                                .pool
+                                .get_from(&fallback, &filter)
+                                .await
+                                .into_iter()
+                                .next();
+                        }
                         ev
                     }
                 };
@@ -3415,11 +3555,14 @@ impl Core {
         // The NIP-18 quote rides FIRST: a q tag (id, relay hint, author) and
         // the nostr: reference folded into the text the reader sees.
         let content = if let Some(q) = &quote {
+            // The relay hint rides the author's most-recent seen relay
+            // (actions.ts:118); empty when we've never seen them (NIP-18:
+            // the hint is optional).
             tags.push(Tag::custom(
                 "q",
                 [
                     q.id.to_string(),
-                    String::new(),
+                    seen::first(&q.pubkey).unwrap_or_default(),
                     q.pubkey.to_string(),
                 ],
             ));
@@ -3877,7 +4020,7 @@ impl Core {
                     active.me(),
                     Timestamp::now(),
                     Kind::Reaction,
-                    [Tag::event(target.id), Tag::public_key(target.pubkey)],
+                    [seen::hint_tag(target.id, &target.pubkey), Tag::public_key(target.pubkey)],
                     "+",
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
@@ -4063,7 +4206,7 @@ impl Core {
                     active.me(),
                     Timestamp::now(),
                     Kind::EventDeletion,
-                    [Tag::event(target.id)],
+                    [seen::hint_tag(target.id, &target.pubkey)],
                     "",
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
@@ -4180,20 +4323,45 @@ impl Core {
                     return;
                 }
                 let event = match n {
-                    nostr_sdk::client::ClientNotification::Event { subscription_id, event, .. }
+                    nostr_sdk::client::ClientNotification::Event {
+                        relay_url,
+                        subscription_id,
+                        event,
+                        ..
+                    }
                         if output.id() == &subscription_id
                             || routed
                                 .as_ref()
                                 .map(|r| r.id() == &subscription_id)
                                 .unwrap_or(false) =>
                     {
-                        *event
+                        (relay_url, *event)
+                    }
+                    nostr_sdk::client::ClientNotification::Message { relay_url, message }
+                        if matches!(
+                            &*message,
+                            nostr::message::RelayMessage::Closed { message, .. }
+                                if relay_latency::is_read_denial(message)
+                        ) =>
+                    {
+                        // An explicit REQ refusal (write-only blaster,
+                        // auth wall we won't sign for, paywall) — the
+                        // read-dead signal (pool.ts onclose →
+                        // recordReadDenial; the broadcast stream delivers
+                        // every relay's CLOSED here).
+                        relay_latency::record_read_denial(relay_url.as_str());
+                        eprintln!("[core] live: read denial from {relay_url}");
+                        continue;
                     }
                     nostr_sdk::client::ClientNotification::Shutdown => break,
                     _ => continue,
                 };
-                // (no explicit save: the SDK persists every received event
-                // before notifying — relay/inner.rs)
+                let (relay_url, event) = event;
+                // Seen-on memory (seen-relays.ts recordSeenOn): which
+                // relays we ACTUALLY receive each author from — the live
+                // bell is the same drain the TS wrapped around its
+                // subscription's onevent.
+                seen::record(&event.pubkey, &[relay_url.as_str()]);
                 let sig = if u16::from(event.kind) == 5 {
                     None // deletions ride the store; the render filter sees them
                 } else if event.tags.clone().public_keys().any(|pk| pk == me) {

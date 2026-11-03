@@ -224,6 +224,9 @@ fn main() {
         // Store retention: prune past-retention events shortly after
         // launch, then daily.
         core.spawn_store_prune();
+        // Relay-list refresher: hourly, refetch the follows' stale
+        // kind:10002 lists so routed reads heal themselves.
+        core.spawn_list_refresher();
         // The blocktime bridge (timefmt.rs): the core handle + ask dedup
         // behind every tappable timestamp, before any window renders.
         crate::timefmt::init(core.clone(), cx);
