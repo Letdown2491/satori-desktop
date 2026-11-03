@@ -1808,7 +1808,7 @@ impl Core {
         let ran_deep = !follows.is_empty() && !warm;
         // The fetches' values are not read: their effect is the SDK's
         // save-on-receive; the page projects from the store below.
-        let (engagement, fetched, dels) = tokio::join!(
+        let (engagement, fetched, _dels) = tokio::join!(
             async {
                 let mine = Filter::new()
                     .author(me)
@@ -1838,22 +1838,24 @@ impl Core {
                 }
             },
             // Deletions ride along (NIP-09): rare, follows-scoped, needed
-            // before the render filter can drop what they cover.
+            // before the render filter can drop what they cover. The
+            // chokepoint consumes the kind:5s (records them, filters them
+            // from the set), so the arm's value is the tombstones it
+            // seeds plus the ordering — the projection waits on it.
             async {
                 if !follows.is_empty() && !warm {
                     let filter = Filter::new()
                         .kind(Kind::EventDeletion)
                         .authors(follows.clone())
                         .limit(500);
-                    active.pool.get(filter).await.unwrap_or_default()
-                } else {
-                    Default::default()
+                    let _ = active.pool.get(filter).await;
                 }
+                0usize
             }
         );
         eprintln!(
             "[core] deep fetch: {} events",
-            engagement.len() + fetched.len() + dels.len()
+            engagement.len() + fetched.len()
         );
         // No explicit saves: the SDK persists every relay-received event
         // before notifying (relay/inner.rs), so these loops re-saved what
@@ -3509,25 +3511,21 @@ impl Core {
                     replies.push(ev);
                 }
                 // Deletions (NIP-09), targeted by id — replies come from
-                // beyond the follows, so the sync can't cover them. Only a
-                // delete from the reply's own author counts.
+                // beyond the follows, so the sync can't cover them. The
+                // chokepoint consumes the kind:5s it fetches (records
+                // them; the returned set is empty by design), so the gate
+                // is the module lookup — which enforces the deleter ==
+                // author MUST structurally. (Audit: the old local HashSet
+                // read the get() results the chokepoint now consumes.)
                 let reply_ids: Vec<EventId> = replies.iter().map(|e| e.id).collect();
                 if !reply_ids.is_empty() {
                     let mut del_filter = Filter::new().kind(Kind::EventDeletion).limit(200);
                     for id in reply_ids {
                         del_filter = del_filter.event(id);
                     }
-                    let dels = active.pool.get(del_filter).await.unwrap_or_default();
                     // (no explicit save: the SDK persists what it receives)
-                    if !dels.is_empty() {
-                        let mut deleted: HashSet<(PublicKey, EventId)> = HashSet::new();
-                        for d in &dels {
-                            for id in d.tags.clone().event_ids() {
-                                deleted.insert((d.pubkey, id));
-                            }
-                        }
-                        replies.retain(|e| !deleted.contains(&(e.pubkey, e.id)));
-                    }
+                    let _ = active.pool.get(del_filter).await;
+                    replies.retain(|e| !deletions::is_deleted(e));
                 }
                 let mut seen: HashSet<EventId> = HashSet::new();
                 replies.retain(|e| seen.insert(e.id));
@@ -4251,6 +4249,12 @@ impl Core {
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;
+                // Own deletion accepted: PIN the tombstone (deletions.ts
+                // recordDeletion(ev, pin=true)) — immune to relay-fed
+                // eviction, so the deleted note can't resurrect through
+                // embeds, re-fetches, or a stranger's tag-spam churn.
+                // (Audit: this was never wired; the pinned maps were dead.)
+                deletions::record(&signed, true);
                 let _ = active.pool.store.delete_event(target.id).await;
                 Ok(())
             }

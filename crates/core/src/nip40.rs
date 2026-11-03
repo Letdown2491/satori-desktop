@@ -10,7 +10,9 @@ use nostr::prelude::*;
 
 /// True when the event carries a valid `expiration` tag in the past. A
 /// malformed timestamp does not expire the event (the spec ties the
-/// behavior to the timestamp, not the tag).
+/// behavior to the timestamp, not the tag). Only the tag's FIRST value
+/// is consulted (nip40.ts tag1) — the tags are signature-covered, so a
+/// relay can't smuggle a parseable timestamp into a later slot.
 pub fn is_expired(ev: &Event) -> bool {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -19,9 +21,8 @@ pub fn is_expired(ev: &Event) -> bool {
     ev.tags.iter().any(|t| {
         let s = t.as_slice();
         s.first().is_some_and(|k| k == "expiration")
-            && s[1..]
-                .iter()
-                .find_map(|v| v.parse::<u64>().ok())
+            && s.get(1)
+                .and_then(|v| v.parse::<u64>().ok())
                 .is_some_and(|t| t > 0 && t <= now)
     })
 }
@@ -58,6 +59,12 @@ mod tests {
         assert!(!is_expired(&ev_with_tags(vec![zero])));
         let junk = Tag::custom("expiration", ["tomorrow".to_string()]);
         assert!(!is_expired(&ev_with_tags(vec![junk])));
+        // tag1 semantics (nip40.ts): only the FIRST value is consulted —
+        // a parseable later slot does not expire (tags are
+        // signature-covered, so this shape is author-chosen, not
+        // relay-injectable).
+        let trailing = Tag::custom("expiration", ["nope", &(now_secs() - 1).to_string()]);
+        assert!(!is_expired(&ev_with_tags(vec![trailing])));
         // The 0 prefix is honored (no leading-zero games), and an event
         // that merely CONTAINS the word is untouched.
         let other = Tag::custom("client", ["expiration".to_string()]);

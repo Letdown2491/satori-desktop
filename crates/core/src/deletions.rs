@@ -24,7 +24,7 @@
 //! must outlive the LMDB store's retention and restarts, or deleted
 //! events resurrect on reboot. Bounded like seen-relays.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -45,7 +45,7 @@ const CHECK_TTL_SECS: u64 = 30 * 60;
 /// Flush cadence (deletions.ts debouncedFlush: 10s).
 const FLUSH_SECS: u64 = 10;
 
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 struct Stored {
     #[serde(default)]
     ids: HashMap<String, u64>,
@@ -59,15 +59,17 @@ struct Stored {
 
 struct Deletions {
     /// "target-id:deleter-pk" → deletion created_at, and
-    /// "kind:pk:d" → deletion created_at. Insertion order (the order
-    /// vecs) = recency; oldest entries are dropped first at the cap.
+    /// "kind:pk:d" → deletion created_at. The order deques hold the
+    /// same keys in arrival order; oldest entries are dropped first at
+    /// the cap (pop_front is O(1) — a Vec's remove(0) would memmove the
+    /// whole tail per insert at cap, and kind:5s arrive in bursts).
     /// The pinned pair holds the same shapes but is written only from
     /// your own accepted publishes.
     maps: Stored,
-    ids_order: Vec<String>,
-    addrs_order: Vec<String>,
-    pids_order: Vec<String>,
-    paddrs_order: Vec<String>,
+    ids_order: VecDeque<String>,
+    addrs_order: VecDeque<String>,
+    pids_order: VecDeque<String>,
+    paddrs_order: VecDeque<String>,
     /// In-memory only: ids/coords recently asked about (the background
     /// deletion sweep's TTL memory). A restart just re-checks once.
     checked: HashMap<String, u64>,
@@ -118,9 +120,11 @@ fn load(map: HashMap<String, u64>, cap: usize) -> HashMap<String, u64> {
 }
 
 fn write_disk() {
-    let held = deletions().lock().unwrap();
-    let body = serde_json::to_string(&held.maps).unwrap_or_default();
-    drop(held);
+    // Snapshot under the lock, serialize OUTSIDE it: this same mutex
+    // gates every is_deleted render lookup, and JSON-formatting ~10k
+    // entries must not stall a paint (audit perf).
+    let snap = deletions().lock().unwrap().maps.clone();
+    let body = serde_json::to_string(&snap).unwrap_or_default();
     // Temp sibling + rename, 0600 — the state-file discipline.
     let path = config::state_file(config::files::DELETIONS);
     if let Some(parent) = path.parent() {
@@ -162,19 +166,27 @@ fn spawn_flusher() {
 }
 
 /// Keep the NEWEST deletion time per key; oldest evicted over the cap.
-fn put(map: &mut HashMap<String, u64>, order: &mut Vec<String>, key: String, at: u64, cap: usize) {
+fn put(
+    map: &mut HashMap<String, u64>,
+    order: &mut VecDeque<String>,
+    key: String,
+    at: u64,
+    cap: usize,
+) {
     if let Some(cur) = map.get(&key)
         && *cur >= at
     {
         return;
     }
     if !map.contains_key(&key) {
-        order.push(key.clone());
+        order.push_back(key.clone());
     }
     map.insert(key, at);
     while order.len() > cap {
-        let old = order.remove(0);
-        map.remove(&old);
+        let old = order.pop_front();
+        if let Some(old) = old {
+            map.remove(&old);
+        }
     }
 }
 
