@@ -30,6 +30,7 @@ pub mod kinds;
 pub mod media;
 pub mod nip;
 pub mod notifications;
+pub mod outbox;
 pub mod pool;
 pub mod publish;
 pub mod store;

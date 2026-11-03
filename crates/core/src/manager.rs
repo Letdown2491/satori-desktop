@@ -1797,18 +1797,15 @@ impl Core {
             .first()
             .map(|e| e.created_at.as_secs())
             .unwrap_or(0);
-        // NIP-01: an empty filter list can never match — never send
-        // `authors: []`; a no-follow account just projects the store.
-        let fetched = if follows.is_empty() {
-            Default::default()
-        } else {
-            let filter = Filter::new()
-                .kinds(kinds.clone())
-                .authors(follows.clone())
-                .since(Timestamp::from(since))
-                .limit(100);
-            active.pool.get(filter).await.unwrap_or_default()
-        };
+        // The full outbox model (nip65.ts routeAuthorsToRelays): each follow
+        // is read from the relays THEY write to — set-cover-bounded, 2x
+        // redundancy, orphans recovered to their own relays. The guard
+        // upstream already sent no-follow accounts to the bootstrap; the
+        // call's own guard makes the empty case a no-op regardless.
+        let fetched = active
+            .pool
+            .get_routed(kinds.clone(), &follows, Some(Timestamp::from(since)), None, 100)
+            .await;
         if fetched.is_empty() {
             // Relays unreachable (post-suspend, offline): this used to end
             // the refresh as NothingNew — which the feed swallows — so a
@@ -1856,12 +1853,18 @@ impl Core {
                 // NIP-01: an empty list can never match — with no follows
                 // there is nothing to top up from the relays.
                 if notes.len() <= PAGE && !active.follows.is_empty() {
-                    let filter = Filter::new()
-                        .kinds(kinds.clone())
-                        .authors(active.follows.clone())
-                        .until(Timestamp::from(until))
-                        .limit(TOPUP_DEPTH);
-                    let fetched = active.pool.get(filter).await.unwrap_or_default();
+                    // Outbox routing: strictly older than the page bottom,
+                    // from each follow's own write relays.
+                    let fetched = active
+                        .pool
+                        .get_routed(
+                            kinds.clone(),
+                            &active.follows,
+                            None,
+                            Some(Timestamp::from(until)),
+                            TOPUP_DEPTH,
+                        )
+                        .await;
                     for ev in fetched {
                         let _ = active.pool.store.save(&ev).await;
                     }
@@ -4060,12 +4063,6 @@ impl Core {
             if !follows.is_empty() {
                 filters.push(
                     Filter::new()
-                        .kinds(kinds.clone())
-                        .authors(follows.clone())
-                        .since(now),
-                );
-                filters.push(
-                    Filter::new()
                         .kind(Kind::EventDeletion)
                         .authors(follows.clone())
                         .since(now),
@@ -4075,6 +4072,25 @@ impl Core {
                 eprintln!("[core] live: subscribe failed; re-arming");
                 live_on.store(false, std::sync::atomic::Ordering::SeqCst);
                 return;
+            };
+            // The follows' notes ride the OUTBOX (each author from the
+            // relays they write to — routed live fan-out, feeds.ts): a
+            // second subscription, merged into the same notification
+            // stream. Failure degrades to the main read set (indexers +
+            // own inbox relays), not to a dead bell.
+            let routed = if follows.is_empty() {
+                None
+            } else {
+                match pool
+                    .subscribe_routed(kinds.clone(), &follows, Some(now))
+                    .await
+                {
+                    Ok(o) => Some(o),
+                    Err(e) => {
+                        eprintln!("[core] live: outbox fan-out failed ({e}); indexers only");
+                        None
+                    }
+                }
             };
             let mut notifications = pool.client().notifications();
             while let Some(n) = notifications.next().await {
@@ -4086,11 +4102,18 @@ impl Core {
                 if live_epoch.load(std::sync::atomic::Ordering::SeqCst) != my_epoch {
                     eprintln!("[core] live: session changed; unsubscribing");
                     let _ = pool.client().unsubscribe(output.id()).await;
+                    if let Some(r) = &routed {
+                        let _ = pool.client().unsubscribe(r.id()).await;
+                    }
                     return;
                 }
                 let event = match n {
                     nostr_sdk::client::ClientNotification::Event { subscription_id, event, .. }
-                        if output.id() == &subscription_id =>
+                        if output.id() == &subscription_id
+                            || routed
+                                .as_ref()
+                                .map(|r| r.id() == &subscription_id)
+                                .unwrap_or(false) =>
                     {
                         *event
                     }

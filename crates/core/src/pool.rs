@@ -9,9 +9,10 @@
 //!   latency profiles, read-dead detection, seen-on memory (M2+).
 //! - TODO(port): NIP-09 tombstones + NIP-40 expiry at the chokepoint (M2).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -20,15 +21,18 @@ use nostr_sdk::authenticator::Authenticator;
 use nostr_sdk::error::Error as SdkError;
 use nostr_sdk::prelude::*;
 
+use crate::outbox::{self, RelayList, Route};
 use crate::signer::Signer;
 use crate::store::Store;
 
-/// Bootstrap indexer relays (nip65.ts:9-15).
+/// Bootstrap indexer relays (nip65.ts:9-15). Liveness-probed Nov 2026:
+/// relay.coracle.social has no DNS and nos.social 404s websocket upgrades —
+/// the TS reference's indexer./relay. hosts are the live ones.
 pub const INDEXERS: [&str; 5] = [
     "wss://relay.damus.io",
     "wss://relay.primal.net",
-    "wss://relay.coracle.social",
-    "wss://nos.social",
+    "wss://indexer.coracle.social",
+    "wss://relay.nos.social",
     "wss://purplepag.es",
 ];
 
@@ -180,7 +184,7 @@ impl Pool {
         Ok(cached.map(|ev| ev.tags.public_keys().collect()).unwrap_or_default())
     }
 
-    /// Own NIP-65 relay list, split into (read, write).
+    /// Own NIP-65 relay list, split into (read, write) — the shared parser.
     pub async fn nip65(&self, me: PublicKey) -> Result<(Vec<String>, Vec<String>), SdkError> {
         let fresh = self
             .get(Filter::new().kind(Kind::RelayList).author(me).limit(1))
@@ -189,25 +193,171 @@ impl Pool {
             let _ = self.store.save(ev).await;
         }
         let cached = self.store.latest_by_kind(me, Kind::RelayList).await?;
-        let mut read = Vec::new();
-        let mut write = Vec::new();
-        if let Some(ev) = cached {
-            for tag in ev.tags.clone().to_vec() {
-                let parts = tag.as_slice();
-                // r <wss-url> [read|write] — absent marker means both.
-                if parts.len() >= 2 && parts[0] == "r" && parts[1].starts_with("wss://") {
-                    match parts.get(2).map(String::as_str) {
-                        Some("read") => read.push(parts[1].clone()),
-                        Some("write") => write.push(parts[1].clone()),
-                        _ => {
-                            read.push(parts[1].clone());
-                            write.push(parts[1].clone());
-                        }
+        let Some(ev) = cached else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+        let list = outbox::parse_relay_list(&ev);
+        Ok((list.read, list.write))
+    }
+
+    // --- full outbox model (nip65.ts routeAuthorsToRelays + feeds.ts routeFor) ---
+
+    /// Relay lists for a set of authors: store-first (the client's database
+    /// is this store, so everything ever seen is cached), missing ones
+    /// fetched from the indexers in one deadline-bounded, author-chunked
+    /// query per 200 and saved. Authors with no list anywhere stay absent —
+    /// routing sends them to the fallback. A present-but-stale list is
+    /// served as-is for now (no background refresher yet — that lands with
+    /// the seen-on memory slice).
+    pub async fn relay_lists(&self, authors: &[PublicKey]) -> HashMap<String, RelayList> {
+        let mut out: HashMap<String, RelayList> = HashMap::new();
+        let mut missing: Vec<PublicKey> = Vec::new();
+        for pk in authors {
+            match self.store.latest_by_kind(*pk, Kind::RelayList).await {
+                Ok(Some(ev)) => {
+                    let list = outbox::parse_relay_list(&ev);
+                    if !list.is_empty() {
+                        out.insert(pk.to_string(), list);
+                    }
+                }
+                _ => missing.push(*pk),
+            }
+        }
+        for chunk in outbox::chunk(&missing, outbox::MAX_AUTHORS_PER_FILTER) {
+            // Chunk is non-empty by construction: NIP-01, never send [].
+            let filter = Filter::new()
+                .kind(Kind::RelayList)
+                .authors(chunk)
+                .limit(3000);
+            if let Ok(events) = self.get(filter).await {
+                for ev in &events {
+                    let _ = self.store.save(ev).await;
+                    let list = outbox::parse_relay_list(ev);
+                    if !list.is_empty() {
+                        out.insert(ev.pubkey.to_string(), list);
                     }
                 }
             }
         }
-        Ok((read, write))
+        out
+    }
+
+    /// Fan a route out into per-relay, author-chunked deadline queries and
+    /// merge (feeds.ts fetchRoutedPage: limit*2 per shard, read-dead relays
+    /// skipped at query time, mergeNewest → the BTreeSet's newest-first
+    /// ordering). Fetched events cache on arrival (client db = store).
+    async fn fetch_route(
+        &self,
+        route: &Route,
+        kinds: &[Kind],
+        since: Option<Timestamp>,
+        until: Option<Timestamp>,
+        limit: usize,
+    ) -> BTreeSet<Event> {
+        let mut queries = Vec::new();
+        for (url, author_set) in route {
+            // Bad relay = skip; read-scoped capability (add_relay is
+            // idempotent — the pool rejects un-added urls at REQ time).
+            let _ = self
+                .client
+                .add_relay(url.as_str())
+                .capabilities(RelayCapabilities::READ)
+                .await;
+            let authors: Vec<String> = author_set.iter().cloned().collect();
+            for shard in outbox::chunk(&authors, outbox::MAX_AUTHORS_PER_FILTER) {
+                let pks: Vec<PublicKey> = shard
+                    .iter()
+                    .filter_map(|a| PublicKey::from_str(a).ok())
+                    .collect();
+                if pks.is_empty() {
+                    continue;
+                }
+                let mut filter = Filter::new()
+                    .kinds(kinds.to_vec())
+                    .authors(pks)
+                    .limit(limit * 2);
+                if let Some(s) = since {
+                    filter = filter.since(s);
+                }
+                if let Some(u) = until {
+                    filter = filter.until(u);
+                }
+                queries.push(self.client.fetch_events(filter).timeout(READ_BUDGET).into_future());
+            }
+        }
+        let results = futures_util::future::join_all(queries).await;
+        let mut merged: BTreeSet<Event> = BTreeSet::new();
+        for events in results.into_iter().flatten() {
+            merged.extend(events);
+        }
+        merged
+    }
+
+    /// One paged read over the OUTBOX: route authors to the relays THEY
+    /// write to (set-cover at 70 relays, 2x redundancy per author, orphan
+    /// recovery), then query each relay with its author shard.
+    pub async fn get_routed(
+        &self,
+        kinds: Vec<Kind>,
+        authors: &[PublicKey],
+        since: Option<Timestamp>,
+        until: Option<Timestamp>,
+        limit: usize,
+    ) -> BTreeSet<Event> {
+        // NIP-01: an empty list can never match — and routing nobody is
+        // nothing to do.
+        if authors.is_empty() {
+            return Default::default();
+        }
+        let keys: Vec<String> = authors.iter().map(|p| p.to_string()).collect();
+        let lists = self.relay_lists(authors).await;
+        let fallback: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
+        let route = outbox::route(&lists, &keys, &fallback, |_| 1.0);
+        self.fetch_route(&route, &kinds, since, until, limit).await
+    }
+
+    /// Subscribe the live bell over the OUTBOX: the same routing as
+    /// get_routed, one subscription id spanning every relay+shard pair.
+    /// Events arrive through the client's shared notification stream,
+    /// unchanged. The caller keeps using the main pool for its own
+    /// me-scoped filters (mentions/deletions read from the inbox set).
+    pub async fn subscribe_routed(
+        &self,
+        kinds: Vec<Kind>,
+        authors: &[PublicKey],
+        since: Option<Timestamp>,
+    ) -> Result<Output<SubscriptionId>, SdkError> {
+        if authors.is_empty() {
+            return Err(SdkError::other("no authors to subscribe"));
+        }
+        let keys: Vec<String> = authors.iter().map(|p| p.to_string()).collect();
+        let lists = self.relay_lists(authors).await;
+        let fallback: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
+        let route = outbox::route(&lists, &keys, &fallback, |_| 1.0);
+        let mut targets: Vec<(&str, Vec<Filter>)> = Vec::new();
+        for (url, author_set) in &route {
+            let _ = self
+                .client
+                .add_relay(url.as_str())
+                .capabilities(RelayCapabilities::READ)
+                .await;
+            let authors: Vec<String> = author_set.iter().cloned().collect();
+            for shard in outbox::chunk(&authors, outbox::MAX_AUTHORS_PER_FILTER) {
+                let pks: Vec<PublicKey> = shard
+                    .iter()
+                    .filter_map(|a| PublicKey::from_str(a).ok())
+                    .collect();
+                if pks.is_empty() {
+                    continue;
+                }
+                let mut filter = Filter::new().kinds(kinds.clone()).authors(pks);
+                if let Some(s) = since {
+                    filter = filter.since(s);
+                }
+                targets.push((url.as_str(), vec![filter]));
+            }
+        }
+        self.client.subscribe(ReqTarget::manual(targets)).await
     }
 
     /// Publish to the write set (own write relays, fallback indexers).

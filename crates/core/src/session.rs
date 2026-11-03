@@ -78,7 +78,7 @@ mod tests {
     /// container has no Secret Service, so store() exercises the fallback).
     #[test]
     fn session_roundtrip_and_file_fallback() {
-        let env = crate::test_env::EnvGuard::new("session");
+        let _env = crate::test_env::EnvGuard::new("session");
 
         let session = Session {
             pubkey: "3bf0c626cb9b0e68c8280ba10023637b0425e77b29f8e2a0b7b3b6b0e0a1f2e3".into(),
