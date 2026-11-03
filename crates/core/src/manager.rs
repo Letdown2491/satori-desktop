@@ -473,14 +473,51 @@ impl Core {
     /// failure reason (shown on the login page — silent resume failures are
     /// how users get lost). The bunker signer is rebuilt from the transport
     /// secret without user interaction.
-    /// Sign out: forget the session file + both secret-store entries
-    /// (logout must not leave residue) and drop the in-memory Active — the
-    /// next login rebuilds it exactly as a fresh process would.
+    /// Shared session teardown (sign_out + logout): shut the bunker
+    /// transport down FIRST (zombie kind-24133 subscriptions = phantom
+    /// approval prompts in the user's bunker app once the session is
+    /// gone), drop the pool's NIP-42 identity (never answer AUTH as a
+    /// stale account), close the NWC wallet (phantom subscriptions are the
+    /// bunker bug's cousin; the LEDGER stays — history, not state), and
+    /// clear the engagement/mute/profile mirrors so a different account
+    /// never inherits them. sign_out used to skip all of this and bleed
+    /// mirrors across accounts.
+    fn teardown_session(&self) {
+        let old = self.active.lock().unwrap().take();
+        if let Some(a) = old
+            && let Signer::Bunker(connect) = &a.signer {
+                let connect = Arc::clone(connect);
+                self.rt
+                    .spawn(async move { Arc::unwrap_or_clone(connect).shutdown().await });
+            }
+        // The pool answered NIP-42 AUTH challenges as this session's
+        // identity (pool.rs): drop it now, before the bunker transport
+        // finishes dying and before session::clear drops the session
+        // record.
+        if let Some(p) = self.pool.lock().unwrap().as_ref() {
+            p.clear_identity();
+        }
+        let w = Arc::clone(&self.wallet);
+        self.rt.spawn(async move { w.disconnect().await });
+        self.own_liked.lock().unwrap().clear();
+        self.own_reposted.lock().unwrap().clear();
+        self.own_bookmarked.lock().unwrap().clear();
+        self.own_zapped.lock().unwrap().clear();
+        self.muted.lock().unwrap().clear();
+        // The profile mirror is display state for the logged-in session's
+        // reading; a next login re-hydrates it from its own feed pages.
+        self.profiles_mem.lock().unwrap().clear();
+    }
+
+    /// Sign out: run the full session teardown (transports, pool identity,
+    /// mirrors) and forget the session file + both secret-store entries —
+    /// the next login rebuilds everything exactly as a fresh process
+    /// would.
     pub fn sign_out(&self) {
-        crate::session::clear();
-        crate::secrets::delete(crate::secrets::NSEC);
-        crate::secrets::delete(crate::secrets::BUNKER_CLIENT_SECRET);
-        *self.active.lock().unwrap() = None;
+        self.teardown_session();
+        session::clear();
+        secrets::delete(secrets::NSEC);
+        secrets::delete(secrets::BUNKER_CLIENT_SECRET);
         // The deletion cache was built from the OLD session's follow set.
         *self.deleted_cache.lock().unwrap() = None;
         // The live sub is armed per session: the epoch bump makes the old
@@ -540,40 +577,13 @@ impl Core {
     }
 
     pub fn logout(&self) {
-        // Shut the bunker transport down FIRST (zombie kind-24133
-        // subscriptions = phantom approval prompts in the user's bunker app
-        // after logout).
-        let old = self.active.lock().unwrap().take();
-        if let Some(a) = old
-            && let Signer::Bunker(connect) = &a.signer {
-                let connect = Arc::clone(connect);
-                self.rt
-                    .spawn(async move { Arc::unwrap_or_clone(connect).shutdown().await });
-            }
-        // The pool answered NIP-42 AUTH challenges as this session's
-        // identity (pool.rs): drop it now, before the bunker transport
-        // finishes dying and before session::clear drops the session
-        // record — never answer as a stale account.
-        if let Some(p) = self.pool.lock().unwrap().as_ref() {
-            p.clear_identity();
-        }
+        // Full shared teardown: bunker transport first (zombie kind-24133
+        // subscriptions = phantom approval prompts), then pool identity,
+        // wallet, mirrors.
+        self.teardown_session();
         session::clear();
         secrets::delete(secrets::BUNKER_CLIENT_SECRET);
         secrets::delete(secrets::NSEC);
-        // The wallet is a session-scoped capability too: shut the NWC
-        // transport down (phantom subscriptions are the bunker bug's
-        // cousin) and forget the render mirror. The LEDGER stays — it is
-        // history, not state.
-        let w = Arc::clone(&self.wallet);
-        self.rt.spawn(async move { w.disconnect().await });
-        self.own_liked.lock().unwrap().clear();
-        self.own_reposted.lock().unwrap().clear();
-        self.own_bookmarked.lock().unwrap().clear();
-        self.own_zapped.lock().unwrap().clear();
-        self.muted.lock().unwrap().clear();
-        // The profile mirror is display state for the logged-in session's
-        // reading; a next login re-hydrates it from its own feed pages.
-        self.profiles_mem.lock().unwrap().clear();
         eprintln!("[core] logout");
     }
 

@@ -212,15 +212,20 @@ impl Pool {
     pub async fn relay_lists(&self, authors: &[PublicKey]) -> HashMap<String, RelayList> {
         let mut out: HashMap<String, RelayList> = HashMap::new();
         let mut missing: Vec<PublicKey> = Vec::new();
-        for pk in authors {
-            match self.store.latest_by_kind(*pk, Kind::RelayList).await {
-                Ok(Some(ev)) => {
-                    let list = outbox::parse_relay_list(&ev);
-                    if !list.is_empty() {
-                        out.insert(pk.to_string(), list);
-                    }
+        // Store-side lookups batched: one query per 200 authors (the
+        // per-author cursor limit(1) IS the newest list), not one
+        // sequential LMDB round trip per follow.
+        if let Ok(events) = self.store.relay_lists(authors).await {
+            for ev in &events {
+                let list = Self::routed_list(ev);
+                if !list.is_empty() {
+                    out.insert(ev.pubkey.to_string(), list);
                 }
-                _ => missing.push(*pk),
+            }
+        }
+        for pk in authors {
+            if !out.contains_key(&pk.to_string()) {
+                missing.push(*pk);
             }
         }
         for chunk in outbox::chunk(&missing, outbox::MAX_AUTHORS_PER_FILTER) {
@@ -232,7 +237,7 @@ impl Pool {
             if let Ok(events) = self.get(filter).await {
                 for ev in &events {
                     let _ = self.store.save(ev).await;
-                    let list = outbox::parse_relay_list(ev);
+                    let list = Self::routed_list(ev);
                     if !list.is_empty() {
                         out.insert(ev.pubkey.to_string(), list);
                     }
@@ -240,6 +245,17 @@ impl Pool {
             }
         }
         out
+    }
+
+    /// A follow's parsed relay list, screened for ROUTED use
+    /// (outbox::routable_relay): wss only, public IP literals only. A list
+    /// left empty by the screen reads as "no list" — the author rides the
+    /// indexers with the listless, never a dialed private host.
+    fn routed_list(ev: &Event) -> RelayList {
+        let mut list = outbox::parse_relay_list(ev);
+        list.read.retain(|u| outbox::routable_relay(u));
+        list.write.retain(|u| outbox::routable_relay(u));
+        list
     }
 
     /// Fan a route out into per-relay, author-chunked deadline queries and
@@ -258,6 +274,11 @@ impl Pool {
         for (url, author_set) in route {
             // Bad relay = skip; read-scoped capability (add_relay is
             // idempotent — the pool rejects un-added urls at REQ time).
+            // The route itself is already screened (relay_lists), this is
+            // the belt to that suspenders.
+            if !outbox::routable_relay(url.as_str()) {
+                continue;
+            }
             let _ = self
                 .client
                 .add_relay(url.as_str())
@@ -336,6 +357,10 @@ impl Pool {
         let route = outbox::route(&lists, &keys, &fallback, |_| 1.0);
         let mut targets: Vec<(&str, Vec<Filter>)> = Vec::new();
         for (url, author_set) in &route {
+            // Same screen as fetch_route (defense in depth).
+            if !outbox::routable_relay(url.as_str()) {
+                continue;
+            }
             let _ = self
                 .client
                 .add_relay(url.as_str())

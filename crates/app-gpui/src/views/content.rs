@@ -317,12 +317,17 @@ pub(crate) fn short_bech32(bech: &str) -> String {
 fn display_url(url: &str) -> String {
     let s = url.strip_prefix("https://").unwrap_or(url);
     let s = s.strip_prefix("http://").unwrap_or(s);
-    let mut s = s.split('/').take(3).collect::<Vec<_>>().join("/");
-    if s.len() > 48 {
-        s.truncate(45);
-        s.push('…');
+    let s = s.split('/').take(3).collect::<Vec<_>>().join("/");
+    // Char-boundary-safe truncation: byte slicing panicked on multi-byte
+    // URLs (String::truncate at a char edge), and a relay-controlled token
+    // reaching 48 bytes is trivial to publish — the same regression class
+    // as cards.rs short().
+    if s.chars().count() > 48 {
+        let t: String = s.chars().take(45).collect();
+        format!("{t}…")
+    } else {
+        s
     }
-    s
 }
 
 // --- word-flow tokens ------------------------------------------------------

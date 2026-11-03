@@ -76,6 +76,72 @@ pub fn parse_relay_list(ev: &nostr::prelude::Event) -> RelayList {
     }
 }
 
+/// Routing-grade relay screening. A follow's kind:10002 is relay-controlled
+/// data: without a screen, a malicious list makes the client dial
+/// `ws://127.0.0.1:<port>`, link-local or RFC1918 hosts (the SSRF chain),
+/// and plain `ws://` relays would take this client's AUTH responses and
+/// subscriptions in cleartext. Relays the user entered themselves
+/// (Settings, the session's own NIP-65 via connect_reads) never pass
+/// through here — the user chose those.
+///
+/// Names (non-IP hosts) pass for now; pinning resolved IPs per hop is the
+/// SSRF-guard M5 item (same gap as the media guard).
+pub fn routable_relay(url: &str) -> bool {
+    if !url.starts_with("wss://") {
+        return false;
+    }
+    let rest = &url["wss://".len()..];
+    let host = if let Some(bracketed) = rest.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or("")
+    } else {
+        rest.split(['/', ':', '?']).next().unwrap_or("")
+    };
+    if host.is_empty() {
+        return false;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => is_public_ip(&ip),
+        Err(_) => true,
+    }
+}
+
+/// Public unicast only: rejects this-network, RFC1918, loopback, link-local
+/// (incl. the 169.254.169.254 metadata endpoint), CGNAT, multicast and
+/// reserved ranges; IPv6 additionally unique-local/link-local/multicast,
+/// with v4-mapped addresses judged by their embedded v4.
+fn is_public_ip(ip: &std::net::IpAddr) -> bool {
+    match *ip {
+        std::net::IpAddr::V4(v4) => {
+            let [a, b, _, _] = v4.octets();
+            !(a == 0
+                || a == 10
+                || a == 127
+                || (a == 169 && b == 254)
+                || (a == 172 && (b & 0xf0) == 16)
+                || (a == 192 && b == 168)
+                || (a == 100 && (b & 0xc0) == 64)
+                || a >= 224)
+        }
+        std::net::IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            if seg[..5] == [0, 0, 0, 0, 0] && seg[5] == 0xffff {
+                let v4 = std::net::Ipv4Addr::new(
+                    (seg[6] >> 8) as u8,
+                    seg[6] as u8,
+                    (seg[7] >> 8) as u8,
+                    seg[7] as u8,
+                );
+                return is_public_ip(&std::net::IpAddr::V4(v4));
+            }
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || (seg[0] & 0xffc0) == 0xfe80
+                || (seg[0] & 0xfe00) == 0xfc00
+                || (seg[0] & 0xff00) == 0xff00)
+        }
+    }
+}
+
 // Caps (nip65.ts): 3 write relays per author considered; the greedy set-cover
 // stops at 70 relays; redundancy routes each author to 2 of their relays so a
 // note on only one of them still surfaces; the orphan tail may open NEW
@@ -391,5 +457,30 @@ mod tests {
         let l = parse_relay_list(&e);
         assert_eq!(l.write, vec!["wss://both.example", "wss://write.example"]);
         assert_eq!(l.read, vec!["wss://both.example", "wss://read.example"]);
+    }
+
+    /// The SSRF screen: wss only, and IP literals must be public — a
+    /// followed author's list cannot aim the client at loopback, the
+    /// metadata endpoint, RFC1918/CGNAT space, or plain-ws cleartext.
+    #[test]
+    fn routable_screen() {
+        assert!(routable_relay("wss://relay.example.com"));
+        assert!(routable_relay("wss://relay.example.com/path"));
+        assert!(routable_relay("wss://8.8.8.8:443"));
+        assert!(routable_relay("wss://2606:4700::1111"));
+        assert!(!routable_relay("ws://relay.example.com"));
+        assert!(!routable_relay("http://relay.example.com"));
+        assert!(!routable_relay("wss://127.0.0.1:8080"));
+        assert!(!routable_relay("wss://169.254.169.254"));
+        assert!(!routable_relay("wss://10.0.0.5"));
+        assert!(!routable_relay("wss://192.168.1.2"));
+        assert!(!routable_relay("wss://172.16.0.9"));
+        assert!(!routable_relay("wss://100.100.1.1"));
+        assert!(!routable_relay("wss://0.0.0.0"));
+        assert!(!routable_relay("wss://[::1]:7777"));
+        assert!(!routable_relay("wss://[fe80::1]:7777"));
+        assert!(!routable_relay("wss://[fc00::1]"));
+        assert!(!routable_relay("wss://[::ffff:127.0.0.1]"));
+        assert!(!routable_relay("wss://"));
     }
 }
