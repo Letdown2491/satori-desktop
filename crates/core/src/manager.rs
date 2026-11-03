@@ -4350,6 +4350,9 @@ mod tests {
     /// The unsafe URL returns before any network or sniff work.
     #[test]
     fn poster_job_runs_on_the_core_runtime() {
+        // Core::new() rotates the diag mirror into the data dir: keep
+        // that off the real $HOME (the guard isolates it, lock held).
+        let _env = crate::test_env::EnvGuard::new("poster");
         let core = Arc::new(Core::new());
         let mut rx = core.fetch_poster("not a url".into(), 16, |_| Err(()));
         let verdict =
@@ -4366,10 +4369,12 @@ mod tests {
     /// spawned-task variant hangs in this container; the host does not.
     #[test]
     fn login_then_notifications_has_session() {
-        let _env = crate::test_env::ENV_LOCK.lock().unwrap();
+        let env = crate::test_env::EnvGuard::new("login");
         let core = Arc::new(Core::new());
         core.logout(); // start clean
-        let secret_path = std::env::temp_dir().join("satori-test-nsec");
+        // The nsec lands inside the guard's isolated dir (never a shared
+        // temp path a parallel run could race).
+        let secret_path = env.dir().join("test-nsec");
         let secret =
             "e1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554";
         let _ = std::fs::write(&secret_path, secret);

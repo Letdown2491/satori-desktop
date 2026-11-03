@@ -78,9 +78,7 @@ mod tests {
     /// container has no Secret Service, so store() exercises the fallback).
     #[test]
     fn session_roundtrip_and_file_fallback() {
-        let _env = crate::test_env::ENV_LOCK.lock().unwrap();
-        let tmp = std::env::temp_dir().join(format!("satori-test-{}", std::process::id()));
-        unsafe { std::env::set_var("XDG_DATA_HOME", &tmp) };
+        let env = crate::test_env::EnvGuard::new("session");
 
         let session = Session {
             pubkey: "3bf0c626cb9b0e68c8280ba10023637b0425e77b29f8e2a0b7b3b6b0e0a1f2e3".into(),
@@ -118,7 +116,6 @@ mod tests {
         secrets::delete(secrets::NSEC);
         clear();
         assert!(load().is_none());
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     const TEST_SECRET: &str = "e1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554";

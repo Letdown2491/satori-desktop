@@ -761,10 +761,7 @@ mod tests {
 
     #[test]
     fn ledger_stores_before_pay_and_retry_reuses_id() {
-        let _env = crate::test_env::ENV_LOCK.lock().unwrap();
-        let tmp = std::env::temp_dir().join(format!("satori-zaps-{}", std::process::id()));
-        unsafe { std::env::set_var("XDG_DATA_HOME", &tmp) };
-        let _ = std::fs::remove_dir_all(&tmp);
+        let _env = crate::test_env::EnvGuard::new("zaps");
 
         let note = "a".repeat(64);
         let record = ZapRecord {
@@ -798,8 +795,6 @@ mod tests {
         let hist = ledger_history();
         assert_eq!(hist.len(), 1);
         assert_eq!(hist[0].req, "req1");
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
