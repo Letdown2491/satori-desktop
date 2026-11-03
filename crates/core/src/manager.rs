@@ -646,6 +646,28 @@ impl Core {
         rx
     }
 
+    /// The poster job (D32): everything tokio-flavored stays on this
+    /// runtime — the UI's executor has no tokio context, and awaiting
+    /// these futures from it panicked thread 'main (the crash the day
+    /// D32 shipped). The sniffer is injected by the UI (gstreamer lives
+    /// there) and runs on this pool's blocking threads; the channel is
+    /// fetch_image's exact seam.
+    pub fn fetch_poster(
+        self: &Arc<Self>,
+        url: String,
+        cap: usize,
+        sniff: impl FnOnce(&[u8]) -> std::result::Result<(u32, u32, Vec<u8>), ()> + Send + 'static,
+    ) -> mpsc::UnboundedReceiver<
+        std::result::Result<crate::media::DecodedImage, crate::media::MediaError>,
+    > {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.rt.spawn(async move {
+            let res = crate::media::fetch_poster(url, cap, sniff).await;
+            let _ = tx.send(res);
+        });
+        rx
+    }
+
     // --- wallet / zaps (D20) ---------------------------------------------------
 
     /// The wallet handle (the settings pane reads status/balance directly).
@@ -4235,6 +4257,24 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+
+    /// The D32 crash seam: the poster job must run on THIS runtime no
+    /// matter which thread summons it — the first cut let the UI poll the
+    /// futures on gpui's executor, where `spawn_blocking` has no tokio
+    /// context, and thread 'main panicked the app. A plain thread calling
+    /// the wrapper (no runtime anywhere on it) must still get its verdict.
+    /// The unsafe URL returns before any network or sniff work.
+    #[test]
+    fn poster_job_runs_on_the_core_runtime() {
+        let core = Arc::new(Core::new());
+        let mut rx = core.fetch_poster("not a url".into(), 16, |_| Err(()));
+        let verdict =
+            std::thread::spawn(move || rx.blocking_recv()).join().unwrap();
+        assert!(matches!(
+            verdict,
+            Some(Err(crate::media::MediaError::NotMedia))
+        ));
+    }
 
     /// Logout → login → notifications must NOT fail with "no active
     /// session" (the user-report). Runs headless; network errors are fine,

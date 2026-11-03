@@ -307,16 +307,42 @@ pub fn purge_legacy_cache() {
     }
 }
 
-/// Head bytes of a video URL, for the UI's local poster sniff: the same
-/// SSRF-guarded, backed-off, capped fetch as `fetch_image`, at the sniffer's
-/// own (smaller) cap. The bytes are a partial media file BY DESIGN — they
-/// validate as nothing and so never touch the image cache; only the sniffed
-/// frame (`poster_store`) earns a cache slot.
-pub async fn fetch_video_head(url: &str, cap: usize) -> Result<Vec<u8>, MediaError> {
-    if !is_safe_media_url(url) {
+/// The whole poster job (D32): cache read-through, the capped guarded head
+/// fetch, the injected sniffer, the store. Runs ON a tokio runtime — every
+/// call below (reqwest, `spawn_blocking`) needs that context, so the UI
+/// awaits the verdict through `Core::fetch_poster`'s channel: `fetch_image`'s
+/// exact seam. (The first cut of this let the UI poll these futures on
+/// gpui's executor — no tokio context there, thread 'main panicked at
+/// `read_cache_off_rt`, the app died the day D32 shipped.) The sniffer is
+/// injected because gstreamer lives in the UI crate; it blocks (a bounded
+/// decode) and runs on the blocking pool, never on the 2-worker relay
+/// runtime itself.
+pub async fn fetch_poster(
+    url: String,
+    cap: usize,
+    sniff: impl FnOnce(&[u8]) -> std::result::Result<(u32, u32, Vec<u8>), ()> + Send + 'static,
+) -> Result<DecodedImage, MediaError> {
+    if !is_safe_media_url(&url) {
         return Err(MediaError::NotMedia);
     }
-    fetch_capped(url, cap).await
+    // Cache read-through: a sniff survives restarts.
+    if let Some(png) = poster_cached(&url).await {
+        return decode_async(png).await;
+    }
+    // The head bytes are a partial media file BY DESIGN — they validate as
+    // nothing and so never touch the image cache; only the sniffed frame
+    // (`poster_store`) earns a cache slot.
+    let head = fetch_capped(&url, cap).await?;
+    // JoinError = the sniff task itself died (a bug, but the tile staying
+    // bare beats the app following it down); Err(()) = no decodable frame
+    // (moov at the end, audio-only) — transient, the backoff decides.
+    let frame = tokio::task::spawn_blocking(move || sniff(&head))
+        .await
+        .map_err(|_| MediaError::Transient)?
+        .map_err(|_| MediaError::Transient)?;
+    let (_, _, png) = frame;
+    poster_store(&url, &png).await;
+    decode_async(png).await
 }
 
 /// A sniffed poster's cache key: namespaced apart from `fetch_image`
@@ -327,8 +353,8 @@ fn poster_key(url: &str) -> String {
 }
 
 /// The cached poster frame for `url`, when one was sniffed before (raw
-/// PNG bytes — the caller decodes through the ordinary image path).
-pub async fn poster_cached(url: &str) -> Option<Vec<u8>> {
+/// PNG bytes — decoded by `fetch_poster`'s ordinary validate path).
+async fn poster_cached(url: &str) -> Option<Vec<u8>> {
     read_cache_off_rt(cache_path(&poster_key(url)))
         .await
         .ok()
@@ -337,7 +363,7 @@ pub async fn poster_cached(url: &str) -> Option<Vec<u8>> {
 /// Store a sniffed poster (a PNG the sniffer encoded — valid by
 /// construction). Rides the ordinary cache trim: posters are a few tens
 /// of KB and re-derivable, so they age out like any other media.
-pub async fn poster_store(url: &str, png: &[u8]) {
+async fn poster_store(url: &str, png: &[u8]) {
     let path = cache_path(&poster_key(url));
     let png = png.to_vec();
     tokio::task::spawn_blocking(move || write_cache(&path, &png))

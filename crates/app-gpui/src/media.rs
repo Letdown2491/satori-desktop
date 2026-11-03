@@ -574,49 +574,27 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                     // short backoff — no queued promises, the ordinary
                     // retry timer re-enters fetch.
                     Kind::Poster(video) => {
-                        match satori_core::media::poster_cached(&video).await {
-                            Some(png) => ready_or_not(
-                                cx.background_executor()
-                                    .spawn(async move {
-                                        crate::poster::decoded_png_dims(png)
-                                    })
-                                    .await,
-                            ),
-                            None => {
-                                let slot = crate::poster::InFlight::take();
-                                let outcome = match slot {
-                                    None => Err(MediaError::Transient),
-                                    Some(_slot) => match satori_core::media::fetch_video_head(
-                                        &video,
-                                        crate::poster::POSTER_HEAD_BYTES,
-                                    )
-                                    .await
-                                    {
-                                        Ok(head) => match cx
-                                            .background_executor()
-                                            .spawn(async move {
-                                                crate::poster::sniff_png(&head)
-                                            })
-                                            .await
-                                        {
-                                            Ok((w, h, png)) => {
-                                                satori_core::media::poster_store(
-                                                    &video, &png,
-                                                )
-                                                .await;
-                                                Ok(crate::poster::decoded_png(png, w, h))
-                                            }
-                                            // Dead URL, moov-at-end, audio-only:
-                                            // transient — the backoff decides
-                                            // whether it's ever worth another look.
-                                            Err(()) => Err(MediaError::Transient),
-                                        },
-                                        Err(e) => Err(e),
-                                    },
-                                };
-                                landing_state(outcome, next_backoff)
+                        // The workshop cap stays UI-side (over-full = a
+                        // short backoff), but the job itself runs on core's
+                        // runtime: every tokio call inside it — the guarded
+                        // head fetch, the cache slots, the sniffer's
+                        // spawn_blocking — needs that context, and polled
+                        // from gpui's executor it panicked thread 'main
+                        // (the crash the day D32 shipped). The channel is
+                        // fetch_image's exact seam.
+                        let outcome = match crate::poster::InFlight::take() {
+                            None => Err(MediaError::Transient),
+                            Some(_slot) => {
+                                let rx = core2.fetch_poster(
+                                    video,
+                                    crate::poster::POSTER_HEAD_BYTES,
+                                    crate::poster::sniff_png,
+                                );
+                                { let mut rx = rx; rx.recv().await }
+                                    .unwrap_or(Err(MediaError::Transient))
                             }
-                        }
+                        };
+                        landing_state(outcome, next_backoff)
                     }
                 };
                 // Publish globally, then wake every waiter.

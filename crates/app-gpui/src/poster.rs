@@ -77,38 +77,26 @@ pub fn blurhash_png(hash: &str) -> Option<image::DynamicImage> {
     Some(image::DynamicImage::ImageRgba8(img))
 }
 
-/// A decoded frame as the media cache's `DecodedImage` (PNG bytes + dims;
-/// gpui decodes the rest on its asset thread).
-pub fn decoded_png(png: Vec<u8>, w: u32, h: u32) -> satori_core::media::DecodedImage {
-    satori_core::media::DecodedImage {
-        width: w,
-        height: h,
-        bytes: png,
-        format: image::ImageFormat::Png,
-        thumb: None,
-    }
-}
-
-/// A decoded gradient/frame as `DecodedImage`, encoded to PNG in passing.
+/// A decoded gradient as `DecodedImage`, encoded to PNG in passing.
 pub fn decoded_dynamic(img: image::DynamicImage) -> Option<satori_core::media::DecodedImage> {
     let (w, h) = (img.width(), img.height());
     let mut png = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .ok()?;
-    Some(decoded_png(png, w, h))
-}
-
-/// Dims + format for an already-encoded PNG (the cache-hit path reads
-/// back bytes and needs the size the sniffer knew).
-pub fn decoded_png_dims(png: Vec<u8>) -> Option<satori_core::media::DecodedImage> {
-    let img = image::load_from_memory(&png).ok()?;
-    Some(decoded_png(png, img.width(), img.height()))
+    Some(satori_core::media::DecodedImage {
+        width: w,
+        height: h,
+        bytes: png,
+        format: image::ImageFormat::Png,
+        thumb: None,
+    })
 }
 
 /// The sniff: GStreamer demuxes the head bytes' FIRST usable frame
 /// (skipping a black opener — many encoders start one) and encodes it to
-/// PNG. Blocking, bounded (~10s worst case); runs on the background
-/// executor. Ok = (width, height, png).
+/// PNG. Blocking, bounded (~10s worst case); runs on core's blocking pool,
+/// injected into `fetch_poster` — gstreamer stays a UI-crate dependency.
+/// Ok = (width, height, png).
 pub fn sniff_png(head: &[u8]) -> Result<(u32, u32, Vec<u8>), ()> {
     let tmp = std::env::temp_dir().join(format!(
         "satori-poster-{}-{}",
