@@ -163,6 +163,12 @@ pub struct Pool {
     /// set_reads/connect_reads retire reads the user dropped instead of
     /// draining them only on restart.
     reads: Mutex<BTreeSet<String>>,
+    /// Relay urls already registered with WRITE capability (D36): the
+    /// registration is an upsert-merge, so a relay that is also a read
+    /// keeps both; tracked so publish doesn't re-add + re-connect per
+    /// attempt. Targets always come from the caller's list, so a relay
+    /// the user dropped simply stops being targeted.
+    writes: Mutex<BTreeSet<String>>,
 }
 
 impl Pool {
@@ -189,6 +195,7 @@ impl Pool {
             identity,
             routed: Mutex::new(HashMap::new()),
             reads: Mutex::new(BTreeSet::new()),
+            writes: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -626,6 +633,33 @@ impl Pool {
         } else {
             write_relays.to_vec()
         };
+        // D36: WRITE relays join at publish time — this was the documented
+        // contract, but nothing registered them anymore and nostr-sdk 0.45
+        // gates every send on per-relay capability ("write actions are
+        // disabled" — the silent killer that made every publish fail
+        // after the Nov 3 re-lock). add_relay UPSELLS capabilities (merge,
+        // not replace), so a relay that is also a read keeps both. Connect
+        // only when something new joined; sends to already-connected
+        // relays are unaffected.
+        let new_targets: Vec<String> = {
+            let reg = self.writes.lock().unwrap();
+            targets
+                .iter()
+                .filter(|u| !reg.contains(*u))
+                .cloned()
+                .collect()
+        };
+        if !new_targets.is_empty() {
+            for url in &new_targets {
+                let _ = self
+                    .client
+                    .add_relay(url.clone())
+                    .capabilities(RelayCapabilities::WRITE)
+                    .await;
+                self.writes.lock().unwrap().insert(url.clone());
+            }
+            self.client.connect().await;
+        }
         let short = &event.id.to_string()[..8];
         let mut report = PublishReport::default();
         match self.client.send_event(event).to(targets.clone()).await {

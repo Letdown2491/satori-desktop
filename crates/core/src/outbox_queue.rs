@@ -68,11 +68,29 @@ static DIRTY: AtomicBool = AtomicBool::new(false);
 
 fn outbox() -> &'static Mutex<Outbox> {
     OUTBOX.get_or_init(|| {
-        let items = std::fs::read_to_string(config::state_file(config::files::OUTBOX_PENDING))
-            .ok()
-            .and_then(|s| serde_json::from_str::<Stored>(&s).ok())
-            .map(|s| s.items)
-            .unwrap_or_default();
+        // Load-or-start-empty, LOUD on anomalies: a pending file that
+        // doesn't parse would otherwise silently strand queued notes.
+        let path = config::state_file(config::files::OUTBOX_PENDING);
+        let items = match std::fs::read_to_string(&path) {
+            // No file yet = nothing ever queued (the normal first run).
+            Err(_) => Vec::new(),
+            Ok(body) => match serde_json::from_str::<Stored>(&body) {
+                Ok(s) => {
+                    if !s.items.is_empty() {
+                        eprintln!("[core] outbox: loaded {} pending item(s)", s.items.len());
+                    }
+                    s.items
+                }
+                Err(e) => {
+                    let msg = e.to_string().replace('\n', " ");
+                    eprintln!(
+                        "[core] outbox: pending file UNPARSEABLE, starting empty ({})",
+                        &msg[..msg.len().min(160)]
+                    );
+                    Vec::new()
+                }
+            },
+        };
         let mut map = HashMap::new();
         let mut order = VecDeque::new();
         for p in items {
@@ -286,9 +304,19 @@ fn write_disk() {
     };
     use std::io::Write as _;
     if f.write_all(body.as_bytes()).is_ok() {
+        // Durable-before-visible: the enqueue's write-ahead guarantee is
+        // only honest if the bytes survive a power cut. sync_all before
+        // the rename; the rename itself stays non-fsynced — a crash
+        // reverting it at worst resurrects the PREVIOUS queue state,
+        // which re-publishes an event (relays dedupe by id).
+        let synced = f.sync_all().is_ok();
         drop(f);
-        let _ = std::fs::rename(&tmp, &path);
-        DIRTY.store(false, Ordering::Relaxed);
+        if synced {
+            let _ = std::fs::rename(&tmp, &path);
+            DIRTY.store(false, Ordering::Relaxed);
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
     } else {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -463,6 +491,31 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// Full serde round-trip through the Stored shape (a hand-written
+    /// file must load: recovery flows write it out-of-band).
+    #[test]
+    fn serde_round_trip() {
+        let _env = EnvGuard::new("outbox-serde");
+        let keys = Keys::generate();
+        let ev = note(&keys, "roundtrip");
+        let p = Pending {
+            event: ev.clone(),
+            added_at: now_secs(),
+            attempts: 2,
+            next_try_at: now_secs() + 600,
+        };
+        let body = serde_json::to_string(&Stored { items: vec![p] }).unwrap();
+        let back: Stored = serde_json::from_str(&body).unwrap();
+        assert_eq!(back.items.len(), 1);
+        assert_eq!(back.items[0].event.id, ev.id);
+        assert_eq!(back.items[0].attempts, 2);
+        // The event's JSON shape is the NIP-01 form (hex id/pubkey/sig).
+        let ev_json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(ev_json["id"], ev.id.to_string());
+        assert_eq!(ev_json["kind"], 1);
+        assert_eq!(ev_json["pubkey"], keys.public_key().to_string());
     }
 
     /// Write-set resolution: normalize (trailing slash), dedupe, drop

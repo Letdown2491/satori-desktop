@@ -1759,14 +1759,17 @@ impl Core {
                 // network). Without this the main live sub armed with
                 // zero relays and "subscribe failed; re-arming" every
                 // surface (live loop, stderr8).
-                let read: Vec<String> = active
+                let (read, write): (Vec<String>, Vec<String>) = active
                     .pool
                     .store
                     .latest_by_kind(me, Kind::RelayList)
                     .await
                     .ok()
                     .flatten()
-                    .map(|ev| outbox::parse_relay_list(&ev).read)
+                    .map(|ev| {
+                        let lists = outbox::parse_relay_list(&ev);
+                        (lists.read.into_iter().collect(), lists.write.into_iter().collect())
+                    })
                     .unwrap_or_default();
                 if !read.is_empty() {
                     active.read_relays = read.clone();
@@ -1777,6 +1780,21 @@ impl Core {
                 } else {
                     // No cached list at all: indexers only, still connect.
                     active.pool.connect_reads(Vec::new()).await.ok();
+                }
+                // D36: the WRITE half too. A warm start previously left
+                // the write set empty (only `.read` was hydrated), so
+                // every publish — commit or outbox drain — fell back to
+                // the indexer fan-out instead of the user's declared
+                // write relays until the next full phase ran (the
+                // three recovered notes went out via indexers for
+                // exactly this reason). Same staleness contract as the
+                // read half: the store copy until a full phase refreshes.
+                if !write.is_empty() {
+                    eprintln!("[core] bootstrap: write set from store: {} relay(s)", write.len());
+                    active.write_relays = write.clone();
+                    if let Some(a) = self.active.lock().unwrap().as_mut() {
+                        a.write_relays = write;
+                    }
                 }
                 // The phase already landed the fresh contact list; pick it
                 // up (a store read).
@@ -4096,6 +4114,7 @@ impl Core {
         if self.outbox_started.swap(true, Ordering::SeqCst) {
             return;
         }
+        eprintln!("[core] outbox: drainer armed");
         let weak = Arc::downgrade(self);
         self.rt.spawn(async move {
             loop {
