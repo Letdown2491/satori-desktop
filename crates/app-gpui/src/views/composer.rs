@@ -502,7 +502,7 @@ impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.autofocused {
             self.autofocused = true;
-            window.focus(&self.focus);
+            window.focus(&self.focus, cx);
             self.focused_tab = Some(Tab::Note);
         }
         if self.focused_tab != Some(self.tab) {
@@ -512,8 +512,8 @@ impl Render for Composer {
             self.focused_tab = Some(self.tab);
             match self.tab {
                 Tab::Poll => window
-                    .focus(&self.poll_question.read(cx).focus_handle(cx)),
-                Tab::Note => window.focus(&self.focus),
+                    .focus(&self.poll_question.read(cx).focus_handle(cx), cx),
+                Tab::Note => window.focus(&self.focus, cx),
             }
         }
         let replying = self.reply_to.is_some();

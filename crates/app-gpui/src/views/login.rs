@@ -226,7 +226,7 @@ impl Render for LoginView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.autofocused {
             self.autofocused = true;
-            window.focus(&self.focus);
+            window.focus(&self.focus, cx);
         }
         let error = self.error.clone();
         let err_color = if self.error_is_notice {

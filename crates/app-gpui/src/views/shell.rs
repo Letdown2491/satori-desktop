@@ -907,7 +907,7 @@ impl Render for Shell {
         if !self.focused_once || self.refocus {
             self.focused_once = true;
             self.refocus = false;
-            window.focus(&self.focus);
+            window.focus(&self.focus, cx);
         }
 
         div()

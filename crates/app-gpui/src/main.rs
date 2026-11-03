@@ -89,7 +89,7 @@ impl Root {
                 while let Some(uri) = rx.recv().await {
                     let _ = this.update(cx, |root, cx| root.route(&uri, cx));
                     // A URI arriving from outside should raise the window.
-                    let _ = cx.update(|app| app.activate(true));
+                    cx.update(|app| app.activate(true));
                 }
             })
             .detach();
@@ -128,9 +128,9 @@ impl Root {
                 cx.spawn(async move |_, cx| {
                     let Some(FeedEvent::One(Some(ev), _)) = rx.recv().await else { return };
                     if u16::from(ev.kind) == 30023 {
-                        let _ = shell2.update(cx, |s, cx| s.open_article(ev, cx));
+                        shell2.update(cx, |s, cx| s.open_article(ev, cx));
                     } else {
-                        let _ = shell2.update(cx, |s, cx| s.open_thread(ev.id, cx));
+                        shell2.update(cx, |s, cx| s.open_thread(ev.id, cx));
                     }
                 })
                 .detach();
@@ -186,7 +186,9 @@ fn main() {
     unsafe {
         let _ = libc::mallopt(libc::M_ARENA_MAX, 4);
     }
-    Application::new().run(|cx: &mut App| {
+    // D35/P5: the snapshot moved the platform out of Application::new();
+    // the Linux platform (wgpu renderer) comes from gpui_linux.
+    Application::with_platform(gpui_linux::current_platform(false)).run(|cx: &mut App| {
         // Return glibc arena heap to the OS on a slow clock. gpui's image
         // work allocates/frees large blocks on many threads; glibc retains
         // the freed arenas (RSS stays at the high-water mark otherwise).

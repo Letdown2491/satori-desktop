@@ -614,7 +614,7 @@ fn field(input: Entity<Input>, id: &str) -> impl IntoElement {
         // focus transfer in this pane (login/search autofocus instead).
         .on_click(move |_, window, cx| {
             let fh = focus_target.read(cx).focus_handle(cx);
-            window.focus(&fh);
+            window.focus(&fh, cx);
         })
 }
 

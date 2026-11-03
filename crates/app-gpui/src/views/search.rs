@@ -260,7 +260,7 @@ impl Render for SearchView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.autofocused {
             self.autofocused = true;
-            window.focus(&self.focus);
+            window.focus(&self.focus, cx);
         }
         let handle = cx.entity();
         let status = self.status.clone();

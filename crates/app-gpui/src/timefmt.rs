@@ -162,7 +162,7 @@ pub fn ensure(secs: u64, cx: &mut gpui::App) {
     };
     cx.spawn(async move |cx| {
         let res = { let mut rx = rx; rx.recv().await };
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             if cx.has_global::<Bridge>() {
                 let bridge = cx.global_mut::<Bridge>();
                 if res.is_none_or(|r| r.is_err()) {

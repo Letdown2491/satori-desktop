@@ -70,6 +70,7 @@ gstreamer1-libav = ""
 
 [dependencies]
 gpui = { workspace = true }
+gpui-pre-linux = { workspace = true }
 nostr = { workspace = true }
 satori-core = { path = "../core" }
 image = { workspace = true }
@@ -85,7 +86,9 @@ rfd = "0.15"
 zbus = { version = "5", default-features = false, features = ["blocking", "tokio"] }
 # Inline video playback (Phase 3): GStreamer-backed, click-to-play cards.
 # Needs system GStreamer 1.14+ at build (dev libs) and run (plugins).
-gpui-video-player = "0.1.3"
+gpui-video-player = { version = "0.1.3", default-features = false, features = [
+    "gpui-pre",
+] }
 # Poster previews (D32): the first-frame sniff builds its own decodebin
 # pipeline beside gpui-video-player's playbin — same gstreamer bindings,
 # shared sys. blurhash decodes NIP-92's `blurhash` attr to a placeholder.

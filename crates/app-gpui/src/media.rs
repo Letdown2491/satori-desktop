@@ -606,7 +606,7 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                     }
                 };
                 // Publish globally, then wake every waiter.
-                let _ = cx.update(|app| {
+                cx.update(|app| {
                     let cache = app.global_mut::<Cache>();
                     let mut map = cache.map.borrow_mut();
                     cache.epoch.set(cache.epoch.get() + 1);
@@ -699,7 +699,7 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                         let url = url.clone();
                         app.spawn(async move |app| {
                             app.background_executor().timer(backoff).await;
-                            let _ = app.update(|app| fetch(&core, url, view2, app));
+                            app.update(|app| fetch(&core, url, view2, app));
                         })
                         .detach();
                     }

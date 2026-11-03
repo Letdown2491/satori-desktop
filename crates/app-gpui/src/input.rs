@@ -49,7 +49,9 @@ pub fn bind_input_keys(cx: &mut App) {
 /// One shaped paragraph ('\n'-separated) plus its byte offset in the content.
 #[derive(Clone)]
 struct Para {
-    line: WrappedLine,
+    // P5 (D35): WrappedLine dropped Clone in the snapshot; every use here
+    // is a shared read, so the Arc carries the clonability.
+    line: std::sync::Arc<WrappedLine>,
     /// Byte offset of the paragraph's first byte in the full content.
     start: usize,
     /// Byte length of the paragraph text (excluding the trailing '\n').
@@ -244,7 +246,7 @@ impl Input {
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Clicking a field hands IT the caret — every input (note, question,
         // options) needs no parent to do this for it.
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         self.is_selecting = true;
         let offset = self.index_for_mouse_position(event.position);
         if event.modifiers.shift {
@@ -655,7 +657,7 @@ impl Element for InputElement {
                 .ok()
                 .and_then(|mut lines| lines.pop());
             if let Some(line) = shaped {
-                paras.push(Para { line, start: byte_start, len: seg.len(), y });
+                paras.push(Para { line: std::sync::Arc::new(line), start: byte_start, len: seg.len(), y });
                 y += paras.last().unwrap().line.size(line_height).height;
             }
             byte_start += seg.len() + 1;

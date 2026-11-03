@@ -5,16 +5,18 @@ members = ["crates/core", "crates/app-gpui"]
 # D13: gpui 0.2.2 → zed-async-tar → xattr 0.2.3 does not compile on Linux
 # (ENOATTR is macOS-only there); 0.2.3 is the last of its semver line, so the
 # patch is a vendored copy with ENOATTR aliased to ENODATA (same errno).
-[patch.crates-io]
-xattr = { path = "vendor/xattr" }
+# RETIRED in P5 (D35): the gpui-pre 0.3.11 graph no longer carries the
+# xattr/async-tar chain — re-add a re-vendored fix if it returns.
 # Emoji face preference: distros ship Noto Color Emoji twice (COLRv1 + CBDT)
 # under one family name; COLRv1 renders EMPTY under swash (COLRv0-only), so
 # the matcher must prefer the CBDT face. Probed empirically (Nov 2026).
-cosmic-text = { path = "vendor/cosmic-text" }
+# PENDING in P5 (D35): the vendored patch targets cosmic-text 0.14; the new
+# graph wants ^0.19 — port the patch if the duplicate-face regression
+# reappears (verify emoji at runtime before deciding).
 # E0365 future-incompat (rust #127909): 2.0.1 re-exports the `proc_macro`
 # extern crate through a private item — a hard error in a future release
 # (pulled in via gpui → stacksafe). The compiler's own one-word fix, vendored.
-proc-macro-error2 = { path = "vendor/proc-macro-error2" }
+# RETIRED in P5 (D35): re-add if the stacksafe chain returns.
 
 [workspace.package]
 version = "0.1.0"
@@ -22,8 +24,19 @@ edition = "2024"
 license = "MIT"
 authors = ["Letdown2491"]
 
+# D35/P5: the renderer migration. gpui 0.2.2's blade backend has an
+# unpublished fatal atlas race (create-then-evict within a frame panics
+# flush_initializations); Zed's own remedy was the wgpu renderer, which
+# ships in the gpui-pre crates.io snapshots (=0.3.9 is zed@<Oct 2026>).
+# The dep key stays `gpui` (package rename) so `use gpui::` imports
+# survive. Pinned =0.3.9 to unify with gpui-video-player's `gpui-pre`
+# feature (its VideoElement implements THAT snapshot's traits; two
+# snapshot versions would be two incompatible gpui copies). The vendored
+# patches are retired: the official-gpui graph (xattr/async-tar chain)
+# drops out entirely; cosmic-text re-check pending for D29.
 [workspace.dependencies]
-gpui = "0.2.2"
+gpui = { package = "gpui-pre", version = "=0.3.9" }
+gpui-pre-linux = "=0.3.9"
 nostr = "0.45"
 nostr-sdk = "0.45"
 nostr-connect = "0.45"

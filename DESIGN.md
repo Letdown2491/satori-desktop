@@ -543,6 +543,29 @@ re-expression of views, not a feature rebuild.
   D29 probe evidence). *Fallback if the snapshot route fails: a pinned git dep
   on zed's repo (heavier, less reproducible — same accept criteria).*
 
+- **P5: Renderer — blade out, wgpu in (built; overnight soak pending).** Done on
+  the `gpui-pre` crates.io snapshots exactly as planned: `gpui` aliased to
+  `package = "gpui-pre", "=0.3.9"` (the lib name stays `gpui`, so every `use
+  gpui::` import survived), pinned to 0.3.9 to unify with `gpui-video-player`
+  0.1.3's own `gpui-pre` feature (default-features off; its `VideoElement`
+  implements THAT snapshot's traits — two snapshot versions would be two
+  incompatible gpui copies), plus `gpui-pre-linux =0.3.9` for the platform:
+  `Application::new()` became `Application::with_platform(gpui_linux::
+  current_platform(false))`. blade is GONE from the graph (`cargo tree -i
+  blade` matches nothing; wgpu 29.0.4 in), so the D13 xattr patch retired
+  itself. API churn was small and mechanical: `window.focus(h)` gained a
+  `&mut App` (9 sites), `Application::new()` → `with_platform`, `WrappedLine`
+  lost `Clone` (input.rs `Para` holds an `Arc<WrappedLine>`), and
+  `AsyncApp::update` returns `()` now (the `let _ =` unit-binds dropped;
+  `WeakEntity::update` still returns Result). clippy silent, 111 tests green,
+  SDK rustc 1.98.1 builds it, bundle 33M → 41M (the wgpu/naga stack). The two
+  vendor dirs stay put but only `proc-macro-error2` remains patchable-in-
+  principle — no `[patch.crates-io]` entries remain. **Accept still open:**
+  the overnight soak (zero renderer panics) and the D29 emoji spot-check —
+  the cosmic-text patch (0.14) could not ride along (the graph wants 0.19);
+  if the duplicate-face regression is back (COLRv1 chosen over CBDT →
+  invisible emoji), the D29 fix gets ported to 0.19 as a follow-up.
+
 Port convention: each ported view cites its GTK/TS origin
 (`// TODO(port): <origin> — P<n>`), same discipline as `crates/core`. Since
 the retirement (D19) those citations point into git history.

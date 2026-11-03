@@ -173,7 +173,7 @@ impl Render for WalletView {
                             .cursor(gpui::CursorStyle::IBeam)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let focus = this.uri.read(cx).focus_handle(cx);
-                                window.focus(&focus);
+                                window.focus(&focus, cx);
                             }))
                             .child(self.uri.clone()),
                     ),

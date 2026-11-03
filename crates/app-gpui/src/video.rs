@@ -112,7 +112,7 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
             .background_executor()
             .spawn(async move { Video::new(&parsed) })
             .await;
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             // Whatever the outcome, the wait is over.
             if let Ok(mut g) = OPENING.write()
                 && g.as_deref() == Some(&url)
