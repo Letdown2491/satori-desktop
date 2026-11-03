@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use crate::blocktime::Blocktime;
 use crate::error::{LoginError, Result};
 use crate::nip::nip78;
+use crate::outbox;
 use crate::pool::Pool;
 use crate::secrets;
 use crate::session::{self, Session, SessionMode};
@@ -1663,8 +1664,34 @@ impl Core {
                     });
                 }
             } else {
-                // The first surface's phase already landed the fresh
-                // contact list; pick it up (a store read).
+                // The phase ran recently (this or a previous launch): no
+                // relay round trips for nip65/follows. But the pool is
+                // PER PROCESS — the session's reads must still join it,
+                // from the store's copy of the own kind:10002 (no
+                // network). Without this the main live sub armed with
+                // zero relays and "subscribe failed; re-arming" every
+                // surface (live loop, stderr8).
+                let read: Vec<String> = active
+                    .pool
+                    .store
+                    .latest_by_kind(me, Kind::RelayList)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|ev| outbox::parse_relay_list(&ev).read)
+                    .unwrap_or_default();
+                if !read.is_empty() {
+                    active.read_relays = read.clone();
+                    if let Some(a) = self.active.lock().unwrap().as_mut() {
+                        a.read_relays = read.clone();
+                    }
+                    active.pool.connect_reads(read).await.ok();
+                } else {
+                    // No cached list at all: indexers only, still connect.
+                    active.pool.connect_reads(Vec::new()).await.ok();
+                }
+                // The phase already landed the fresh contact list; pick it
+                // up (a store read).
                 if let Ok(Some(ev)) =
                     active.pool.store.latest_by_kind(me, Kind::ContactList).await
                 {
@@ -4110,10 +4137,13 @@ impl Core {
                         .since(now),
                 );
             }
-            let Ok(output) = pool.client().subscribe(filters).await else {
-                eprintln!("[core] live: subscribe failed; re-arming");
-                live_on.store(false, std::sync::atomic::Ordering::SeqCst);
-                return;
+            let output = match pool.client().subscribe(filters).await {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("[core] live: subscribe failed ({e}); re-arming");
+                    live_on.store(false, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
             };
             // The follows' notes ride the OUTBOX (each author from the
             // relays they write to — routed live fan-out, feeds.ts): a
