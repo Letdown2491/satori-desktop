@@ -496,6 +496,12 @@ impl Core {
         // record.
         if let Some(p) = self.pool.lock().unwrap().as_ref() {
             p.clear_identity();
+            // Routed relays belonged to this session's route graph: sweep
+            // them so the next login (any account) starts clean. Nothing
+            // removed a relay before — the set grew for the process
+            // lifetime (audit Nov 2026).
+            let p = Arc::clone(p);
+            self.rt.spawn(async move { p.clear_routed().await });
         }
         let w = Arc::clone(&self.wallet);
         self.rt.spawn(async move { w.disconnect().await });
@@ -3905,11 +3911,9 @@ impl Core {
                         a.write_relays = write.clone();
                     }
                 }
-                // New reads join the pool (removed reads drain on restart; a
-                // live force_remove port lands with the pool rewrite — M2).
-                for url in &read {
-                    let _ = active.pool.client().add_relay(url.clone()).await;
-                }
+                // New reads join the pool; reads the user dropped are
+                // retired live (they used to drain only on restart).
+                active.pool.set_reads(&read).await;
                 Ok(())
             }
             .await;

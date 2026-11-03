@@ -14,7 +14,7 @@ use gpui::{div, img, prelude::*, px, relative, rgb, AnimationExt, AnyElement, Di
 use nostr::prelude::*;
 use satori_core::manager::Profile;
 use satori_core::nip::article;
-use satori_core::nip::imeta::{self, ImageMeta};
+use satori_core::nip::imeta;
 
 use crate::{media, theme};
 use super::nav::Nav;
@@ -132,18 +132,10 @@ impl MediaAsset {
 /// derived from the id), pictures, and extension-less blossom candidates.
 /// The article's cover, wherever the author put it: the NIP-23 `image` tag
 /// first, then the first imeta/content picture (some clients skip the tag —
-/// article.ts header image).
+/// article.ts header image). Memoized with the body parse (article::parse
+/// clones the whole tag vec — it ran per article card per frame).
 pub fn article_cover(ev: &Event) -> Option<String> {
-    if let Some(d) = article::parse(ev)
-        && let Some(img) = d.image
-        && !img.is_empty()
-    {
-        return Some(img);
-    }
-    media_assets(ev).iter().find_map(|a| match a {
-        MediaAsset::Picture { url } => Some(url.clone()),
-        _ => None,
-    })
+    body_parse_cached(ev).cover.clone()
 }
 
 pub fn media_assets(ev: &Event) -> Vec<MediaAsset> {
@@ -539,6 +531,69 @@ pub(crate) fn word_flow<V: EventEmitter<Nav> + 'static>(
     flow
 }
 
+/// The RENDER path's per-event parse (audit perf H3): body() re-ran
+/// imeta::parse (a full tag-vec clone), media_urls and media_assets per
+/// visible card per frame — the fetch path's media_urls_cached existed,
+/// but render never used it. One memo here, keyed by event id: the parse
+/// is a pure function of the event (unlike the fetch memo, whose privacy
+/// mode rides its key). Bounded, oldest-dropped at 4096 events; an entry
+/// is a handful of url strings + the asset vec.
+struct BodyParse {
+    cover: Option<String>,
+    dims: HashMap<String, Option<(u32, u32)>>,
+    murls: std::sync::Arc<[String]>,
+    assets: Vec<MediaAsset>,
+    media_links: Vec<String>,
+}
+
+fn body_parse_cached(ev: &Event) -> std::sync::Arc<BodyParse> {
+    const CAP: usize = 4096;
+    struct Memo {
+        map: HashMap<String, std::sync::Arc<BodyParse>>,
+        order: std::collections::VecDeque<String>,
+    }
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<Memo>> = std::sync::OnceLock::new();
+    let memo = MEMO.get_or_init(|| {
+        std::sync::Mutex::new(Memo {
+            map: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        })
+    });
+    let key = ev.id.to_string();
+    let mut memo = memo.lock().unwrap();
+    if let Some(hit) = memo.map.get(&key) {
+        return hit.clone();
+    }
+    let assets = media_assets(ev);
+    let media_links: Vec<String> = assets.iter().map(|a| a.url().to_string()).collect();
+    let cover = match article::parse(ev).map(|d| d.image) {
+        Some(Some(img)) if !img.is_empty() => Some(img),
+        _ => assets.iter().find_map(|a| match a {
+            MediaAsset::Picture { url } => Some(url.clone()),
+            _ => None,
+        }),
+    };
+    let dims: HashMap<String, Option<(u32, u32)>> = imeta::parse(ev)
+        .iter()
+        .map(|m| (m.url.clone(), m.dim))
+        .collect();
+    let parsed = std::sync::Arc::new(BodyParse {
+        cover,
+        dims,
+        murls: media_urls(ev).into(),
+        assets,
+        media_links,
+    });
+    if memo.map.len() >= CAP
+        && let Some(oldest) = memo.order.pop_front()
+    {
+        memo.map.remove(&oldest);
+    }
+    memo.order.push_back(key.clone());
+    memo.map.insert(key, parsed.clone());
+    parsed
+}
+
 /// Render a note body: word-flow paragraphs, media gallery section, quote
 /// embeds. Media fetches ride the shared cache (`media::Snapshot`); the view
 /// queues them via `content::media_urls` + `media::fetch`.
@@ -549,16 +604,13 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
 ) -> Div {
     let mut body = div().w_full().flex().flex_col().gap_2();
 
-    let metas: Vec<ImageMeta> = imeta::parse(ev);
-    let dims: HashMap<String, Option<(u32, u32)>> = metas
-        .iter()
-        .map(|m| (m.url.clone(), m.dim))
-        .collect();
-    let murls = media_urls(ev);
+    let parsed = body_parse_cached(ev);
+    let dims = &parsed.dims;
+    let murls = &parsed.murls;
     // Computed once: the media section below renders these, and the text
     // flow skips their URLs (a media URL never renders twice).
-    let assets = media_assets(ev);
-    let media_links: Vec<String> = assets.iter().map(|a| a.url().to_string()).collect();
+    let assets = &parsed.assets;
+    let media_links = &parsed.media_links;
 
     // Paragraph rhythm follows the TS renderer's pre-wrap semantics
     // (TODO(port): src/render/content.ts — `.content` is pre-wrap): a single
@@ -618,7 +670,7 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
                     .into_any_element();
                 run.push(el);
             }
-            None => run.push(word_flow(para, &media_links, ctx, &handle).into_any_element()),
+            None => run.push(word_flow(para, media_links, ctx, &handle).into_any_element()),
         };
     }
     body = push_block(body, &mut run);
@@ -627,7 +679,7 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
     // item full-width by its aspect, several as a horizontal strip; picture
     // tiles open the lightbox, video tiles open the browser.
     if !murls.is_empty()
-        && let Some(section) = media_section(&assets, &dims, ctx, &handle)
+        && let Some(section) = media_section(assets, dims, ctx, &handle)
     {
         body = body.child(section);
     }

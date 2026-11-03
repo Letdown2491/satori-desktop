@@ -110,10 +110,32 @@ pub fn set_bool(key: &str, on: bool) {
 }
 
 fn read_value(file: &str) -> serde_json::Value {
-    std::fs::read_to_string(config::state_file(file))
+    // Parsed once per file change (mtime + size key — the core config.rs
+    // prefs() pattern): the feed projection reads prefs per visible card
+    // per frame (privacy_mode on the media path), and each read was a
+    // full file read + JSON parse on the UI thread (audit perf H2).
+    static CACHE: std::sync::Mutex<Option<(std::time::SystemTime, u64, serde_json::Value)>> =
+        std::sync::Mutex::new(None);
+    let path = config::state_file(file);
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return serde_json::Value::Object(serde_json::Map::new());
+    };
+    let Ok(modified) = meta.modified() else {
+        return serde_json::Value::Object(serde_json::Map::new());
+    };
+    let mut held = CACHE.lock().unwrap();
+    if let Some((at, len, value)) = held.as_ref()
+        && *at == modified
+        && *len == meta.len()
+    {
+        return value.clone();
+    }
+    let value = std::fs::read_to_string(&path)
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()))
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    *held = Some((modified, meta.len(), value.clone()));
+    value
 }
 
 fn write_state(file: &str, body: &str) {

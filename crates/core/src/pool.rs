@@ -9,12 +9,12 @@
 //!   latency profiles, read-dead detection, seen-on memory (M2+).
 //! - TODO(port): NIP-09 tombstones + NIP-40 expiry at the chokepoint (M2).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use nostr::prelude::*;
 use nostr_sdk::authenticator::Authenticator;
@@ -38,6 +38,15 @@ pub const INDEXERS: [&str; 5] = [
 
 /// Per-query deadline (pool.ts 'page' budget).
 const READ_BUDGET: Duration = Duration::from_secs(4);
+
+/// Routed-relay retention (audit Nov 2026: nothing ever removed a relay —
+/// the client's set grew for the process lifetime, sockets/fds/timers and
+/// all). Routed relays idle for over ROUTED_IDLE are evicted at the next
+/// routed call, the set is capped at ROUTED_CAP (oldest use first), and
+/// session teardown sweeps them all. A routed live sub on an evicted relay
+/// goes quiet until the next re-arm — the price of bounded fds.
+const ROUTED_IDLE: Duration = Duration::from_secs(3600);
+const ROUTED_CAP: usize = 60;
 
 /// The session identity the pool answers NIP-42 AUTH challenges with.
 ///
@@ -112,6 +121,13 @@ pub struct Pool {
     client: Client,
     pub store: Store,
     identity: PoolIdentity,
+    /// Relays added for ROUTED reads (url -> last routed use), evicted when
+    /// idle, capped, and swept at session teardown (ROUTED_IDLE/ROUTED_CAP).
+    routed: Mutex<HashMap<String, Instant>>,
+    /// The session's own read relays (indexers + the session's NIP-65), so
+    /// set_reads/connect_reads retire reads the user dropped instead of
+    /// draining them only on restart.
+    reads: Mutex<BTreeSet<String>>,
 }
 
 impl Pool {
@@ -136,6 +152,8 @@ impl Pool {
             client,
             store,
             identity,
+            routed: Mutex::new(HashMap::new()),
+            reads: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -153,18 +171,98 @@ impl Pool {
 
     /// Connect the read set. Write relays join at publish time.
     pub async fn connect_reads(&self, read_relays: Vec<String>) -> Result<(), SdkError> {
+        self.set_reads(&read_relays).await;
+        self.client.connect().await;
+        Ok(())
+    }
+
+    /// Joins read relays to the pool and RETIRES tracked reads absent from
+    /// the list — previously removed reads drained only on restart, and the
+    /// set grew across accounts for the process lifetime (audit Nov 2026).
+    /// The indexers are permanent members of the read set, so callers pass
+    /// only the session's own reads.
+    pub async fn set_reads(&self, own_reads: &[String]) {
         let mut urls: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
-        urls.extend(read_relays);
+        urls.extend(own_reads.iter().cloned());
+        let keep: HashSet<&String> = urls.iter().collect();
+        let retired: Vec<String> = {
+            let mut reads = self.reads.lock().unwrap();
+            let retired: Vec<String> = reads
+                .iter()
+                .filter(|u| !keep.contains(*u))
+                .cloned()
+                .collect();
+            for u in &retired {
+                reads.remove(u);
+            }
+            retired
+        };
+        for url in retired {
+            let _ = self.client.remove_relay(&url).force().await;
+        }
         for url in urls {
-            // Bad relay = skip; read-scoped capability.
+            self.reads.lock().unwrap().insert(url.clone());
+            // Read-scoped capability; bad relay = skip.
             let _ = self
                 .client
-                .add_relay(url)
+                .add_relay(url.clone())
                 .capabilities(RelayCapabilities::READ)
                 .await;
         }
-        self.client.connect().await;
-        Ok(())
+    }
+
+    /// One routed-read relay: add (read-scoped) and stamp use.
+    async fn add_routed(&self, url: &str) {
+        let _ = self
+            .client
+            .add_relay(url)
+            .capabilities(RelayCapabilities::READ)
+            .await;
+        self.routed
+            .lock()
+            .unwrap()
+            .insert(url.to_string(), Instant::now());
+    }
+
+    /// Idle/cap eviction of routed relays — bounds sockets, fds and timers
+    /// within a session (the teardown sweep bounds them across sessions).
+    async fn trim_routed(&self) {
+        let victims: Vec<String> = {
+            let mut map = self.routed.lock().unwrap();
+            let now = Instant::now();
+            map.retain(|_, at| now.duration_since(*at) < ROUTED_IDLE);
+            if map.len() <= ROUTED_CAP {
+                Vec::new()
+            } else {
+                let mut by_age: Vec<(String, Instant)> =
+                    map.iter().map(|(u, t)| (u.clone(), *t)).collect();
+                by_age.sort_by_key(|(_, t)| *t);
+                let over = by_age
+                    .into_iter()
+                    .take(map.len() - ROUTED_CAP)
+                    .map(|(u, _)| u)
+                    .collect::<Vec<_>>();
+                for u in &over {
+                    map.remove(u);
+                }
+                over
+            }
+        };
+        for url in victims {
+            let _ = self.client.remove_relay(&url).force().await;
+        }
+    }
+
+    /// Session teardown: every routed relay goes home, so the next login
+    /// (any account) starts a clean route graph.
+    pub async fn clear_routed(&self) {
+        let urls: Vec<String> = {
+            let mut map = self.routed.lock().unwrap();
+            map.drain().map(|(u, _)| u).collect()
+        };
+        for url in urls {
+            let _ = self.client.remove_relay(&url).force().await;
+        }
     }
 
     /// Deadline-not-completeness read (pool.ts 'page' mode).
@@ -271,6 +369,7 @@ impl Pool {
         limit: usize,
     ) -> BTreeSet<Event> {
         let mut queries = Vec::new();
+        self.trim_routed().await;
         for (url, author_set) in route {
             // Bad relay = skip; read-scoped capability (add_relay is
             // idempotent — the pool rejects un-added urls at REQ time).
@@ -279,11 +378,7 @@ impl Pool {
             if !outbox::routable_relay(url.as_str()) {
                 continue;
             }
-            let _ = self
-                .client
-                .add_relay(url.as_str())
-                .capabilities(RelayCapabilities::READ)
-                .await;
+            self.add_routed(url.as_str()).await;
             let authors: Vec<String> = author_set.iter().cloned().collect();
             for shard in outbox::chunk(&authors, outbox::MAX_AUTHORS_PER_FILTER) {
                 let pks: Vec<PublicKey> = shard
@@ -356,16 +451,13 @@ impl Pool {
         let fallback: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
         let route = outbox::route(&lists, &keys, &fallback, |_| 1.0);
         let mut targets: Vec<(&str, Vec<Filter>)> = Vec::new();
+        self.trim_routed().await;
         for (url, author_set) in &route {
             // Same screen as fetch_route (defense in depth).
             if !outbox::routable_relay(url.as_str()) {
                 continue;
             }
-            let _ = self
-                .client
-                .add_relay(url.as_str())
-                .capabilities(RelayCapabilities::READ)
-                .await;
+            self.add_routed(url.as_str()).await;
             let authors: Vec<String> = author_set.iter().cloned().collect();
             for shard in outbox::chunk(&authors, outbox::MAX_AUTHORS_PER_FILTER) {
                 let pks: Vec<PublicKey> = shard
