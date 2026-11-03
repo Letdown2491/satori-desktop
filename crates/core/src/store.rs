@@ -168,6 +168,14 @@ impl Store {
         Ok(self.query(filter).await?.into_iter().collect())
     }
 
+    /// Every kind:5 the store holds (the deletions module's one-time
+    /// hydration scan; tombstones persist in the module's own file past
+    /// this store's retention).
+    pub async fn tombstones(&self) -> NostrResult<Vec<Event>> {
+        let filter = Filter::new().kind(Kind::EventDeletion).limit(5000);
+        Ok(self.query(filter).await?.into_iter().collect())
+    }
+
     /// NIP-22 comments addressing the event (kind 1111, any `e` tag —
     /// parent or root scope). Oldest first.
     pub async fn comments(&self, id: EventId) -> NostrResult<Vec<Event>> {

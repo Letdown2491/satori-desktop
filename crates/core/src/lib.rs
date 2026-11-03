@@ -13,9 +13,11 @@
 
 pub mod blocktime;
 pub mod config;
+pub mod deletions;
 pub mod diag;
 pub mod error;
 pub mod manager;
+pub mod nip40;
 pub mod privacy;
 pub mod profiles;
 pub mod read_state;

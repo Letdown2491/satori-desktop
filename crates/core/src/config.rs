@@ -25,10 +25,10 @@ pub mod files {
     pub const RELAYS_CACHE: &str = "relays-cache.json";
     pub const SEEN_RELAYS: &str = "seen-relays.json";
     pub const RELAY_LATENCY: &str = "relay-latency.json";
+    pub const DELETIONS: &str = "deletions.json";
     pub const RELAY_INFO: &str = "relay-info.json";
     pub const RELAY_FAVORITES: &str = "relay-favorites.json";
     pub const ENGAGEMENT: &str = "engagement.json";
-    pub const DELETIONS: &str = "deletions.json";
     pub const PROFILES: &str = "profiles.json";
     /// NWC wallet connection — secret-FREE (the secret rides in the secret
     /// store under `secrets::NWC_SECRET`); only pubkey + relays live here so

@@ -16,6 +16,8 @@ use tokio::sync::mpsc;
 use crate::blocktime::Blocktime;
 use crate::error::{LoginError, Result};
 use crate::nip::nip78;
+use crate::deletions;
+use crate::nip40;
 use crate::outbox;
 use crate::pool::{Pool, INDEXERS};
 use crate::relay_latency;
@@ -30,12 +32,6 @@ const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Feed page size; the bootstrap fetch keeps depth for "view older".
 const PAGE: usize = 40;
-/// How long the cached NIP-09 deletion set stands (drop_deleted).
-const DELETED_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// The follows' deletion pairs (author, deleted event id) — shared out of
-/// the cache as an Arc so the per-page hit path costs one bump.
-type DeletedSet = Arc<HashSet<(PublicKey, EventId)>>;
 /// How deep one older-page top-up reaches into the relays (the web app's
 /// fetchRoutedPage asked limit*2 per author shard — same spirit: each round
 /// trip should feed several pages before the next one).
@@ -352,13 +348,11 @@ pub struct Core {
     /// Own zaps: note id (hex) → zapped. The ledger (zaps.json) is the
     /// durable authority; this mirrors it for render, like own_liked.
     own_zapped: Mutex<HashSet<String>>,
-    /// The follows' NIP-09 deletion pairs, cached for DELETED_TTL. The
-    /// feed projection drops deleted notes per page — twice per scroll
-    /// past the store's depth (the top-up re-projects) — and each miss
-    /// was a full kind-5 query + hash rebuild. A fresh deletion lands
-    /// via the live sub or a refresh save and is honored at the next
-    /// projection, worst case a TTL later.
-    deleted_cache: Mutex<Option<(std::time::Instant, DeletedSet)>>,
+    /// Tombstone hydration: the one-time store scan that seeds the
+    /// deletions module with kind:5s that predate it (drop_deleted's
+    /// doc). The module persists past this point; the flag just keeps
+    /// the scan from repeating.
+    tombstones_hydrated: std::sync::atomic::AtomicBool,
     /// The NIP-47 wallet handle (D20) — one per process, like the pool.
     wallet: Arc<Wallet>,
     /// Bitcoin timestamp→height service (blocktime, Phase 2 §4.4) — one
@@ -424,7 +418,7 @@ impl Core {
             own_bookmarked: Mutex::new(HashSet::new()),
             muted: Mutex::new(HashSet::new()),
             own_zapped: Mutex::new(HashSet::new()),
-            deleted_cache: Mutex::new(None),
+            tombstones_hydrated: std::sync::atomic::AtomicBool::new(false),
             wallet: Arc::new(Wallet::new()),
             profiles_mem: Mutex::new(ProfileMem::new()),
             holds: Mutex::new(std::collections::HashMap::new()),
@@ -638,8 +632,8 @@ impl Core {
         session::clear();
         secrets::delete(secrets::NSEC);
         secrets::delete(secrets::BUNKER_CLIENT_SECRET);
-        // The deletion cache was built from the OLD session's follow set.
-        *self.deleted_cache.lock().unwrap() = None;
+        // The tombstone store outlives sessions (it is keyed by
+        // deleter, not by follows) — nothing to clear at logout.
         // The live sub is armed per session: the epoch bump makes the old
         // loop tear down at its next event, and live_on false lets the
         // next login's bootstrap arm a fresh one with the new identity.
@@ -2194,40 +2188,37 @@ impl Core {
 
     /// One page projection: store query (a PAGE+1 window so "has more" is
     /// knowable), then the mutes gate at the chokepoint.
-    /// NIP-09 render filter: drop events their own author deleted (a
-    /// kind-5 `e` tag from the deleted event's pubkey). A stranger's
-    /// kind-5 can't delete your notes, so the author must match.
-    async fn drop_deleted(&self, active: &Active, mut notes: Vec<Event>) -> Vec<Event> {
-        if notes.is_empty() {
-            return notes;
-        }
-        let hit = self.deleted_cache.lock().unwrap().clone();
-        let deleted = match hit {
-            Some((at, set)) if at.elapsed() < DELETED_TTL => set,
-            _ => {
-                let dels = active
-                    .pool
-                    .store
-                    .deletions(&active.follows)
-                    .await
-                    .unwrap_or_default();
-                let mut map: HashSet<(PublicKey, EventId)> = HashSet::new();
-                for d in &dels {
-                    for id in d.tags.clone().event_ids() {
-                        map.insert((d.pubkey, id));
+    /// NIP-09/NIP-40 render filter: drop events their own author deleted
+    /// (deletions.rs tombstone lookups — O(1), persisted, fed by the pool
+    /// chokepoint) and events whose NIP-40 expiration has passed (the SDK
+    /// persists expired copies; they must not paint). A stranger's
+    /// kind:5 can't delete your notes, so the author must match — the
+    /// tombstone store enforces that structurally.
+    fn drop_deleted(&self, notes: Vec<Event>) -> Vec<Event> {
+        // One-time hydration: tombstones that entered the store BEFORE
+        // the deletions module shipped would otherwise resurrect (the
+        // module's own file starts empty). Idempotent — record keeps the
+        // newest per key.
+        if !self
+            .tombstones_hydrated
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            let pool = self.pool.lock().unwrap().as_ref().map(Arc::clone);
+            if let Some(pool) = pool {
+                self.rt.spawn(async move {
+                    if let Ok(tombs) = pool.store.tombstones().await {
+                        for t in &tombs {
+                            crate::deletions::record(t, false);
+                        }
+                        eprintln!("[core] tombstones hydrated: {}", tombs.len());
                     }
-                }
-                let set: DeletedSet = Arc::new(map);
-                *self.deleted_cache.lock().unwrap() =
-                    Some((std::time::Instant::now(), Arc::clone(&set)));
-                set
+                });
             }
-        };
-        if deleted.is_empty() {
-            return notes;
         }
-        notes.retain(|ev| !deleted.contains(&(ev.pubkey, ev.id)));
         notes
+            .into_iter()
+            .filter(|ev| !crate::nip40::is_expired(ev) && !crate::deletions::is_deleted(ev))
+            .collect()
     }
 
     async fn project_page(
@@ -2246,7 +2237,7 @@ impl Core {
             let muted = self.muted.lock().unwrap();
             notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
         }
-        Ok(self.drop_deleted(active, notes).await)
+        Ok(self.drop_deleted(notes))
     }
 
     async fn page_from_store(
@@ -2268,7 +2259,7 @@ impl Core {
             let muted = self.muted.lock().unwrap();
             notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
         }
-        notes = self.drop_deleted(active, notes).await;
+        notes = self.drop_deleted(notes);
         let profiles = Self::profiles_for(active, &notes).await;
         self.absorb_profiles(&profiles);
         for p in &profiles {
@@ -2381,6 +2372,10 @@ impl Core {
                     !(u16::from(ev.kind) == 7
                         && (!reaction_notifs || ev.content.trim() == "-"))
                 });
+                // The chokepoint gates too: the union keeps cached rows in
+                // the final page, so a deleted (NIP-09) or expired
+                // (NIP-40) cached copy must not paint here either.
+                cached.retain(|ev| !nip40::is_expired(ev) && !deletions::is_deleted(ev));
                 {
                     let muted = this.muted.lock().unwrap();
                     cached.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
@@ -3036,7 +3031,14 @@ impl Core {
                 }
                 let mut events: Vec<Event> = Vec::new();
                 for id in &want {
-                    if let Some(ev) = active.pool.store.event_by_id(*id).await.ok().flatten() {
+                    // The store hit path wears the same gates as the
+                    // network one (the chokepoint): expired or
+                    // author-deleted parents don't resolve — the whisper
+                    // degrades, which is the point.
+                    if let Some(ev) = active.pool.store.event_by_id(*id).await.ok().flatten()
+                        && !nip40::is_expired(&ev)
+                        && !deletions::is_deleted(&ev)
+                    {
                         events.push(ev);
                     }
                 }
@@ -3133,6 +3135,31 @@ impl Core {
                                 .await
                                 .into_iter()
                                 .next();
+                        }
+                        // NIP-40 + NIP-09 re-check on the resolution (the
+                        // pool chokepoint covers the network paths; the
+                        // STORE hit needs this gate — a long-lived cache
+                        // can serve an event that expired mid-retention
+                        // or was deleted after it landed). A deleted
+                        // event also earns one background sweep: ask the
+                        // relays for its tombstone (at most once per TTL
+                        // per id — deletions.ts checkDeletions) so the
+                        // NEXT open reflects it.
+                        let ev = ev.filter(|e| !nip40::is_expired(e) && !deletions::is_deleted(e));
+                        if let Some(resolved) = &ev
+                            && deletions::should_check(&resolved.id.to_string())
+                        {
+                            let pool = Arc::clone(&active.pool);
+                            let sweep = Filter::new()
+                                .kind(Kind::EventDeletion)
+                                .event(resolved.id)
+                                .limit(50);
+                            this.rt.spawn(async move {
+                                // The chokepoint inside get() records
+                                // whatever comes back; nothing else to do
+                                // with the (filtered) result.
+                                let _ = pool.get(sweep).await;
+                            });
                         }
                         ev
                     }
@@ -3301,7 +3328,7 @@ impl Core {
                     let muted = this.muted.lock().unwrap();
                     notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
                 }
-                let mut notes = this.drop_deleted(&active, notes).await;
+                let mut notes = this.drop_deleted(notes);
                 notes.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
                 let profiles = Self::profiles_for(&active, &notes).await;
                 Ok(FeedPage { notes, profiles })
@@ -3341,7 +3368,7 @@ impl Core {
                     let muted = this.muted.lock().unwrap();
                     notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
                 }
-                let mut notes = this.drop_deleted(&active, notes).await;
+                let mut notes = this.drop_deleted(notes);
                 notes.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
                 let has_more = notes.len() > PAGE;
                 notes.truncate(PAGE);
@@ -4375,9 +4402,20 @@ impl Core {
                 // bell is the same drain the TS wrapped around its
                 // subscription's onevent.
                 seen::record(&event.pubkey, &[relay_url.as_str()]);
-                let sig = if u16::from(event.kind) == 5 {
-                    None // deletions ride the store; the render filter sees them
-                } else if event.tags.clone().public_keys().any(|pk| pk == me) {
+                // The chokepoint lives here too (pool.ts onevent):
+                // kind:5s are recorded as tombstones; expired copies
+                // (NIP-40) and author-deleted content (NIP-09) never
+                // ping the bell. The SDK has already persisted the
+                // event either way — the tombstone store is how it
+                // stops rendering.
+                if u16::from(event.kind) == 5 {
+                    deletions::record(&event, false);
+                    continue;
+                }
+                if nip40::is_expired(&event) || deletions::is_deleted(&event) {
+                    continue;
+                }
+                let sig = if event.tags.clone().public_keys().any(|pk| pk == me) {
                     Some(Live::Mention)
                 } else {
                     Some(Live::Post)

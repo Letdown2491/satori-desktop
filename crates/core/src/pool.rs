@@ -26,6 +26,8 @@ use nostr_sdk::authenticator::Authenticator;
 use nostr_sdk::error::Error as SdkError;
 use nostr_sdk::prelude::*;
 
+use crate::deletions;
+use crate::nip40;
 use crate::outbox::{self, RelayList, Route};
 use crate::relay_latency;
 use crate::seen;
@@ -50,6 +52,26 @@ const READ_BUDGET: Duration = Duration::from_secs(4);
 /// one gets rope toward the ceiling.
 const PAGE_BUDGET: Duration = Duration::from_secs(2);
 const CEILING_BUDGET: Duration = Duration::from_secs(8);
+
+/// The pool chokepoint (pool.ts consumeAndFilter) — the one door every
+/// network read walks through: kind:5s are RECORDED as tombstones
+/// wherever they arrive (deletions.rs), then filtered — along with
+/// expired copies (NIP-40) and author-deleted ones (NIP-09) — out of the
+/// results. Two passes, so a deletion takes effect even on the result
+/// set that carried it, regardless of arrival order within it.
+fn consume_and_filter(events: impl IntoIterator<Item = Event>) -> BTreeSet<Event> {
+    let all: Vec<Event> = events.into_iter().collect();
+    for e in &all {
+        if u16::from(e.kind) == 5 {
+            deletions::record(e, false);
+        }
+    }
+    all.into_iter()
+        .filter(|e| {
+            u16::from(e.kind) != 5 && !nip40::is_expired(e) && !deletions::is_deleted(e)
+        })
+        .collect()
+}
 
 /// Routed-relay retention (audit Nov 2026: nothing ever removed a relay —
 /// the client's set grew for the process lifetime, sockets/fds/timers and
@@ -279,7 +301,11 @@ impl Pool {
 
     /// Deadline-not-completeness read (pool.ts 'page' mode).
     pub async fn get(&self, filter: Filter) -> Result<BTreeSet<Event>, SdkError> {
-        self.client.fetch_events(filter).timeout(READ_BUDGET).await
+        self.client
+            .fetch_events(filter)
+            .timeout(READ_BUDGET)
+            .await
+            .map(consume_and_filter)
     }
 
     /// Own contact list: fresh from relays, cached into the store.
@@ -456,7 +482,7 @@ impl Pool {
             for ev in &events {
                 seen::record(&ev.pubkey, &[url.as_str()]);
             }
-            merged.extend(events);
+            merged.extend(consume_and_filter(events));
         }
         merged
     }
@@ -495,13 +521,20 @@ impl Pool {
         let results = futures_util::future::join_all(queries).await;
         let mut merged: BTreeSet<Event> = BTreeSet::new();
         for (url, budget, elapsed, res) in results {
+            // `truncated` = rode to the hard cap while (evidently) still
+            // delivering — TS's finish()-on-timer flag, read off the clock
+            // (nostr-sdk merges internally; the EOSE-quiet tail is not
+            // observable, so ms is time-to-complete, a slightly LOOSER
+            // measure than pool.ts's time-to-last-event).
             let truncated = elapsed >= budget;
             let events = res.unwrap_or_default();
+            // The latency profile measures DELIVERY (the raw count, the
+            // tombstone/expiry filtering below is not the relay's fault).
             relay_latency::record(&url, elapsed.as_millis() as u64, truncated, events.len());
             for ev in &events {
                 seen::record(&ev.pubkey, &[url.as_str()]);
             }
-            merged.extend(events);
+            merged.extend(consume_and_filter(events));
         }
         merged
     }
@@ -596,7 +629,6 @@ impl Pool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr_sdk::authenticator::Authenticator as _;
 
     /// Any 32-byte value; a throwaway test key, never an identity.
     const TEST_HEX: &str = "e1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554";
