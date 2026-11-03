@@ -335,7 +335,14 @@ impl Feed {
             return;
         };
         let old_len = self.list_len();
-        self.notes.truncate(to);
+        // Shed the trimmed notes' dedup entries too (audit perf L2): the
+        // window may hold 1000 while the visible target is 400 - every
+        // scrolled-away note carried its id in note_ids for the session.
+        // A trimmed note re-delivered by the live bell re-enters as fresh
+        // content, which is correct: nothing of it is on screen.
+        for note in self.notes.drain(to..) {
+            self.note_ids.remove(&note.id);
+        }
         // The end cap replaces the dropped tail: range to..old_len becomes
         // one row. Rows above `to` (the reader's anchor) keep their heights.
         self.list.splice(to..old_len, 1);
@@ -464,6 +471,10 @@ impl Feed {
         cx: &mut Context<Self>,
     ) {
         self.absorb_profiles(profiles, cx);
+        // Mention candidates from the notes actually INSERTED (the loop
+        // dedups): re-scanning the whole window re-classified every token
+        // of every note on every landing (audit perf M6).
+        let mut mention_candidates: Vec<PublicKey> = Vec::new();
         for note in notes {
             // The paging anchor advances on EVERY incoming note — even a
             // deduped repeat or a filtered kind marks where the stream has
@@ -490,22 +501,20 @@ impl Feed {
             if u16::from(note.kind) == 1068 {
                 self.want_poll(&note, cx);
             }
+            mention_candidates.push(note.pubkey);
+            mention_candidates.extend(content::mention_pks(&note.content));
             self.note_ids.insert(note.id);
             self.notes.push(note);
         }
         self.notes.sort_by_key(|n| std::cmp::Reverse(n.created_at));
-        // Ask core for any authors we still can't name — plus mentioned
-        // pubkeys, so a mention renders @name instead of @npub1…
-        // (TODO(port): content.ts mentionPubkeys — hydrate before render).
+        // Ask core for any authors we still can't name — the note's author
+        // plus mentioned pubkeys, so a mention renders @name instead of
+        // @npub1… (TODO(port): content.ts mentionPubkeys — hydrate before
+        // render).
         let missing: Vec<PublicKey> = {
             let mut seen = HashSet::new();
-            self.notes
-                .iter()
-                .flat_map(|n| {
-                    let mut pks = vec![n.pubkey];
-                    pks.extend(content::mention_pks(&n.content));
-                    pks
-                })
+            mention_candidates
+                .into_iter()
                 .filter(|pk| {
                     !self.profiles.contains_key(&pk.to_string()) && seen.insert(pk.to_string())
                 })

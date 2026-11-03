@@ -503,8 +503,10 @@ impl Shell {
     /// inline-able (video.rs gates strict Tor/YouTube), else the browser
     /// link — the honest pre-Phase-3 behavior.
     fn open_video(&mut self, url: String, mime: Option<String>, cx: &mut Context<Self>) {
-        if !crate::video::inline_able(&url, mime.as_deref()) {
-            cx.open_url(&url);
+        if !crate::views::content::web_url(&url) || !crate::video::inline_able(&url, mime.as_deref()) {
+            if crate::views::content::web_url(&url) {
+                cx.open_url(&url);
+            }
             return;
         }
         self.video_overlay = Some((url.clone(), mime.clone()));
@@ -1318,7 +1320,9 @@ fn video_overlay(url: &str, cx: &mut Context<Shell>) -> impl IntoElement {
                                 .text_color(rgb(0xb8b2a6))
                                 .on_click(move |_, _, cx| {
                                     cx.stop_propagation();
-                                    cx.open_url(&browser);
+                                    if crate::views::content::web_url(&browser) {
+                                        cx.open_url(&browser);
+                                    }
                                 })
                                 .child("↗"),
                         ),

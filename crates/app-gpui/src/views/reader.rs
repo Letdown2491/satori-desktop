@@ -262,11 +262,16 @@ fn md_flow(
         match span.link {
             Some(url) => {
                 let id = SharedString::from(format!("mdlink-{label}-{url}"));
+                let openable = crate::views::content::web_url(&url);
                 flow = flow.child(
                     styled(label)
                         .id(id)
                         .cursor_pointer()
-                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                        .on_click(move |_, _, cx| {
+                            if openable {
+                                cx.open_url(&url);
+                            }
+                        }),
                 );
             }
             None => {

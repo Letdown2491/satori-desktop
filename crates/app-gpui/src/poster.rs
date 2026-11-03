@@ -98,6 +98,11 @@ pub fn decoded_dynamic(img: image::DynamicImage) -> Option<satori_core::media::D
 /// injected into `fetch_poster` — gstreamer stays a UI-crate dependency.
 /// Ok = (width, height, png).
 pub fn sniff_png(head: &[u8]) -> Result<(u32, u32, Vec<u8>), ()> {
+    // O_EXCL + 0600 (audit security L2): a predictable /tmp name let a
+    // same-host user pre-plant a symlink for the write to follow.
+    // create_new fails instead of following it; the sniff just gives up.
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let tmp = std::env::temp_dir().join(format!(
         "satori-poster-{}-{}",
         std::process::id(),
@@ -106,7 +111,14 @@ pub fn sniff_png(head: &[u8]) -> Result<(u32, u32, Vec<u8>), ()> {
             .map(|d| d.as_nanos())
             .unwrap_or_default()
     ));
-    std::fs::write(&tmp, head).map_err(|_| ())?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .map_err(|_| ())?;
+    f.write_all(head).map_err(|_| ())?;
+    drop(f);
     let out = sniff_file(&tmp);
     let _ = std::fs::remove_file(&tmp);
     out

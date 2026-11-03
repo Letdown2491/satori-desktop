@@ -322,6 +322,14 @@ fn display_url(url: &str) -> String {
     }
 }
 
+/// The open-in-browser allow-list (audit security M2): feed-derived URLs
+/// may only be http(s) — xdg-open dispatches any other scheme to whatever
+/// desktop handler is registered. NIP-21/nostrconnect targets route
+/// through uris.rs or the login flow, never through this.
+pub(crate) fn web_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
 // --- word-flow tokens ------------------------------------------------------
 
 /// One whitespace token inside a paragraph.
@@ -426,10 +434,13 @@ pub(crate) fn token_el<V: EventEmitter<Nav> + 'static>(
         Tok::Word(w) => word(if punct.is_empty() { w } else { format!("{w}{punct}") }).into_any_element(),
         Tok::Url(url) => {
             let label = display_url(&url);
+            let openable = web_url(&url);
             let el = base(seg_id("url", &format!("{n}{url}")))
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
-                    cx.open_url(&url);
+                    if openable {
+                        cx.open_url(&url);
+                    }
                 })
                 .child(label);
             with_punct(el, punct)
@@ -716,6 +727,7 @@ pub(crate) fn mention_pks(content: &str) -> Vec<PublicKey> {
 /// Schemeless, truncated link row for URLs that aren't media.
 pub(crate) fn link_row(url: &str) -> AnyElement {
     let target = url.to_string();
+    let openable = web_url(&target);
     div()
         .id(seg_id("link", url))
         .cursor_pointer()
@@ -723,7 +735,11 @@ pub(crate) fn link_row(url: &str) -> AnyElement {
         .text_color(rgb(theme::muted()))
         .underline()
         .hover(|s| s.text_color(rgb(theme::vermilion())))
-        .on_click(move |_, _, cx| cx.open_url(&target))
+        .on_click(move |_, _, cx| {
+            if openable {
+                cx.open_url(&target);
+            }
+        })
         .child(display_url(url))
         .into_any_element()
 }
@@ -820,7 +836,9 @@ fn video_tile(
                             .hover(|s| s.text_color(rgb(theme::ink())))
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
-                                cx.open_url(&browser_target);
+                                if crate::views::content::web_url(&browser_target) {
+                                    cx.open_url(&browser_target);
+                                }
                             })
                             .child("↗"),
                     ),

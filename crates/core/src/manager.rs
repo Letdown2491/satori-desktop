@@ -379,6 +379,10 @@ pub struct Core {
     /// session, still filtering by the old account's pubkey and follows,
     /// while live_on true blocked the next login from arming its own.
     live_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// Refresh single-flight (audit perf M4).
+    refreshing: std::sync::atomic::AtomicBool,
+    /// Bootstrap session-phase single-flight (audit perf M5).
+    session_boot: tokio::sync::Mutex<()>,
 }
 
 impl Default for Core {
@@ -425,6 +429,8 @@ impl Core {
             hold_tx: tokio::sync::broadcast::Sender::new(16),
             live_on: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             live_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            refreshing: std::sync::atomic::AtomicBool::new(false),
+            session_boot: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -1400,7 +1406,7 @@ impl Core {
                                         ),
                                         Err(_) => crate::dlog!(
                                             "nostrconnect probe: undecodable response: {}…",
-                                            &json[..json.len().min(120)]
+                                            json.chars().take(120).collect::<String>()
                                         ),
                                     }
                                 }
@@ -1611,34 +1617,67 @@ impl Core {
         // 2. The network phase — everything independent, IN PARALLEL. The
         // UI re-renders when the fresh page lands (the reactive profile
         // patching fills names/avatars as they arrive).
-        active.pool.connect_reads(Vec::new()).await.ok();
-
-        let (read, write) = active
-            .pool
-            .nip65(me)
-            .await
-            .unwrap_or_else(|_| {
-                eprintln!("[core] nip65 fetch failed or timed out");
-                (Vec::new(), Vec::new())
-            });
-        eprintln!(
-            "[core] bootstrap: {} read relay(s), {} write relay(s)",
-            read.len(),
-            write.len()
-        );
-        active.read_relays = read.clone();
-        active.write_relays = write.clone();
-        if let Some(a) = self.active.lock().unwrap().as_mut() {
-            a.read_relays = read.clone();
-            a.write_relays = write;
+        // Session-phase single-flight (audit perf M5): surfaces opened in
+        // quick succession re-ran the nip65/follows phase CONCURRENTLY
+        // against the same relays. The first surface runs it; the rest
+        // wait, then read the (now warm) store. Keyed per account —
+        // read_state persists across logouts — TTL 1h, armed only when a
+        // phase actually found follows.
+        let phase_key = format!("session-phase-{me}");
+        {
+            let _guard = self.session_boot.lock().await;
+            let ran = crate::read_state::load()
+                .warm_at
+                .get(&phase_key)
+                .is_some_and(|t| *t > now_secs().saturating_sub(3600));
+            if !ran {
+                active.pool.connect_reads(Vec::new()).await.ok();
+                let (read, write) = active
+                    .pool
+                    .nip65(me)
+                    .await
+                    .unwrap_or_else(|_| {
+                        eprintln!("[core] nip65 fetch failed or timed out");
+                        (Vec::new(), Vec::new())
+                    });
+                eprintln!(
+                    "[core] bootstrap: {} read relay(s), {} write relay(s)",
+                    read.len(),
+                    write.len()
+                );
+                active.read_relays = read.clone();
+                active.write_relays = write.clone();
+                if let Some(a) = self.active.lock().unwrap().as_mut() {
+                    a.read_relays = read.clone();
+                    a.write_relays = write;
+                }
+                active.pool.connect_reads(read).await.ok();
+                let follows = active.pool.follows(me).await.unwrap_or_default();
+                active.follows = follows.clone();
+                if let Some(a) = self.active.lock().unwrap().as_mut() {
+                    a.follows = follows.clone();
+                }
+                if !follows.is_empty() {
+                    crate::read_state::advance(|st| {
+                        st.warm_at.insert(phase_key.clone(), now_secs());
+                    });
+                }
+            } else {
+                // The first surface's phase already landed the fresh
+                // contact list; pick it up (a store read).
+                if let Ok(Some(ev)) =
+                    active.pool.store.latest_by_kind(me, Kind::ContactList).await
+                {
+                    let follows: Vec<PublicKey> = ev.tags.public_keys().collect();
+                    active.follows = follows.clone();
+                    if let Some(a) = self.active.lock().unwrap().as_mut() {
+                        a.follows = follows;
+                    }
+                }
+            }
         }
-        active.pool.connect_reads(read).await.ok();
-
-        let follows = active.pool.follows(me).await.unwrap_or_default();
-        active.follows = follows.clone();
-        if let Some(a) = self.active.lock().unwrap().as_mut() {
-            a.follows = follows.clone();
-        }
+        // The phase (or its store pickup) left active.follows authoritative.
+        let follows = active.follows.clone();
         self.start_live(kinds.clone()).await;
 
         // Profiles + engagement + deep fetch: parallel, none block paint.
@@ -1663,6 +1702,8 @@ impl Core {
         // skipped bootstrap would let a surface opened every few minutes
         // defer its fill forever.
         let ran_deep = !follows.is_empty() && !warm;
+        // The fetches' values are not read: their effect is the SDK's
+        // save-on-receive; the page projects from the store below.
         let (engagement, fetched, dels) = tokio::join!(
             async {
                 let mine = Filter::new()
@@ -1706,20 +1747,14 @@ impl Core {
                 }
             }
         );
-        eprintln!("[core] deep fetch: {} events", fetched.len());
-        for ev in engagement {
-            let _ = active.pool.store.save(&ev).await;
-        }
-        // The deep fetch lands in the store like every other network yield
-        // (refresh_inner and older's top-up save theirs) — it used to be
-        // logged and DROPPED, so a fresh surface (the articles shelf) kept
-        // painting only whatever older/refresh had happened to carry.
-        for ev in fetched {
-            let _ = active.pool.store.save(&ev).await;
-        }
-        for ev in dels {
-            let _ = active.pool.store.save(&ev).await;
-        }
+        eprintln!(
+            "[core] deep fetch: {} events",
+            engagement.len() + fetched.len() + dels.len()
+        );
+        // No explicit saves: the SDK persists every relay-received event
+        // before notifying (relay/inner.rs), so these loops re-saved what
+        // was already on disk (audit perf M2). The page projects from the
+        // store below.
         self.load_own_sets(&active).await;
 
         if ran_deep {
@@ -1808,11 +1843,20 @@ impl Core {
     /// Newest page (home button): relay fetch since the newest known note.
     pub fn refresh(self: &Arc<Self>, kinds: Vec<Kind>) -> FeedRx {
         let (tx, rx) = mpsc::unbounded_channel();
+        // Single-flight (audit perf M4): overlapping refreshes stacked
+        // full routed fan-outs. A click while one runs drops the new tx —
+        // the caller's pump sees the closed channel and exits quietly;
+        // the running refresh lands its Loaded anyway.
+        if self.refreshing.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return rx;
+        }
         let this = Arc::clone(self);
         self.rt.spawn(async move {
             if let Err(e) = this.refresh_inner(&tx, kinds).await {
                 let _ = tx.send(FeedEvent::Failed(e.to_string()));
             }
+            this.refreshing
+                .store(false, std::sync::atomic::Ordering::SeqCst);
         });
         rx
     }
@@ -1859,20 +1903,13 @@ impl Core {
             let _ = tx.send(FeedEvent::Loaded(page));
             return Ok(());
         }
-        for ev in fetched {
-            let _ = active.pool.store.save(&ev).await;
-        }
-        // Deletions ride along (NIP-09) — a follow's kind-5s since the
-        // newest note cover everything the refresh window can carry
-        // (skipped with no follows: NIP-01, never send an empty list).
+        // The SDK saves what it receives; the store projection follows.
         if !follows.is_empty() {
             let del_filter = Filter::new()
                 .kind(Kind::EventDeletion)
                 .authors(follows.clone())
                 .since(Timestamp::from(since.saturating_sub(86400)));
-            for ev in active.pool.get(del_filter).await.unwrap_or_default() {
-                let _ = active.pool.store.save(&ev).await;
-            }
+            let _ = active.pool.get(del_filter).await;
         }
         let page = self.page_from_store(&active, None, &kinds).await?;
         eprintln!("[core] bootstrap page: {} notes", page.notes.len());
@@ -1895,8 +1932,9 @@ impl Core {
                 // there is nothing to top up from the relays.
                 if notes.len() <= PAGE && !active.follows.is_empty() {
                     // Outbox routing: strictly older than the page bottom,
-                    // from each follow's own write relays.
-                    let fetched = active
+                    // from each follow's own write relays. The value is not
+                    // read - the SDK saves what it receives.
+                    let _ = active
                         .pool
                         .get_routed(
                             kinds.clone(),
@@ -1906,18 +1944,15 @@ impl Core {
                             TOPUP_DEPTH,
                         )
                         .await;
-                    for ev in fetched {
-                        let _ = active.pool.store.save(&ev).await;
-                    }
+                    // (no explicit save: the SDK persists what it receives;
+                    // commit() saves own events)
                     // Deletions ride along (NIP-09).
                     let del_filter = Filter::new()
                         .kind(Kind::EventDeletion)
                         .authors(active.follows.clone())
                         .until(Timestamp::from(until))
                         .limit(500);
-                    for ev in active.pool.get(del_filter).await.unwrap_or_default() {
-                        let _ = active.pool.store.save(&ev).await;
-                    }
+                    let _ = active.pool.get(del_filter).await;
                     notes = this.project_page(&active, Some(until), &kinds).await?;
                 }
                 let has_more = notes.len() > PAGE;
@@ -2154,9 +2189,8 @@ impl Core {
             .collect();
         if !missing.is_empty() {
             let filter = Filter::new().kind(Kind::Metadata).authors(missing.clone()).limit(500);
-            for ev in active.pool.get(filter).await.unwrap_or_default() {
-                let _ = active.pool.store.save(&ev).await;
-            }
+            // The SDK saves what it receives; `fresh` reads the store.
+            let _ = active.pool.get(filter).await;
             let fresh = active
                 .pool
                 .store
@@ -2316,9 +2350,7 @@ impl Core {
                     .chain(replies_res)
                     .chain(votes_res)
                     .collect();
-                for ev in &mine_events {
-                    let _ = active.pool.store.save(ev).await;
-                }
+                // (no explicit save: the SDK persists what it receives)
 
                 // Dedup + drop own + sort desc.
                 let mut seen = std::collections::HashSet::new();
@@ -2546,7 +2578,6 @@ impl Core {
                     );
                     let signed = active.signer.sign_event(unsigned).await?;
                     Self::commit(&active, &signed, &tx).await?;
-                    let _ = active.pool.store.save(&signed).await;
                     n += 1;
                 }
                 Ok(n)
@@ -2577,9 +2608,7 @@ impl Core {
                         comments.push(ev);
                     }
                 }
-                for ev in &comments {
-                    let _ = active.pool.store.save(ev).await;
-                }
+                // (no explicit save: the SDK persists what it receives)
                 // Dedup + oldest first.
                 let mut seen = std::collections::HashSet::new();
                 comments.retain(|ev| seen.insert(ev.id));
@@ -2658,7 +2687,6 @@ impl Core {
                     }
                     None => {
                         Self::commit(&active, &signed, &tx).await?;
-                        let _ = active.pool.store.save(&signed).await;
                     }
                 }
                 Ok(())
@@ -2688,9 +2716,7 @@ impl Core {
                 for ev in active.pool.get(filter).await.unwrap_or_default() {
                     votes.push(ev);
                 }
-                for ev in &votes {
-                    let _ = active.pool.store.save(ev).await;
-                }
+                // (no explicit save: the SDK persists what it receives)
                 Ok(crate::nip::poll::tally(&votes))
             }
             .await;
@@ -2722,7 +2748,6 @@ impl Core {
                     UnsignedEvent::new(active.me(), Timestamp::now(), Kind::Custom(1018), tags, "");
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;
-                let _ = active.pool.store.save(&signed).await;
                 Ok(())
             }
             .await;
@@ -2761,7 +2786,6 @@ impl Core {
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;
-                let _ = active.pool.store.save(&signed).await;
                 Ok(())
             }
             .await;
@@ -2816,7 +2840,6 @@ impl Core {
                     }
                     None => {
                         Self::commit(&active, &signed, &tx).await?;
-                        let _ = active.pool.store.save(&signed).await;
                         let _ = tx.send(PublishEvent::Committed { token: 0 });
                     }
                 }
@@ -2894,9 +2917,7 @@ impl Core {
                         .get(Filter::new().ids(missing).limit(n))
                         .await
                         .unwrap_or_default();
-                    for ev in &fetched {
-                        let _ = active.pool.store.save(ev).await;
-                    }
+                    // (no explicit save: the SDK persists what it receives)
                     events.extend(fetched);
                 }
                 for ev in events {
@@ -2932,9 +2953,7 @@ impl Core {
                             .await
                             .unwrap_or_default();
                         let ev = fetched.into_iter().next();
-                        if let Some(ev) = &ev {
-                            let _ = active.pool.store.save(ev).await;
-                        }
+                        // (no explicit save: the SDK persists what it receives)
                         ev
                     }
                 };
@@ -2950,7 +2969,6 @@ impl Core {
                                 .author(ev.pubkey)
                                 .limit(1);
                             for meta in active.pool.get(filter).await.unwrap_or_default() {
-                                let _ = active.pool.store.save(&meta).await;
                                 if p.is_none() {
                                     p = Profile::from_event(&meta);
                                 }
@@ -2996,9 +3014,7 @@ impl Core {
                 // Addressable events: newest replaces (NIP-01); take the
                 // greatest (id-ordered BTreeSet ≈ latest seen).
                 let ev = ev.into_iter().next_back();
-                if let Some(ev) = &ev {
-                    let _ = active.pool.store.save(ev).await;
-                }
+                // (no explicit save: the SDK persists what it receives)
                 let profile = match &ev {
                     Some(ev) => {
                         let authors = [ev.pubkey];
@@ -3016,7 +3032,6 @@ impl Core {
                                 .author(ev.pubkey)
                                 .limit(1);
                             for meta in active.pool.get(f).await.unwrap_or_default() {
-                                let _ = active.pool.store.save(&meta).await;
                                 if p.is_none() {
                                     p = Profile::from_event(&meta);
                                 }
@@ -3062,9 +3077,7 @@ impl Core {
                 for ev in active.pool.get(filter).await.unwrap_or_default() {
                     results.push(ev);
                 }
-                for ev in &results {
-                    let _ = active.pool.store.save(ev).await;
-                }
+                // (no explicit save: the SDK persists what it receives)
                 results.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
                 let profiles = Self::profiles_for(&active, &results).await;
                 Ok(FeedPage { notes: results, profiles })
@@ -3103,9 +3116,7 @@ impl Core {
                     .limit(PAGE + 1);
                 let mut notes: Vec<Event> =
                     active.pool.get(filter).await.unwrap_or_default().into_iter().collect();
-                for ev in &notes {
-                    let _ = active.pool.store.save(ev).await;
-                }
+                // (no explicit save: the SDK persists what it receives)
                 {
                     let muted = this.muted.lock().unwrap();
                     notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
@@ -3145,9 +3156,7 @@ impl Core {
                     .limit(PAGE + 1);
                 let mut notes: Vec<Event> =
                     active.pool.get(filter).await.unwrap_or_default().into_iter().collect();
-                for ev in &notes {
-                    let _ = active.pool.store.save(ev).await;
-                }
+                // (no explicit save: the SDK persists what it receives)
                 {
                     let muted = this.muted.lock().unwrap();
                     notes.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
@@ -3184,9 +3193,8 @@ impl Core {
                     .kinds(crate::store::visible_kinds())
                     .author(who)
                     .limit(50);
-                for ev in active.pool.get(filter).await.unwrap_or_default() {
-                    let _ = active.pool.store.save(&ev).await;
-                }
+                // (no explicit save: the SDK persists what it receives)
+                let _ = active.pool.get(filter).await;
                 let notes = active
                     .pool
                     .store
@@ -3230,18 +3238,14 @@ impl Core {
                         .author(who)
                         .until(Timestamp::from(until))
                         .limit(TOPUP_DEPTH);
-                    let fetched = active.pool.get(filter).await.unwrap_or_default();
-                    for ev in fetched {
-                        let _ = active.pool.store.save(&ev).await;
-                    }
+                    // (no explicit save: the SDK persists what it receives)
+                    let _ = active.pool.get(filter).await.unwrap_or_default();
                     let del_filter = Filter::new()
                         .kind(Kind::EventDeletion)
                         .author(who)
                         .until(Timestamp::from(until))
                         .limit(500);
-                    for ev in active.pool.get(del_filter).await.unwrap_or_default() {
-                        let _ = active.pool.store.save(&ev).await;
-                    }
+                    let _ = active.pool.get(del_filter).await;
                     notes = active
                         .pool
                         .store
@@ -3276,10 +3280,10 @@ impl Core {
         self.rt.spawn(async move {
             let res: Result<FeedEvent> = async {
                 let active = this.active().await?;
+                // Relay top-up for kind-1 replies (the SDK saves what it
+                // receives); the store holds the threaded set.
                 let filter = Filter::new().kind(Kind::TextNote).event(id).limit(200);
-                for ev in active.pool.get(filter).await.unwrap_or_default() {
-                    let _ = active.pool.store.save(&ev).await;
-                }
+                let _ = active.pool.get(filter).await;
                 let mut replies = active
                     .pool
                     .store
@@ -3295,7 +3299,6 @@ impl Core {
                 }
                 let comment_filter = Filter::new().kind(Kind::Custom(1111)).event(id).limit(200);
                 for ev in active.pool.get(comment_filter).await.unwrap_or_default() {
-                    let _ = active.pool.store.save(&ev).await;
                     replies.push(ev);
                 }
                 // Deletions (NIP-09), targeted by id — replies come from
@@ -3308,9 +3311,7 @@ impl Core {
                         del_filter = del_filter.event(id);
                     }
                     let dels = active.pool.get(del_filter).await.unwrap_or_default();
-                    for d in &dels {
-                        let _ = active.pool.store.save(d).await;
-                    }
+                    // (no explicit save: the SDK persists what it receives)
                     if !dels.is_empty() {
                         let mut deleted: HashSet<(PublicKey, EventId)> = HashSet::new();
                         for d in &dels {
@@ -4161,7 +4162,8 @@ impl Core {
                     nostr_sdk::client::ClientNotification::Shutdown => break,
                     _ => continue,
                 };
-                let _ = pool.store.save(&event).await;
+                // (no explicit save: the SDK persists every received event
+                // before notifying — relay/inner.rs)
                 let sig = if u16::from(event.kind) == 5 {
                     None // deletions ride the store; the render filter sees them
                 } else if event.tags.clone().public_keys().any(|pk| pk == me) {
@@ -4172,6 +4174,13 @@ impl Core {
                 if let Some(sig) = sig {
                     let _ = live.send(sig);
                 }
+            }
+            // The stream ended without a Shutdown (client teardown): the
+            // bell used to stay armed-dead until the next login (audit
+            // perf L1) — drop the flag so a later bootstrap re-arms, but
+            // only if no newer arm took over (that one owns the flag).
+            if live_epoch.load(std::sync::atomic::Ordering::SeqCst) == my_epoch {
+                live_on.store(false, std::sync::atomic::Ordering::SeqCst);
             }
             eprintln!("[core] live stream ended (relay disconnects resume via fetches)");
         });

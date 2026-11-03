@@ -82,8 +82,13 @@ pub fn inline_able(url: &str, mime: Option<&str>) -> bool {
 /// Tap on a video tile: open the inline player when the URL is inline-able,
 /// else the browser (the honest link the tile showed before Phase 3).
 pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
-    if !inline_able(&url, mime.as_deref()) {
-        cx.open_url(&url);
+    // The browser allow-list (audit security M2): feed-derived URLs only
+    // ever open as http(s).
+    let openable = crate::views::content::web_url(&url);
+    if !openable || !inline_able(&url, mime.as_deref()) {
+        if openable {
+            cx.open_url(&url);
+        }
         return;
     }
     let Ok(parsed) = url::Url::parse(&url) else {
@@ -134,7 +139,11 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
                 }
                 // The pipeline failed (missing plugins, dead URL): the honest
                 // fallback is the browser — the pre-Phase-3 behavior.
-                Err(_) => cx.open_url(&url),
+                Err(_) => {
+                    if crate::views::content::web_url(&url) {
+                        cx.open_url(&url);
+                    }
+                }
             }
             cx.set_global(Signal);
         });

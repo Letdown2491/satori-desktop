@@ -491,10 +491,18 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                         order.retain(|u| u != &url);
                         order.push_back(url.clone());
                     }
-                    cache
-                        .touched
-                        .borrow_mut()
-                        .insert(url.clone(), Instant::now());
+                    // Touch at most once a second per url (audit perf L3):
+                    // interleaved visible images made every frame pay an
+                    // O(entries) retain + a map write. The eviction grace
+                    // window is seconds - a 1s staleness is nothing.
+                    let mut touched = cache.touched.borrow_mut();
+                    let now = Instant::now();
+                    if touched
+                        .get(&url)
+                        .is_none_or(|t| now.duration_since(*t) >= std::time::Duration::from_secs(1))
+                    {
+                        touched.insert(url.clone(), now);
+                    }
                 }
                 match e.get_mut() {
                     Entry::Ready(_) | Entry::NotMedia => Action::Ready,

@@ -31,13 +31,20 @@ pub fn rotate() {
 
 /// One diagnostic line: stderr for a foreground run, the mirror for the
 /// nohup launch, each prefixed with epoch seconds so gaps (suspend!) show.
-/// A failing write is silent — a log never takes the app down.
+/// A failing write is silent — a log never takes the app down. The mirror
+/// rotates IN PLACE once past the threshold (audit memory L-2: rotation
+/// used to be startup-only, so a long session's log grew unbounded).
 pub fn log(args: std::fmt::Arguments) {
     eprintln!("[satori] {args}");
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    if let Ok(meta) = std::fs::metadata(path())
+        && meta.len() > ROTATE_BYTES
+    {
+        let _ = std::fs::remove_file(path());
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path()) {
         let _ = writeln!(f, "{secs} {args}");
     }

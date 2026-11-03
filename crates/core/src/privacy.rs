@@ -3,6 +3,14 @@
 //! `off`      direct connections
 //! `balanced` 5s Tor attempt, then fail-open direct
 //! `strict`   fail-closed: Tor-only, never leaks (doubled timeouts apply)
+//!
+//! HONESTY NOTE (audit security H3, Nov 2026): the Tor TRANSPORT is still
+//! the M5 stub — nothing here proxies sockets yet. Today the mode only
+//! gates what the UI does with media (strict keeps poster sniffs off and
+//! inline video out); every network path (relays, media fetches, NIP-05,
+//! LNURL) still connects DIRECTLY, and this module's "never leaks" claim
+//! is not yet true. The claims above describe the port's target behavior;
+//! wire the SOCKS5/Tor transport before trusting them.
 
 use serde::{Deserialize, Serialize};
 

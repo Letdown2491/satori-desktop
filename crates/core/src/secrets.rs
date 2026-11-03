@@ -154,14 +154,24 @@ fn file_store(name: &str, secret: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| LoginError::Store(e.to_string()))?;
     }
+    // Write to a fresh 0600 temp sibling and rename over (audit security
+    // L3): plain create() FOLLOWS a pre-planted symlink, and the mode flag
+    // is a no-op on an existing file. The rename replaces whatever sits at
+    // the path - link or file - without following it.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tmp = path.with_extension(format!("tmp-{}-{nanos}", std::process::id()));
     let mut f = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
-        .open(&path)
+        .open(&tmp)
         .map_err(|e| LoginError::Store(e.to_string()))?;
     writeln!(f, "{secret}").map_err(|e| LoginError::Store(e.to_string()))?;
+    drop(f);
+    std::fs::rename(&tmp, &path).map_err(|e| LoginError::Store(e.to_string()))?;
     Ok(())
 }
 

@@ -127,11 +127,13 @@ impl SearchView {
         if q.is_empty() {
             return;
         }
-        // New question, clean answer (search.rs:41).
+        // New question, clean answer (search.rs:41) — profiles too: the
+        // map used to survive across runs for the pane's lifetime.
         self.generation += 1;
         let generation = self.generation;
         self.results.clear();
         self.quotes.clear();
+        self.profiles.clear();
         self.list.reset(0);
         self.query = q.clone();
         self.tab = SearchTab::Notes;

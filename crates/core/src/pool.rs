@@ -272,24 +272,22 @@ impl Pool {
 
     /// Own contact list: fresh from relays, cached into the store.
     pub async fn follows(&self, me: PublicKey) -> Result<Vec<PublicKey>, SdkError> {
-        let fresh = self
+        // Fresh from relays (the SDK persists what it receives), then the
+        // store's cached copy is parsed.
+        let _ = self
             .get(Filter::new().kind(Kind::ContactList).author(me).limit(1))
             .await?;
-        for ev in &fresh {
-            let _ = self.store.save(ev).await;
-        }
         let cached = self.store.latest_by_kind(me, Kind::ContactList).await?;
         Ok(cached.map(|ev| ev.tags.public_keys().collect()).unwrap_or_default())
     }
 
     /// Own NIP-65 relay list, split into (read, write) — the shared parser.
     pub async fn nip65(&self, me: PublicKey) -> Result<(Vec<String>, Vec<String>), SdkError> {
-        let fresh = self
+        // Fresh from relays (the SDK persists what it receives), then the
+        // store's cached copy is parsed.
+        let _ = self
             .get(Filter::new().kind(Kind::RelayList).author(me).limit(1))
             .await?;
-        for ev in &fresh {
-            let _ = self.store.save(ev).await;
-        }
         let cached = self.store.latest_by_kind(me, Kind::RelayList).await?;
         let Some(ev) = cached else {
             return Ok((Vec::new(), Vec::new()));
@@ -334,7 +332,7 @@ impl Pool {
                 .limit(3000);
             if let Ok(events) = self.get(filter).await {
                 for ev in &events {
-                    let _ = self.store.save(ev).await;
+                    // (no explicit save: the SDK persists what it receives)
                     let list = Self::routed_list(ev);
                     if !list.is_empty() {
                         out.insert(ev.pubkey.to_string(), list);
