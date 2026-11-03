@@ -353,6 +353,9 @@ pub struct Core {
     /// doc). The module persists past this point; the flag just keeps
     /// the scan from repeating.
     tombstones_hydrated: std::sync::atomic::AtomicBool,
+    /// The outbox drainer spawns once per process (D36), on the first
+    /// bootstrap that has a write set; later logins are no-ops.
+    outbox_started: std::sync::atomic::AtomicBool,
     /// The NIP-47 wallet handle (D20) — one per process, like the pool.
     wallet: Arc<Wallet>,
     /// Bitcoin timestamp→height service (blocktime, Phase 2 §4.4) — one
@@ -411,6 +414,7 @@ impl Core {
             active: Mutex::new(None),
             pending: Mutex::new(None),
             hold_seq: AtomicU64::new(1),
+            outbox_started: std::sync::atomic::AtomicBool::new(false),
             login_seq: AtomicU64::new(1),
             pool: Mutex::new(None),
             own_liked: Mutex::new(HashSet::new()),
@@ -1660,6 +1664,9 @@ impl Core {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
+            // D36: the outbox drainer arms on the first bootstrap —
+            // crash leftovers and queued failures come due here.
+            this.spawn_outbox_drain();
             if let Err(e) = this.bootstrap_inner(&tx, kinds).await {
                 let _ = tx.send(FeedEvent::Failed(e.to_string()));
             }
@@ -1728,6 +1735,10 @@ impl Core {
                 if let Some(a) = self.active.lock().unwrap().as_mut() {
                     a.read_relays = read.clone();
                     a.write_relays = write;
+                }
+                let n = crate::outbox_queue::len();
+                if n > 0 {
+                    eprintln!("[core] outbox: {n} item(s) pending, drain armed");
                 }
                 active.pool.connect_reads(read).await.ok();
                 let follows = active.pool.follows(me).await.unwrap_or_default();
@@ -4039,11 +4050,88 @@ impl Core {
         }
     }
 
+    /// THE publish funnel (D36 full outbox): every outgoing event —
+    /// notes, reactions, deletions, relay lists, restores — comes through
+    /// here. The order IS the contract:
+    /// 1. save to the store FIRST (local-first: the event exists even
+    ///    fully offline),
+    /// 2. enqueue in the outbox (write-ahead, synchronously persisted)
+    ///    so a crash mid-publish still retries later,
+    /// 3. publish to the current write set (slash-normalized, write-dead
+    ///    filtered), learning per-relay outcomes for the fan-out,
+    /// 4. ≥1 relay ACK → dequeue + Ok (the UI gets Committed); zero →
+    ///    the item STAYS queued and Err flows to the UI as Failed. The
+    ///    composer shows Committed only on first acceptance; a later
+    ///    outbox success is logged, not re-toasted (D36).
     async fn commit(active: &Active, event: &Event, _tx: &mpsc::UnboundedSender<PublishEvent>) -> Result<()> {
-        active.pool.publish(event, &active.write_relays).await
-            .map_err(|e| LoginError::Connect(e.to_string()))?;
         let _ = active.pool.store.save(event).await;
-        Ok(())
+        crate::outbox_queue::enqueue(event);
+        let targets = crate::outbox_queue::targets(&active.write_relays);
+        let report = active.pool.publish(event, &targets).await;
+        for r in &report.ok {
+            crate::relay_latency::record_write_result(r, true);
+        }
+        for (r, _m) in &report.failed {
+            crate::relay_latency::record_write_result(r, false);
+        }
+        if report.accepted() {
+            crate::outbox_queue::remove(event);
+            Ok(())
+        } else {
+            let n = report.failed.len();
+            Err(LoginError::Connect(format!(
+                "no relay accepted the event ({n} tried); queued for retry"
+            )))
+        }
+    }
+
+    /// The outbox drainer (D36): ONE task owns every retry, spawned once
+    /// per process on the first bootstrap with a session. Serialized
+    /// publishes mean a login drain can never double-fire against an
+    /// in-flight backoff attempt (per-item loops could). Items survive
+    /// restarts (the queue file loads on first touch), so drain-on-login
+    /// is simply the drainer finding due items; logged-out stretches
+    /// just push each item's next try out 60s at a time.
+    fn spawn_outbox_drain(self: &Arc<Self>) {
+        if self.outbox_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        self.rt.spawn(async move {
+            loop {
+                let Some(core) = weak.upgrade() else { break }; // app closing
+                let Some(item) = crate::outbox_queue::next_due(crate::outbox_queue::now_secs()) else {
+                    drop(core);
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                };
+                let Ok(active) = core.active().await else {
+                    crate::outbox_queue::reschedule(
+                        &item.event,
+                        crate::outbox_queue::now_secs() + 60,
+                    );
+                    continue;
+                };
+                let targets = crate::outbox_queue::targets(&active.write_relays);
+                let report = active.pool.publish(&item.event, &targets).await;
+                for r in &report.ok {
+                    crate::relay_latency::record_write_result(r, true);
+                }
+                for (r, _m) in &report.failed {
+                    crate::relay_latency::record_write_result(r, false);
+                }
+                if report.accepted() {
+                    crate::outbox_queue::remove(&item.event);
+                    let short = &item.event.id.to_string()[..8];
+                    eprintln!(
+                        "[core] outbox: {short} delivered after {} queued attempt(s)",
+                        item.attempts
+                    );
+                } else {
+                    crate::outbox_queue::mark_attempt(&item.event);
+                }
+            }
+        });
     }
 
     /// Like (NIP-25). No undo window on reactions.

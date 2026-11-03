@@ -33,6 +33,7 @@ pub mod media;
 pub mod nip;
 pub mod notifications;
 pub mod outbox;
+pub mod outbox_queue;
 pub mod pool;
 pub mod publish;
 pub mod relay_latency;

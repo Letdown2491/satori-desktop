@@ -26,6 +26,7 @@ pub mod files {
     pub const SEEN_RELAYS: &str = "seen-relays.json";
     pub const RELAY_LATENCY: &str = "relay-latency.json";
     pub const DELETIONS: &str = "deletions.json";
+    pub const OUTBOX_PENDING: &str = "outbox-pending.json";
     pub const RELAY_INFO: &str = "relay-info.json";
     pub const RELAY_FAVORITES: &str = "relay-favorites.json";
     pub const ENGAGEMENT: &str = "engagement.json";

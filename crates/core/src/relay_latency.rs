@@ -41,6 +41,12 @@ const RICH_EV: f64 = 20.0; // ...and only if it delivers this many events/query
 const DENIAL_TTL_SECS: u64 = 12 * 3600;
 const DEAD_N: u32 = 8;
 const DEAD_TRUNC: f64 = 0.9;
+/// Write-dead classification (D36): WRITE_DEAD_N consecutive publish
+/// failures (no OK from the relay) drop it from the write fan-out; any
+/// success resets the count. Only the all-dead fallback in
+/// outbox_queue::targets keeps attempting dead relays, so revival always
+/// remains possible.
+const WRITE_DEAD_N: u32 = 3;
 /// Flush cadence (relay-latency.ts debouncedFlush: 15s).
 const FLUSH_SECS: u64 = 15;
 
@@ -54,6 +60,8 @@ const FLUSH_SECS: u64 = 15;
 /// prolific aggregator (waiting longer just fetches older tail scroll
 /// recovers anyway — so ceiling it). `denied_at` = the relay explicitly
 /// REFUSED a read (CLOSED our REQ with a denial) — the read-dead signal.
+/// `write_fails` = consecutive publish failures (D36) — the write-dead
+/// signal; any success resets it.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct RelayStat {
     ms: u64,
@@ -64,6 +72,12 @@ struct RelayStat {
     at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     denied_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    write_fails: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 struct Stats {
@@ -188,6 +202,7 @@ pub fn record(relay: &str, ms: u64, truncated: bool, events: usize) {
         trunc: prev.as_ref().map(|p| p.trunc + u32::from(truncated)).unwrap_or(u32::from(truncated)),
         at: now_secs(),
         denied_at: prev.as_ref().and_then(|p| p.denied_at),
+        write_fails: prev.as_ref().map(|p| p.write_fails).unwrap_or(0),
     };
     held.map.insert(url.clone(), stat);
     held.order.push_back(url);
@@ -277,6 +292,52 @@ pub fn is_read_dead(relay: &str) -> bool {
         return true;
     }
     s.n >= DEAD_N && s.ev < EV_EMPTY && s.trunc as f64 / s.n as f64 >= DEAD_TRUNC
+}
+
+/// Note a publish outcome for this relay (D36 write-dead learning — the
+/// write-side twin of record_read_denial): a success resets the
+/// consecutive-failure count, a failure increments it. WRITE_DEAD_N
+/// consecutive failures make the relay write-dead.
+pub fn record_write_result(relay: &str, ok: bool) {
+    let url = key(relay);
+    if url.is_empty() {
+        return;
+    }
+    let mut held = stats().lock().unwrap();
+    held.order.retain(|u| u != &url);
+    let prev = held.map.get(&url).cloned();
+    let fails = if ok {
+        0
+    } else {
+        prev.as_ref().map(|p| p.write_fails).unwrap_or(0) + 1
+    };
+    held.map.insert(
+        url.clone(),
+        RelayStat {
+            write_fails: fails,
+            at: now_secs(),
+            ..prev.unwrap_or_default()
+        },
+    );
+    held.order.push_back(url);
+    while held.order.len() > MAX_RELAYS {
+        let old = held.order.pop_front();
+        if let Some(old) = old {
+            held.map.remove(&old);
+        }
+    }
+    drop(held);
+    DIRTY.store(true, Ordering::Relaxed);
+}
+
+/// True when publishing to this relay failed WRITE_DEAD_N times in a row
+/// (D36): it leaves the write fan-out (outbox_queue::targets) until a
+/// success — which only the all-dead fallback can produce — resets it.
+pub fn is_write_dead(relay: &str) -> bool {
+    let held = stats().lock().unwrap();
+    held.map
+        .get(&key(relay))
+        .is_some_and(|s| s.write_fails >= WRITE_DEAD_N)
 }
 
 /// Selection weight in (0,1] for outbox routing (relay-latency.ts

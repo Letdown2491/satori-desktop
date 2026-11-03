@@ -25,6 +25,7 @@ use nostr::prelude::*;
 use nostr_sdk::authenticator::Authenticator;
 use nostr_sdk::error::Error as SdkError;
 use nostr_sdk::prelude::*;
+use nostr_sdk::relay::EventSendStatus;
 
 use crate::deletions;
 use crate::nip40;
@@ -614,16 +615,84 @@ impl Pool {
         self.client.subscribe(ReqTarget::manual(targets)).await
     }
 
-    /// Publish to the write set (own write relays, fallback indexers).
-    pub async fn publish(&self, event: &Event, write_relays: &[String]) -> Result<(), SdkError> {
+    /// Publish to the write set (own write relays, fallback indexers) and
+    /// report per-relay outcomes (D36): the SDK's per-relay Output is
+    /// PRESERVED — the old `let _ = ...?; Ok(())` discarded it, which is
+    /// how a total publish failure looked like success and notes died
+    /// silently in the local store. Decision = ≥1 relay ACKed (OK true).
+    pub async fn publish(&self, event: &Event, write_relays: &[String]) -> PublishReport {
         let targets: Vec<String> = if write_relays.is_empty() {
             INDEXERS.iter().map(|s| s.to_string()).collect()
         } else {
             write_relays.to_vec()
         };
-        let _ = self.client.send_event(event).to(targets).await?;
-        Ok(())
+        let short = &event.id.to_string()[..8];
+        let mut report = PublishReport::default();
+        match self.client.send_event(event).to(targets.clone()).await {
+            Ok(output) => {
+                for (url, status) in output.success {
+                    let u = url.to_string();
+                    if matches!(status, EventSendStatus::Ack(_)) {
+                        report.ok.push(u);
+                    } else {
+                        // `Sent` (no OK waited) never occurs under our
+                        // default wait-for-OK; if it ever does, treat it
+                        // as unaccepted.
+                        report.failed.push((u, "sent, no OK".into()));
+                    }
+                }
+                for (url, msg) in output.failed {
+                    report.failed.push((url.to_string(), clean_reason(&msg)));
+                }
+            }
+            // Top-level failure (no relay reported anything at all).
+            Err(e) => {
+                let reason = clean_reason(&e.to_string());
+                for t in &targets {
+                    report.failed.push((t.clone(), reason.clone()));
+                }
+            }
+        }
+        for r in &report.ok {
+            eprintln!("[core] publish {short}: ok {r}");
+        }
+        for (r, m) in &report.failed {
+            eprintln!("[core] publish {short}: fail {r} ({m})");
+        }
+        eprintln!(
+            "[core] publish {short}: {} accepted, {} failed",
+            report.ok.len(),
+            report.failed.len()
+        );
+        report
     }
+}
+
+/// Per-relay publish report (D36): the SDK's `Output<EventId,
+/// EventSendStatus, String>` preserved instead of discarded. `Ack` (the
+/// relay's OK true) is the only acceptance signal; OK false, auth walls,
+/// timeouts and dead sockets all land in `failed` with their reason.
+#[derive(Debug, Clone, Default)]
+pub struct PublishReport {
+    /// Relays that returned OK true (EventSendStatus::Ack).
+    pub ok: Vec<String>,
+    /// (relay, reason) for every relay that did not accept. Reasons are
+    /// relay-supplied hostile input: control chars stripped, length
+    /// capped (clean_reason) before they reach our logs.
+    pub failed: Vec<(String, String)>,
+}
+
+impl PublishReport {
+    /// The publish decision: at least one relay accepted the event.
+    pub fn accepted(&self) -> bool {
+        !self.ok.is_empty()
+    }
+}
+
+/// Relay-supplied text is hostile input: strip control chars (a message
+/// carrying `\n` could forge log lines) and cap the length.
+fn clean_reason(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(120).collect()
 }
 
 #[cfg(test)]
