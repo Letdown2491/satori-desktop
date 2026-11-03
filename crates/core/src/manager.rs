@@ -428,6 +428,30 @@ impl Core {
         }
     }
 
+    /// Store retention (audit memory H-2): every event ever seen was kept
+    /// forever - several MB/day, GB-class over a month of live saves. One
+    /// prune pass shortly after launch (bootstraps settle first), then
+    /// daily. The store is a cache; the relays are the archive. Call once,
+    /// from main, on the Arc'd core.
+    pub fn spawn_store_prune(self: &Arc<Self>) {
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+                // Clone the pool out of the lock; no lock spans the awaits.
+                let pool = this.pool.lock().unwrap().as_ref().map(Arc::clone);
+                if let Some(p) = pool {
+                    match p.store.prune().await {
+                        Ok(0) => {}
+                        Ok(n) => eprintln!("[core] store prune: {n} event(s) past retention"),
+                        Err(e) => eprintln!("[core] store prune failed: {e}"),
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
+            }
+        });
+    }
+
     /// Suspend watchdog (DESIGN.md §3.4): after sleep/hibernate every relay
     /// socket is dead. The SDK's 55s ping notices, but its adaptive backoff
     /// (10s doubling) can take minutes to reconnect — until then every read
@@ -1803,15 +1827,16 @@ impl Core {
         if follows.is_empty() {
             return self.bootstrap_inner(tx, kinds).await;
         }
-        let newest = active
+        // The 'since' probe: newest known kind-1 (newest_created_at docs:
+        // the all-kinds page materialized one event per author-kind pair,
+        // ~7,000 for 500 follows, on every refresh). A kind-1-only newest
+        // underestimates, which just widens the refetch window.
+        let since = active
             .pool
             .store
-            .feed_page(&follows, None, 1)
+            .newest_created_at(&follows)
             .await
-            .map_err(|e| LoginError::Resume(e.to_string()))?;
-        let since = newest
-            .first()
-            .map(|e| e.created_at.as_secs())
+            .map_err(|e| LoginError::Resume(e.to_string()))?
             .unwrap_or(0);
         // The full outbox model (nip65.ts routeAuthorsToRelays): each follow
         // is read from the relays THEY write to — set-cover-bounded, 2x
@@ -2426,15 +2451,17 @@ impl Core {
         self.rt.spawn(async move {
             let res: Result<bool> = async {
                 let active = this.active().await?;
+                // Same probe as refresh (newest_created_at docs): the
+                // all-kinds page materialized one event per author-kind
+                // pair per poll.
                 let newest = active
                     .pool
                     .store
-                    .feed_page(&active.follows, None, 1)
+                    .newest_created_at(&active.follows)
                     .await
                     .map_err(|e| LoginError::Resume(e.to_string()))?;
                 Ok(newest
-                    .first()
-                    .map(|e| e.created_at.as_secs() > crate::read_state::load().feed_seen)
+                    .map(|t| t > crate::read_state::load().feed_seen)
                     .unwrap_or(false))
             }
             .await;

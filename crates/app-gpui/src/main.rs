@@ -221,6 +221,9 @@ fn main() {
         // The suspend watchdog (DESIGN.md §3.4): after sleep/hibernate,
         // reconnect the relays in seconds instead of the SDK's backoff.
         core.spawn_suspend_watchdog();
+        // Store retention: prune past-retention events shortly after
+        // launch, then daily.
+        core.spawn_store_prune();
         // The blocktime bridge (timefmt.rs): the core handle + ask dedup
         // behind every tappable timestamp, before any window renders.
         crate::timefmt::init(core.clone(), cx);

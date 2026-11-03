@@ -5,7 +5,7 @@
 //! built against this database, so every event received from relays is saved
 //! automatically; this module adds the query surface the UI needs.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -243,6 +243,87 @@ impl Store {
     ) -> NostrResult<Option<Event>> {
         let filter = Filter::new().kind(kind).author(author).limit(1);
         Ok(self.query(filter).await?.into_iter().next())
+    }
+
+    /// The newest kind-1 note across the follows - the refresh 'since'
+    /// probe and the quiet-dot poll's answer. The naive probe (a page over
+    /// ALL visible kinds) materialized one event per author-kind pair -
+    /// up to ~7,000 deserializations for 500 follows on every refresh AND
+    /// every poll (audit perf H1: nostr-lmdb applies `limit` per pair).
+    /// One kind bounds it at one event per follow; a kind-1-only newest
+    /// can only UNDERestimate the feed's true newest, and a smaller
+    /// `since` just widens the refetch window (the store dedups what
+    /// comes back).
+    pub async fn newest_created_at(&self, authors: &[PublicKey]) -> NostrResult<Option<u64>> {
+        let page = self
+            .feed_page_kinds(authors, None, 1, vec![Kind::TextNote])
+            .await?;
+        Ok(page.first().map(|e| e.created_at.as_secs()))
+    }
+
+    /// Prune (audit memory H-2): every event ever seen was kept forever -
+    /// several MB/day, GB-class over a month of live saves. Feed content
+    /// older than the retention window is deleted, paged through the kind
+    /// index (kind-only queries stop at the batch limit; the per-pair
+    /// limit quirk applies only to author+kind queries). Reference lists
+    /// (kinds 0/3/10002) keep only the newest per author. LMDB reuses
+    /// freed pages for new writes, so the file plateaus rather than
+    /// shrinking; there is no compaction pass (the env handle stays
+    /// inside nostr-lmdb).
+    pub async fn prune(&self) -> NostrResult<u32> {
+        const PRUNE_DAYS: u64 = 90;
+        const PRUNE_BATCH: usize = 500;
+        let mut deleted = 0u32;
+        // Feed content: older than the retention window.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let cutoff = Timestamp::from_secs(now.saturating_sub(PRUNE_DAYS * 86400));
+        for kind in FEED_KINDS.iter().chain(std::iter::once(&Kind::Reaction)) {
+            loop {
+                let filter = Filter::new()
+                    .kind(*kind)
+                    .until(cutoff)
+                    .limit(PRUNE_BATCH);
+                let batch = self.query(filter).await?;
+                if batch.is_empty() {
+                    break;
+                }
+                for ev in &batch {
+                    self.delete_event(ev.id).await?;
+                    deleted += 1;
+                }
+                if batch.len() < PRUNE_BATCH {
+                    break;
+                }
+            }
+        }
+        // Reference lists: newest per author only - profiles(), the
+        // contact cache and relay_lists() read the newest; the history is
+        // dead weight.
+        for kind in [Kind::Metadata, Kind::ContactList, Kind::RelayList] {
+            let all = self.query(Filter::new().kind(kind)).await?;
+            let mut newest: HashMap<PublicKey, Option<(u64, EventId)>> = HashMap::new();
+            let mut stale: Vec<EventId> = Vec::new();
+            for ev in &all {
+                let t = ev.created_at.as_secs();
+                let slot = newest.entry(ev.pubkey).or_default();
+                match *slot {
+                    None => *slot = Some((t, ev.id)),
+                    Some((pt, _)) if pt >= t => stale.push(ev.id),
+                    Some((_, pid)) => {
+                        stale.push(pid);
+                        *slot = Some((t, ev.id));
+                    }
+                }
+            }
+            for id in stale {
+                self.delete_event(id).await?;
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
     }
 
     /// The user's own reactions (engagement set source).
