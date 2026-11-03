@@ -172,10 +172,12 @@ impl NotificationsView {
     fn on_event(&mut self, ev: FeedEvent, prev: u64, cx: &mut Context<Self>) {
         match ev {
             FeedEvent::Notifications(notifs, profiles) => {
-                // Each event is a full page (cached-first, then fresh) —
-                // rebuild, never append. The manager gates the types
-                // (kind-1 replies, NIP-22 comments, mutes); the view
-                // renders whatever that stream vouches for.
+                // Each event is a full page — the cached paint, then its
+                // UNION with the relay results (a superset: the list only
+                // grows, nothing reloads). Rebuild on each; the manager
+                // owns the merge. The manager gates the types (kind-1
+                // replies, NIP-22 comments, mutes); the view renders
+                // whatever that stream vouches for.
                 let notifs: Vec<Event> = notifs
                     .into_iter()
                     // Zap receipts have empty content — the label carries

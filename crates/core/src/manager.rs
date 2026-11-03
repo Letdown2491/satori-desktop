@@ -2396,7 +2396,10 @@ impl Core {
                         .iter()
                         .filter_map(Profile::from_event)
                         .collect();
-                    let _ = tx.send(FeedEvent::Notifications(cached, profiles));
+                    // A clone rides the instant paint; `cached` stays here
+                    // for the final union (below) — the second emit must be
+                    // a SUPERSET of the first, never a replacement.
+                    let _ = tx.send(FeedEvent::Notifications(cached.clone(), profiles));
                 }
 
                 let since = std::time::SystemTime::now()
@@ -2462,11 +2465,21 @@ impl Core {
                     .collect();
                 // (no explicit save: the SDK persists what it receives)
 
-                // Dedup + drop own + sort desc.
+                // Dedup + drop own + sort desc — as a UNION with the
+                // cached paint, not a replacement. The two phases have
+                // different memberships (the cached paint is
+                // replies/comments/engagement on my recent notes, any age;
+                // the relay phase is mentions/replies/votes within the
+                // 7-day window), so emitting the relay set ALONE made the
+                // list visibly reload on every open: old rows vanished
+                // while the window's new ones appeared. The union keeps
+                // both: the page paints instantly, then only GROWS as the
+                // fresh rows land on top.
                 let mut seen = std::collections::HashSet::new();
                 let muted = this.muted.lock().unwrap().clone();
                 let mut notifs: Vec<Event> = mine_events
                     .into_iter()
+                    .chain(cached)
                     .filter(|ev| {
                         ev.pubkey != me
                             && seen.insert(ev.id)
