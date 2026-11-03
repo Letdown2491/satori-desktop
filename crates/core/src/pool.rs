@@ -1,13 +1,18 @@
 //! Relay pool — port of `src/data/pool.ts` + `src/nostr/nip65.ts` semantics,
-//! slice 1 (v1): a nostr-sdk client over the LMDB store.
+//! v2 (slices 1+2): a nostr-sdk client over the LMDB store.
 //!
-//! v1 routing (deliberately simple, TODO(port) marks the full port):
-//! - READ: indexers (the bootstrap relays from nip65.ts:9-15) + own NIP-65
-//!   read relays. Feed queries pass all followed authors in one filter.
+//! - READ: outbox-routed (outbox.rs quality-weighted set-cover, ≤2/author,
+//!   ≤70 relays), ONE relay per shard via manual `ReqTarget`s, each shard
+//!   on its adaptive latency budget (relay_latency.rs: profiled-empty
+//!   relays bail to the floor, rich-but-truncating ones earn the ceiling),
+//!   read-dead relays skipped mid-session; indexers as the fallback set.
+//!   Seen-on memory (seen.rs) folds learned relays into single-event
+//!   fetches (`get_from`, the resolveEvent shape) and the `e`/`q` tag
+//!   hints on write paths (actions.ts addTag).
 //! - WRITE: own NIP-65 write relays, falling back to indexers.
-//! - TODO(port): quality-weighted set-cover routing, adaptive budgets, EWMA
-//!   latency profiles, read-dead detection, seen-on memory (M2+).
-//! - TODO(port): NIP-09 tombstones + NIP-40 expiry at the chokepoint (M2).
+//! - TODO(port): NIP-09 tombstones + NIP-40 expiry at the chokepoint (M2)
+//!   — deletions are filtered at the manager's render filter today, not
+//!   here.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
