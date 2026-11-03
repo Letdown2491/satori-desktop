@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.Letdown2491.satori</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Satori</name>
+  <summary>A quiet Nostr client</summary>
+  <description>
+    <p>
+      A native Nostr client with a GPU-rendered UI and a local-first
+      event store: a follows-driven timeline, threads, reactions,
+      zaps, reposts, and direct messages, all served from an LMDB
+      cache on your disk and kept fresh by one live subscription.
+    </p>
+    <p>
+      Inline video plays through GStreamer, click to play, one player
+      at a time, nothing fetched until you ask. Keys stay in your
+      secret store, relays are yours to pick (NIP-65), and private
+      preferences sync end-to-end encrypted through NIP-78.
+    </p>
+  </description>
+  <categories>
+    <category>Network</category>
+    <category>InstantMessaging</category>
+  </categories>
+  <launchable type="desktop-id">io.github.Letdown2491.satori.desktop</launchable>
+  <url type="homepage">https://github.com/Letdown2491/satori-desktop</url>
+  <releases>
+    <release version="0.1.0" date="2026-11-02">
+      <description>
+        <p>The first release: the whole client, from the follows timeline to inline video and zaps.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Assemble satori's Orchard app tree: the built binary into files/bin,
+# beside the committed metadata and the export/ files (desktop entry,
+# AppStream metainfo, icons) that orchard-publish turns into a
+# flatpak-shaped OCI image. The freedesktop runtime supplies the native
+# libraries the binary links (wayland, xkbcommon-x11, fontconfig) and,
+# via the runtime's GStreamer, the demuxers and codecs the deb/rpm name
+# as Recommends — the sandbox sees no host plugins either way.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+binary=target/release/satori-desktop
+if [[ ! -x $binary ]]; then
+    echo "missing $binary; build it first (cargo build --release -p satori-gpui)" >&2
+    exit 1
+fi
+
+mkdir -p self/tree/files/bin
+install -m 0755 "$binary" self/tree/files/bin/satori-desktop
+
+# The metadata's runtime ref carries the arch, and the export's commit
+# ref comes from it (app/<id>/<arch>/stable). The tree is assembled
+# per-host (CI legs: x86_64 and aarch64; flatpak's arch names match
+# uname -m), so stamp the host arch into the runtime ref. On the arch
+# the metadata already pins this is a no-op rewrite.
+arch=$(uname -m)
+sed -i "s|^runtime=org\.freedesktop\.Platform/.*/25\.08$|runtime=org.freedesktop.Platform/$arch/25.08|" \
+    self/tree/metadata
+
+# The desktop tree: entry, AppStream metainfo, icons (the flatpak id is
+# the icon name the desktop entry already references).
+mkdir -p self/tree/export/share/applications
+mkdir -p self/tree/export/share/metainfo
+mkdir -p self/tree/export/share/icons/hicolor/scalable/apps
+mkdir -p self/tree/export/share/icons/hicolor/512x512/apps
+install -m 0644 packaging/io.github.Letdown2491.satori.desktop \
+    self/tree/export/share/applications/io.github.Letdown2491.satori.desktop
+install -m 0644 packaging/io.github.Letdown2491.satori.metainfo.xml \
+    self/tree/export/share/metainfo/io.github.Letdown2491.satori.metainfo.xml
+install -m 0644 packaging/icons/io.github.Letdown2491.satori.svg \
+    self/tree/export/share/icons/hicolor/scalable/apps/io.github.Letdown2491.satori.svg
+install -m 0644 packaging/icons/512x512/apps/io.github.Letdown2491.satori.png \
+    self/tree/export/share/icons/hicolor/512x512/apps/io.github.Letdown2491.satori.png
+
+echo "assembled self/tree: $(du -sh self/tree/files | cut -f1)"

@@ -1,6 +1,6 @@
 [package]
 name = "satori-gpui"
-description = "Satori's GPUI front-end: views re-expressed from crates/app on Zed's GPUI (D13). Domain logic lives in crates/core."
+description = "A quiet Nostr client with a GPU-rendered UI and a local-first event store; domain logic lives in crates/core (D13)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,64 @@ authors.workspace = true
 [[bin]]
 name = "satori-desktop"
 path = "src/main.rs"
+
+# deb/rpm packaging: `cargo deb` and `cargo generate-rpm` (CI-installed
+# subcommands) read these blocks against the release build. The GStreamer
+# runtime plugins are dlopen'd at pipeline build, never linked, so they
+# are Recommends rather than Depends: without them (base-only hosts)
+# videos stay poster links instead of the package being uninstallable.
+#
+# NOTE: the deb table name is `deb` — cargo-deb (3.8 and 2.x verified)
+# reads ONLY [package.metadata.deb]; a `cargo-deb`-named table is
+# silently ignored (explicit assets vanish, control falls back to the
+# [package] defaults). gertie's v1.0.1 deb shipped without its desktop
+# file, metainfo, and icon because of exactly this.
+[package.metadata.deb]
+maintainer = "martin <github.penknife946@passmail.net>"
+license-file = ["../../LICENSE", "0"]
+depends = "$auto"
+recommends = "gstreamer1-plugins-good, gstreamer1-libav"
+extended-description = """\
+A quiet Nostr client with a GPU-rendered UI and a local-first event
+store: a follows-driven timeline, threads, reactions, zaps, reposts,
+and direct messages, all served from an LMDB cache on your disk and
+kept fresh by one live subscription. Inline video plays through
+GStreamer, click to play; keys stay in your secret store; relays are
+yours to pick (NIP-65)."""
+section = "net"
+assets = [
+    ["target/release/satori-desktop", "usr/bin/", "755"],
+    ["../../packaging/io.github.Letdown2491.satori.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/io.github.Letdown2491.satori.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["../../packaging/icons/512x512/apps/io.github.Letdown2491.satori.png", "usr/share/icons/hicolor/512x512/apps/io.github.Letdown2491.satori.png", "644"],
+]
+conflicts = "io.github.Letdown2491.satori"
+provides = "io.github.Letdown2491.satori"
+
+[package.metadata.generate-rpm]
+maintainer = "martin <github.penknife946@passmail.net>"
+license = "MIT"
+summary = "A quiet Nostr client"
+group = "Applications/Internet"
+post_install_script = """
+if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database >/dev/null 2>&1 || true; fi
+"""
+assets = [
+    { source = "target/release/satori-desktop", dest = "/usr/bin/satori-desktop", mode = "755" },
+    { source = "packaging/io.github.Letdown2491.satori.desktop", dest = "/usr/share/applications/io.github.Letdown2491.satori.desktop", mode = "644" },
+    { source = "packaging/io.github.Letdown2491.satori.metainfo.xml", dest = "/usr/share/metainfo/io.github.Letdown2491.satori.metainfo.xml", mode = "644" },
+    { source = "packaging/icons/512x512/apps/io.github.Letdown2491.satori.png", dest = "/usr/share/icons/hicolor/512x512/apps/io.github.Letdown2491.satori.png", mode = "644" },
+]
+# Weak deps (dlopen'd at runtime, never linked): the GStreamer demuxers
+# (good) and codecs (libav via the distro's ffmpeg). RPM auto-req picks
+# up the linked shared libraries by itself.
+[package.metadata.generate-rpm.recommends]
+gstreamer1-plugins-good = ""
+gstreamer1-libav = ""
+[package.metadata.generate-rpm.conflicts]
+"io.github.Letdown2491.satori" = ""
+[package.metadata.generate-rpm.provides]
+"io.github.Letdown2491.satori" = ""
 
 [dependencies]
 gpui = { workspace = true }

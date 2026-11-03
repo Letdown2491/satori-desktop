@@ -1,0 +1,222 @@
+# Release: a tag builds the Linux binary and attaches it, plus the deb,
+# the rpm, the flatpak bundles (one leg per architecture), and the
+# Orchard publish (the flatpak store, github.com/Letdown2491/orchard).
+# Linux-only by decision (the ports are scoped in DESIGN.md); the
+# library list is what satori-desktop links against, spelled out here
+# as apt lines because CI has no containerfile.
+#
+# Trigger: push a tag shaped v0.1.0 (the v prefix matches the tag
+# convention). Everything else (draft text, the version bump itself)
+# is manual, on purpose: a release is a claim, not a side effect.
+#
+# Secrets:
+#   ORCHARD_NSEC  the publisher's Nostr key (set before the Orchard
+#                 publish leg goes live; flatpak bundles attach without
+#                 it — the signing step is gated on the repo variable
+#                 ORCHARD_NSEC_SET so tagging is safe before then).
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  REGISTRY: ghcr.io/letdown2491/satori-flatpak
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install the client libraries satori links
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libxcb1-dev \
+            libvulkan-dev
+
+      - name: Build the release binary
+        run: cargo build --release --locked -p satori-gpui
+
+      - name: Build the deb
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb -p satori-gpui --no-build
+          # Smoke: the deb parses and its payload carries the expected paths.
+          dpkg-deb --info target/debian/*.deb | head -20
+
+      - name: Build the rpm
+        run: |
+          cargo install cargo-generate-rpm --locked
+          # -p takes the package DIRECTORY path, not the crate name.
+          cargo generate-rpm -p crates/app-gpui
+          # Smoke: the rpm reads back (rpmlint is not installed; the
+          # header listing is the check).
+          rpm -q --info target/generate-rpm/*.rpm || rpm2cpio target/generate-rpm/*.rpm | cpio -it | head
+
+      - name: Attach the artifacts to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/satori-desktop
+            target/debian/*.deb
+            target/generate-rpm/*.rpm
+          generate_release_notes: true
+
+  flatpak:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: linux-x86_64
+            runner: ubuntu-24.04
+          - arch: linux-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain and libraries
+        run: |
+          sudo apt-get update
+          # librsvg2-common: the gdk-pixbuf SVG loader. build-export
+          # validates the exported icons through gdk-pixbuf, and with
+          # the loader missing the scalable SVG dies with "Format not
+          # recognized" even though the file is fine.
+          sudo apt-get install -y flatpak podman file librsvg2-common
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev \
+            libvulkan-dev
+
+      - name: Build the release binary
+        run: cargo build --release --locked -p satori-gpui
+
+      - name: Assemble and prepare the app tree (no publish, no key needed)
+        run: ./self/assemble.sh
+
+      - name: Export and bundle the flatpak
+        # self/tree is already a build directory (files/, export/,
+        # metadata), so there is no build-init: it would create a
+        # second build directory, and build-export pointed at it dies
+        # with "opening repo: opendir(objects)". build-export makes
+        # the ostree repo at repo/ itself, from the tree; its third
+        # argument is the branch, and the default is master, not
+        # stable. build-bundle's --runtime flag means the bundle IS a
+        # runtime, not "include the runtime", so it is left off; the
+        # app branch carries the runtime dependency. The Platform and
+        # Sdk install from flathub so the runtime refs resolve on the
+        # runner, whether or not the local flatpak validates them.
+        run: |
+          flatpak remote-add --user --if-not-exists flathub \
+            https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --no-deps flathub \
+            org.freedesktop.Platform/${{ matrix.arch == 'linux-x86_64' && 'x86_64' || 'aarch64' }}/25.08 \
+            org.freedesktop.Sdk/${{ matrix.arch == 'linux-x86_64' && 'x86_64' || 'aarch64' }}/25.08
+          mkdir -p bundles repo
+          flatpak build-export repo self/tree stable
+          flatpak build-bundle repo \
+            "bundles/satori-${GITHUB_REF_NAME#v}-${{ matrix.arch }}.flatpak" \
+            io.github.Letdown2491.satori stable
+
+      - name: Attach the flatpak bundles to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bundles/*.flatpak
+          generate_release_notes: true
+
+      - name: Save the staged tree for the publish job
+        # orchard-publish packs the app tree (files/, export/,
+        # metadata), not the bundle. One tar per leg; the publish job
+        # prepares both trees and signs the listing once.
+        run: tar -C self/tree -czf app-tree.tar.gz export files metadata
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-tree-${{ matrix.arch }}
+          path: app-tree.tar.gz
+          retention-days: 1
+
+  orchard:
+    needs: flatpak
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from the tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build orchard-publish from Orchard's pinned tag
+        run: |
+          git clone --quiet --depth 1 --branch v0.3.0 \
+            https://github.com/Letdown2491/orchard /tmp/orchard
+          test "$(git -C /tmp/orchard rev-parse HEAD)" = f2e4635cb44722f104c4fd28d86616f114baf157
+          cd /tmp/orchard
+          # the crate moved under crates/ (the old path dies with "is
+          # not a directory"); --locked pins its Cargo.lock
+          cargo install --locked --path crates/orchard-publish
+
+      - name: Download the staged trees
+        uses: actions/download-artifact@v4
+        with:
+          pattern: app-tree-*
+          path: trees
+
+      - name: Prepare both trees (no key, no network)
+        # one prepare per arch, from that arch's staged tree; --arch
+        # also overrides the manifest's arch, which the prepared asset
+        # records. ORCHARD_PUBLISH_VERSION must match the signing
+        # run's, or the coverage check sees two different versions.
+        env:
+          ORCHARD_PUBLISH_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          mkdir -p prepared
+          for dir in trees/app-tree-*; do
+            arch=${dir##*/app-tree-}
+            rm -rf self/tree
+            mkdir -p self/tree
+            tar -xzf "$dir/app-tree.tar.gz" -C self/tree
+            orchard-publish self/satori.publish.toml \
+              --arch "$arch" --prepare --out "prepared/$arch"
+          done
+          find prepared -type f | sort
+
+      - name: Push to the registry and sign the listing (requires the ORCHARD_NSEC secret)
+        # One signing run for both arches: this pin of orchard-publish
+        # refuses a listing whose assets do not cover every declared
+        # platform. --tag stays at the manifest's "latest": the
+        # publisher appends the platform itself (latest-linux-x86_64,
+        # latest-linux-aarch64). --prove writes orchard.txt to this
+        # repo (public, contents:write) so the listing's repository
+        # link verifies in clients.
+        if: ${{ vars.ORCHARD_NSEC_SET == 'true' }}
+        env:
+          ORCHARD_PUBLISH_VERSION: ${{ steps.ver.outputs.version }}
+          ORCHARD_NSEC: ${{ secrets.ORCHARD_NSEC }}
+          ORCHARD_REGISTRY_USER: ${{ github.actor }}
+          ORCHARD_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          orchard-publish self/satori.publish.toml \
+            --asset "prepared/linux-x86_64/io.github.Letdown2491.satori-linux-x86_64.asset.json" \
+            --asset "prepared/linux-aarch64/io.github.Letdown2491.satori-linux-aarch64.asset.json" \
+            --registry "$REGISTRY" --prove

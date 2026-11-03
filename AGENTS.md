@@ -17,7 +17,9 @@ is commit `a4b09e8`: `git show a4b09e8:src/<file>`). The build spec is
 - `vendor/xattr`: one-line Linux compile fix for a gpui 0.2.2 transitive dep
   (D13); wired via `[patch.crates-io]` in the root `Cargo.toml`.
 - `packaging/`: `install-local.sh` ships the release (bin + wrapper + desktop
-  file + hicolor icons into `~/.local`); Flatpak packaging is not built.
+  file + hicolor icons into `~/.local`). `self/` +
+  `.github/workflows/release.yml`: tag-driven deb/rpm/flatpak builds and
+  the Orchard publish (D31).
 
 ## Dev environment (the bootc host has no GTK/Vulkan dev headers)
 

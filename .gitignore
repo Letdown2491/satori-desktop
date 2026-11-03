@@ -11,3 +11,12 @@ graphify-out/
 # Claude Code local config + AI-workflow docs (not part of the published project)
 .claude/
 CLAUDE.md
+
+# Packaging build outputs (self/assemble.sh regenerates the tree;
+# flatpak build-export/build-bundle and orchard-publish stage the rest)
+self/tree/files/
+self/tree/export/
+repo/
+bundles/
+prepared/
+app-tree.tar.gz

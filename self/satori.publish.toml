@@ -1,0 +1,50 @@
+# Orchard (https://github.com/Letdown2491/orchard) listing for the flatpak.
+#
+# Read by `orchard-publish`. The CI release workflow (.github/workflows/
+# release.yml) runs it on tags: one prepare per architecture, then a
+# single signing run with both prepared assets. Local preparation is
+# safe (no key, no network):
+#   orchard-publish self/satori.publish.toml --prepare
+# ORCHARD_PUBLISH_VERSION (set from the tag) overrides [release] version.
+
+[app]
+id = "io.github.Letdown2491.satori"
+name = "Satori"
+summary = "A quiet Nostr client"
+description = """\
+A native Nostr client with a GPU-rendered UI and a local-first event
+store: a follows-driven timeline, threads, reactions, zaps, reposts,
+and direct messages, all served from an LMDB cache on your disk and
+kept fresh by one live subscription. Inline video plays through
+GStreamer, click to play, one player at a time, nothing fetched until
+you ask. Keys stay in your secret store, relays are yours to pick
+(NIP-65), and private preferences sync end-to-end encrypted through
+NIP-78."""
+categories = ["Network", "InstantMessaging"]
+license = "MIT"
+repository = "https://github.com/Letdown2491/satori-desktop"
+homepage = "https://github.com/Letdown2491/satori-desktop"
+# Must be a PNG: Orchard caches icons without extensions, and an SVG then
+# fails to render. Absolute URL: the store fetches it over HTTP, it cannot
+# read the publisher's disk.
+icon = "https://raw.githubusercontent.com/Letdown2491/satori-desktop/main/packaging/icons/512x512/apps/io.github.Letdown2491.satori.png"
+
+[release]
+# Placeholder. The workflow sets ORCHARD_PUBLISH_VERSION from the tag.
+version = "0.1.0"
+channel = "stable"
+arch = "linux-x86_64"
+# The listing declares coverage for both arches; the CI prepare legs
+# pass --arch for their own build, and the single signing run publishes
+# one listing with both prepared assets.
+platforms = ["linux-x86_64", "linux-aarch64"]
+notes = "The first release: the whole client, from the follows timeline to inline video and zaps."
+
+[artifact]
+tree = "tree"
+
+[publish]
+# relay.orchard.rocks is required (see PUBLISHING.md): orchard-publish
+# refuses a manifest publish without it.
+relays = ["wss://relay.orchard.rocks", "wss://relay.primal.net", "wss://nos.lol"]
+tag = "latest"

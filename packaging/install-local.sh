@@ -22,7 +22,12 @@ fi
 
 install -Dm755 "$BIN" "$HOME/.local/libexec/satori-desktop"
 install -Dm755 packaging/satori.sh "$HOME/.local/bin/satori"
-install -Dm644 "packaging/$APP.desktop" "$HOME/.local/share/applications/$APP.desktop"
+# The local install execs the wrapper (it sets LD_LIBRARY_PATH for hosts
+# missing libxkbcommon-x11); the shipped desktop file points at the raw
+# binary name the deb/rpm/flatpak install as /usr/bin/satori-desktop.
+sed "s|^Exec=.*|Exec=satori %u|" "packaging/$APP.desktop" \
+    > "$HOME/.local/share/applications/$APP.desktop"
+chmod 0644 "$HOME/.local/share/applications/$APP.desktop"
 install -Dm644 "packaging/icons/$APP.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/$APP.svg"
 for s in 512 256 128 64 48 32; do
     install -Dm644 "packaging/icons/${s}x${s}/apps/$APP.png" \

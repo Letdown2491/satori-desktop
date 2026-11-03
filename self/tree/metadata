@@ -1,0 +1,18 @@
+[Application]
+name=io.github.Letdown2491.satori
+runtime=org.freedesktop.Platform/x86_64/25.08
+command=satori-desktop
+
+[Context]
+# wayland primary, x11 fallback, dri for Vulkan (gpui renders through a
+# Vulkan driver), network for relays, media, and the wallet. The XDG
+# data dir maps to ~/.var/app/<id> inside the sandbox automatically;
+# no filesystem grants (nothing reads or writes user files today).
+sockets=x11;wayland;
+devices=dri;
+shared=network;
+
+[Session Bus Policy]
+# The keyring (crates/core/src/secrets.rs) talks to the secret service
+# (gnome-keyring / kwallet) on the session bus.
+org.freedesktop.secrets=talk
