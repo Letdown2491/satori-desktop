@@ -8,6 +8,7 @@ mod icons;
 mod input;
 mod media;
 mod markdown;
+mod poster;
 mod prefs;
 mod theme;
 mod timefmt;

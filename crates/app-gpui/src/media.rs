@@ -450,6 +450,23 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
     if url.is_empty() {
         return;
     }
+    // The key kinds: real media URLs, and the two virtual namespaces the
+    // poster ladder synthesizes (D32) — a blurhash decode (no network)
+    // and a sniffed poster frame (capped head download + local decode).
+    // Everything else about a fetch — the entry bookkeeping, the backoff,
+    // the landing, the waiters — is the same for all three.
+    enum Kind {
+        Plain,
+        Blurhash(String),
+        Poster(String),
+    }
+    let kind = if let Some(h) = url.strip_prefix("blurhash:") {
+        Kind::Blurhash(h.to_string())
+    } else if let Some(v) = url.strip_prefix("poster:") {
+        Kind::Poster(v.to_string())
+    } else {
+        Kind::Plain
+    };
     enum Action {
         /// Begin a fetch; `Duration` is the cool-off to record on failure.
         Start(Duration),
@@ -531,22 +548,76 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
     match action {
         Action::Joined | Action::Ready => {} // the landing notifies every waiter
         Action::Start(next_backoff) => {
-            let rx = core.fetch_image(url.clone());
             let core2 = core.clone();
             let view2 = view;
             cx.spawn(async move |cx| {
-                let outcome =
-                    { let mut rx = rx; rx.recv().await }.unwrap_or(Err(MediaError::Transient));
-                let st = match outcome {
-                    Ok(d) => match cached_from_decoded(d) {
-                        Some(c) => Entry::Ready(c),
-                        None => Entry::NotMedia,
-                    },
-                    Err(MediaError::NotMedia) => Entry::NotMedia,
-                    Err(MediaError::Transient) => Entry::Failed {
-                        at: Instant::now(),
-                        backoff: next_backoff,
-                    },
+                let st = match kind {
+                    Kind::Plain => {
+                        let rx = core2.fetch_image(url.clone());
+                        let outcome = { let mut rx = rx; rx.recv().await }
+                            .unwrap_or(Err(MediaError::Transient));
+                        landing_state(outcome, next_backoff)
+                    }
+                    // A blurhash is decoded LOCALLY — no network at all.
+                    // A hash that won't decode is NotMedia (terminal for
+                    // the session): a poisoned tag can't spin.
+                    Kind::Blurhash(hash) => {
+                        let frame = cx
+                            .background_executor()
+                            .spawn(async move { crate::poster::blurhash_png(&hash) })
+                            .await;
+                        ready_or_not(frame.and_then(crate::poster::decoded_dynamic))
+                    }
+                    // A sniffed poster: cache read-through first (a sniffs
+                    // survives restarts), then the capped head download +
+                    // local first-frame decode. Over-full workshop books a
+                    // short backoff — no queued promises, the ordinary
+                    // retry timer re-enters fetch.
+                    Kind::Poster(video) => {
+                        match satori_core::media::poster_cached(&video).await {
+                            Some(png) => ready_or_not(
+                                cx.background_executor()
+                                    .spawn(async move {
+                                        crate::poster::decoded_png_dims(png)
+                                    })
+                                    .await,
+                            ),
+                            None => {
+                                let slot = crate::poster::InFlight::take();
+                                let outcome = match slot {
+                                    None => Err(MediaError::Transient),
+                                    Some(_slot) => match satori_core::media::fetch_video_head(
+                                        &video,
+                                        crate::poster::POSTER_HEAD_BYTES,
+                                    )
+                                    .await
+                                    {
+                                        Ok(head) => match cx
+                                            .background_executor()
+                                            .spawn(async move {
+                                                crate::poster::sniff_png(&head)
+                                            })
+                                            .await
+                                        {
+                                            Ok((w, h, png)) => {
+                                                satori_core::media::poster_store(
+                                                    &video, &png,
+                                                )
+                                                .await;
+                                                Ok(crate::poster::decoded_png(png, w, h))
+                                            }
+                                            // Dead URL, moov-at-end, audio-only:
+                                            // transient — the backoff decides
+                                            // whether it's ever worth another look.
+                                            Err(()) => Err(MediaError::Transient),
+                                        },
+                                        Err(e) => Err(e),
+                                    },
+                                };
+                                landing_state(outcome, next_backoff)
+                            }
+                        }
+                    }
                 };
                 // Publish globally, then wake every waiter.
                 let _ = cx.update(|app| {
@@ -653,6 +724,28 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
             })
             .detach();
         }
+    }
+}
+
+/// A job's outcome as the entry to land: validated decodes go Ready,
+/// verified not-an-image (or an unsafe/over-cap URL) is NotMedia, and a
+/// transient failure cools off with the caller's backoff.
+fn landing_state(outcome: Result<satori_core::media::DecodedImage, MediaError>, backoff: Duration) -> Entry {
+    match outcome {
+        Ok(d) => ready_or_not(Some(d)),
+        Err(MediaError::NotMedia) => Entry::NotMedia,
+        Err(MediaError::Transient) => Entry::Failed {
+            at: Instant::now(),
+            backoff,
+        },
+    }
+}
+
+/// The Ready/NotMedia fold shared by every landing path.
+fn ready_or_not(d: Option<satori_core::media::DecodedImage>) -> Entry {
+    match d.and_then(cached_from_decoded) {
+        Some(c) => Entry::Ready(c),
+        None => Entry::NotMedia,
     }
 }
 

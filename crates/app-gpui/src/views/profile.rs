@@ -23,6 +23,9 @@ use super::{content, feed::Feed, nav::Nav};
 
 /// Which profile surface is up: the notes body or the media strips
 /// (Phase 2 §4.3 — Photos/Videos, three-column thumbnails).
+/// One Videos-strip tile: (url, poster, blurhash, imeta mime).
+pub(crate) type VidTile = (String, Option<String>, Option<String>, Option<String>);
+
 #[derive(Clone, Copy, PartialEq)]
 enum ProfileTab {
     Notes,
@@ -34,9 +37,9 @@ enum ProfileTab {
 enum Row {
     /// Up to three thumbnails: (url, index into the tab's lightbox list).
     Pics(Vec<(String, usize)>),
-    /// Up to three video tiles: (url, poster, imeta mime) — the same
-    /// 3-column grid as the photos, the play badge marking them.
-    Vids(Vec<(String, Option<String>, Option<String>)>),
+    /// Up to three video tiles: (url, poster, blurhash, imeta mime) — the
+    /// same 3-column grid as the photos, the play badge marking them.
+    Vids(Vec<VidTile>),
 }
 
 pub struct ProfileView {
@@ -226,18 +229,18 @@ impl ProfileView {
     }
 
     /// The Videos strip: every video asset in timeline order (kind 21/22,
-    /// plus imeta/link videos on kind 1) — url + poster + imeta mime. All
-    /// of a note's videos, the same way Photos takes all of its pictures.
-    /// Video files themselves are never fetched (the tap opens the player
-    /// or the browser, video.rs decides).
-    fn video_urls(&self) -> Vec<(String, Option<String>, Option<String>)> {
+    /// plus imeta/link videos on kind 1) — url + poster + blurhash + imeta
+    /// mime. All of a note's videos, the same way Photos takes all of its
+    /// pictures. Video files themselves are never fetched; the preview is
+    /// the publisher's poster, a blurhash, or a sniffed first frame (D32).
+    fn video_urls(&self) -> Vec<VidTile> {
         self.notes
             .iter()
             .filter(|n| matches!(u16::from(n.kind), 1 | 21 | 22))
             .flat_map(|n| {
                 content::media_assets(n).into_iter().filter_map(|a| match a {
-                    content::MediaAsset::Video { url, poster, mime } => {
-                        Some((url, poster, mime))
+                    content::MediaAsset::Video { url, poster, blurhash, mime } => {
+                        Some((url, poster, blurhash, mime))
                     }
                     _ => None,
                 })
@@ -749,6 +752,7 @@ impl Render for ProfileView {
                                     &media,
                                     SharedString::from(format!("pic-{gix}")),
                                     url,
+                                    None,
                                     Some((&pics_all, *gix)),
                                     None,
                                     None,
@@ -768,11 +772,12 @@ impl Render for ProfileView {
                                 .border_color(rgb(theme::hairline()));
                             // One tile per video, the poster thumb when the
                             // bytes landed, the quiet play frame otherwise.
-                            for (i, (url, poster, mime)) in tiles.iter().enumerate() {
+                            for (i, (url, poster, blurhash, mime)) in tiles.iter().enumerate() {
                                 grid = grid.child(thumb_tile(
                                     &media,
                                     SharedString::from(format!("vid-{idx}-{i}")),
                                     poster.as_deref().unwrap_or(""),
+                                    blurhash.as_deref(),
                                     None,
                                     Some(url.as_str()),
                                     mime.as_deref(),
@@ -804,6 +809,7 @@ fn thumb_tile(
     snap: &media::Snapshot,
     key: SharedString,
     thumb: &str,
+    blurhash: Option<&str>,
     lightbox: Option<(&[String], usize)>,
     video_url: Option<&str>,
     video_mime: Option<&str>,
@@ -855,7 +861,17 @@ fn thumb_tile(
             f
         }
     };
-    match snap.png(thumb) {
+    // The preview ladder (D32): the publisher's poster, then a blurhash
+    // gradient, then a locally sniffed first frame — the picture a video
+    // tile paints is whichever the cache holds.
+    let shown = if !thumb.is_empty() {
+        snap.png(thumb)
+    } else {
+        None
+    }
+    .or_else(|| blurhash.and_then(|b| snap.png(&crate::poster::blurhash_key(b))))
+    .or_else(|| video_url.and_then(|u| snap.png(&crate::poster::poster_key(u))));
+    match shown {
         Some(png) => frame
             .child(
                 div()

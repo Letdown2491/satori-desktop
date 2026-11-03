@@ -115,7 +115,7 @@ pub(crate) fn is_video_url(url: &str) -> bool {
 #[derive(Clone)]
 pub enum MediaAsset {
     Picture { url: String },
-    Video { url: String, poster: Option<String>, mime: Option<String> },
+    Video { url: String, poster: Option<String>, blurhash: Option<String>, mime: Option<String> },
 }
 impl MediaAsset {
     fn url(&self) -> &str {
@@ -165,7 +165,12 @@ pub fn media_assets(ev: &Event) -> Vec<MediaAsset> {
         let video = m.mime.as_deref().is_some_and(|m| m.starts_with("video/"))
             || is_video_url(&m.url);
         out.push(if video {
-            MediaAsset::Video { url: m.url, poster: m.poster, mime: m.mime.clone() }
+            MediaAsset::Video {
+                url: m.url,
+                poster: m.poster,
+                blurhash: m.blurhash,
+                mime: m.mime.clone(),
+            }
         } else {
             MediaAsset::Picture { url: m.url }
         });
@@ -173,9 +178,14 @@ pub fn media_assets(ev: &Event) -> Vec<MediaAsset> {
     for para in ev.content.split('\n') {
         if let Some(Seg::Link(url)) = standalone(para) {
             let asset = if let Some(thumb) = youtube_thumb(&url) {
-                MediaAsset::Video { url: url.clone(), poster: Some(thumb), mime: None }
+                MediaAsset::Video {
+                    url: url.clone(),
+                    poster: Some(thumb),
+                    blurhash: None,
+                    mime: None,
+                }
             } else if is_video_url(&url) {
-                MediaAsset::Video { url: url.clone(), poster: None, mime: None }
+                MediaAsset::Video { url: url.clone(), poster: None, blurhash: None, mime: None }
             } else if is_image_url(&url) || path_ext(&url).is_none() {
                 MediaAsset::Picture { url: url.clone() }
             } else {
@@ -189,15 +199,34 @@ pub fn media_assets(ev: &Event) -> Vec<MediaAsset> {
     out
 }
 
-/// Every url worth fetching for this event: the pictures plus video posters
-/// (NIP-92 `image` attrs, YouTube thumbnails). Video files themselves are
-/// never fetched — the tile opens the browser.
+/// Every url worth fetching for this event: the pictures plus, per video,
+/// the first preview source that applies — the publisher's poster, else a
+/// blurhash decode (virtual key, no network), else a first-frame sniff
+/// (virtual key; the video FILE is never fetched, only a capped head).
+/// Strict Tor keeps the sniff off entirely (the facade rule): the tile
+/// stays bare. A cache may still hold a sniff from before the switch —
+/// painting already-fetched bytes breaks no new ground.
 pub fn media_urls(ev: &Event) -> Vec<String> {
     media_assets(ev)
         .into_iter()
-        .filter_map(|a| match a {
-            MediaAsset::Picture { url } => Some(url),
-            MediaAsset::Video { poster, .. } => poster,
+        .flat_map(|a| match a {
+            MediaAsset::Picture { url } => vec![url],
+            MediaAsset::Video { url, poster, blurhash, mime } => match poster {
+                Some(p) => vec![p],
+                None => match blurhash {
+                    Some(h) => vec![crate::poster::blurhash_key(&h)],
+                    None => {
+                        // inline_able already refuses the facade (strict
+                        // Tor) and YouTube pages (the sniffer would fetch
+                        // a web page for nothing) — no sniff for either.
+                        if !crate::video::inline_able(&url, mime.as_deref()) {
+                            vec![]
+                        } else {
+                            vec![crate::poster::poster_key(&url)]
+                        }
+                    }
+                },
+            },
         })
         .collect()
 }
@@ -219,7 +248,10 @@ pub fn media_urls_cached(ev: &Event) -> std::sync::Arc<[String]> {
             order: std::collections::VecDeque::new(),
         })
     });
-    let key = ev.id.to_string();
+    let strict = crate::prefs::privacy_mode() == satori_core::privacy::PrivacyMode::Strict;
+    // The mode rides the key: a strict-Tor switch must not keep emitting
+    // the pre-switch sniffs for memoized events (and back).
+    let key = format!("{strict}#{}", ev.id);
     let mut memo = memo.lock().unwrap();
     if let Some(hit) = memo.map.get(&key) {
         return hit.clone();
@@ -635,6 +667,7 @@ pub(crate) fn link_row(url: &str) -> AnyElement {
 fn video_tile(
     url: &str,
     poster: Option<&str>,
+    blurhash: Option<&str>,
     mime: Option<&str>,
     w: Option<f32>,
     h: f32,
@@ -767,7 +800,14 @@ fn video_tile(
             cx.stop_propagation();
             crate::video::open(url_for_open.clone(), mime_for_open.clone(), cx);
         });
-    match poster.and_then(|p| ctx.media.png(p)) {
+    // The preview ladder (D32): the publisher's poster, a blurhash
+    // gradient, a locally sniffed first frame — any hit paints under the
+    // play mark; none means the quiet bare row.
+    let shown = poster
+        .and_then(|p| ctx.media.png(p))
+        .or_else(|| blurhash.and_then(|b| ctx.media.png(&crate::poster::blurhash_key(b))))
+        .or_else(|| ctx.media.png(&crate::poster::poster_key(url)));
+    match shown {
         Some(png) => frame
             .child(
                 div()
@@ -852,8 +892,16 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
         // until the aspect arrives with the bytes).
         let width = COL_W - 32.0;
         let height = |url: &str, poster: Option<&str>, provisional: f32| {
-            let aspect =
-                dim_or(ctx.media, poster.unwrap_or(url), dims.get(url).copied().flatten());
+            // The imeta dim (describes the video) first, then the poster's
+            // landed size, then the sniffed frame's (same key the tile
+            // paints) — the provisional box wears otherwise.
+            let aspect = dims
+                .get(url)
+                .copied()
+                .flatten()
+                .filter(|(w, _)| *w > 0)
+                .or_else(|| poster.and_then(|p| ctx.media.size(p)))
+                .or_else(|| ctx.media.size(&crate::poster::poster_key(url)));
             aspect.map_or(provisional, |(w, h)| {
                 if w > 0 {
                     (width * h as f32 / w as f32).clamp(80.0, 560.0)
@@ -873,9 +921,10 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
                 handle,
             )
             .into_any_element(),
-            MediaAsset::Video { url, poster, mime } => video_tile(
+            MediaAsset::Video { url, poster, blurhash, mime } => video_tile(
                 url,
                 poster.as_deref(),
+                blurhash.as_deref(),
                 mime.as_deref(),
                 None,
                 height(url, poster.as_deref(), 360.0),
@@ -907,15 +956,17 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
                 ));
                 pic_idx += 1;
             }
-            MediaAsset::Video { url, poster, mime } => {
-                // The imeta dim describes the video itself; the poster (when
-                // there is one) shares its aspect.
+            MediaAsset::Video { url, poster, blurhash, mime } => {
+                // The imeta dim describes the video itself; the poster
+                // (when there is one) shares its aspect, as does the
+                // sniffed frame.
                 let aspect = dims
                     .get(&url)
                     .copied()
                     .flatten()
                     .filter(|d| d.0 > 0)
-                    .or_else(|| poster.as_deref().and_then(|p| ctx.media.size(p)));
+                    .or_else(|| poster.as_deref().and_then(|p| ctx.media.size(p)))
+                    .or_else(|| ctx.media.size(&crate::poster::poster_key(&url)));
                 let height = aspect.map_or(480.0, |(w, h)| {
                     if w > 0 {
                         (560.0 * h as f32 / w as f32).clamp(240.0, 480.0)
@@ -926,6 +977,7 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
                 strip = strip.child(video_tile(
                     &url,
                     poster.as_deref(),
+                    blurhash.as_deref(),
                     mime.as_deref(),
                     Some(560.0),
                     height,

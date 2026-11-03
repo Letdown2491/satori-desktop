@@ -47,7 +47,9 @@ jobs:
             libxkbcommon-x11-dev \
             libwayland-dev \
             libxcb1-dev \
-            libvulkan-dev
+            libvulkan-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
 
       - name: Build the release binary
         run: cargo build --release --locked -p satori-gpui
@@ -103,7 +105,7 @@ jobs:
           sudo apt-get install -y flatpak podman file librsvg2-common
           sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev \
-            libvulkan-dev
+            libvulkan-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
       - name: Build the release binary
         run: cargo build --release --locked -p satori-gpui

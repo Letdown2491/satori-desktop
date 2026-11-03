@@ -86,6 +86,12 @@ zbus = { version = "5", default-features = false, features = ["blocking", "tokio
 # Inline video playback (Phase 3): GStreamer-backed, click-to-play cards.
 # Needs system GStreamer 1.14+ at build (dev libs) and run (plugins).
 gpui-video-player = "0.1.3"
+# Poster previews (D32): the first-frame sniff builds its own decodebin
+# pipeline beside gpui-video-player's playbin — same gstreamer bindings,
+# shared sys. blurhash decodes NIP-92's `blurhash` attr to a placeholder.
+gstreamer = "0.25"
+gstreamer-app = "0.25"
+blurhash = "0.2"
 url = { workspace = true }
 # malloc_trim: glibc arenas retain freed heap (35 threads of arenas); the
 # trim timer hands it back to the OS on a slow clock (main.rs).

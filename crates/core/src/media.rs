@@ -307,6 +307,44 @@ pub fn purge_legacy_cache() {
     }
 }
 
+/// Head bytes of a video URL, for the UI's local poster sniff: the same
+/// SSRF-guarded, backed-off, capped fetch as `fetch_image`, at the sniffer's
+/// own (smaller) cap. The bytes are a partial media file BY DESIGN — they
+/// validate as nothing and so never touch the image cache; only the sniffed
+/// frame (`poster_store`) earns a cache slot.
+pub async fn fetch_video_head(url: &str, cap: usize) -> Result<Vec<u8>, MediaError> {
+    if !is_safe_media_url(url) {
+        return Err(MediaError::NotMedia);
+    }
+    fetch_capped(url, cap).await
+}
+
+/// A sniffed poster's cache key: namespaced apart from `fetch_image`
+/// content (`poster\0…` hashes differently) so a partial-file decode can
+/// never collide with a whole-file one.
+fn poster_key(url: &str) -> String {
+    cache_key(&format!("poster\x00{url}"))
+}
+
+/// The cached poster frame for `url`, when one was sniffed before (raw
+/// PNG bytes — the caller decodes through the ordinary image path).
+pub async fn poster_cached(url: &str) -> Option<Vec<u8>> {
+    read_cache_off_rt(cache_path(&poster_key(url)))
+        .await
+        .ok()
+}
+
+/// Store a sniffed poster (a PNG the sniffer encoded — valid by
+/// construction). Rides the ordinary cache trim: posters are a few tens
+/// of KB and re-derivable, so they age out like any other media.
+pub async fn poster_store(url: &str, png: &[u8]) {
+    let path = cache_path(&poster_key(url));
+    let png = png.to_vec();
+    tokio::task::spawn_blocking(move || write_cache(&path, &png))
+        .await
+        .ok();
+}
+
 pub fn cache_key(url: &str) -> String {
     let mut h = Sha256::new();
     h.update(url.as_bytes());
