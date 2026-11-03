@@ -510,6 +510,7 @@ fn with_punct(el: impl IntoElement, punct: &str) -> AnyElement {
 /// Also the profile page's about block (profile.rs `about_flow`).
 pub(crate) fn word_flow<V: EventEmitter<Nav> + 'static>(
     para: &str,
+    skip: &[String],
     ctx: &Body,
     handle: &Entity<V>,
 ) -> Div {
@@ -519,7 +520,16 @@ pub(crate) fn word_flow<V: EventEmitter<Nav> + 'static>(
         if core.is_empty() {
             continue;
         }
-        flow = flow.child(token_el(classify_token(core), punct, n, ctx, handle));
+        let tok = classify_token(core);
+        // NIP-92 (content.ts applyImetaMime parity): a media asset's URL is
+        // painted by the media section — the text flow drops the duplicate
+        // link.
+        if let Tok::Url(u) = &tok
+            && skip.contains(u)
+        {
+            continue;
+        }
+        flow = flow.child(token_el(tok, punct, n, ctx, handle));
     }
     flow
 }
@@ -540,6 +550,10 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
         .map(|m| (m.url.clone(), m.dim))
         .collect();
     let murls = media_urls(ev);
+    // Computed once: the media section below renders these, and the text
+    // flow skips their URLs (a media URL never renders twice).
+    let assets = media_assets(ev);
+    let media_links: Vec<String> = assets.iter().map(|a| a.url().to_string()).collect();
 
     // Paragraph rhythm follows the TS renderer's pre-wrap semantics
     // (TODO(port): src/render/content.ts — `.content` is pre-wrap): a single
@@ -599,7 +613,7 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
                     .into_any_element();
                 run.push(el);
             }
-            None => run.push(word_flow(para, ctx, &handle).into_any_element()),
+            None => run.push(word_flow(para, &media_links, ctx, &handle).into_any_element()),
         };
     }
     body = push_block(body, &mut run);
@@ -608,7 +622,7 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
     // item full-width by its aspect, several as a horizontal strip; picture
     // tiles open the lightbox, video tiles open the browser.
     if !murls.is_empty()
-        && let Some(section) = media_section(&media_assets(ev), &dims, ctx, &handle)
+        && let Some(section) = media_section(&assets, &dims, ctx, &handle)
     {
         body = body.child(section);
     }
@@ -1209,4 +1223,30 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
                 .child(body(ev, &ctx, handle)),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::prelude::*;
+
+    /// An extension-less blossom URL alone on a line classifies as a
+    /// picture (the byte-sniff fallback path), so the gallery section
+    /// claims it instead of the text flow.
+    #[test]
+    fn standalone_blossom_link_classifies_as_picture() {
+        let keys = Keys::generate();
+        let unsigned = UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::from_secs(1),
+            Kind::TextNote,
+            [],
+            "nostr:npub1fa05cayzx9xze32d2nhxnp7vhf42mkvpf9zr8xa9keq35tlrps5q7k0z97\nhttps://logen.btcforplebs.com/584dbd0e64cf17d19e4838c10ec22482495e61b52705029a263b8f85168f9048",
+        );
+        let ev = keys.sign_event(unsigned).unwrap();
+        let assets = media_assets(&ev);
+        let urls: Vec<&str> = assets.iter().map(|a| a.url()).collect();
+        assert_eq!(urls, vec!["https://logen.btcforplebs.com/584dbd0e64cf17d19e4838c10ec22482495e61b52705029a263b8f85168f9048"]);
+        assert!(matches!(assets[0], MediaAsset::Picture { .. }));
+    }
 }

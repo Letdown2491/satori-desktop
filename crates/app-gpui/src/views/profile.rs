@@ -906,7 +906,7 @@ fn thumb_tile(
 fn about_flow(text: &str, ctx: &content::Body, handle: &Entity<ProfileView>) -> Div {
     let mut flow = div().w_full().flex().flex_col().gap_1();
     for para in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        flow = flow.child(content::word_flow(para, ctx, handle));
+        flow = flow.child(content::word_flow(para, &[], ctx, handle));
     }
     flow
 }

@@ -258,3 +258,19 @@ fn encode_png(img: &image::RgbImage, w: u32, h: u32) -> Result<(u32, u32, Vec<u8
         .map_err(|_| ())?;
     Ok((w, h, png))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The real blurhash from a live NIP-92 video note ("Me, using the new
+    /// Amethyst.") — 94 chars, decodes to a 48x27 gradient.
+    #[test]
+    fn real_world_blurhash_decodes() {
+        let img = blurhash_png(
+            "]B8ZD.rUb^$+axv0kXs;bwjY7$O]tTJ,of-Wg1T0kEWA-Q%LXTwJjYPqjvwHXRs.e7XAo$NdX9pymiRiohV?x^TzbXr=sn",
+        )
+        .expect("a valid blurhash decodes");
+        assert_eq!((img.width(), img.height()), (48, 27));
+    }
+}
