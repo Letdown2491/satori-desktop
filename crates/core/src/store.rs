@@ -269,6 +269,13 @@ impl Store {
         Ok(self.query(filter).await?.into_iter().next())
     }
 
+    /// EVERY event of one kind by one author (NIP-51 named lists: one
+    /// replaceable event per d — the set of lists, not a latest).
+    pub async fn all_by_kind(&self, author: PublicKey, kind: Kind) -> NostrResult<Vec<Event>> {
+        let filter = Filter::new().kind(kind).author(author);
+        Ok(self.query(filter).await?.into_iter().collect())
+    }
+
     /// The newest kind-1 note across the follows - the refresh 'since'
     /// probe and the quiet-dot poll's answer. The naive probe (a page over
     /// ALL visible kinds) materialized one event per author-kind pair -

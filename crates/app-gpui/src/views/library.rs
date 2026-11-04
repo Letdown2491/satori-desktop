@@ -4,13 +4,13 @@
 //! an embedded Feed so the rows ARE the feed's rows. Drafts (synced
 //! encrypted, NIP-78) and Lists (NIP-51) land in their own slices.
 
-use gpui::{div, prelude::*, px, rgb, AnyElement, Context, Entity, EventEmitter, Render,
-           SharedString, Window};
+use gpui::{div, prelude::*, px, rgb, AnyElement, Context, Entity, EventEmitter, FontWeight,
+           Render, SharedString, Window};
 use nostr::prelude::*;
-use std::sync::Arc;
-use satori_core::manager::{Core, DraftEntry};
+use std::{collections::HashMap, sync::Arc};
+use satori_core::manager::{Core, DraftEntry, FeedEvent, FeedRx, NostrList, Profile};
 
-use crate::theme;
+use crate::{media, theme};
 use super::{content, feed::Feed, nav::Nav};
 
 pub(crate) struct LibraryView {
@@ -18,6 +18,15 @@ pub(crate) struct LibraryView {
     tab: LibTab,
     /// The Bookmarks tab's rows — a full Feed in Bookmarks mode.
     bookmarks: Entity<Feed>,
+    /// The Lists tab (D38): the own NIP-51 named lists, loaded once on the
+    /// tab's first open (a one-shot store query — own list events arrive
+    /// with the startup deep fetch).
+    lists: Vec<NostrList>,
+    lists_loaded: bool,
+    /// The open list's detail (in-tab second level): the list + its
+    /// members' resolved profiles.
+    open_list: Option<NostrList>,
+    members: HashMap<String, Profile>,
     /// Mirror of the child feed's deep-scroll state (profile.rs's pattern —
     /// the shell reads the pane view's field for the back-to-top whisper).
     pub(crate) deep: bool,
@@ -49,6 +58,10 @@ impl LibraryView {
             core,
             tab: LibTab::Bookmarks,
             bookmarks,
+            lists: Vec::new(),
+            lists_loaded: false,
+            open_list: None,
+            members: HashMap::new(),
             deep: false,
         }
     }
@@ -58,6 +71,146 @@ impl LibraryView {
     pub fn scroll_top(&mut self, cx: &mut Context<Self>) {
         self.deep = false;
         self.bookmarks.update(cx, |feed, _| feed.scroll_top());
+    }
+
+    /// First Lists tab open (D38): the one-shot own-lists query.
+    fn load_lists(&mut self, cx: &mut Context<Self>) {
+        self.lists_loaded = true;
+        let mut rx = self.core.own_lists();
+        cx.spawn(async move |this, cx| {
+            if let Some(lists) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| {
+                    this.lists = lists;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Open a list's detail: the members resolve reactively (search.rs's
+    /// person rows — ensure_profiles pumps Profiles batches).
+    fn open_list(&mut self, l: NostrList, cx: &mut Context<Self>) {
+        if self.open_list.as_ref().is_some_and(|o| o.d == l.d) {
+            return;
+        }
+        self.open_list = Some(l.clone());
+        let mut rx: FeedRx = self.core.ensure_profiles(l.members.clone());
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                if let FeedEvent::Profiles(ps) = ev {
+                    let _ = this.update(cx, |this, cx| {
+                        for p in ps {
+                            this.members.insert(p.pubkey.clone(), p);
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// One list row: the display name, the member count, a chevron.
+    fn list_row(&self, i: usize, l: &NostrList, cx: &mut Context<Self>) -> AnyElement {
+        let count = l.members.len();
+        let tap = l.clone();
+        div()
+            .id(SharedString::from(format!("list-{i}")))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .py_1p5()
+            .px_4()
+            .border_b_1()
+            .border_color(rgb(theme::hairline()))
+            .hover(|s| s.bg(rgb(theme::panel())))
+            .on_click(cx.listener(move |this, _, _, cx| this.open_list(tap.clone(), cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(13.5))
+                    .text_color(rgb(theme::ink()))
+                    .text_ellipsis()
+                    .child(l.display().to_string()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.5))
+                    .text_color(rgb(theme::muted()))
+                    .child(if count == 1 {
+                        "1 person".to_string()
+                    } else {
+                        format!("{count} people")
+                    }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(12.))
+                    .text_color(rgb(theme::muted()))
+                    .child("›"),
+            )
+            .into_any_element()
+    }
+
+    /// One member row (search.rs's person rows): avatar, name, NIP-05 — a
+    /// profile link.
+    fn member_row(
+        &self,
+        i: usize,
+        media: &media::Snapshot,
+        pk: &PublicKey,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let hex = pk.to_string();
+        let p = self.members.get(&hex);
+        let (name, picture, nip05) = match p {
+            Some(p) => (
+                p.display(),
+                p.picture.clone(),
+                p.nip05.clone(),
+            ),
+            None => (hex.clone(), String::new(), String::new()),
+        };
+        let who = *pk;
+        div()
+            .id(SharedString::from(format!("member-{i}")))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .py_1p5()
+            .px_4()
+            .cursor_pointer()
+            .border_b_1()
+            .border_color(rgb(theme::hairline()))
+            .hover(|s| s.bg(rgb(theme::panel())))
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(Nav::OpenProfile(who))))
+            .child(media::avatar(media, &picture, &name, 26.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(13.5))
+                    .text_color(rgb(theme::ink()))
+                    .text_ellipsis()
+                    .child(name),
+            )
+            .when(!nip05.is_empty(), |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(12.0))
+                        .text_color(rgb(theme::muted()))
+                        .child(nip05),
+                )
+            })
+            .into_any_element()
     }
 
     /// Tap a synced draft (D38): spend the slot now (the composer's close
@@ -189,6 +342,12 @@ impl LibraryView {
                 if view.tab != which {
                     view.tab = which;
                     view.deep = false;
+                    // Leaving the detail behind — tabs are flat surfaces.
+                    view.open_list = None;
+                    // First Lists open: the one-shot own-lists query.
+                    if which == LibTab::Lists && !view.lists_loaded {
+                        view.load_lists(cx);
+                    }
                     cx.notify();
                 }
             }))
@@ -259,11 +418,118 @@ impl Render for LibraryView {
                             .into_any_element()
                     }
                 }
-                LibTab::Lists => placeholder(
-                    "Lists",
-                    "Your NIP-51 lists will live here — not yet.",
-                ),
+                // The Lists tab (D38): the own NIP-51 named lists
+                // (kind 30000), read-only — the detail is an in-tab second
+                // level, the member rows are profile links (search.rs's).
+                LibTab::Lists => match self.open_list.clone() {
+                    None => {
+                        let lists = self.lists.clone();
+                        if lists.is_empty() {
+                            placeholder(
+                                "Lists",
+                                "Your NIP-51 lists will show here — none in the store yet.",
+                            )
+                        } else {
+                            div()
+                                .id("lists-list")
+                                .w_full()
+                                .h_full()
+                                .max_w(px(content::COL_W))
+                                .flex()
+                                .flex_col()
+                                .overflow_y_scroll()
+                                .children(
+                                    lists
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, l)| self.list_row(i, l, cx)),
+                                )
+                                .into_any_element()
+                        }
+                    }
+                    Some(l) => self.list_detail(&l, cx),
+                },
             })
+    }
+}
+
+impl LibraryView {
+    /// A list's members: a back row, the list's name + count, the people
+    /// (search.rs's person rows — avatars re-fetch on render, evicted
+    /// entries come back silently).
+    fn list_detail(&mut self, l: &NostrList, cx: &mut Context<Self>) -> AnyElement {
+        let media = media::Snapshot::new(cx);
+        let viewer = cx.entity_id();
+        for p in self.members.values() {
+            media::fetch(&self.core, p.picture.clone(), viewer, cx);
+        }
+        let name = l.display().to_string();
+        let count = l.members.len();
+        div()
+            .id("list-detail")
+            .w_full()
+            .h_full()
+            .max_w(px(content::COL_W))
+            .flex()
+            .flex_col()
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .id("lists-back")
+                    .cursor_pointer()
+                    .px_4()
+                    .py_2()
+                    .text_size(px(12.5))
+                    .text_color(rgb(theme::muted()))
+                    .hover(|s| s.text_color(rgb(theme::ink())))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.open_list = None;
+                        cx.notify();
+                    }))
+                    .child("‹ All lists"),
+            )
+            .child(
+                div()
+                    .px_4()
+                    .pb_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(theme::ink()))
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(theme::muted()))
+                            .child(if count == 1 {
+                                "1 person".to_string()
+                            } else {
+                                format!("{count} people")
+                            }),
+                    ),
+            )
+            .when(count == 0, |d| {
+                d.child(
+                    div()
+                        .px_4()
+                        .py_4()
+                        .text_size(px(12.5))
+                        .text_color(rgb(theme::muted()))
+                        .child("Nobody in this list yet."),
+                )
+            })
+            .children(
+                l.members
+                    .iter()
+                    .enumerate()
+                    .map(|(i, pk)| self.member_row(i, &media, pk, cx)),
+            )
+            .into_any_element()
     }
 }
 

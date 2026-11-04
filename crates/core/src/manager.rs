@@ -5158,6 +5158,88 @@ impl DraftEntry {
     }
 }
 
+/// One NIP-51 named list (kind 30000, D38's Lists tab): the d tag IS the
+/// list's identifier (its name unless a title tag rides along); the p tags
+/// are the members. People lists only in v1 — e/a members are skipped at
+/// parse. Read-only surface: lists are MADE in other clients today; Satori
+/// shows the user's own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NostrList {
+    pub d: String,
+    pub title: Option<String>,
+    pub members: Vec<PublicKey>,
+}
+
+impl NostrList {
+    /// The display name: a title tag beats the d identifier.
+    pub fn display(&self) -> &str {
+        match &self.title {
+            Some(t) if !t.trim().is_empty() => t,
+            _ => &self.d,
+        }
+    }
+
+    /// Parse one kind 30000 event: the d, an optional title, the p-tag
+    /// pubkeys (malformed ones skipped).
+    pub fn from_event(ev: &Event) -> Option<Self> {
+        let mut d = String::new();
+        let mut title = None;
+        let mut members = Vec::new();
+        for tag in ev.tags.clone().to_vec() {
+            match tag.kind() {
+                "d" => d = tag.content().unwrap_or_default().to_string(),
+                "title" => title = Some(tag.content().unwrap_or_default().to_string()),
+                "p" => {
+                    if let Some(pk) = tag.content().and_then(|c| c.parse::<PublicKey>().ok()) {
+                        members.push(pk);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // NIP-51: a named list MUST carry a d; dedupe members preserving
+        // order (a list event can repeat a p tag across edits — not always
+        // adjacent).
+        if d.is_empty() {
+            return None;
+        }
+        let mut seen = std::collections::HashSet::new();
+        members.retain(|pk| seen.insert(pk.to_string()));
+        Some(Self { d, title, members })
+    }
+}
+
+impl Core {
+    /// The own NIP-51 named lists (kind 30000) from the store (D38's Lists
+    /// tab). One shot: own list events arrive with the startup deep fetch
+    /// (the D36 write-set coordinate-keys 30000-39999) and echo back from
+    /// publishes; there is nothing to page. Sorted by display name.
+    pub fn own_lists(self: &Arc<Self>) -> tokio::sync::mpsc::UnboundedReceiver<Vec<NostrList>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let lists = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let mut lists: Vec<NostrList> = active
+                    .pool
+                    .store
+                    .all_by_kind(me, Kind::Custom(30000))
+                    .await
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(NostrList::from_event)
+                    .collect();
+                lists.sort_by_key(|l| l.display().to_lowercase());
+                Ok::<Vec<NostrList>, LoginError>(lists)
+            }
+            .await;
+            let _ = tx.send(lists.unwrap_or_default());
+        });
+        rx
+    }
+}
+
 /// A profile edit (D38): each field maps to a kind:0 content key. None =
 /// leave the stored value; Some("") = clear the key; Some(s) = set it.
 /// Ported from the TS reference's edit form (routes/profile.ts — git
