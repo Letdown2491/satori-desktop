@@ -5399,6 +5399,10 @@ pub struct NostrList {
     pub d: String,
     pub title: Option<String>,
     pub members: Vec<PublicKey>,
+    /// The source event (v1.2): a private list's members live encrypted
+    /// in its content — the detail view decrypts them LAZILY (per open),
+    /// the rows never wait on crypto.
+    pub event: Event,
 }
 
 /// Minimal percent-decoding (%XX hex pairs) for display: list ds
@@ -5460,7 +5464,12 @@ impl NostrList {
         }
         let mut seen = std::collections::HashSet::new();
         members.retain(|pk| seen.insert(pk.to_string()));
-        Some(Self { d, title, members })
+        Some(Self {
+            d,
+            title,
+            members,
+            event: ev.clone(),
+        })
     }
 }
 
@@ -5525,7 +5534,8 @@ impl Core {
     }
 
     /// The store's own list events, collapsed to newest per (kind, d),
-    /// members decrypted, display-sorted (own_lists' read side).
+    /// display-sorted (own_lists' read side). Members stay undecrypted —
+    /// the detail view decrypts them lazily (v1.3).
     async fn lists_from_store(active: &Active, me: PublicKey) -> Vec<NostrList> {
         // (kind, d) is the replaceable coordinate; a plain d key would
         // collide 30000 and 30001 sets.
@@ -5561,32 +5571,56 @@ impl Core {
         }
         let mut lists: Vec<NostrList> = Vec::new();
         for ev in newest.values() {
-            let Some(mut l) = NostrList::from_event(ev) else {
-                continue;
-            };
-            // A private list's items are encrypted (NIP-51: the content
-            // is nip44-to-self of the tag array) — the plain p-tags are
-            // gone, so decrypt for the members.
-            if l.members.is_empty()
-                && !ev.content.is_empty()
-                && let Ok(plain) = active
-                    .signer
-                    .nip44_decrypt_self(&me, ev.content.as_str())
-                    .await
-                && let Ok(tags) = serde_json::from_str::<Vec<Vec<String>>>(&plain)
-            {
-                for tag in tags {
-                    if tag.first().map(String::as_str) == Some("p")
-                        && let Some(pk) = tag.get(1).and_then(|c| c.parse::<PublicKey>().ok())
-                    {
-                        l.members.push(pk);
-                    }
-                }
+            // No decryption here (v1.2): rows paint from plain tags only;
+            // a private list's members decrypt lazily in the detail view
+            // (decrypt_list_members) — 78 serial decrypts blocked the
+            // snapshot and the tab crawled.
+            if let Some(l) = NostrList::from_event(ev) {
+                lists.push(l);
             }
-            lists.push(l);
         }
         lists.sort_by_key(|l| l.display().to_lowercase());
         lists
+    }
+
+    /// A private list's members (NIP-51: the content is nip44-to-self of
+    /// the tag array). The detail view's lazy path — called per open, so
+    /// the Library rows never wait on crypto. Empty when the content is
+    /// empty or undecryptable.
+    pub fn decrypt_list_members(
+        self: &Arc<Self>,
+        ev: Event,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<Vec<PublicKey>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let members = async {
+                if ev.content.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let active = this.active().await?;
+                let me = active.me();
+                let plain = active
+                    .signer
+                    .nip44_decrypt_self(&me, ev.content.as_str())
+                    .await?;
+                let mut members = Vec::new();
+                if let Ok(tags) = serde_json::from_str::<Vec<Vec<String>>>(&plain) {
+                    for tag in tags {
+                        if tag.first().map(String::as_str) == Some("p")
+                            && let Some(pk) =
+                                tag.get(1).and_then(|c| c.parse::<PublicKey>().ok())
+                        {
+                            members.push(pk);
+                        }
+                    }
+                }
+                Ok::<Vec<PublicKey>, LoginError>(members)
+            }
+            .await;
+            let _ = tx.send(members.unwrap_or_default());
+        });
+        rx
     }
 }
 

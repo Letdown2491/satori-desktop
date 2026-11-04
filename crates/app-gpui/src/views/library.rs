@@ -88,7 +88,9 @@ impl LibraryView {
     }
 
     /// Open a list's detail: the members resolve reactively (search.rs's
-    /// person rows — ensure_profiles pumps Profiles batches).
+    /// person rows — ensure_profiles pumps Profiles batches). A private
+    /// list's members decrypt here, lazily (v1.2) — the rows never wait
+    /// on crypto.
     fn open_list(&mut self, l: NostrList, cx: &mut Context<Self>) {
         if self.open_list.as_ref().is_some_and(|o| o.d == l.d) {
             return;
@@ -108,6 +110,41 @@ impl LibraryView {
             }
         })
         .detach();
+        // The lazy decrypt (v1.2): a private list's p-tags live in the
+        // encrypted content — one decrypt per OPEN, the members row in
+        // when it lands.
+        if l.members.is_empty() && !l.event.content.is_empty() {
+            let mut rx = self.core.decrypt_list_members(l.event.clone());
+            cx.spawn(async move |this, cx| {
+                let decrypted = rx.recv().await.unwrap_or_default();
+                let _ = this.update(cx, |this, cx| {
+                    if decrypted.is_empty() {
+                        return;
+                    }
+                    let mut rx = this.core.ensure_profiles(decrypted.clone());
+                    // Feed the batch pump on this spawn; the detail shows
+                    // the people as their profiles resolve.
+                    cx.spawn(async move |this, cx| {
+                        while let Some(ev) = rx.recv().await {
+                            if let FeedEvent::Profiles(ps) = ev {
+                                let _ = this.update(cx, |this, cx| {
+                                    for p in ps {
+                                        this.members.insert(p.pubkey.clone(), p);
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    })
+                    .detach();
+                    if let Some(o) = this.open_list.as_mut() {
+                        o.members.extend(decrypted);
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -136,17 +173,21 @@ impl LibraryView {
                     .text_ellipsis()
                     .child(l.display()),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(11.5))
-                    .text_color(rgb(theme::muted()))
-                    .child(if count == 1 {
-                        "1 person".to_string()
-                    } else {
-                        format!("{count} people")
-                    }),
-            )
+            // The count hides when 0: a private list's members are
+            // unknown until the detail's lazy decrypt runs.
+            .when(count > 0, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.5))
+                        .text_color(rgb(theme::muted()))
+                        .child(if count == 1 {
+                            "1 person".to_string()
+                        } else {
+                            format!("{count} people")
+                        }),
+                )
+            })
             .child(
                 div()
                     .flex_none()
