@@ -70,13 +70,14 @@ impl LibraryView {
         self.bookmarks.update(cx, |feed, _| feed.scroll_top());
     }
 
-    /// A Lists tab visit (D38 v1.1: EVERY visit, not just the first —
+    /// A Lists tab visit (D38 v1.2: EVERY visit, not just the first —
     /// the one-shot query raced the SDK's saves and pinned the empty
-    /// placeholder). The fresh result replaces whatever showed.
+    /// placeholder). Two deliveries apply: the instant store snapshot,
+    /// then the post-fetch merge.
     fn load_lists(&mut self, cx: &mut Context<Self>) {
         let mut rx = self.core.own_lists();
         cx.spawn(async move |this, cx| {
-            if let Some(lists) = rx.recv().await {
+            while let Some(lists) = rx.recv().await {
                 let _ = this.update(cx, |this, cx| {
                     this.lists = lists;
                     cx.notify();

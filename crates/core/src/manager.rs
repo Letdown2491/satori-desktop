@@ -5455,18 +5455,27 @@ impl Core {
     /// plus kind 30001 (categorized people/bookmark sets — Primal's
     /// "custom sets" live there), EXCEPT the 30001 d="bookmark" — that
     /// one IS the public bookmarks list and shows in the Bookmarks tab.
-    /// The relay round first — before D38 v1.1 nothing ever fetched own
-    /// list events — with the fetched events SAVED EXPLICITLY before the
-    /// store read: the one-shot fetch's SDK-side saves are async and can
-    /// still be landing when the read runs (v1.1's empty-tab race), a
-    /// save is deterministic. Newest event per (kind, d) wins
-    /// (parameterized replaceable); a private list's members (encrypted
-    /// tag-JSON content, Bloom's folders) decrypt to-self. Sorted by
-    /// display name.
+    /// TWO deliveries: a store-only snapshot first (the tab paints
+    /// instantly — the relay round never gates the rows), then the
+    /// merged fresh one. The relay round saves every fetched event
+    /// EXPLICITLY before the read: the one-shot fetch's SDK-side saves
+    /// are async and can still be landing when the read runs (v1.2's
+    /// empty-tab race). Newest event per (kind, d) wins (parameterized
+    /// replaceable); a private list's members (encrypted tag-JSON
+    /// content, Bloom's folders) decrypt to-self. Sorted by display
+    /// name.
     pub fn own_lists(self: &Arc<Self>) -> tokio::sync::mpsc::UnboundedReceiver<Vec<NostrList>> {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
+            // Snapshot 1: whatever the store holds right now.
+            if let Ok(active) = this.active().await {
+                let me = active.me();
+                let snapshot = Self::lists_from_store(&active, me).await;
+                eprintln!("[core] own_lists: store snapshot: {} list(s)", snapshot.len());
+                let _ = tx.send(snapshot);
+            }
+            // Snapshot 2: after the relay round + explicit saves.
             let lists = async {
                 let active = this.active().await?;
                 let me = active.me();
@@ -5476,75 +5485,87 @@ impl Core {
                         .kind(Kind::Custom(kind))
                         .limit(200);
                     let fetched = active.pool.get(filter).await.unwrap_or_default();
+                    eprintln!(
+                        "[core] own_lists: kind {kind}: {} event(s) fetched",
+                        fetched.len()
+                    );
                     for ev in &fetched {
                         let _ = active.pool.store.save(ev).await;
                     }
                 }
-                // (kind, d) is the replaceable coordinate; a plain d key
-                // would collide 30000 and 30001 sets.
-                let mut newest: HashMap<(u16, String), Event> = HashMap::new();
-                for kind in [30000u16, 30001] {
-                    for ev in active
-                        .pool
-                        .store
-                        .all_by_kind(me, Kind::Custom(kind))
-                        .await
-                        .unwrap_or_default()
-                    {
-                        let Some(d) = ev
-                            .tags
-                            .clone()
-                            .to_vec()
-                            .iter()
-                            .find(|t| t.kind() == "d")
-                            .and_then(|t| t.content().map(str::to_string))
-                        else {
-                            continue;
-                        };
-                        if kind == 30001 && d == "bookmark" {
-                            continue;
-                        }
-                        match newest.get(&(kind, d.clone())) {
-                            Some(old) if old.created_at >= ev.created_at => {}
-                            _ => {
-                                newest.insert((kind, d), ev);
-                            }
-                        }
-                    }
-                }
-                let mut lists: Vec<NostrList> = Vec::new();
-                for ev in newest.values() {
-                    let Some(mut l) = NostrList::from_event(ev) else {
-                        continue;
-                    };
-                    // A private list's items are encrypted (NIP-51: the
-                    // content is nip44-to-self of the tag array) — the
-                    // plain p-tags are gone, so decrypt for the members.
-                    if l.members.is_empty()
-                        && !ev.content.is_empty()
-                        && let Ok(plain) = active
-                            .signer
-                            .nip44_decrypt_self(&me, ev.content.as_str())
-                            .await
-                        && let Ok(tags) = serde_json::from_str::<Vec<Vec<String>>>(&plain)
-                    {
-                        for tag in tags {
-                            if tag.first().map(String::as_str) == Some("p")
-                                && let Some(pk) =
-                                    tag.get(1).and_then(|c| c.parse::<PublicKey>().ok())
-                            {
-                                l.members.push(pk);
-                            }
-                        }
-                    }
-                    lists.push(l);
-                }
-                lists.sort_by_key(|l| l.display().to_lowercase());                Ok::<Vec<NostrList>, LoginError>(lists)
+                let merged = Self::lists_from_store(&active, me).await;
+                eprintln!("[core] own_lists: merged: {} list(s)", merged.len());
+                Ok::<Vec<NostrList>, LoginError>(merged)
             }
             .await;
             let _ = tx.send(lists.unwrap_or_default());
         });
         rx
+    }
+
+    /// The store's own list events, collapsed to newest per (kind, d),
+    /// members decrypted, display-sorted (own_lists' read side).
+    async fn lists_from_store(active: &Active, me: PublicKey) -> Vec<NostrList> {
+        // (kind, d) is the replaceable coordinate; a plain d key would
+        // collide 30000 and 30001 sets.
+        let mut newest: HashMap<(u16, String), Event> = HashMap::new();
+        for kind in [30000u16, 30001] {
+            for ev in active
+                .pool
+                .store
+                .all_by_kind(me, Kind::Custom(kind))
+                .await
+                .unwrap_or_default()
+            {
+                let Some(d) = ev
+                    .tags
+                    .clone()
+                    .to_vec()
+                    .iter()
+                    .find(|t| t.kind() == "d")
+                    .and_then(|t| t.content().map(str::to_string))
+                else {
+                    continue;
+                };
+                if kind == 30001 && d == "bookmark" {
+                    continue;
+                }
+                match newest.get(&(kind, d.clone())) {
+                    Some(old) if old.created_at >= ev.created_at => {}
+                    _ => {
+                        newest.insert((kind, d), ev);
+                    }
+                }
+            }
+        }
+        let mut lists: Vec<NostrList> = Vec::new();
+        for ev in newest.values() {
+            let Some(mut l) = NostrList::from_event(ev) else {
+                continue;
+            };
+            // A private list's items are encrypted (NIP-51: the content
+            // is nip44-to-self of the tag array) — the plain p-tags are
+            // gone, so decrypt for the members.
+            if l.members.is_empty()
+                && !ev.content.is_empty()
+                && let Ok(plain) = active
+                    .signer
+                    .nip44_decrypt_self(&me, ev.content.as_str())
+                    .await
+                && let Ok(tags) = serde_json::from_str::<Vec<Vec<String>>>(&plain)
+            {
+                for tag in tags {
+                    if tag.first().map(String::as_str) == Some("p")
+                        && let Some(pk) = tag.get(1).and_then(|c| c.parse::<PublicKey>().ok())
+                    {
+                        l.members.push(pk);
+                    }
+                }
+            }
+            lists.push(l);
+        }
+        lists.sort_by_key(|l| l.display().to_lowercase());
+        lists
     }
 }
 
