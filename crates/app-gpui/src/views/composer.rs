@@ -409,10 +409,11 @@ impl Composer {
             for (content_type, bytes) in &atts {
                 let mut rx = core.blossom_upload(bytes.clone(), content_type.clone());
                 let mut uploaded = false;
+                let mut imeta: Vec<String> = vec![];
                 while let Some(ev) = rx.recv().await {
                     match ev {
-                        PublishEvent::Uploaded { imeta, .. } => {
-                            imetas.push(imeta);
+                        PublishEvent::Uploaded { imeta: m, .. } => {
+                            imeta = m;
                             uploaded = true;
                             break;
                         }
@@ -435,6 +436,40 @@ impl Composer {
                     });
                     return;
                 }
+                // D38: a video carries its first frame as a second blob —
+                // the imeta gains `image` + `blurhash` so every client (and
+                // our own tile, which prefers the publisher's poster) paints
+                // it with no runtime sniff. The grab runs on the background
+                // pool (a GStreamer demux has no place on the UI thread);
+                // a failed grab or poster upload DEGRADES to the bare imeta
+                // — never blocks the post.
+                if content_type.starts_with("video/") {
+                    let grabbed = {
+                        let bytes = bytes.clone();
+                        cx.background_executor()
+                            .spawn(async move { crate::poster::grab(&bytes) })
+                            .await
+                    };
+                    if let Some((png, hash)) = grabbed {
+                        let mut rx = core.blossom_upload(png, "image/png".to_string());
+                        let mut poster_url: Option<String> = None;
+                        while let Some(ev) = rx.recv().await {
+                            match ev {
+                                PublishEvent::Uploaded { url, .. } => {
+                                    poster_url = Some(url);
+                                    break;
+                                }
+                                PublishEvent::Failed { .. } => break,
+                                _ => {}
+                            }
+                        }
+                        if let Some(poster_url) = poster_url {
+                            imeta.push(format!("image {poster_url}"));
+                            imeta.push(format!("blurhash {hash}"));
+                        }
+                    }
+                }
+                imetas.push(imeta);
             }
 
             // Publish: pictures when there are imetas, notes otherwise.

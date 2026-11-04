@@ -871,6 +871,12 @@ fn video_tile(
         }
     };
 
+    // D38: the preview panel is a fixed 16:9 — posters mostly are, and a
+    // uniform shape reads cleaner than every video its own. The player
+    // above keeps the video's true aspect; this is just the poster box.
+    let panel_w = w.unwrap_or(COL_W - 32.0);
+    let panel_h = panel_w * 9.0 / 16.0;
+
     let frame = div()
         .id(seg_id("video-tile", url))
         .cursor_pointer()
@@ -884,14 +890,16 @@ fn video_tile(
             Some(w) => d.w(px(w)),
             None => d.w_full(),
         })
-        .h(px(h))
+        .h(px(panel_h))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             crate::video::open(url_for_open.clone(), mime_for_open.clone(), cx);
         });
-    // The preview ladder (D32): the publisher's poster, a blurhash
-    // gradient, a locally sniffed first frame — any hit paints under the
-    // play mark; none means the quiet bare row.
+    // The preview ladder (D32): the publisher's poster (now OUR uploads
+    // embed one — D38's grab at attach time), a blurhash gradient, a
+    // locally sniffed first frame — any hit paints under the centered play
+    // mark; none means the quiet 16:9 panel, mark only (the filename row
+    // is gone — nobody read it).
     let shown = poster
         .and_then(|p| ctx.media.png(p))
         .or_else(|| blurhash.and_then(|b| ctx.media.png(&crate::poster::blurhash_key(b))))
@@ -902,7 +910,9 @@ fn video_tile(
                 div()
                     .relative()
                     .size_full()
-                    .child(img(png).w_full().h_full().object_fit(ObjectFit::Contain))
+                    // Cover: the panel is the shape now — a non-16:9 poster
+                    // crops (Contain's letterbox bars read as breakage).
+                    .child(img(png).w_full().h_full().object_fit(ObjectFit::Cover))
                     .child(
                         div()
                             .absolute()
@@ -922,20 +932,7 @@ fn video_tile(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .gap_2()
-                    .child(play_mark(18.0))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(theme::muted()))
-                            .underline()
-                            .hover(|s| s.text_color(rgb(theme::vermilion())))
-                            .child(if opening_now {
-                                "opening…".to_string()
-                            } else {
-                                display_url(url)
-                            }),
-                    ),
+                    .child(play_mark(24.0)),
             )
             .into_any_element(),
     }

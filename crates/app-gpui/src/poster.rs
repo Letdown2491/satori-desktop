@@ -59,6 +59,18 @@ impl InFlight {
     }
 }
 
+/// D38: the upload-time first-frame grab. The whole file is in hand (the
+/// composer's attachment), so moov-at-end files get posters too — the
+/// runtime head-sniff can't reach their moov. Returns (poster PNG,
+/// blurhash of the frame); None = no usable frame in the deadline (the
+/// video still uploads, its tile falls back to the runtime ladder).
+pub fn grab(bytes: &[u8]) -> Option<(Vec<u8>, String)> {
+    let (_w, _h, png) = sniff_png(bytes).ok()?;
+    let rgba = image::load_from_memory(&png).ok()?.to_rgba8();
+    let hash = blurhash::encode(4, 3, rgba.width(), rgba.height(), rgba.as_raw()).ok()?;
+    Some((png, hash))
+}
+
 impl Drop for InFlight {
     fn drop(&mut self) {
         IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
