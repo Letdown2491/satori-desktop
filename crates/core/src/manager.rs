@@ -1852,6 +1852,14 @@ impl Core {
                         Kind::Repost,
                         Kind::Custom(16),
                         Kind::Custom(10003),
+                        // D38 v1.1: the own surfaces the store never had a
+                        // fetch for — the public bookmarks list (30001),
+                        // the NIP-51 named lists (30000, one per d) and the
+                        // web app's NIP-37 draft wraps (31234, retired
+                        // format, imported into the 30078 stash).
+                        Kind::Custom(30000),
+                        Kind::Custom(30001),
+                        Kind::Custom(31234),
                     ])
                     .limit(2000);
                 active.pool.get(mine).await.unwrap_or_default()
@@ -1968,6 +1976,99 @@ impl Core {
             for id in ev.tags.clone().event_ids() {
                 b.insert(id.to_string());
             }
+        }
+
+        // The web app's synced drafts (NIP-37 kind 31234 wraps — retired
+        // with the web app): content = nip44-to-self of the inner draft
+        // event, d = the draft id, empty content = deleted. They migrate
+        // into the same array as id-marked entries (deduped by id across
+        // logins); the Library shows them and opening/deleting one
+        // republishes the wrap empty (NIP-37's delete) — the moment the
+        // text becomes a Satori slot draft.
+        if let Ok(wraps) = active
+            .pool
+            .store
+            .all_by_kind(me, Kind::Custom(31234))
+            .await
+        {
+            // Parameterized replaceable: the newest wrap per d wins.
+            let mut newest: HashMap<String, Event> = HashMap::new();
+            for wrap in wraps {
+                let Some(d) = wrap
+                    .tags
+                    .clone()
+                    .to_vec()
+                    .iter()
+                    .find(|t| t.kind() == "d")
+                    .and_then(|t| t.content().map(str::to_string))
+                else {
+                    continue;
+                };
+                match newest.get(&d) {
+                    Some(old) if old.created_at >= wrap.created_at => {}
+                    _ => {
+                        newest.insert(d, wrap);
+                    }
+                }
+            }
+            let mut drafts = self.own_drafts.lock().unwrap().clone();
+            for (d, wrap) in newest {
+                if wrap.content.trim().is_empty() || nip40::is_expired(&wrap) {
+                    continue;
+                }
+                if drafts.iter().any(|e| e.id.as_deref() == Some(d.as_str())) {
+                    continue;
+                }
+                let Ok(plain) = active
+                    .signer
+                    .nip44_decrypt_self(&me, wrap.content.as_str())
+                    .await
+                else {
+                    continue;
+                };
+                // The inner event: {kind, created_at, tags, content} — our
+                // own data, but stay crash-proof (the TS parse's posture).
+                let Ok(inner) = serde_json::from_str::<serde_json::Value>(&plain) else {
+                    continue;
+                };
+                let kind = inner.get("kind").and_then(|k| k.as_u64()).unwrap_or(0);
+                let content = inner
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let title = inner.get("tags").and_then(|t| t.as_array()).and_then(|tags| {
+                    tags.iter().find_map(|t| {
+                        let arr = t.as_array()?;
+                        if arr.first()?.as_str()? == "title" {
+                            arr.get(1)?.as_str().map(str::to_string)
+                        } else {
+                            None
+                        }
+                    })
+                });
+                // A note draft keeps its text; an article's body rides its
+                // title; a poll's question is the text.
+                let text = match kind {
+                    30023 => match (&title, content.is_empty()) {
+                        (Some(t), false) => format!("{t}\n\n{content}"),
+                        (Some(t), true) => t.clone(),
+                        _ => content,
+                    },
+                    _ => content,
+                };
+                if text.trim().is_empty() {
+                    continue;
+                }
+                drafts.push(DraftEntry {
+                    text,
+                    reply_to: None,
+                    quote: None,
+                    id: Some(d),
+                    at: wrap.created_at.as_secs(),
+                });
+            }
+            *self.own_drafts.lock().unwrap() = drafts;
         }
 
         // Synced drafts (D38): NIP-78 kind 30078 d="satori/drafts" — one
@@ -4476,12 +4577,17 @@ impl Core {
                 let me = active.me();
                 let key = (reply_to.map(|e| e.to_string()), quote.map(|e| e.to_string()));
                 let mut drafts = this.own_drafts.lock().unwrap().clone();
-                drafts.retain(|d| !d.matches(key.0.as_deref(), key.1.as_deref()));
+                // Satori's own slot entries replace by (reply, quote);
+                // imported (id-marked) entries only ever leave through
+                // drop_draft (their wrap is a separate event).
+                drafts.retain(|d| d.id.is_some() || !d.matches(key.0.as_deref(), key.1.as_deref()));
                 if !text.trim().is_empty() {
                     drafts.push(DraftEntry {
                         text,
                         reply_to: key.0,
                         quote: key.1,
+                        id: None,
+                        at: Timestamp::now().as_secs(),
                     });
                 }
                 let plain = serde_json::to_string(&drafts).unwrap_or_default();
@@ -4496,6 +4602,61 @@ impl Core {
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;
                 *this.own_drafts.lock().unwrap() = drafts;
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
+    }
+
+    /// Drop a draft entry (D38 v1.1): remove it from the array and
+    /// republish the stash; an imported entry's kind 31234 wrap is ALSO
+    /// republished with empty content — NIP-37's delete (the empty shell
+    /// sits on the relays until its NIP-40 expiry purges it).
+    pub fn drop_draft(self: &Arc<Self>, id: String) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let mut drafts = this.own_drafts.lock().unwrap().clone();
+                drafts.retain(|d| d.id.as_deref() != Some(id.as_str()));
+                let plain = serde_json::to_string(&drafts).unwrap_or_default();
+                let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
+                let unsigned = UnsignedEvent::new(
+                    me,
+                    Timestamp::now(),
+                    Kind::Custom(30078),
+                    [Tag::custom("d", ["satori/drafts"])],
+                    content,
+                );
+                let signed = active.signer.sign_event(unsigned).await?;
+                Self::commit(&active, &signed, &tx).await?;
+                *this.own_drafts.lock().unwrap() = drafts;
+                // The wrap itself: NIP-37's delete — republish with empty
+                // content (relays keep the empty shell until NIP-40 expiry).
+                if let Ok(Some(wrap)) = active
+                    .pool
+                    .store
+                    .latest_by_kind_d(me, Kind::Custom(31234), &id)
+                    .await
+                {
+                    let unsigned = UnsignedEvent::new(
+                        me,
+                        Timestamp::now(),
+                        Kind::Custom(31234),
+                        wrap.tags.clone().to_vec(),
+                        "",
+                    );
+                    let signed = active.signer.sign_event(unsigned).await?;
+                    Self::commit(&active, &signed, &tx).await?;
+                }
                 Ok(())
             }
             .await;
@@ -5142,6 +5303,11 @@ async fn sync_app_data(
 /// attachments are not stashed in v1). The array rides NIP-78 kind 30078
 /// d="satori/drafts", nip44-encrypted; the (reply, quote) pair is the
 /// composer slot (top-level = both None).
+///
+/// Entries imported from the web app's NIP-37 kind 31234 wraps (v1.1)
+/// carry `id` (the wrap's d) — Satori's own slot entries have none, and
+/// a close-sync never clobbers an id-marked entry; opening or deleting
+/// one converts it (the empty-content wrap republish, NIP-37's delete).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DraftEntry {
     pub text: String,
@@ -5149,6 +5315,12 @@ pub struct DraftEntry {
     pub reply_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Last touch (wrap created_at / save time) — the tab sorts by it,
+    /// the composer's restore takes the newest top-level.
+    #[serde(default)]
+    pub at: u64,
 }
 
 impl DraftEntry {
@@ -5210,10 +5382,12 @@ impl NostrList {
 }
 
 impl Core {
-    /// The own NIP-51 named lists (kind 30000) from the store (D38's Lists
-    /// tab). One shot: own list events arrive with the startup deep fetch
-    /// (the D36 write-set coordinate-keys 30000-39999) and echo back from
-    /// publishes; there is nothing to page. Sorted by display name.
+    /// The own NIP-51 named lists (kind 30000) (D38's Lists tab). The
+    /// relay round first — before D38 nothing ever fetched own list
+    /// events, so the store only held what a past publish echoed; the
+    /// fetch lands via save-on-receive and the store read merges it with
+    /// what was already there. Newest wrap per d wins (parameterized
+    /// replaceable); sorted by display name.
     pub fn own_lists(self: &Arc<Self>) -> tokio::sync::mpsc::UnboundedReceiver<Vec<NostrList>> {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
@@ -5221,15 +5395,38 @@ impl Core {
             let lists = async {
                 let active = this.active().await?;
                 let me = active.me();
-                let mut lists: Vec<NostrList> = active
+                let filter = Filter::new()
+                    .author(me)
+                    .kind(Kind::Custom(30000))
+                    .limit(200);
+                let _ = active.pool.get(filter).await.unwrap_or_default();
+                let mut newest: HashMap<String, Event> = HashMap::new();
+                for ev in active
                     .pool
                     .store
                     .all_by_kind(me, Kind::Custom(30000))
                     .await
                     .unwrap_or_default()
-                    .iter()
-                    .filter_map(NostrList::from_event)
-                    .collect();
+                {
+                    let Some(d) = ev
+                        .tags
+                        .clone()
+                        .to_vec()
+                        .iter()
+                        .find(|t| t.kind() == "d")
+                        .and_then(|t| t.content().map(str::to_string))
+                    else {
+                        continue;
+                    };
+                    match newest.get(&d) {
+                        Some(old) if old.created_at >= ev.created_at => {}
+                        _ => {
+                            newest.insert(d, ev);
+                        }
+                    }
+                }
+                let mut lists: Vec<NostrList> =
+                    newest.values().filter_map(NostrList::from_event).collect();
                 lists.sort_by_key(|l| l.display().to_lowercase());
                 Ok::<Vec<NostrList>, LoginError>(lists)
             }

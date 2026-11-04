@@ -131,18 +131,28 @@ impl Composer {
         } else if reply_to.is_none() && quote.is_none() {
             // D38: no session stash — the synced one (NIP-78 kind 30078)
             // survives restarts; the take spends it (a close without a send
-            // saves it right back).
+            // saves it right back). The newest top-level entry wins — that
+            // includes the web app's imported wraps (id-marked, v1.1).
             let synced = core
                 .own_draft_list()
                 .into_iter()
-                .find(|d| d.matches(None, None))
-                .map(|d| d.text)
-                .filter(|t| !t.trim().is_empty());
-            if let Some(text) = synced {
+                .filter(|d| d.matches(None, None))
+                .max_by_key(|d| d.at);
+            if let Some(d) = synced.filter(|d| !d.text.trim().is_empty()) {
                 // Fire and forget: the publish rides the outbox; a failed
                 // save leaves the slot intact (the next close re-syncs).
-                let _ = core.save_draft(None, None, String::new());
-                input.update(cx, |i, cx| i.set_text(&text, cx));
+                match d.id {
+                    // An import converts: the wrap dies (NIP-37's delete)
+                    // and the text becomes the composer's — its close saves
+                    // a Satori slot entry.
+                    Some(id) => {
+                        let _ = core.drop_draft(id);
+                    }
+                    None => {
+                        let _ = core.save_draft(None, None, String::new());
+                    }
+                }
+                input.update(cx, |i, cx| i.set_text(&d.text, cx));
             }
         }
         // @-mention detection: watch the buffer, find an active `@token`.

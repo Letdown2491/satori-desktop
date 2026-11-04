@@ -215,11 +215,16 @@ impl LibraryView {
 
     /// Tap a synced draft (D38): spend the slot now (the composer's close
     /// re-saves whatever the user does with it), resolve the reply/quote
-    /// context events best-effort, then open the composer prefilled.
+    /// context events best-effort, then open the composer prefilled. An
+    /// imported (id-marked) entry instead drops its NIP-37 wrap — the
+    /// conversion moment (v1.1).
     fn open_draft(&self, d: DraftEntry, cx: &mut Context<Self>) {
         let reply_id = d.reply_to.as_ref().and_then(|h| EventId::from_hex(h).ok());
         let quote_id = d.quote.as_ref().and_then(|h| EventId::from_hex(h).ok());
-        let mut rx = self.core.save_draft(reply_id, quote_id, String::new());
+        let mut rx = match d.id.clone() {
+            Some(id) => self.core.drop_draft(id),
+            None => self.core.save_draft(reply_id, quote_id, String::new()),
+        };
         let core = self.core.clone();
         let text = d.text.clone();
         cx.spawn(async move |this, cx| {
@@ -248,13 +253,17 @@ impl LibraryView {
         .detach();
     }
 
-    /// Delete a synced draft from the tab (the x): spend the slot; the row
-    /// drops when the save stream closes and the tab re-renders from the
+    /// Delete a synced draft from the tab (the x): spend the slot (or,
+    /// for an imported id-marked entry, kill its NIP-37 wrap); the row
+    /// drops when the stream closes and the tab re-renders from the
     /// fresh list.
     fn delete_draft(&self, d: &DraftEntry, cx: &mut Context<Self>) {
         let reply_id = d.reply_to.as_ref().and_then(|h| EventId::from_hex(h).ok());
         let quote_id = d.quote.as_ref().and_then(|h| EventId::from_hex(h).ok());
-        let mut rx = self.core.save_draft(reply_id, quote_id, String::new());
+        let mut rx = match d.id.clone() {
+            Some(id) => self.core.drop_draft(id),
+            None => self.core.save_draft(reply_id, quote_id, String::new()),
+        };
         cx.spawn(async move |this, cx| {
             while rx.recv().await.is_some() {}
             let _ = this.update(cx, |_, cx| cx.notify());
@@ -397,7 +406,10 @@ impl Render for LibraryView {
                 // Placeholder slices: the drafts land with the NIP-78 sync,
                 // the lists with the NIP-51 pass (D38's queue order).
                 LibTab::Drafts => {
-                    let drafts = self.core.own_draft_list();
+                    // Newest first: the wrap's created_at (imports, v1.1)
+                    // or the last save, whichever the entry carries.
+                    let mut drafts = self.core.own_draft_list();
+                    drafts.sort_by_key(|d| std::cmp::Reverse(d.at));
                     if drafts.is_empty() {
                         placeholder(
                             "Drafts",
