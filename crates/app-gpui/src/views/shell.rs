@@ -116,6 +116,14 @@ impl Shell {
             Nav::OpenEditProfile(me) => this.open_edit_profile(*me, cx),
             Nav::OpenHashtag(tag) => this.open_hashtag(tag.clone(), cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), None, cx),
+            Nav::OpenDraft(text, reply, quote) => {
+                this.open_draft(
+                    text,
+                    reply.as_deref().cloned(),
+                    quote.as_deref().cloned(),
+                    cx,
+                )
+            }
             Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
@@ -193,6 +201,14 @@ impl Shell {
             Nav::OpenEditProfile(me) => this.open_edit_profile(*me, cx),
             Nav::OpenHashtag(tag) => this.open_hashtag(tag.clone(), cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), None, cx),
+            Nav::OpenDraft(text, reply, quote) => {
+                this.open_draft(
+                    text,
+                    reply.as_deref().cloned(),
+                    quote.as_deref().cloned(),
+                    cx,
+                )
+            }
             Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
@@ -263,6 +279,21 @@ impl Shell {
         self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Library(view));
         cx.notify();
+    }
+
+    /// Reopen a synced draft (D38): the composer with its context back, the
+    /// buffer prefilled over any stash restore.
+    fn open_draft(
+        &mut self,
+        text: &str,
+        reply: Option<Event>,
+        quote: Option<Event>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_composer(reply, quote, cx);
+        if let Some(Pane::Composer(c)) = self.stack.last().cloned() {
+            c.update(cx, |composer, cx| composer.prefill(text, cx));
+        }
     }
 
     /// The hashtag timeline: a Feed entity in hashtag mode — a #tag tap in
@@ -556,6 +587,16 @@ impl Shell {
                 && let Some(text) = c.read(cx).draft_candidate(cx)
             {
                 cx.default_global::<Draft>().0 = Some(text);
+            }
+            // D38: the SYNCED draft (NIP-78 kind 30078) — every compose
+            // syncs its buffer on close (replies/quotes keyed; an empty
+            // buffer clears the slot). Fire and forget: the outbox retries
+            // the publish, a failed save leaves the slot intact, and the
+            // session global above still covers the instant reopen.
+            if let Some(Pane::Composer(c)) = self.stack.last()
+                && let Some((reply, quote, text)) = c.read(cx).draft_sync_candidate(cx)
+            {
+                let _ = self.core.save_draft(reply, quote, text);
             }
             // D38: closing the edit form — a save may have landed a fresh
             // kind 0 while it was up. Refresh the rail's own-profile copy

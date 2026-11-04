@@ -229,10 +229,14 @@ impl Feed {
                             // A follow's fresh post needn't carry this
                             // hashtag — no new-notes pill on hashtag feeds.
                             // Author feeds likewise: the pill would sit
-                            // under the profile's own header, noise.
+                            // under the profile's own header, noise. The
+                            // Library's bookmarks (D38) too: a follow's
+                            // post is not a new bookmark.
                             if matches!(
                                 feed.mode,
-                                FeedMode::Hashtag(_) | FeedMode::Profile(_)
+                                FeedMode::Hashtag(_)
+                                    | FeedMode::Profile(_)
+                                    | FeedMode::Bookmarks
                             ) {
                                 return;
                             }

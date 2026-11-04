@@ -6,13 +6,15 @@
 
 use gpui::{div, prelude::*, px, rgb, AnyElement, Context, Entity, EventEmitter, Render,
            SharedString, Window};
+use nostr::prelude::*;
 use std::sync::Arc;
-use satori_core::manager::Core;
+use satori_core::manager::{Core, DraftEntry};
 
 use crate::theme;
 use super::{content, feed::Feed, nav::Nav};
 
 pub(crate) struct LibraryView {
+    core: Arc<Core>,
     tab: LibTab,
     /// The Bookmarks tab's rows — a full Feed in Bookmarks mode.
     bookmarks: Entity<Feed>,
@@ -44,6 +46,7 @@ impl LibraryView {
         })
         .detach();
         Self {
+            core,
             tab: LibTab::Bookmarks,
             bookmarks,
             deep: false,
@@ -55,6 +58,116 @@ impl LibraryView {
     pub fn scroll_top(&mut self, cx: &mut Context<Self>) {
         self.deep = false;
         self.bookmarks.update(cx, |feed, _| feed.scroll_top());
+    }
+
+    /// Tap a synced draft (D38): spend the slot now (the composer's close
+    /// re-saves whatever the user does with it), resolve the reply/quote
+    /// context events best-effort, then open the composer prefilled.
+    fn open_draft(&self, d: DraftEntry, cx: &mut Context<Self>) {
+        let reply_id = d.reply_to.as_ref().and_then(|h| EventId::from_hex(h).ok());
+        let quote_id = d.quote.as_ref().and_then(|h| EventId::from_hex(h).ok());
+        let mut rx = self.core.save_draft(reply_id, quote_id, String::new());
+        let core = self.core.clone();
+        let text = d.text.clone();
+        cx.spawn(async move |this, cx| {
+            // The slot's spend lands when the publish stream closes — then
+            // the tab re-renders without the row.
+            while rx.recv().await.is_some() {}
+            let _ = this.update(cx, |_this, cx| cx.notify());
+            let reply = match reply_id {
+                Some(id) => {
+                    let mut rx = core.note_by_id(id);
+                    rx.recv().await.unwrap_or(None)
+                }
+                None => None,
+            };
+            let quote = match quote_id {
+                Some(id) => {
+                    let mut rx = core.note_by_id(id);
+                    rx.recv().await.unwrap_or(None)
+                }
+                None => None,
+            };
+            let _ = this.update(cx, |_this, cx| {
+                cx.emit(Nav::OpenDraft(text, reply.map(Box::new), quote.map(Box::new)))
+            });
+        })
+        .detach();
+    }
+
+    /// Delete a synced draft from the tab (the x): spend the slot; the row
+    /// drops when the save stream closes and the tab re-renders from the
+    /// fresh list.
+    fn delete_draft(&self, d: &DraftEntry, cx: &mut Context<Self>) {
+        let reply_id = d.reply_to.as_ref().and_then(|h| EventId::from_hex(h).ok());
+        let quote_id = d.quote.as_ref().and_then(|h| EventId::from_hex(h).ok());
+        let mut rx = self.core.save_draft(reply_id, quote_id, String::new());
+        cx.spawn(async move |this, cx| {
+            while rx.recv().await.is_some() {}
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
+    /// One draft row: context chip, the first line's snippet, the delete x.
+    fn draft_row(&self, i: usize, d: &DraftEntry, cx: &mut Context<Self>) -> AnyElement {
+        let snippet = d.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").to_string();
+        let label = match (&d.reply_to, &d.quote) {
+            (Some(_), _) => "reply",
+            (None, Some(_)) => "quote",
+            _ => "draft",
+        };
+        let d_tap = d.clone();
+        let d_del = d.clone();
+        div()
+            .id(SharedString::from(format!("draft-{i}")))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .py_1()
+            .px_4()
+            .border_b_1()
+            .border_color(rgb(theme::hairline()))
+            .hover(|s| s.bg(rgb(theme::panel())))
+            .on_click(cx.listener(move |this, _, _, cx| this.open_draft(d_tap.clone(), cx)))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(10.5))
+                    .text_color(rgb(theme::vermilion()))
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(13.))
+                    .text_color(rgb(theme::ink()))
+                    .text_ellipsis()
+                    .child(if snippet.is_empty() {
+                        "…".to_string()
+                    } else {
+                        snippet
+                    }),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("draft-del-{i}")))
+                    .flex_none()
+                    .cursor_pointer()
+                    .px_2()
+                    .text_size(px(11.))
+                    .text_color(rgb(theme::muted()))
+                    .hover(|s| s.text_color(rgb(theme::err())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // The row is tappable too — don't open the draft.
+                        cx.stop_propagation();
+                        this.delete_draft(&d_del, cx)
+                    }))
+                    .child("delete"),
+            )
+            .into_any_element()
     }
 
     fn tab_btn(
@@ -124,10 +237,28 @@ impl Render for LibraryView {
                     .into_any_element(),
                 // Placeholder slices: the drafts land with the NIP-78 sync,
                 // the lists with the NIP-51 pass (D38's queue order).
-                LibTab::Drafts => placeholder(
-                    "Drafts",
-                    "Composer drafts will sync here, encrypted — not yet.",
-                ),
+                LibTab::Drafts => {
+                    let drafts = self.core.own_draft_list();
+                    if drafts.is_empty() {
+                        placeholder(
+                            "Drafts",
+                            "Drafts you close in the composer sync here, encrypted.",
+                        )
+                    } else {
+                        div()
+                            .id("drafts-list")
+                            .w_full()
+                            .h_full()
+                            .max_w(px(content::COL_W))
+                            .flex()
+                            .flex_col()
+                            .overflow_y_scroll()
+                            .children(drafts.iter().enumerate().map(|(i, d)| {
+                                self.draft_row(i, d, cx)
+                            }))
+                            .into_any_element()
+                    }
+                }
                 LibTab::Lists => placeholder(
                     "Lists",
                     "Your NIP-51 lists will live here — not yet.",

@@ -128,6 +128,22 @@ impl Composer {
             && let Some(text) = draft_take(cx).filter(|t| !t.trim().is_empty())
         {
             input.update(cx, |i, cx| i.set_text(&text, cx));
+        } else if reply_to.is_none() && quote.is_none() {
+            // D38: no session stash — the synced one (NIP-78 kind 30078)
+            // survives restarts; the take spends it (a close without a send
+            // saves it right back).
+            let synced = core
+                .own_draft_list()
+                .into_iter()
+                .find(|d| d.matches(None, None))
+                .map(|d| d.text)
+                .filter(|t| !t.trim().is_empty());
+            if let Some(text) = synced {
+                // Fire and forget: the publish rides the outbox; a failed
+                // save leaves the slot intact (the next close re-syncs).
+                let _ = core.save_draft(None, None, String::new());
+                input.update(cx, |i, cx| i.set_text(&text, cx));
+            }
         }
         // @-mention detection: watch the buffer, find an active `@token`.
         cx.observe(&input, |this, _input, cx| this.detect_mention(cx))
@@ -375,6 +391,10 @@ impl Composer {
             cx.default_global::<Draft>().0 = None;
         }
         let core = self.core.clone();
+        let draft_key = (
+            self.reply_to.as_ref().map(|e| e.id),
+            self.quote.as_ref().map(|e| e.id),
+        );
         let this_mentions = std::mem::take(&mut self.mentions);
         let atts: Vec<(String, Vec<u8>)> = self
             .attachments
@@ -444,6 +464,10 @@ impl Composer {
                     // window regardless — the shell's subscribe_hold toast
                     // carries Undo and the outcome.
                     PublishEvent::Held { .. } => {
+                        // D38: the synced slot is spent — the note will go
+                        // out unless undone (then the composer stays open
+                        // and a close re-saves the draft).
+                        let _ = core.save_draft(draft_key.0, draft_key.1, String::new());
                         let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
                         return;
                     }
@@ -458,6 +482,8 @@ impl Composer {
                         return;
                     }
                     PublishEvent::Committed { .. } => {
+                        // D38: the synced draft slot is spent with the send.
+                        let _ = core.save_draft(draft_key.0, draft_key.1, String::new());
                         let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
                         return;
                     }
@@ -485,6 +511,33 @@ impl Composer {
             return None;
         }
         Some(self.input.read(cx).content.trim().to_string())
+    }
+
+    /// The SYNCED draft candidate (D38): (reply parent, quote, buffer) for
+    /// any compose that isn't mid-send — replies and quotes sync keyed,
+    /// not just the top-level slot. Polls don't draft (v1 keeps their
+    /// surface small — and their empty note buffer must not wipe the
+    /// top-level slot).
+    pub fn draft_sync_candidate(
+        &self,
+        cx: &App,
+    ) -> Option<(Option<EventId>, Option<EventId>, String)> {
+        if self.posting || self.tab == Tab::Poll {
+            return None;
+        }
+        Some((
+            self.reply_to.as_ref().map(|e| e.id),
+            self.quote.as_ref().map(|e| e.id),
+            self.input.read(cx).content.trim().to_string(),
+        ))
+    }
+
+    /// D38: fill the buffer from a reopened Library draft — overwrites
+    /// whatever the session stash restored (the synced slot was spent at
+    /// tap time; the close saves whatever the user does with it).
+    pub fn prefill(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |i, cx| i.set_text(text, cx));
+        cx.notify();
     }
 }
 

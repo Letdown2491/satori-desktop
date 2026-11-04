@@ -343,6 +343,10 @@ pub struct Core {
     /// Own reposts (NIP-18 kind 6/16) — same shape as own_liked.
     own_reposted: Mutex<HashSet<String>>,
     own_bookmarked: Mutex<HashSet<String>>,
+    /// Synced composer drafts (D38): NIP-78 kind 30078 d="satori/drafts",
+    /// the array nip44-encrypted — text + reply/quote context (ids; the
+    /// full events live in the store). Attachments are not stashed in v1.
+    own_drafts: Mutex<Vec<DraftEntry>>,
     /// Muted authors (pubkey hex) — NIP-51 kind:10000, content encrypted.
     muted: Mutex<HashSet<String>>,
     /// Own zaps: note id (hex) → zapped. The ledger (zaps.json) is the
@@ -420,6 +424,7 @@ impl Core {
             own_liked: Mutex::new(HashSet::new()),
             own_reposted: Mutex::new(HashSet::new()),
             own_bookmarked: Mutex::new(HashSet::new()),
+        own_drafts: Mutex::new(Vec::new()),
             muted: Mutex::new(HashSet::new()),
             own_zapped: Mutex::new(HashSet::new()),
             tombstones_hydrated: std::sync::atomic::AtomicBool::new(false),
@@ -620,6 +625,7 @@ impl Core {
         self.own_liked.lock().unwrap().clear();
         self.own_reposted.lock().unwrap().clear();
         self.own_bookmarked.lock().unwrap().clear();
+        self.own_drafts.lock().unwrap().clear();
         self.own_zapped.lock().unwrap().clear();
         self.muted.lock().unwrap().clear();
         // The profile mirror is display state for the logged-in session's
@@ -1962,6 +1968,23 @@ impl Core {
             for id in ev.tags.clone().event_ids() {
                 b.insert(id.to_string());
             }
+        }
+
+        // Synced drafts (D38): NIP-78 kind 30078 d="satori/drafts" — one
+        // replaceable event, the draft array nip44-encrypted (self).
+        if let Ok(Some(ev)) = active
+            .pool
+            .store
+            .latest_by_kind_d(me, Kind::Custom(30078), "satori/drafts")
+            .await
+            && !ev.content.is_empty()
+            && let Ok(plain) = active
+                .signer
+                .nip44_decrypt_self(&me, ev.content.as_str())
+                .await
+            && let Ok(entries) = serde_json::from_str::<Vec<DraftEntry>>(&plain)
+        {
+            *self.own_drafts.lock().unwrap() = entries;
         }
 
         if let Ok(Some(ev)) = active
@@ -4434,6 +4457,100 @@ impl Core {
         rx
     }
 
+    /// Save a composer draft (D38): replace-or-insert by slot — the
+    /// (reply, quote) pair; an empty text DELETES the slot (closing a
+    /// compose empty clears a stale draft, the session stash's semantics).
+    /// The whole array re-encrypts into the one NIP-78 event and rides
+    /// commit() (30078 is coordinate-keyed, the outbox retries it).
+    pub fn save_draft(
+        self: &Arc<Self>,
+        reply_to: Option<EventId>,
+        quote: Option<EventId>,
+        text: String,
+    ) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let key = (reply_to.map(|e| e.to_string()), quote.map(|e| e.to_string()));
+                let mut drafts = this.own_drafts.lock().unwrap().clone();
+                drafts.retain(|d| !d.matches(key.0.as_deref(), key.1.as_deref()));
+                if !text.trim().is_empty() {
+                    drafts.push(DraftEntry {
+                        text,
+                        reply_to: key.0,
+                        quote: key.1,
+                    });
+                }
+                let plain = serde_json::to_string(&drafts).unwrap_or_default();
+                let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
+                let unsigned = UnsignedEvent::new(
+                    me,
+                    Timestamp::now(),
+                    Kind::Custom(30078),
+                    [Tag::custom("d", ["satori/drafts"])],
+                    content,
+                );
+                let signed = active.signer.sign_event(unsigned).await?;
+                Self::commit(&active, &signed, &tx).await?;
+                *this.own_drafts.lock().unwrap() = drafts;
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
+    }
+
+    /// The synced drafts, snapshot (the Library's Drafts tab reads it at
+    /// render — pane switches notify on every path that changes it).
+    pub fn own_draft_list(&self) -> Vec<DraftEntry> {
+        self.own_drafts.lock().unwrap().clone()
+    }
+
+    /// One note by id (D38: the Drafts tab restores a draft's reply/quote
+    /// context): the store first, then a targeted ids query on the
+    /// indexers — the ParentNote resolution's pattern, with the same
+    /// NIP-40/NIP-09 gates. None when nowhere.
+    pub fn note_by_id(self: &Arc<Self>, id: EventId) -> tokio::sync::mpsc::UnboundedReceiver<Option<Event>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let ev = async {
+                let active = this.active().await?;
+                let stored = active.pool.store.event_by_id(id).await.ok().flatten();
+                let ev = match stored {
+                    Some(ev)
+                        if !nip40::is_expired(&ev) && !deletions::is_deleted(&ev) =>
+                    {
+                        Some(ev)
+                    }
+                    _ => {
+                        let filter = Filter::new().ids(vec![id]).limit(1);
+                        let fallback: Vec<String> =
+                            INDEXERS.iter().map(|s| s.to_string()).collect();
+                        active
+                            .pool
+                            .get_from(&fallback, &filter)
+                            .await
+                            .into_iter()
+                            .find(|ev| !deletions::is_deleted(ev))
+                    }
+                };
+                Ok::<Option<Event>, LoginError>(ev)
+            }
+            .await;
+            let _ = tx.send(ev.unwrap_or(None));
+        });
+        rx
+    }
+
     /// Current NIP-65 relay split (settings pane projection).
     pub fn current_relays(&self) -> (Vec<String>, Vec<String>) {
         self.active
@@ -5018,6 +5135,27 @@ async fn sync_app_data(
     }
     write_prefs_overlay(&pairs);
     let _ = live.send(Live::PrefsSynced);
+}
+
+/// One synced composer draft (D38): the buffer text plus its context —
+/// reply parent / quoted note as IDS (the full events live in the store;
+/// attachments are not stashed in v1). The array rides NIP-78 kind 30078
+/// d="satori/drafts", nip44-encrypted; the (reply, quote) pair is the
+/// composer slot (top-level = both None).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DraftEntry {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+}
+
+impl DraftEntry {
+    /// Which composer slot this draft belongs to.
+    pub fn matches(&self, reply_to: Option<&str>, quote: Option<&str>) -> bool {
+        self.reply_to.as_deref() == reply_to && self.quote.as_deref() == quote
+    }
 }
 
 /// A profile edit (D38): each field maps to a kind:0 content key. None =
