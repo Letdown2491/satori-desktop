@@ -48,6 +48,9 @@ pub struct SettingsView {
     // Notifications: reactions behind the bell's pref (core reads it
     // per stream — applies the next time the stream opens).
     reaction_notifs: bool,
+    // Bookmarks (D38): what the star WRITES — private kind 10003 (the
+    // default) or the public NIP-51 list. Read back per star click.
+    bookmark_public: bool,
     // Wallet (D20): mirrored status for the row (the broadcast is truth;
     // the manage pane owns the detail).
     wallet: Status,
@@ -106,6 +109,7 @@ impl SettingsView {
             machine_hidden: satori_core::store::machine_notes_hidden(),
             hidden_kinds: prefs::content_hidden(),
             reaction_notifs: prefs::get_bool("reactionNotifs"),
+            bookmark_public: prefs::get_bool("bookmarkPublic"),
             wallet: core.wallet().status(),
             signing_out: false,
             me_name: None,
@@ -424,6 +428,14 @@ impl SettingsView {
         // NIP-78: sync (Phase 2 §4.1).
         self.core
             .publish_app_data("reactionNotifs", self.reaction_notifs.into());
+        cx.notify();
+    }
+
+    /// Bookmarks scope (D38): local-only for now — the star reads the file
+    /// per click, so a flip applies to the next star with no sync hop.
+    fn toggle_bookmark_public(&mut self, cx: &mut Context<Self>) {
+        self.bookmark_public = !self.bookmark_public;
+        prefs::set_bool("bookmarkPublic", self.bookmark_public);
         cx.notify();
     }
 
@@ -934,6 +946,35 @@ impl Render for SettingsView {
                         .child(toggle("reaction-notifs", self.reaction_notifs))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.toggle_reaction_notifs(cx);
+                        })),
+                ),
+            )
+            // --- Bookmarks (D38) ---------------------------------------------
+            .child(
+                group(
+                    "Bookmarks",
+                    "Private bookmarks are nip44-encrypted (kind 10003). Public ones \
+                     are a plain NIP-51 list (kind 30001) anyone can read; both show \
+                     in the Library.",
+                )
+                .child(
+                    div()
+                        .id("bookmark-public-row")
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(13.0))
+                                .text_color(rgb(theme::ink()))
+                                .child("Stars write public bookmarks"),
+                        )
+                        .child(toggle("bookmark-public", self.bookmark_public))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toggle_bookmark_public(cx);
                         })),
                 ),
             )

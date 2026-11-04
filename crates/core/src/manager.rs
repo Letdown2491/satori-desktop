@@ -1949,6 +1949,21 @@ impl Core {
             }
         }
 
+        // The public bookmarks list (D38: NIP-51 kind 30001 d="bookmarks")
+        // merges into the same display set — the star fills for either,
+        // unbookmarking clears both.
+        if let Ok(Some(ev)) = active
+            .pool
+            .store
+            .latest_by_kind_d(me, Kind::Custom(30001), "bookmarks")
+            .await
+        {
+            let mut b = self.own_bookmarked.lock().unwrap();
+            for id in ev.tags.clone().event_ids() {
+                b.insert(id.to_string());
+            }
+        }
+
         if let Ok(Some(ev)) = active
             .pool
             .store
@@ -4183,9 +4198,11 @@ impl Core {
         rx
     }
 
-    /// Bookmark (NIP-51 kind:10003, private by default: content is a
-    /// nip44-encrypted tag list — the web app's private-default semantics).
-    pub fn bookmark(self: &Arc<Self>, target: &Event) -> PublishRx {
+    /// Bookmark (NIP-51). Private by default: kind 10003 with the id in a
+    /// nip44-encrypted tag list — the web app's private-default semantics.
+    /// Public scope (D38): kind 30001 d="bookmarks", the id as a plain e-tag
+    /// — which list the star writes is the settings pref's job.
+    pub fn bookmark(self: &Arc<Self>, target: &Event, public: bool) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         let target = target.clone();
@@ -4193,13 +4210,56 @@ impl Core {
             let res: Result<()> = async {
                 let active = this.active().await?;
                 let me = active.me();
-                let mut ids: Vec<String> = this.own_bookmarked.lock().unwrap().clone().into_iter().collect();
-                ids.push(target.id.to_string());
-                let plain = list_json(&ids, "e");
-                let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
-                let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(10003), [], content);
-                let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit(&active, &signed, &tx).await?;
+                if !public {
+                    // Private: the content array is the list (nip44); the
+                    // stored event's other tags ride along (a plain e-tag
+                    // the user's other client wrote must survive the RMW).
+                    let stored = active
+                        .pool
+                        .store
+                        .latest_by_kind(me, Kind::Custom(10003))
+                        .await
+                        .ok()
+                        .flatten();
+                    let mut ids: Vec<String> =
+                        this.own_bookmarked.lock().unwrap().clone().into_iter().collect();
+                    ids.push(target.id.to_string());
+                    let plain = list_json(&ids, "e");
+                    let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
+                    let unsigned = UnsignedEvent::new(
+                        me,
+                        Timestamp::now(),
+                        Kind::Custom(10003),
+                        stored.map(|ev| ev.tags.clone().to_vec()).unwrap_or_default(),
+                        content,
+                    );
+                    let signed = active.signer.sign_event(unsigned).await?;
+                    Self::commit(&active, &signed, &tx).await?;
+                } else {
+                    // Public: NIP-51 kind 30001 d="bookmarks" — the e-tags
+                    // ARE the list (my event only — others' 30001s are
+                    // different lists). The d and any other markers ride
+                    // along; the push dedupes.
+                    let stored = active
+                        .pool
+                        .store
+                        .latest_by_kind_d(me, Kind::Custom(30001), "bookmarks")
+                        .await
+                        .ok()
+                        .flatten();
+                    let mut raw: Vec<Tag> = stored.map(|ev| ev.tags.clone().to_vec()).unwrap_or_default();
+                    let hex = target.id.to_string();
+                    let present = raw
+                        .iter()
+                        .any(|t| t.kind() == "e" && t.content() == Some(hex.as_str()));
+                    if !present {
+                        raw.push(Tag::event(target.id));
+                    }
+                    let unsigned =
+                        UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(30001), raw, "");
+                    let signed = active.signer.sign_event(unsigned).await?;
+                    Self::commit(&active, &signed, &tx).await?;
+                }
                 this.own_bookmarked.lock().unwrap().insert(target.id.to_string());
                 Ok(())
             }
@@ -4208,6 +4268,167 @@ impl Core {
                 let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
+    }
+
+    /// Un-bookmark (D38): RMW BOTH lists — the private 10003 (content array
+    /// plus any plain e-tags it carries) and the public 30001
+    /// d="bookmarks" — publishing only a list that actually held the id.
+    pub fn unbookmark(self: &Arc<Self>, id: EventId) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let hex = id.to_string();
+                // Private list: decrypt, drop the id, re-encrypt — only if
+                // it was there (content array OR a plain e-tag).
+                let stored = active
+                    .pool
+                    .store
+                    .latest_by_kind(me, Kind::Custom(10003))
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(ev) = stored {
+                    let ids: Vec<String> = if ev.content.is_empty() {
+                        Vec::new()
+                    } else {
+                        active
+                            .signer
+                            .nip44_decrypt_self(&me, ev.content.as_str())
+                            .await
+                            .map(|plain| parse_list_event(&plain))
+                            .unwrap_or_default()
+                    };
+                    let in_content = ids.iter().any(|s| s == &hex);
+                    let in_tags = ev
+                        .tags
+                        .clone()
+                        .to_vec()
+                        .iter()
+                        .any(|t| t.kind() == "e" && t.content() == Some(hex.as_str()));
+                    if in_content || in_tags {
+                        let ids: Vec<String> =
+                            ids.into_iter().filter(|s| s != &hex).collect();
+                        let plain = list_json(&ids, "e");
+                        let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
+                        // The stored event's non-removed tags ride along
+                        // (plain e-tags from another client, client marks).
+                        let mut raw: Vec<Tag> = ev.tags.clone().to_vec();
+                        raw.retain(|t| !(t.kind() == "e" && t.content() == Some(hex.as_str())));
+                        let unsigned = UnsignedEvent::new(
+                            me,
+                            Timestamp::now(),
+                            Kind::Custom(10003),
+                            raw,
+                            content,
+                        );
+                        let signed = active.signer.sign_event(unsigned).await?;
+                        Self::commit(&active, &signed, &tx).await?;
+                    }
+                }
+                // Public list: rebuild the stored tags without the id's
+                // e-tag (the d rides along) — only if it was there.
+                let stored = active
+                    .pool
+                    .store
+                    .latest_by_kind_d(me, Kind::Custom(30001), "bookmarks")
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(ev) = stored {
+                    let mut raw: Vec<Tag> = ev.tags.clone().to_vec();
+                    let before = raw.len();
+                    raw.retain(|t| !(t.kind() == "e" && t.content() == Some(hex.as_str())));
+                    if raw.len() < before {
+                        let unsigned = UnsignedEvent::new(
+                            me,
+                            Timestamp::now(),
+                            Kind::Custom(30001),
+                            raw,
+                            "",
+                        );
+                        let signed = active.signer.sign_event(unsigned).await?;
+                        Self::commit(&active, &signed, &tx).await?;
+                    }
+                }
+                this.own_bookmarked.lock().unwrap().remove(&hex);
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
+    }
+
+    /// The own bookmarks hydrated (D38): the merged id set (private 10003 +
+    /// public 30001) resolved from the store — expired (NIP-40) and deleted
+    /// (NIP-09) dropped at the same gates the whisper uses — with missing
+    /// ids fetched from the indexers by a targeted ids query. One shot: the
+    /// list is finite, so the page carries has_more = false (the feed never
+    /// orders an Older round for this mode).
+    pub fn bookmarked_notes(self: &Arc<Self>) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<FeedEvent> = async {
+                let active = this.active().await?;
+                let want: Vec<EventId> = this
+                    .own_bookmarked
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|h| EventId::from_hex(h).ok())
+                    .collect();
+                let mut events: Vec<Event> = Vec::new();
+                for id in &want {
+                    if let Some(ev) = active.pool.store.event_by_id(*id).await.ok().flatten()
+                        && !nip40::is_expired(&ev)
+                        && !deletions::is_deleted(&ev)
+                    {
+                        events.push(ev);
+                    }
+                }
+                let have: HashSet<EventId> = events.iter().map(|e| e.id).collect();
+                let missing: Vec<EventId> =
+                    want.iter().filter(|id| !have.contains(id)).cloned().collect();
+                if !missing.is_empty() {
+                    // feeds.ts fetchEventsByIds: a TARGETED query on the
+                    // indexers (a bookmarked note's author may be outside
+                    // the follows — seen-on can't narrow this one).
+                    let n = missing.len();
+                    let filter = Filter::new().ids(missing).limit(n);
+                    let fallback: Vec<String> =
+                        INDEXERS.iter().map(|s| s.to_string()).collect();
+                    let fetched: Vec<Event> = active
+                        .pool
+                        .get_from(&fallback, &filter)
+                        .await
+                        .into_iter()
+                        .collect();
+                    // (no explicit save: the SDK persists what it receives)
+                    events.extend(fetched.into_iter().filter(|ev| !deletions::is_deleted(ev)));
+                }
+                events.sort_by_key(|e| std::cmp::Reverse(e.created_at));
+                let profiles = Self::profiles_for(&active, &events).await;
+                Ok(FeedEvent::Loaded(FeedPage { notes: events, profiles }))
+            }
+            .await;
+            match res {
+                Ok(ev) => {
+                    let _ = tx.send(ev);
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
             }
         });
         rx

@@ -23,6 +23,7 @@ use super::{
     content,
     edit_profile::EditProfileView,
     feed::Feed,
+    library::LibraryView,
     nav::Nav,
     notifications::NotificationsView,
     profile::ProfileView,
@@ -45,6 +46,8 @@ pub enum Pane {
     Profile(Entity<ProfileView>),
     /// The profile edit form (D38) — the own-profile header's button.
     EditProfile(Entity<EditProfileView>),
+    /// The Library pane (D38): Bookmarks | Drafts | Lists.
+    Library(Entity<LibraryView>),
     Notifications(Entity<NotificationsView>),
     Search(Entity<SearchView>),
     Settings(Entity<SettingsView>),
@@ -250,6 +253,15 @@ impl Shell {
         let view = cx.new(|cx| Feed::articles(self.core.clone(), cx));
         self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Articles(view));
+        cx.notify();
+    }
+
+    /// The Library pane (D38): Bookmarks | Drafts | Lists — the user's own
+    /// stuff in one place.
+    fn open_library(&mut self, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| LibraryView::new(self.core.clone(), cx));
+        self.subscribe_nav(&view, cx);
+        self.stack.push(Pane::Library(view));
         cx.notify();
     }
 
@@ -580,6 +592,7 @@ impl Shell {
         match self.stack.last() {
             Some(Pane::Feed(_)) => "Feed".into(),
             Some(Pane::Articles(_)) => "Articles".into(),
+            Some(Pane::Library(_)) => "Library".into(),
             Some(Pane::Hashtag(f)) => f.read(cx).header().into(),
             Some(Pane::Thread(_)) => "Thread".into(),
             Some(Pane::Profile(_)) => "Profile".into(),
@@ -629,6 +642,8 @@ enum Spot {
     /// The user's avatar (D38) — ticks when the top pane is the OWN
     /// profile; a visit to someone else's profile doesn't tick it.
     Profile,
+    /// The Library pane (D38).
+    Library,
     Feed,
     Articles,
     Search,
@@ -649,6 +664,7 @@ impl Shell {
             // The avatar spot is the OWN profile only — a visit to someone
             // else's profile pane is not the spot.
             Some(Pane::Profile(view)) if view.read(cx).is_me => Some(Spot::Profile),
+            Some(Pane::Library(_)) => Some(Spot::Library),
             _ => None,
         }
     }
@@ -668,6 +684,7 @@ impl Shell {
         match pane {
             Pane::Feed(view) | Pane::Articles(view) | Pane::Hashtag(view) => view.read(cx).deep,
             Pane::Notifications(view) => view.read(cx).deep,
+            Pane::Library(view) => view.read(cx).deep,
             // The profile pane's notes list is an embedded feed; the view
             // mirrors the child's flag (PaneDeep forwarding).
             Pane::Profile(view) => view.read(cx).deep,
@@ -684,6 +701,9 @@ impl Shell {
             }
             Some(Pane::Notifications(view)) => {
                 view.update(cx, |n, _| n.scroll_top());
+            }
+            Some(Pane::Library(view)) => {
+                view.update(cx, |v, cx| v.scroll_top(cx));
             }
             Some(Pane::Profile(view)) => {
                 view.update(cx, |p, cx| p.scroll_top(cx));
@@ -768,6 +788,17 @@ impl Shell {
                 cx.listener(move |shell, _, _, cx| {
                     if shell.active_spot(cx) != Some(Spot::Articles) {
                         shell.open_articles(cx);
+                    }
+                }),
+            ))
+            .child(self.rail_button(
+                "rail-library",
+                "Library",
+                icons::book_icon(ink(active == Some(Spot::Library))),
+                active == Some(Spot::Library),
+                cx.listener(move |shell, _, _, cx| {
+                    if shell.active_spot(cx) != Some(Spot::Library) {
+                        shell.open_library(cx);
                     }
                 }),
             ))
@@ -1055,6 +1086,7 @@ impl Render for Shell {
                     .child(match pane {
                         Pane::Feed(view) => view.clone().into_any_element(),
                         Pane::Articles(view) => view.clone().into_any_element(),
+                        Pane::Library(view) => view.clone().into_any_element(),
                         Pane::Hashtag(view) => view.clone().into_any_element(),
                         Pane::Thread(view) => view.clone().into_any_element(),
                         Pane::Profile(view) => view.clone().into_any_element(),
@@ -1079,6 +1111,7 @@ impl Render for Shell {
                                     | Pane::Articles(_)
                                     | Pane::Hashtag(_)
                                     | Pane::Notifications(_)
+                                    | Pane::Library(_)
                             ),
                         |d| d.child(self.floating_top(cx)),
                     ),

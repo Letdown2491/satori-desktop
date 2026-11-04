@@ -186,6 +186,10 @@ pub fn article_icon(color: u32) -> impl IntoElement {
     icon(article, color, 20.0)
 }
 
+pub fn book_icon(color: u32) -> impl IntoElement {
+    icon(book, color, 17.0)
+}
+
 pub fn arrow_up_icon(color: u32) -> impl IntoElement {
     icon(arrow_up, color, 16.0)
 }
@@ -309,6 +313,21 @@ fn article(b: &mut PathBuilder, g: &Grid) {
     b.line_to(g.p(15.2, 12.0));
     b.move_to(g.p(8.8, 16.0));
     b.line_to(g.p(13.0, 16.0));
+}
+
+// The Library (D38): a closed book — cover, spine, two title lines.
+fn book(b: &mut PathBuilder, g: &Grid) {
+    b.move_to(g.p(5.0, 4.0));
+    b.line_to(g.p(19.0, 4.0));
+    b.line_to(g.p(19.0, 20.0));
+    b.line_to(g.p(5.0, 20.0));
+    b.close();
+    b.move_to(g.p(8.5, 4.0));
+    b.line_to(g.p(8.5, 20.0));
+    b.move_to(g.p(11.5, 9.0));
+    b.line_to(g.p(16.0, 9.0));
+    b.move_to(g.p(11.5, 13.0));
+    b.line_to(g.p(16.0, 13.0));
 }
 
 // Back-to-top: shaft + head.

@@ -253,6 +253,22 @@ impl Store {
         Ok(self.query(filter).await?.into_iter().next())
     }
 
+    /// Latest ADDRESSABLE event of one kind by one author with a d tag
+    /// (NIP-51 lists: the public bookmarks kind 30001 d="bookmarks").
+    pub async fn latest_by_kind_d(
+        &self,
+        author: PublicKey,
+        kind: Kind,
+        identifier: &str,
+    ) -> NostrResult<Option<Event>> {
+        let filter = Filter::new()
+            .kind(kind)
+            .author(author)
+            .identifier(identifier)
+            .limit(1);
+        Ok(self.query(filter).await?.into_iter().next())
+    }
+
     /// The newest kind-1 note across the follows - the refresh 'since'
     /// probe and the quiet-dot poll's answer. The naive probe (a page over
     /// ALL visible kinds) materialized one event per author-kind pair -

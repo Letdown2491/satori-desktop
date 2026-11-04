@@ -20,6 +20,8 @@ use satori_core::manager::{Core, FeedEvent, FeedRx, Live, ParentNote, Profile, P
 use satori_core::nip::nip10;
 use satori_core::wallet::{Status, WalletEvent};
 
+use crate::prefs;
+
 use crate::{icons, media, theme};
 use super::{content, nav::Nav, cards};
 
@@ -34,6 +36,9 @@ pub(crate) enum FeedMode {
     /// One author's notes — the profile page's Notes tab (an embedded Feed
     /// entity; the profile view only renders the header + media strips).
     Profile(PublicKey),
+    /// The Library pane's Bookmarks tab (D38): the own bookmark set
+    /// (private 10003 + public 30001 merged), no paging.
+    Bookmarks,
 }
 impl FeedMode {
     pub(crate) fn kinds(&self) -> Vec<Kind> {
@@ -43,7 +48,8 @@ impl FeedMode {
             // follow set). The kinds themselves honor the content prefs.
             FeedMode::Timeline
             | FeedMode::Hashtag(_)
-            | FeedMode::Profile(_) => satori_core::store::visible_kinds(),
+            | FeedMode::Profile(_)
+            | FeedMode::Bookmarks => satori_core::store::visible_kinds(),
             FeedMode::Articles => vec![Kind::Custom(30023)],
         }
     }
@@ -152,6 +158,12 @@ impl Feed {
         Self::with_mode(core, FeedMode::Profile(who), cx)
     }
 
+    /// The Library pane's Bookmarks tab (D38): the merged own bookmark set
+    /// as timeline rows. One shot — the list is finite, no Older rounds.
+    pub fn bookmarks(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
+        Self::with_mode(core, FeedMode::Bookmarks, cx)
+    }
+
     fn with_mode(core: Arc<Core>, mode: FeedMode, cx: &mut Context<Self>) -> Self {
         let feed = Self {
             liked: core.liked_set(),
@@ -256,6 +268,7 @@ impl Feed {
         let boot = match &feed.mode {
             FeedMode::Hashtag(tag) => feed.core.hashtag(tag.clone()),
             FeedMode::Profile(who) => feed.core.profile(*who),
+            FeedMode::Bookmarks => feed.core.bookmarked_notes(),
             _ => feed.core.bootstrap(feed.mode.kinds()),
         };
         feed.pump(boot, cx);
@@ -268,6 +281,7 @@ impl Feed {
             FeedMode::Hashtag(tag) => format!("#{tag}"),
             FeedMode::Timeline => "Feed".into(),
             FeedMode::Articles => "Articles".into(),
+            FeedMode::Bookmarks => "Bookmarks".into(),
             // Author feeds nest inside the profile pane, which carries its
             // own header — this title never renders.
             FeedMode::Profile(_) => "Profile".into(),
@@ -300,6 +314,11 @@ impl Feed {
     fn maybe_older(&mut self, visible_end: usize, cx: &mut Context<Self>) {
         const LOOKAHEAD: usize = 12;
         if !self.has_more || self.paging || self.notes.is_empty() {
+            return;
+        }
+        // The bookmark list is finite (D38) — the one-shot load never pages.
+        if matches!(self.mode, FeedMode::Bookmarks) {
+            self.has_more = false;
             return;
         }
         if visible_end + LOOKAHEAD < self.notes.len() {
@@ -382,7 +401,8 @@ impl Feed {
                 self.absorb(page.notes, page.profiles, cx);
                 self.want_parents(cx);
                 self.status.clear();
-                self.has_more = true;
+                // The bookmark list is finite (D38) — never page it.
+                self.has_more = !matches!(self.mode, FeedMode::Bookmarks);
             }
             FeedEvent::Older(page, more) => {
                 self.has_more = more;
@@ -812,24 +832,57 @@ impl Feed {
         .detach();
     }
 
-    /// Optimistic bookmark (private kind:10003 list) — engaged at once,
-    /// rolled back if core reports the publish failed.
+    /// Bookmark toggle (D38): a real toggle now. The star fills for either
+    /// list (private 10003 / public 30001 — the settings pref picks which
+    /// one a star WRITES); a second click unbookmarks through the RMW that
+    /// clears both. Optimistic, with rollback (the old add-only star made
+    /// a second click a no-op).
     fn toggle_bookmark(&mut self, ev: &Event, cx: &mut Context<Self>) {
         let id = ev.id.to_string();
-        if !self.bookmarked.insert(id.clone()) {
-            return;
+        let ev_id = ev.id;
+        let adding = self.bookmarked.insert(id.clone());
+        if !adding {
+            self.bookmarked.remove(&id);
         }
+        // The scope read rides the click: a mid-session pref flip applies
+        // to the NEXT star, the running one keeps its list (prefs.rs's
+        // mtime cache makes this a file stat).
+        let public = prefs::get_bool("bookmarkPublic");
         self.touch();
-        let mut rx = self.core.bookmark(ev);
+        let mut rx = if adding {
+            self.core.bookmark(ev, public)
+        } else {
+            self.core.unbookmark(ev_id)
+        };
         cx.spawn(async move |this, cx| {
             while let Some(pv) = rx.recv().await {
-                if let PublishEvent::Failed { .. } = pv {
-                    let _ = this.update(cx, |this, cx| {
-                        this.bookmarked.remove(&id);
-                        this.status = "bookmark didn't go through — try again".into();
-                        this.touch();
-                        cx.notify();
-                    });
+                match pv {
+                    PublishEvent::Failed { .. } => {
+                        let _ = this.update(cx, |this, cx| {
+                            if adding {
+                                this.bookmarked.remove(&id);
+                            } else {
+                                this.bookmarked.insert(id.clone());
+                            }
+                            this.status = "bookmark didn't go through — try again".into();
+                            this.touch();
+                            cx.notify();
+                        });
+                    }
+                    PublishEvent::Committed { .. } if !adding => {
+                        // Unbookmarking from the Library's list drops the
+                        // row (D38); everywhere else only the star unfills.
+                        let _ = this.update(cx, |this, cx| {
+                            if matches!(this.mode, FeedMode::Bookmarks) {
+                                this.notes.retain(|n| n.id != ev_id);
+                                this.note_ids.remove(&ev_id);
+                                this.list.reset(this.list_len());
+                                this.touch();
+                                cx.notify();
+                            }
+                        });
+                    }
+                    _ => {}
                 }
             }
         })
