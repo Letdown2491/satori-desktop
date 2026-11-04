@@ -41,5 +41,10 @@ fi
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database -q "$HOME/.local/share/applications" || true
 fi
+# Claim the nostr: scheme (D27): the desktop file DECLARES the handler;
+# GNOME only routes the URIs here once this entry is the scheme's default.
+if command -v xdg-mime >/dev/null 2>&1; then
+    xdg-mime default "$APP.desktop" x-scheme-handler/nostr || true
+fi
 
 echo "installed: $HOME/.local/bin/satori (+ desktop file, hicolor icons)"

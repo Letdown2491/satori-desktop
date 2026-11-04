@@ -30,21 +30,74 @@ pub fn bind_composer_keys(cx: &mut gpui::App) {
 
 /// The stashed top-level draft (composer.rs's DRAFT thread-local, session
 /// scope like the web app's note.ts saveDraft — one draft at a time).
+/// v1.4: the stash carries the uploaded attachment imetas too, so the
+/// instant reopen restores the gallery, not just the words.
 #[derive(Default)]
-pub struct Draft(pub Option<String>);
+pub struct Draft(pub Option<SessionDraft>);
 impl Global for Draft {}
 
-fn draft_take(cx: &mut App) -> Option<String> {
+/// What a session-stashed draft holds (v1.4): the buffer + the ready
+/// imeta arrays (the blobs are on Blossom; nothing re-uploads).
+#[derive(Default)]
+pub struct SessionDraft {
+    pub text: String,
+    pub attachments: Vec<Vec<String>>,
+}
+
+fn draft_take(cx: &mut App) -> Option<SessionDraft> {
     cx.default_global::<Draft>().0.take()
 }
 
+/// The synced-draft candidate: (reply parent, quote id, buffer, the ready
+/// attachment imetas) — save_draft's arguments, basically.
+pub type DraftCandidate = (Option<EventId>, Option<EventId>, String, Vec<Vec<String>>);
+
 struct Attachment {
+    /// Stable within the composer — an upload completion finds its tile
+    /// by id (the X button can have removed an earlier one meanwhile).
+    id: u64,
     name: String,
-    content_type: String,
-    bytes: Vec<u8>,
+    /// Raw bytes while composing — the tile preview, and the video
+    /// poster grab's source. None on a draft restore (v1.4): no bytes
+    /// ride the synced draft; the tile shows the CDN copy through the
+    /// media cache instead.
+    bytes: Option<Vec<u8>>,
     /// The tile preview: the ORIGINAL encoded bytes handed to gpui (it
     /// decodes on its own asset thread) — the note's gallery, live.
     image: Option<gpui::Image>,
+    /// The Blossom imeta once uploaded (v1.4); None while the attach-time
+    /// upload chain is still working on it. The synced draft and the
+    /// publish both take this verbatim.
+    imeta: Option<Vec<String>>,
+}
+
+impl Attachment {
+    /// Rebuild a tile from a synced draft's imeta (v1.4's restore path):
+    /// name/mime parsed from the tag, preview left to the media cache
+    /// (fetch kicks in attachment_row's render).
+    fn from_imeta(imeta: Vec<String>) -> Option<Self> {
+        let url = imeta
+            .iter()
+            .find(|e| e.starts_with("url "))
+            .map(|e| e[4..].to_string())?;
+        let name = url.rsplit('/').next().unwrap_or("attachment").to_string();
+        Some(Self {
+            id: 0,
+            name,
+            bytes: None,
+            image: None,
+            imeta: Some(imeta),
+        })
+    }
+
+    /// The CDN url the media cache keys on (the tile's restored preview).
+    fn url(&self) -> Option<String> {
+        self.imeta
+            .as_ref()?
+            .iter()
+            .find(|e| e.starts_with("url "))
+            .map(|e| e[4..].to_string())
+    }
 }
 
 /// The compose tab: a note (kind 1) or a poll (NIP-88, kind 1068).
@@ -99,6 +152,9 @@ pub struct Composer {
     /// preview above the field says what's being quoted.
     quote: Option<Event>,
     attachments: Vec<Attachment>,
+    /// Attachment id supply (monotonic; upload completions find their
+    /// tile by this).
+    next_att: u64,
     posting: bool,
     status: String,
     autofocused: bool,
@@ -121,13 +177,21 @@ impl Composer {
         crate::theme::watch(cx); // repaint on theme change
         let input = cx.new(Input::new);
         let focus = input.read(cx).focus_handle(cx);
+        // Restored attachments (stash or synced entry) build up here.
+        let mut attachments: Vec<Attachment> = Vec::new();
         // Draft restore: a top-level compose reopens with whatever was typed
         // and closed before (composer.rs:114 — the take spends the stash).
         // A quote compose carries the quote, so it skips the stash too.
         if reply_to.is_none() && quote.is_none()
-            && let Some(text) = draft_take(cx).filter(|t| !t.trim().is_empty())
+            && let Some(stash) = draft_take(cx)
+            && !stash.text.trim().is_empty()
         {
-            input.update(cx, |i, cx| i.set_text(&text, cx));
+            input.update(cx, |i, cx| i.set_text(&stash.text, cx));
+            attachments = stash
+                .attachments
+                .iter()
+                .filter_map(|m| Attachment::from_imeta(m.clone()))
+                .collect();
         } else if reply_to.is_none() && quote.is_none() {
             // D38: no session stash — the synced one (NIP-78 kind 30078)
             // survives restarts; the take spends it (a close without a send
@@ -149,10 +213,15 @@ impl Composer {
                         let _ = core.drop_draft(id);
                     }
                     None => {
-                        let _ = core.save_draft(None, None, String::new());
+                        let _ = core.save_draft(None, None, String::new(), Vec::new());
                     }
                 }
                 input.update(cx, |i, cx| i.set_text(&d.text, cx));
+                attachments = d
+                    .attachments
+                    .iter()
+                    .filter_map(|m| Attachment::from_imeta(m.clone()))
+                    .collect();
             }
         }
         // @-mention detection: watch the buffer, find an active `@token`.
@@ -162,6 +231,12 @@ impl Composer {
         let poll_options = (0..2)
             .map(|_| cx.new(Input::new))
             .collect();
+        // Restored attachments get real ids too (the upload chain only
+        // ever targets fresh picks, but the invariant stays simple: ids
+        // are unique within a composer).
+        for (i, a) in attachments.iter_mut().enumerate() {
+            a.id = i as u64;
+        }
         Self {
             core,
             input,
@@ -174,7 +249,8 @@ impl Composer {
             mention_token: None,
             reply_to,
             quote,
-            attachments: vec![],
+            next_att: attachments.len() as u64,
+            attachments,
             posting: false,
             status: String::new(),
             autofocused: false,
@@ -188,6 +264,7 @@ impl Composer {
             return;
         }
         self.status = "choosing files…".into();
+        let core = self.core.clone();
         cx.spawn(async move |this, cx| {
             // Blocking portal dialog on the background executor; one thread
             // parked while the user picks is fine.
@@ -199,6 +276,14 @@ impl Composer {
                         .pick_files()
                 })
                 .await;
+            // v1.4: attachments upload NOW, at attach time — the blobs
+            // land on Blossom while the user keeps typing, the publish
+            // embeds the finished imetas, and the synced draft (which
+            // carries no bytes) can reference them. The chain stays
+            // sequential within a batch (one blob at a time, the
+            // publish-time discipline); two overlapping pick batches run
+            // two chains — a deliberate user act, still bounded.
+            let mut fresh: Vec<(u64, String, Vec<u8>)> = Vec::new();
             let _ = this.update(cx, |this, cx| {
                 this.status.clear();
                 for path in picked.into_iter().flatten() {
@@ -223,21 +308,86 @@ impl Composer {
                                 _ => gpui::ImageFormat::Gif,
                             };
                             let image = gpui::Image::from_bytes(format, bytes.clone());
+                            let id = this.next_att;
+                            this.next_att += 1;
                             this.attachments.push(Attachment {
+                                id,
                                 name: path
                                     .file_name()
                                     .map(|n| n.to_string_lossy().into_owned())
                                     .unwrap_or_default(),
-                                content_type: content_type.into(),
-                                bytes,
+                                bytes: Some(bytes.clone()),
                                 image: Some(image),
-                            })
+                                imeta: None,
+                            });
+                            fresh.push((id, content_type.into(), bytes));
                         }
                         Err(e) => this.status = format!("couldn't read {}: {e}", path.display()),
                     }
                 }
                 cx.notify();
             });
+            // The chain: per attachment — upload, then the video poster
+            // grab rides its OWN upload (the D38 order, moved here from
+            // the publish); a failed blob removes the tile with a word.
+            for (id, content_type, bytes) in fresh {
+                let mut rx = core.blossom_upload(bytes.clone(), content_type.clone());
+                let mut imeta: Option<Vec<String>> = None;
+                while let Some(ev) = rx.recv().await {
+                    match ev {
+                        PublishEvent::Uploaded { imeta: m, .. } => {
+                            imeta = Some(m);
+                            break;
+                        }
+                        PublishEvent::Failed { error, .. } => {
+                            let _ = this.update(cx, |this, cx| {
+                                this.attachments.retain(|a| a.id != id);
+                                this.status = format!("upload failed: {error}");
+                                cx.notify();
+                            });
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                let Some(mut imeta) = imeta else { continue };
+                // D38: a video carries its first frame as a second blob —
+                // the imeta gains `image` + `blurhash` so every client (and
+                // our own tile) paints it with no runtime sniff. The grab
+                // runs on the background pool (a GStreamer demux has no
+                // place on the UI thread); a failed grab or poster upload
+                // DEGRADES to the bare imeta — never blocks the attach.
+                if content_type.starts_with("video/") {
+                    let grabbed = cx
+                        .background_executor()
+                        .spawn(async move { crate::poster::grab(&bytes) })
+                        .await;
+                    if let Some((png, hash)) = grabbed {
+                        let mut rx = core.blossom_upload(png, "image/png".to_string());
+                        let mut poster_url: Option<String> = None;
+                        while let Some(ev) = rx.recv().await {
+                            match ev {
+                                PublishEvent::Uploaded { url, .. } => {
+                                    poster_url = Some(url);
+                                    break;
+                                }
+                                PublishEvent::Failed { .. } => break,
+                                _ => {}
+                            }
+                        }
+                        if let Some(poster_url) = poster_url {
+                            imeta.push(format!("image {poster_url}"));
+                            imeta.push(format!("blurhash {hash}"));
+                        }
+                    }
+                }
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(a) = this.attachments.iter_mut().find(|a| a.id == id) {
+                        a.imeta = Some(imeta);
+                    }
+                    cx.notify();
+                });
+            }
         })
         .detach();
     }
@@ -405,83 +555,25 @@ impl Composer {
             self.reply_to.as_ref().map(|e| e.id),
             self.quote.as_ref().map(|e| e.id),
         );
+        // v1.4: the attachments uploaded at ATTACH time — the publish
+        // embeds the finished imetas. Anything still in flight keeps the
+        // note unposted for the moment (the seal re-arms when the chain
+        // lands; a failed blob already removed its tile with a word).
+        if self.attachments.iter().any(|a| a.imeta.is_none()) {
+            self.posting = false;
+            self.status = "waiting for the upload to finish…".into();
+            cx.notify();
+            return;
+        }
         let this_mentions = std::mem::take(&mut self.mentions);
-        let atts: Vec<(String, Vec<u8>)> = self
+        let imetas: Vec<Vec<String>> = self
             .attachments
             .iter()
-            .map(|a| (a.content_type.clone(), a.bytes.clone()))
+            .filter_map(|a| a.imeta.clone())
             .collect();
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            // Upload chain: one blob at a time, collecting imeta tags.
-            let mut imetas: Vec<Vec<String>> = vec![];
-            for (content_type, bytes) in &atts {
-                let mut rx = core.blossom_upload(bytes.clone(), content_type.clone());
-                let mut uploaded = false;
-                let mut imeta: Vec<String> = vec![];
-                while let Some(ev) = rx.recv().await {
-                    match ev {
-                        PublishEvent::Uploaded { imeta: m, .. } => {
-                            imeta = m;
-                            uploaded = true;
-                            break;
-                        }
-                        PublishEvent::Failed { error, .. } => {
-                            let _ = this.update(cx, |this, cx| {
-                                this.posting = false;
-                                this.status = format!("upload failed: {error}");
-                                cx.notify();
-                            });
-                            return;
-                        }
-                        _ => {}
-                    }
-                }
-                if !uploaded {
-                    let _ = this.update(cx, |this, cx| {
-                        this.posting = false;
-                        this.status = "upload cut short".into();
-                        cx.notify();
-                    });
-                    return;
-                }
-                // D38: a video carries its first frame as a second blob —
-                // the imeta gains `image` + `blurhash` so every client (and
-                // our own tile, which prefers the publisher's poster) paints
-                // it with no runtime sniff. The grab runs on the background
-                // pool (a GStreamer demux has no place on the UI thread);
-                // a failed grab or poster upload DEGRADES to the bare imeta
-                // — never blocks the post.
-                if content_type.starts_with("video/") {
-                    let grabbed = {
-                        let bytes = bytes.clone();
-                        cx.background_executor()
-                            .spawn(async move { crate::poster::grab(&bytes) })
-                            .await
-                    };
-                    if let Some((png, hash)) = grabbed {
-                        let mut rx = core.blossom_upload(png, "image/png".to_string());
-                        let mut poster_url: Option<String> = None;
-                        while let Some(ev) = rx.recv().await {
-                            match ev {
-                                PublishEvent::Uploaded { url, .. } => {
-                                    poster_url = Some(url);
-                                    break;
-                                }
-                                PublishEvent::Failed { .. } => break,
-                                _ => {}
-                            }
-                        }
-                        if let Some(poster_url) = poster_url {
-                            imeta.push(format!("image {poster_url}"));
-                            imeta.push(format!("blurhash {hash}"));
-                        }
-                    }
-                }
-                imetas.push(imeta);
-            }
-
             // Publish: pictures when there are imetas, notes otherwise.
             // Reply routing follows Amethyst's migration rule: kind-1 roots
             // keep kind-1 replies + NIP-10 tags (every client reads those);
@@ -512,7 +604,7 @@ impl Composer {
                         // D38: the synced slot is spent — the note will go
                         // out unless undone (then the composer stays open
                         // and a close re-saves the draft).
-                        let _ = core.save_draft(draft_key.0, draft_key.1, String::new());
+                        let _ = core.save_draft(draft_key.0, draft_key.1, String::new(), Vec::new());
                         let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
                         return;
                     }
@@ -528,7 +620,7 @@ impl Composer {
                     }
                     PublishEvent::Committed { .. } => {
                         // D38: the synced draft slot is spent with the send.
-                        let _ = core.save_draft(draft_key.0, draft_key.1, String::new());
+                        let _ = core.save_draft(draft_key.0, draft_key.1, String::new(), Vec::new());
                         let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
                         return;
                     }
@@ -550,23 +642,25 @@ impl Composer {
     /// Stash candidate, GTK close-handler semantics (composer.rs:509): the
     /// whole buffer of a top-level compose that never sent — possibly empty,
     /// so closing empty clears a stale draft. None = don't touch the draft
-    /// (replies, a send in flight, an undo window pending).
-    pub fn draft_candidate(&self, cx: &App) -> Option<String> {
+    /// (replies, a send in flight, an undo window pending). v1.4: the
+    /// session stash carries the ready attachment imetas too.
+    pub fn draft_candidate(&self, cx: &App) -> Option<SessionDraft> {
         if self.reply_to.is_some() || self.quote.is_some() || self.posting {
             return None;
         }
-        Some(self.input.read(cx).content.trim().to_string())
+        Some(SessionDraft {
+            text: self.input.read(cx).content.trim().to_string(),
+            attachments: self.ready_imetas(),
+        })
     }
 
-    /// The SYNCED draft candidate (D38): (reply parent, quote, buffer) for
-    /// any compose that isn't mid-send — replies and quotes sync keyed,
-    /// not just the top-level slot. Polls don't draft (v1 keeps their
-    /// surface small — and their empty note buffer must not wipe the
-    /// top-level slot).
-    pub fn draft_sync_candidate(
-        &self,
-        cx: &App,
-    ) -> Option<(Option<EventId>, Option<EventId>, String)> {
+    /// The SYNCED draft candidate (D38): (reply parent, quote, buffer,
+    /// attachment imetas) for any compose that isn't mid-send — replies and
+    /// quotes sync keyed, not just the top-level slot. Polls don't draft
+    /// (v1 keeps their surface small — and their empty note buffer must not
+    /// wipe the top-level slot). v1.4: the imetas ride the entry (the
+    /// blobs are on Blossom since attach time).
+    pub fn draft_sync_candidate(&self, cx: &App) -> Option<DraftCandidate> {
         if self.posting || self.tab == Tab::Poll {
             return None;
         }
@@ -574,14 +668,37 @@ impl Composer {
             self.reply_to.as_ref().map(|e| e.id),
             self.quote.as_ref().map(|e| e.id),
             self.input.read(cx).content.trim().to_string(),
+            self.ready_imetas(),
         ))
+    }
+
+    /// The uploaded imetas, verbatim — the publish's gallery, the synced
+    /// draft's attachment list (pending tiles contribute nothing).
+    fn ready_imetas(&self) -> Vec<Vec<String>> {
+        self.attachments
+            .iter()
+            .filter_map(|a| a.imeta.clone())
+            .collect()
     }
 
     /// D38: fill the buffer from a reopened Library draft — overwrites
     /// whatever the session stash restored (the synced slot was spent at
     /// tap time; the close saves whatever the user does with it).
-    pub fn prefill(&mut self, text: &str, cx: &mut Context<Self>) {
+    /// v1.4: the entry's attachment imetas restore with it.
+    pub fn prefill(
+        &mut self,
+        text: &str,
+        attachments: Vec<Vec<String>>,
+        cx: &mut Context<Self>,
+    ) {
         self.input.update(cx, |i, cx| i.set_text(text, cx));
+        for m in attachments.into_iter() {
+            if let Some(mut a) = Attachment::from_imeta(m) {
+                a.id = self.next_att;
+                self.next_att += 1;
+                self.attachments.push(a);
+            }
+        }
         cx.notify();
     }
 }
@@ -1005,15 +1122,27 @@ impl Render for Composer {
 impl Composer {
     fn attachment_row(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let tiles = self.attachments.len();
+        // Restored attachments (v1.4) have no bytes — their preview is the
+        // CDN copy through the media cache (fetch + Snapshot, the quote
+        // card's pattern; fetch is a silent no-op while it's cached).
+        let snap = media::Snapshot::new(cx);
+        for a in &self.attachments {
+            if a.bytes.is_none()
+                && let Some(url) = a.url()
+            {
+                media::fetch(&self.core, url, cx.entity_id(), cx);
+            }
+        }
         div()
             .w_full()
             .flex()
             .flex_wrap()
             .gap_2()
             .children(self.attachments.iter().enumerate().map(|(i, a)| {
+                let att_id = a.id;
                 let remove = cx.listener(move |this, _, _, cx| {
                     if !this.posting {
-                        this.attachments.remove(i);
+                        this.attachments.retain(|x| x.id != att_id);
                         cx.notify();
                     }
                 });
@@ -1037,11 +1166,19 @@ impl Composer {
                                     .size_full()
                                     .object_fit(gpui::ObjectFit::Cover)
                                     .into_any_element(),
-                                None => div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(theme::muted()))
-                                    .child("…")
-                                    .into_any_element(),
+                                // The restored tile: the CDN copy when it
+                                // has landed, a quiet placeholder before.
+                                None => match a.url().and_then(|u| snap.png(&u)) {
+                                    Some(png) => img(png)
+                                        .size_full()
+                                        .object_fit(gpui::ObjectFit::Cover)
+                                        .into_any_element(),
+                                    None => div()
+                                        .text_size(px(11.))
+                                        .text_color(rgb(theme::muted()))
+                                        .child("…")
+                                        .into_any_element(),
+                                },
                             }),
                     )
                     .child(

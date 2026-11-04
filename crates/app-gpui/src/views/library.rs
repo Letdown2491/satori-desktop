@@ -265,12 +265,13 @@ impl LibraryView {
         let quote_id = d.quote.as_ref().and_then(|h| EventId::from_hex(h).ok());
         let core = self.core.clone();
         let text = d.text.clone();
+        let attachments = d.attachments.clone();
         cx.notify();
         // A failed publish restored the entry — the row comes back (the
         // composer is up either way; this keeps the tab honest).
         let mut rx = match d.id {
             Some(id) => self.core.drop_draft(id),
-            None => self.core.save_draft(reply_id, quote_id, String::new()),
+            None => self.core.save_draft(reply_id, quote_id, String::new(), Vec::new()),
         };
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.recv().await {
@@ -298,7 +299,12 @@ impl LibraryView {
                 None => None,
             };
             let _ = this.update(cx, |_this, cx| {
-                cx.emit(Nav::OpenDraft(text, reply.map(Box::new), quote.map(Box::new)))
+                cx.emit(Nav::OpenDraft(
+                    text,
+                    attachments.clone(),
+                    reply.map(Box::new),
+                    quote.map(Box::new),
+                ))
             });
         })
         .detach();
@@ -312,7 +318,7 @@ impl LibraryView {
         let quote_id = d.quote.as_ref().and_then(|h| EventId::from_hex(h).ok());
         let mut rx = match d.id.clone() {
             Some(id) => self.core.drop_draft(id),
-            None => self.core.save_draft(reply_id, quote_id, String::new()),
+            None => self.core.save_draft(reply_id, quote_id, String::new(), Vec::new()),
         };
         cx.notify();
         cx.spawn(async move |this, cx| {

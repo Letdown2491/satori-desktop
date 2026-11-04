@@ -2074,6 +2074,7 @@ impl Core {
                     reply_to: None,
                     quote: None,
                     id: Some(d),
+                    attachments: Vec::new(),
                     at: wrap.created_at.as_secs(),
                 });
             }
@@ -4575,6 +4576,8 @@ impl Core {
     /// Save a composer draft (D38): replace-or-insert by slot — the
     /// (reply, quote) pair; an empty text DELETES the slot (closing a
     /// compose empty clears a stale draft, the session stash's semantics).
+    /// `attachments` (v1.4) rides the entry: the uploaded imeta arrays,
+    /// verbatim — the blobs are already on Blossom (upload-at-attach).
     /// The whole array re-encrypts into the one NIP-78 event and rides
     /// commit() (30078 is coordinate-keyed, the outbox retries it).
     /// Optimistic (v1.1): the in-memory array spends immediately so the
@@ -4585,6 +4588,7 @@ impl Core {
         reply_to: Option<EventId>,
         quote: Option<EventId>,
         text: String,
+        attachments: Vec<Vec<String>>,
     ) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
@@ -4611,6 +4615,7 @@ impl Core {
                     reply_to: key.0,
                     quote: key.1,
                     id: None,
+                    attachments,
                     at: Timestamp::now().as_secs(),
                 };
                 spent.push(entry.clone());
@@ -5376,6 +5381,13 @@ pub struct DraftEntry {
     pub quote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Uploaded attachment imetas (v1.4): the blobs are on Blossom before
+    /// the draft saves (upload happens at ATTACH time), so the entry
+    /// carries the NIP-92 tag arrays verbatim — a restore republishes
+    /// them unchanged. No bytes ride the draft; the composer tile shows
+    /// the CDN copy through the media cache.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Vec<String>>,
     /// Last touch (wrap created_at / save time) — the tab sorts by it,
     /// the composer's restore takes the newest top-level.
     #[serde(default)]
@@ -5692,6 +5704,39 @@ impl Core {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// The synced draft round-trip (D38 v1.4): attachment imetas survive
+    /// the serde pass verbatim, and a legacy entry (no attachments key)
+    /// deserializes to an empty vec — old events stay readable.
+    #[test]
+    fn draft_entry_attachments_round_trip() {
+        let imeta = vec![
+            "imeta".to_string(),
+            "url https://cdn.example.com/abc.png".to_string(),
+            "m image/png".to_string(),
+            "x deadbeef".to_string(),
+        ];
+        let entry = DraftEntry {
+            text: "with a picture".into(),
+            reply_to: None,
+            quote: None,
+            id: None,
+            attachments: vec![imeta.clone()],
+            at: 42,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("attachments"), "non-empty must serialize");
+        let back: DraftEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.attachments, vec![imeta]);
+
+        // Legacy shape: the key is absent entirely.
+        let legacy: DraftEntry = serde_json::from_str(
+            r#"{"text":"old","at":7}"#,
+        )
+        .unwrap();
+        assert!(legacy.attachments.is_empty());
+        assert!(legacy.matches(None, None));
+    }
 
     /// NIP-92 kind-0 adoption: the banner's blurhash arrives only from an
     /// The profile patch (D38): Some overwrites, Some("") clears, None
