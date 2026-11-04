@@ -4563,6 +4563,9 @@ impl Core {
     /// compose empty clears a stale draft, the session stash's semantics).
     /// The whole array re-encrypts into the one NIP-78 event and rides
     /// commit() (30078 is coordinate-keyed, the outbox retries it).
+    /// Optimistic (v1.1): the in-memory array spends immediately so the
+    /// composer/Library never wait on the relay round; a failed publish
+    /// restores what was spent.
     pub fn save_draft(
         self: &Arc<Self>,
         reply_to: Option<EventId>,
@@ -4571,26 +4574,41 @@ impl Core {
     ) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
+        // Optimistic (v1.1): the in-memory array updates NOW — the
+        // composer open and the Library rows react instantly — and the
+        // publish rides behind; a failed publish RESTORES the spent
+        // entries (D38's "failed save leaves the slot intact", just
+        // without the wait).
+        let key = (reply_to.map(|e| e.to_string()), quote.map(|e| e.to_string()));
+        let (plain, spent) = {
+            let mut drafts = this.own_drafts.lock().unwrap().clone();
+            // Satori's own slot entries replace by (reply, quote);
+            // imported (id-marked) entries only ever leave through
+            // drop_draft (their wrap is a separate event).
+            let mut spent: Vec<DraftEntry> = drafts
+                .iter()
+                .filter(|d| d.id.is_none() && d.matches(key.0.as_deref(), key.1.as_deref()))
+                .cloned()
+                .collect();
+            drafts.retain(|d| d.id.is_some() || !d.matches(key.0.as_deref(), key.1.as_deref()));
+            if !text.trim().is_empty() {
+                let entry = DraftEntry {
+                    text,
+                    reply_to: key.0,
+                    quote: key.1,
+                    id: None,
+                    at: Timestamp::now().as_secs(),
+                };
+                spent.push(entry.clone());
+                drafts.push(entry);
+            }
+            let plain = serde_json::to_string(&drafts).unwrap_or_default();
+            *this.own_drafts.lock().unwrap() = drafts;
+            (plain, spent)
+        };
+        self.rt.spawn(async move {            let res: Result<()> = async {
                 let active = this.active().await?;
                 let me = active.me();
-                let key = (reply_to.map(|e| e.to_string()), quote.map(|e| e.to_string()));
-                let mut drafts = this.own_drafts.lock().unwrap().clone();
-                // Satori's own slot entries replace by (reply, quote);
-                // imported (id-marked) entries only ever leave through
-                // drop_draft (their wrap is a separate event).
-                drafts.retain(|d| d.id.is_some() || !d.matches(key.0.as_deref(), key.1.as_deref()));
-                if !text.trim().is_empty() {
-                    drafts.push(DraftEntry {
-                        text,
-                        reply_to: key.0,
-                        quote: key.1,
-                        id: None,
-                        at: Timestamp::now().as_secs(),
-                    });
-                }
-                let plain = serde_json::to_string(&drafts).unwrap_or_default();
                 let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
                 let unsigned = UnsignedEvent::new(
                     me,
@@ -4601,11 +4619,19 @@ impl Core {
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;
-                *this.own_drafts.lock().unwrap() = drafts;
                 Ok(())
             }
             .await;
             if let Err(e) = res {
+                // Restore: the spent entries come back unless a newer
+                // save already re-filled the slot.
+                let mut drafts = this.own_drafts.lock().unwrap().clone();
+                for d in spent {
+                    if !drafts.contains(&d) {
+                        drafts.push(d);
+                    }
+                }
+                *this.own_drafts.lock().unwrap() = drafts;
                 let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
@@ -4621,13 +4647,26 @@ impl Core {
     pub fn drop_draft(self: &Arc<Self>, id: String) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
+        // Optimistic (v1.1): the entry leaves the in-memory array NOW —
+        // the row vanishes the moment the tap lands — and the publishes
+        // (the 30078 stash, then the wrap's NIP-37 empty-content delete)
+        // ride behind; a failed publish restores the entry.
+        let (plain, spent) = {
+            let mut drafts = this.own_drafts.lock().unwrap().clone();
+            let spent: Vec<DraftEntry> = drafts
+                .iter()
+                .filter(|d| d.id.as_deref() == Some(id.as_str()))
+                .cloned()
+                .collect();
+            drafts.retain(|d| d.id.as_deref() != Some(id.as_str()));
+            let plain = serde_json::to_string(&drafts).unwrap_or_default();
+            *this.own_drafts.lock().unwrap() = drafts;
+            (plain, spent)
+        };
         self.rt.spawn(async move {
             let res: Result<()> = async {
                 let active = this.active().await?;
                 let me = active.me();
-                let mut drafts = this.own_drafts.lock().unwrap().clone();
-                drafts.retain(|d| d.id.as_deref() != Some(id.as_str()));
-                let plain = serde_json::to_string(&drafts).unwrap_or_default();
                 let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
                 let unsigned = UnsignedEvent::new(
                     me,
@@ -4638,7 +4677,6 @@ impl Core {
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;
-                *this.own_drafts.lock().unwrap() = drafts;
                 // The wrap itself: NIP-37's delete — republish with empty
                 // content (relays keep the empty shell until NIP-40 expiry).
                 if let Ok(Some(wrap)) = active
@@ -4661,6 +4699,13 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
+                let mut drafts = this.own_drafts.lock().unwrap().clone();
+                for d in spent {
+                    if !drafts.contains(&d) {
+                        drafts.push(d);
+                    }
+                }
+                *this.own_drafts.lock().unwrap() = drafts;
                 let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
@@ -5342,12 +5387,36 @@ pub struct NostrList {
     pub members: Vec<PublicKey>,
 }
 
+/// Minimal percent-decoding (%XX hex pairs) for display: list ds
+/// percent-encode path separators; malformed escapes pass through.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let hex = |b: u8| (b as char).to_digit(16);
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 impl NostrList {
-    /// The display name: a title tag beats the d identifier.
-    pub fn display(&self) -> &str {
+    /// The display name: a title tag beats the d identifier; percent
+    /// escapes decode (Bloom's folder ds encode `/` as %2F — the raw
+    /// identifier is wire format, the row shows the path).
+    pub fn display(&self) -> String {
         match &self.title {
-            Some(t) if !t.trim().is_empty() => t,
-            _ => &self.d,
+            Some(t) if !t.trim().is_empty() => t.clone(),
+            _ => percent_decode(&self.d),
         }
     }
 
@@ -5382,12 +5451,18 @@ impl NostrList {
 }
 
 impl Core {
-    /// The own NIP-51 named lists (kind 30000) (D38's Lists tab). The
-    /// relay round first — before D38 nothing ever fetched own list
-    /// events, so the store only held what a past publish echoed; the
-    /// fetch lands via save-on-receive and the store read merges it with
-    /// what was already there. Newest wrap per d wins (parameterized
-    /// replaceable); sorted by display name.
+    /// The own NIP-51 lists (D38's Lists tab): kind 30000 (follow sets)
+    /// plus kind 30001 (categorized people/bookmark sets — Primal's
+    /// "custom sets" live there), EXCEPT the 30001 d="bookmark" — that
+    /// one IS the public bookmarks list and shows in the Bookmarks tab.
+    /// The relay round first — before D38 v1.1 nothing ever fetched own
+    /// list events — with the fetched events SAVED EXPLICITLY before the
+    /// store read: the one-shot fetch's SDK-side saves are async and can
+    /// still be landing when the read runs (v1.1's empty-tab race), a
+    /// save is deterministic. Newest event per (kind, d) wins
+    /// (parameterized replaceable); a private list's members (encrypted
+    /// tag-JSON content, Bloom's folders) decrypt to-self. Sorted by
+    /// display name.
     pub fn own_lists(self: &Arc<Self>) -> tokio::sync::mpsc::UnboundedReceiver<Vec<NostrList>> {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
@@ -5395,40 +5470,76 @@ impl Core {
             let lists = async {
                 let active = this.active().await?;
                 let me = active.me();
-                let filter = Filter::new()
-                    .author(me)
-                    .kind(Kind::Custom(30000))
-                    .limit(200);
-                let _ = active.pool.get(filter).await.unwrap_or_default();
-                let mut newest: HashMap<String, Event> = HashMap::new();
-                for ev in active
-                    .pool
-                    .store
-                    .all_by_kind(me, Kind::Custom(30000))
-                    .await
-                    .unwrap_or_default()
-                {
-                    let Some(d) = ev
-                        .tags
-                        .clone()
-                        .to_vec()
-                        .iter()
-                        .find(|t| t.kind() == "d")
-                        .and_then(|t| t.content().map(str::to_string))
-                    else {
-                        continue;
-                    };
-                    match newest.get(&d) {
-                        Some(old) if old.created_at >= ev.created_at => {}
-                        _ => {
-                            newest.insert(d, ev);
+                for kind in [30000u16, 30001] {
+                    let filter = Filter::new()
+                        .author(me)
+                        .kind(Kind::Custom(kind))
+                        .limit(200);
+                    let fetched = active.pool.get(filter).await.unwrap_or_default();
+                    for ev in &fetched {
+                        let _ = active.pool.store.save(ev).await;
+                    }
+                }
+                // (kind, d) is the replaceable coordinate; a plain d key
+                // would collide 30000 and 30001 sets.
+                let mut newest: HashMap<(u16, String), Event> = HashMap::new();
+                for kind in [30000u16, 30001] {
+                    for ev in active
+                        .pool
+                        .store
+                        .all_by_kind(me, Kind::Custom(kind))
+                        .await
+                        .unwrap_or_default()
+                    {
+                        let Some(d) = ev
+                            .tags
+                            .clone()
+                            .to_vec()
+                            .iter()
+                            .find(|t| t.kind() == "d")
+                            .and_then(|t| t.content().map(str::to_string))
+                        else {
+                            continue;
+                        };
+                        if kind == 30001 && d == "bookmark" {
+                            continue;
+                        }
+                        match newest.get(&(kind, d.clone())) {
+                            Some(old) if old.created_at >= ev.created_at => {}
+                            _ => {
+                                newest.insert((kind, d), ev);
+                            }
                         }
                     }
                 }
-                let mut lists: Vec<NostrList> =
-                    newest.values().filter_map(NostrList::from_event).collect();
-                lists.sort_by_key(|l| l.display().to_lowercase());
-                Ok::<Vec<NostrList>, LoginError>(lists)
+                let mut lists: Vec<NostrList> = Vec::new();
+                for ev in newest.values() {
+                    let Some(mut l) = NostrList::from_event(ev) else {
+                        continue;
+                    };
+                    // A private list's items are encrypted (NIP-51: the
+                    // content is nip44-to-self of the tag array) — the
+                    // plain p-tags are gone, so decrypt for the members.
+                    if l.members.is_empty()
+                        && !ev.content.is_empty()
+                        && let Ok(plain) = active
+                            .signer
+                            .nip44_decrypt_self(&me, ev.content.as_str())
+                            .await
+                        && let Ok(tags) = serde_json::from_str::<Vec<Vec<String>>>(&plain)
+                    {
+                        for tag in tags {
+                            if tag.first().map(String::as_str) == Some("p")
+                                && let Some(pk) =
+                                    tag.get(1).and_then(|c| c.parse::<PublicKey>().ok())
+                            {
+                                l.members.push(pk);
+                            }
+                        }
+                    }
+                    lists.push(l);
+                }
+                lists.sort_by_key(|l| l.display().to_lowercase());                Ok::<Vec<NostrList>, LoginError>(lists)
             }
             .await;
             let _ = tx.send(lists.unwrap_or_default());

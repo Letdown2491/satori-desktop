@@ -8,7 +8,7 @@ use gpui::{div, prelude::*, px, rgb, AnyElement, Context, Entity, EventEmitter, 
            Render, SharedString, Window};
 use nostr::prelude::*;
 use std::{collections::HashMap, sync::Arc};
-use satori_core::manager::{Core, DraftEntry, FeedEvent, FeedRx, NostrList, Profile};
+use satori_core::manager::{Core, DraftEntry, FeedEvent, FeedRx, NostrList, Profile, PublishEvent};
 
 use crate::{media, theme};
 use super::{content, feed::Feed, nav::Nav};
@@ -18,11 +18,9 @@ pub(crate) struct LibraryView {
     tab: LibTab,
     /// The Bookmarks tab's rows — a full Feed in Bookmarks mode.
     bookmarks: Entity<Feed>,
-    /// The Lists tab (D38): the own NIP-51 named lists, loaded once on the
-    /// tab's first open (a one-shot store query — own list events arrive
-    /// with the startup deep fetch).
+    /// The Lists tab (D38): the own NIP-51 lists, re-queried on every
+    /// tab visit (the fresh result replaces whatever showed).
     lists: Vec<NostrList>,
-    lists_loaded: bool,
     /// The open list's detail (in-tab second level): the list + its
     /// members' resolved profiles.
     open_list: Option<NostrList>,
@@ -59,7 +57,6 @@ impl LibraryView {
             tab: LibTab::Bookmarks,
             bookmarks,
             lists: Vec::new(),
-            lists_loaded: false,
             open_list: None,
             members: HashMap::new(),
             deep: false,
@@ -73,9 +70,10 @@ impl LibraryView {
         self.bookmarks.update(cx, |feed, _| feed.scroll_top());
     }
 
-    /// First Lists tab open (D38): the one-shot own-lists query.
+    /// A Lists tab visit (D38 v1.1: EVERY visit, not just the first —
+    /// the one-shot query raced the SDK's saves and pinned the empty
+    /// placeholder). The fresh result replaces whatever showed.
     fn load_lists(&mut self, cx: &mut Context<Self>) {
-        self.lists_loaded = true;
         let mut rx = self.core.own_lists();
         cx.spawn(async move |this, cx| {
             if let Some(lists) = rx.recv().await {
@@ -135,7 +133,7 @@ impl LibraryView {
                     .text_size(px(13.5))
                     .text_color(rgb(theme::ink()))
                     .text_ellipsis()
-                    .child(l.display().to_string()),
+                    .child(l.display()),
             )
             .child(
                 div()
@@ -213,25 +211,36 @@ impl LibraryView {
             .into_any_element()
     }
 
-    /// Tap a synced draft (D38): spend the slot now (the composer's close
-    /// re-saves whatever the user does with it), resolve the reply/quote
-    /// context events best-effort, then open the composer prefilled. An
-    /// imported (id-marked) entry instead drops its NIP-37 wrap — the
-    /// conversion moment (v1.1).
+    /// Tap a synced draft (D38): spend the slot (an imported id-marked
+    /// entry instead drops its NIP-37 wrap — the conversion moment,
+    /// v1.1), resolve the reply/quote context events best-effort, then
+    /// open the composer prefilled. The spend is OPTIMISTIC (the core's
+    /// in-memory array updates synchronously) — only the context reads
+    /// stand between the tap and the composer; the publishes ride
+    /// behind, a failed one restores the entry (the drain re-renders).
     fn open_draft(&self, d: DraftEntry, cx: &mut Context<Self>) {
         let reply_id = d.reply_to.as_ref().and_then(|h| EventId::from_hex(h).ok());
         let quote_id = d.quote.as_ref().and_then(|h| EventId::from_hex(h).ok());
-        let mut rx = match d.id.clone() {
+        let core = self.core.clone();
+        let text = d.text.clone();
+        cx.notify();
+        // A failed publish restored the entry — the row comes back (the
+        // composer is up either way; this keeps the tab honest).
+        let mut rx = match d.id {
             Some(id) => self.core.drop_draft(id),
             None => self.core.save_draft(reply_id, quote_id, String::new()),
         };
-        let core = self.core.clone();
-        let text = d.text.clone();
         cx.spawn(async move |this, cx| {
-            // The slot's spend lands when the publish stream closes — then
-            // the tab re-renders without the row.
-            while rx.recv().await.is_some() {}
-            let _ = this.update(cx, |_this, cx| cx.notify());
+            while let Some(ev) = rx.recv().await {
+                if matches!(ev, PublishEvent::Failed { .. }) {
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                }
+            }
+        })
+        .detach();
+        // The context reads are local-store fast; the composer opens as
+        // soon as they land (the publishes never block it).
+        cx.spawn(async move |this, cx| {
             let reply = match reply_id {
                 Some(id) => {
                     let mut rx = core.note_by_id(id);
@@ -253,10 +262,9 @@ impl LibraryView {
         .detach();
     }
 
-    /// Delete a synced draft from the tab (the x): spend the slot (or,
-    /// for an imported id-marked entry, kill its NIP-37 wrap); the row
-    /// drops when the stream closes and the tab re-renders from the
-    /// fresh list.
+    /// Delete a synced draft from the tab (the x): the spend is
+    /// optimistic — the row drops on the notify — and a failed publish
+    /// (entry restored) re-renders it back via the drain.
     fn delete_draft(&self, d: &DraftEntry, cx: &mut Context<Self>) {
         let reply_id = d.reply_to.as_ref().and_then(|h| EventId::from_hex(h).ok());
         let quote_id = d.quote.as_ref().and_then(|h| EventId::from_hex(h).ok());
@@ -264,9 +272,13 @@ impl LibraryView {
             Some(id) => self.core.drop_draft(id),
             None => self.core.save_draft(reply_id, quote_id, String::new()),
         };
+        cx.notify();
         cx.spawn(async move |this, cx| {
-            while rx.recv().await.is_some() {}
-            let _ = this.update(cx, |_, cx| cx.notify());
+            while let Some(ev) = rx.recv().await {
+                if matches!(ev, PublishEvent::Failed { .. }) {
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                }
+            }
         })
         .detach();
     }
@@ -353,8 +365,8 @@ impl LibraryView {
                     view.deep = false;
                     // Leaving the detail behind — tabs are flat surfaces.
                     view.open_list = None;
-                    // First Lists open: the one-shot own-lists query.
-                    if which == LibTab::Lists && !view.lists_loaded {
+                    // Every Lists visit re-queries (see load_lists).
+                    if which == LibTab::Lists {
                         view.load_lists(cx);
                     }
                     cx.notify();
@@ -475,7 +487,7 @@ impl LibraryView {
         for p in self.members.values() {
             media::fetch(&self.core, p.picture.clone(), viewer, cx);
         }
-        let name = l.display().to_string();
+        let name = l.display();
         let count = l.members.len();
         div()
             .id("list-detail")

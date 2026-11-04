@@ -1300,7 +1300,6 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::prelude::*;
 
     /// An extension-less blossom URL alone on a line classifies as a
     /// picture (the byte-sniff fallback path), so the gallery section
