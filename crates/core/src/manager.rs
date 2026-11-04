@@ -4339,6 +4339,99 @@ impl Core {
         rx
     }
 
+    /// The own kind:0 content string, RAW (D38: the edit form prefills
+    /// from it — the parsed Profile drops display_name/website, and a form
+    /// save writes every displayed field, so a missing prefill would
+    /// silently clobber them). Empty string when none (fresh account).
+    pub fn own_metadata(self: &Arc<Self>) -> tokio::sync::mpsc::UnboundedReceiver<String> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let content = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let raw = active
+                    .pool
+                    .store
+                    .latest_by_kind(me, Kind::Metadata)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|e| e.content)
+                    .unwrap_or_default();
+                Ok::<String, LoginError>(raw)
+            }
+            .await;
+            let _ = tx.send(content.unwrap_or_default());
+        });
+        rx
+    }
+
+    /// The own parsed Profile, from the store's freshest kind:0 (D38: the
+    /// edit form's save lands a new kind 0 — the shell refreshes the rail's
+    /// copy and the profile pane underneath with it; the profiles service's
+    /// cache holds a 12h TTL, far too long to lean on). None when none is
+    /// stored.
+    pub fn own_profile(self: &Arc<Self>) -> tokio::sync::mpsc::UnboundedReceiver<Option<Profile>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let p = async {
+                let active = this.active().await?;
+                let me = active.me();
+                Ok::<Option<Profile>, LoginError>(active
+                    .pool
+                    .store
+                    .latest_by_kind(me, Kind::Metadata)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|e| Profile::from_event(&e)))
+            }
+            .await;
+            let _ = tx.send(p.unwrap_or(None));
+        });
+        rx
+    }
+
+    /// Edit profile (NIP-01 kind:0 read-modify-write): the patch's Some
+    /// fields overwrite, Some("") clears, None leaves the stored value;
+    /// fields the app doesn't edit (lud06/lud16 and friends) ride along
+    /// untouched. Published through commit() — the outbox retries it
+    /// (kind 0 is coordinate-keyed, D36).
+    pub fn set_profile(self: &Arc<Self>, patch: ProfileEdit) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let stored = active
+                    .pool
+                    .store
+                    .latest_by_kind(me, Kind::Metadata)
+                    .await
+                    .ok()
+                    .flatten();
+                let content = apply_profile_patch(
+                    stored.as_ref().map(|e| e.content.as_str()).unwrap_or(""),
+                    &patch,
+                );
+                let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::Metadata, [], content);
+                let signed = active.signer.sign_event(unsigned).await?;
+                Self::commit(&active, &signed, &tx).await?;
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
+    }
+
     /// Delete own post (NIP-09 kind:5) + local tombstone.
     pub fn delete(self: &Arc<Self>, target: &Event) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -4706,6 +4799,50 @@ async fn sync_app_data(
     let _ = live.send(Live::PrefsSynced);
 }
 
+/// A profile edit (D38): each field maps to a kind:0 content key. None =
+/// leave the stored value; Some("") = clear the key; Some(s) = set it.
+/// Ported from the TS reference's edit form (routes/profile.ts — git
+/// a4b09e8), whose header states the invariant this merge keeps: "fields
+/// the app doesn't show … survive a save".
+#[derive(Debug, Clone, Default)]
+pub struct ProfileEdit {
+    pub name: Option<String>,
+    pub display_name: Option<String>,
+    pub about: Option<String>,
+    pub picture: Option<String>,
+    pub banner: Option<String>,
+    pub website: Option<String>,
+    pub nip05: Option<String>,
+}
+
+/// Merge a ProfileEdit into a kind:0 content string (set_profile's pure
+/// half — unit-tested): unknown keys survive, Some overwrites, Some("")
+/// removes, a non-object or unparseable store body starts fresh.
+pub fn apply_profile_patch(stored: &str, patch: &ProfileEdit) -> String {
+    let mut obj = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(stored)
+        .unwrap_or_default();
+    for (key, value) in [
+        ("name", &patch.name),
+        ("display_name", &patch.display_name),
+        ("about", &patch.about),
+        ("picture", &patch.picture),
+        ("banner", &patch.banner),
+        ("website", &patch.website),
+        ("nip05", &patch.nip05),
+    ] {
+        match value {
+            None => {}
+            Some(s) if s.is_empty() => {
+                obj.remove(key);
+            }
+            Some(s) => {
+                obj.insert(key.to_string(), serde_json::Value::String(s.clone()));
+            }
+        }
+    }
+    serde_json::to_string(&obj).unwrap_or_default()
+}
+
 #[cfg(test)]
 /// Test-only local-key login — the user-facing nsec door is gone (D17: the
 /// app never handles the master key), but the logout/re-login flow tests
@@ -4732,6 +4869,37 @@ mod tests {
     use std::sync::Arc;
 
     /// NIP-92 kind-0 adoption: the banner's blurhash arrives only from an
+    /// The profile patch (D38): Some overwrites, Some("") clears, None
+    /// keeps, unknown keys (lud16 and friends) ride along, garbage input
+    /// starts fresh.
+    #[test]
+    fn profile_patch_merges_and_preserves() {
+        let base = r#"{"name":"luna","about":"hi","lud16":"luna@zap.me"}"#;
+        let patch = ProfileEdit {
+            name: Some("luna2".into()),
+            about: Some(String::new()), // clear
+            nip05: Some("luna@example.com".into()),
+            ..Default::default()
+        };
+        let out = apply_profile_patch(base, &patch);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["name"], "luna2");
+        assert_eq!(v["nip05"], "luna@example.com");
+        assert!(v.get("about").is_none(), "Some(\"\") clears the key");
+        assert_eq!(v["lud16"], "luna@zap.me", "unknown keys ride along");
+        // None leaves everything; garbage starts a fresh object.
+        let untouched = apply_profile_patch(base, &ProfileEdit::default());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&untouched).unwrap()["about"],
+            "hi"
+        );
+        let fresh = apply_profile_patch("not json at all", &patch);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fresh).unwrap()["name"],
+            "luna2"
+        );
+    }
+
     /// imeta tag whose url matches the banner field exactly (Oct 2026 spec
     /// section; the TS reference predates it).
     #[test]

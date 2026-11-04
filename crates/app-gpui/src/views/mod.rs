@@ -1,6 +1,7 @@
 pub mod cards;
 pub mod composer;
 pub mod content;
+pub mod edit_profile;
 pub mod feed;
 pub mod login;
 pub mod nav;

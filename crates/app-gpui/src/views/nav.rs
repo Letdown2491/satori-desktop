@@ -18,6 +18,8 @@ pub enum Nav {
     SetTheme(bool),
     OpenThread(EventId),
     OpenProfile(PublicKey),
+    /// The profile edit form (D38) for the given (own) pubkey.
+    OpenEditProfile(PublicKey),
     /// The composer, optionally replying to a note.
     OpenComposer(Option<Event>),
     /// The composer quoting a note (NIP-18 quote repost).

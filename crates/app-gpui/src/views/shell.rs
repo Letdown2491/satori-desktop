@@ -21,6 +21,7 @@ use crate::{icons, media, theme};
 use super::{
     composer::{Draft, Composer},
     content,
+    edit_profile::EditProfileView,
     feed::Feed,
     nav::Nav,
     notifications::NotificationsView,
@@ -42,6 +43,8 @@ pub enum Pane {
     Hashtag(Entity<Feed>),
     Thread(Entity<ThreadView>),
     Profile(Entity<ProfileView>),
+    /// The profile edit form (D38) — the own-profile header's button.
+    EditProfile(Entity<EditProfileView>),
     Notifications(Entity<NotificationsView>),
     Search(Entity<SearchView>),
     Settings(Entity<SettingsView>),
@@ -107,6 +110,7 @@ impl Shell {
         cx.subscribe(&feed, |this, _feed, ev: &Nav, cx| match ev {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
+            Nav::OpenEditProfile(me) => this.open_edit_profile(*me, cx),
             Nav::OpenHashtag(tag) => this.open_hashtag(tag.clone(), cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), None, cx),
             Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
@@ -183,6 +187,7 @@ impl Shell {
         cx.subscribe(view, |this, _view, ev: &Nav, cx| match ev {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
+            Nav::OpenEditProfile(me) => this.open_edit_profile(*me, cx),
             Nav::OpenHashtag(tag) => this.open_hashtag(tag.clone(), cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), None, cx),
             Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
@@ -225,9 +230,17 @@ impl Shell {
     }
 
     pub(crate) fn open_profile(&mut self, who: PublicKey, cx: &mut Context<Self>) {
-        let view = cx.new(|cx| ProfileView::new(self.core.clone(), who, cx));
+        let view = cx.new(|cx| ProfileView::new(self.core.clone(), who, self.me == Some(who), cx));
         self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Profile(view));
+        cx.notify();
+    }
+
+    /// The profile edit form (D38): the own-profile header's Edit button.
+    fn open_edit_profile(&mut self, who: PublicKey, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| EditProfileView::new(self.core.clone(), who, cx));
+        self.subscribe_nav(&view, cx);
+        self.stack.push(Pane::EditProfile(view));
         cx.notify();
     }
 
@@ -532,6 +545,31 @@ impl Shell {
             {
                 cx.default_global::<Draft>().0 = Some(text);
             }
+            // D38: closing the edit form — a save may have landed a fresh
+            // kind 0 while it was up. Refresh the rail's own-profile copy
+            // and the profile pane underneath from the store (the profiles
+            // service's 12h TTL cache won't).
+            if matches!(self.stack.last(), Some(Pane::EditProfile(_))) {
+                let mut rx = self.core.own_profile();
+                let target = match self.stack.get(self.stack.len() - 2) {
+                    Some(Pane::Profile(v)) => Some(v.clone()),
+                    _ => None,
+                };
+                cx.spawn(async move |this, cx| {
+                    if let Some(Some(p)) = rx.recv().await {
+                        let _ = this.update(cx, |shell, cx| {
+                            if let Some(target) = &target {
+                                target.update(cx, |pane, cx| {
+                                    pane.refresh_profile(p.clone(), cx)
+                                });
+                            }
+                            shell.me_profile = Some(p);
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+            }
             self.stack.pop();
             self.refocus = true;
             cx.notify();
@@ -545,6 +583,7 @@ impl Shell {
             Some(Pane::Hashtag(f)) => f.read(cx).header().into(),
             Some(Pane::Thread(_)) => "Thread".into(),
             Some(Pane::Profile(_)) => "Profile".into(),
+            Some(Pane::EditProfile(_)) => "Edit profile".into(),
             Some(Pane::Notifications(_)) => "Notifications".into(),
             Some(Pane::Search(_)) => "Search".into(),
             Some(Pane::Settings(_)) => "Settings".into(),
@@ -587,6 +626,9 @@ pub(crate) fn tip(label: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyV
 /// the active spot, and re-clicking it is an affordance (feed: back to top).
 #[derive(Clone, Copy, PartialEq)]
 enum Spot {
+    /// The user's avatar (D38) — ticks when the top pane is the OWN
+    /// profile; a visit to someone else's profile doesn't tick it.
+    Profile,
     Feed,
     Articles,
     Search,
@@ -596,7 +638,7 @@ enum Spot {
 }
 
 impl Shell {
-    fn active_spot(&self) -> Option<Spot> {
+    fn active_spot(&self, cx: &App) -> Option<Spot> {
         match self.stack.last() {
             Some(Pane::Feed(_)) => Some(Spot::Feed),
             Some(Pane::Articles(_)) => Some(Spot::Articles),
@@ -604,6 +646,9 @@ impl Shell {
             Some(Pane::Notifications(_)) => Some(Spot::Notif),
             Some(Pane::Composer(_)) => Some(Spot::Compose),
             Some(Pane::Settings(_)) => Some(Spot::Settings),
+            // The avatar spot is the OWN profile only — a visit to someone
+            // else's profile pane is not the spot.
+            Some(Pane::Profile(view)) if view.read(cx).is_me => Some(Spot::Profile),
             _ => None,
         }
     }
@@ -648,7 +693,7 @@ impl Shell {
     }
 
     fn rail(&mut self, cx: &mut Context<Self>) -> Div {
-        let active = self.active_spot();
+        let active = self.active_spot(cx);
         let ink = |on: bool| if on { theme::ink() } else { theme::muted() };
         let feed_active = active == Some(Spot::Feed);
 
@@ -684,18 +729,20 @@ impl Shell {
             // avatar (16px page band + 12px note-card padding).
             .pt(px(19.0))
             .gap_1()
-            // The user's avatar is the home mark now (it replaced the ensō);
-            // like the ensō it never wears the active tick.
+            // The user's avatar is the Profile spot (D38): clicking opens
+            // the own profile, re-clicking the active one scrolls it back
+            // up; the tick marks it (Home remains the Feed spot's re-click
+            // — go_home below).
             .child(self.rail_button(
-                "rail-home",
-                "Home",
+                "rail-profile",
+                "Profile",
                 me_avatar,
-                false,
+                active == Some(Spot::Profile),
                 cx.listener(move |shell, _, _, cx| {
-                    if feed_active {
+                    if shell.active_spot(cx) == Some(Spot::Profile) {
                         shell.pane_to_top(cx);
-                    } else {
-                        shell.go_home(cx);
+                    } else if let Some(me) = shell.me {
+                        shell.open_profile(me, cx);
                     }
                 }),
             ))
@@ -719,7 +766,7 @@ impl Shell {
                 icons::article_icon(ink(active == Some(Spot::Articles))),
                 active == Some(Spot::Articles),
                 cx.listener(move |shell, _, _, cx| {
-                    if shell.active_spot() != Some(Spot::Articles) {
+                    if shell.active_spot(cx) != Some(Spot::Articles) {
                         shell.open_articles(cx);
                     }
                 }),
@@ -730,7 +777,7 @@ impl Shell {
                 icons::search_icon(ink(active == Some(Spot::Search))),
                 active == Some(Spot::Search),
                 cx.listener(move |shell, _, _, cx| {
-                    if shell.active_spot() != Some(Spot::Search) {
+                    if shell.active_spot(cx) != Some(Spot::Search) {
                         shell.open_search(cx);
                     }
                 }),
@@ -754,7 +801,7 @@ impl Shell {
                     }),
                 active == Some(Spot::Notif),
                 cx.listener(move |shell, _, _, cx| {
-                    if shell.active_spot() != Some(Spot::Notif) {
+                    if shell.active_spot(cx) != Some(Spot::Notif) {
                         shell.open_notifications(cx);
                     }
                 }),
@@ -766,7 +813,7 @@ impl Shell {
                 icons::gear_icon(ink(active == Some(Spot::Settings))),
                 active == Some(Spot::Settings),
                 cx.listener(move |shell, _, _, cx| {
-                    if shell.active_spot() != Some(Spot::Settings) {
+                    if shell.active_spot(cx) != Some(Spot::Settings) {
                         shell.open_settings(cx);
                     }
                 }),
@@ -778,7 +825,7 @@ impl Shell {
                 active == Some(Spot::Compose),
                 cx.listener(move |shell, _, _, cx| {
                     // Never clobber an open composer (its draft is live).
-                    if shell.active_spot() != Some(Spot::Compose) {
+                    if shell.active_spot(cx) != Some(Spot::Compose) {
                         shell.open_composer(None, None, cx);
                     }
                 }),
@@ -1011,6 +1058,7 @@ impl Render for Shell {
                         Pane::Hashtag(view) => view.clone().into_any_element(),
                         Pane::Thread(view) => view.clone().into_any_element(),
                         Pane::Profile(view) => view.clone().into_any_element(),
+                        Pane::EditProfile(view) => view.clone().into_any_element(),
                         Pane::Notifications(view) => view.clone().into_any_element(),
                         Pane::Search(view) => view.clone().into_any_element(),
                         Pane::Settings(view) => view.clone().into_any_element(),

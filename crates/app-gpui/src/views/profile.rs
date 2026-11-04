@@ -50,6 +50,12 @@ pub struct ProfileView {
     /// The active surface (notes body / media strips — Phase 2 §4.3).
     tab: ProfileTab,
     following: bool,
+    /// This pane IS the signed-in user (D38): the own profile shows the
+    /// Edit-profile button in place of Follow/Mute.
+    pub(crate) is_me: bool,
+    /// Mirror of the mute list (Core::is_muted at construction) — the
+    /// header's Mute button flips it optimistically.
+    muted: bool,
     /// Known profiles — mention names in note bodies (word_flow).
     profiles: HashMap<String, Profile>,
     /// The Notes tab: an embedded Feed (FeedMode::Profile) — the timeline's
@@ -83,7 +89,7 @@ pub struct ProfileView {
 impl EventEmitter<Nav> for ProfileView {}
 
 impl ProfileView {
-    pub fn new(core: Arc<Core>, who: PublicKey, cx: &mut Context<Self>) -> Self {
+    pub fn new(core: Arc<Core>, who: PublicKey, is_me: bool, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
         crate::video::watch(cx); // repaint on player open/toggle/close
@@ -99,6 +105,8 @@ impl ProfileView {
         .detach();
         let view = Self {
             following: core.is_following(&who),
+            is_me,
+            muted: core.is_muted(&who),
             who,
             profile: None,
             notes: vec![],
@@ -153,6 +161,15 @@ impl ProfileView {
             }
         })
         .detach();
+    }
+
+    /// D38: the edit form just landed a fresh kind 0 — swap the header's
+    /// copy (name/about/picture/banner re-derive at render; a changed
+    /// NIP-05 re-fires its memo, a changed picture refetches by URL).
+    pub(crate) fn refresh_profile(&mut self, p: Profile, cx: &mut Context<Self>) {
+        self.profiles.insert(p.pubkey.clone(), p.clone());
+        self.profile = Some(p);
+        cx.notify();
     }
 
     fn on_event(&mut self, ev: FeedEvent, cx: &mut Context<Self>) {
@@ -437,6 +454,7 @@ impl Render for ProfileView {
         let pics_all = self.photo_urls();
         let empty = rows.is_empty();
         let following = self.following;
+        let muted = self.muted;
         // Copy-seal states: which seal (if any) is flashing "copied", and
         // whether the domain's nostr.json vouched for the NIP-05 address.
         let link_flash = self.copied == Some("link");
@@ -473,6 +491,8 @@ impl Render for ProfileView {
         let quotes = content::Quotes::default();
         let handle = cx.entity();
         let follow_handle = handle.clone();
+        let edit_handle = handle.clone();
+        let mute_handle = handle.clone();
         let ctx = content::Body {
             media: &media,
             quotes: &quotes,
@@ -627,42 +647,113 @@ impl Render for ProfileView {
                                                     ),
                                             ),
                                     )
-                                    .child(
-                                        div()
-                                            .id("follow")
-                                            .cursor_pointer()
-                                            .px_2()
-                                            .py_1()
-                                            .rounded(px(4.))
-                                            .border_1()
-                                            .border_color(rgb(theme::hairline()))
-                                            .hover(|s| s.border_color(rgb(theme::muted())))
-                                            .text_size(px(12.0))
-                                            .on_click(move |_, _, cx| {
-                                                let h = follow_handle.clone();
-                                                h.update(cx, |view, cx| {
-                                                    view.following = !view.following;
-                                                    // Optimistic flip; publish events are
-                                                    // drained and ignored (P1).
-                                                    let mut rx = view
-                                                        .core
-                                                        .set_following(view.who, view.following);
-                                                    cx.spawn(async move |_, _| {
-                                                        while rx.recv().await.is_some() {}
-                                                    })
-                                                    .detach();
-                                                    cx.notify();
-                                                });
-                                            })
-                                            .when(following, |d| {
-                                                d.text_color(rgb(theme::muted()))
-                                                    .child("Following")
-                                            })
-                                            .when(!following, |d| {
-                                                d.text_color(rgb(theme::vermilion()))
-                                                    .child("Follow")
-                                            }),
-                                    ),
+                                    // Someone else: Follow rides the header —
+                                    // an optimistic flip, publish events drained
+                                    // and ignored (P1). The own profile hides it
+                                    // (D38) — the edit form takes its place.
+                                    .when(!self.is_me, |d| {
+                                        d.child(
+                                            div()
+                                                .id("follow")
+                                                .cursor_pointer()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded(px(4.))
+                                                .border_1()
+                                                .border_color(rgb(theme::hairline()))
+                                                .hover(|s| {
+                                                    s.border_color(rgb(theme::muted()))
+                                                })
+                                                .text_size(px(12.0))
+                                                .on_click(move |_, _, cx| {
+                                                    let h = follow_handle.clone();
+                                                    h.update(cx, |view, cx| {
+                                                        view.following = !view.following;
+                                                        // Optimistic flip; publish events are
+                                                        // drained and ignored (P1).
+                                                        let mut rx = view.core.set_following(
+                                                            view.who,
+                                                            view.following,
+                                                        );
+                                                        cx.spawn(async move |_, _| {
+                                                            while rx.recv().await.is_some() {}
+                                                        })
+                                                        .detach();
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .when(following, |d| {
+                                                    d.text_color(rgb(theme::muted()))
+                                                        .child("Following")
+                                                })
+                                                .when(!following, |d| {
+                                                    d.text_color(rgb(theme::vermilion()))
+                                                        .child("Follow")
+                                                }),
+                                        )
+                                    })
+                                    // Own profile (D38): the edit form replaces
+                                    // Follow/Mute.
+                                    .when(self.is_me, |d| {
+                                        d.child(
+                                            div()
+                                                .id("edit-profile")
+                                                .cursor_pointer()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded(px(4.))
+                                                .border_1()
+                                                .border_color(rgb(theme::hairline()))
+                                                .hover(|s| s.border_color(rgb(theme::muted())))
+                                                .text_size(px(12.0))
+                                                .on_click(move |_, _, cx| {
+                                                    let h = edit_handle.clone();
+                                                    h.update(cx, |view, cx| {
+                                                        cx.emit(Nav::OpenEditProfile(view.who));
+                                                    });
+                                                })
+                                                .child("Edit profile"),
+                                        )
+                                    })
+                                    // Someone else: Mute rides next to Follow —
+                                    // an optimistic flip, publish events drained
+                                    // and ignored (the Follow button's pattern).
+                                    .when(!self.is_me, |d| {
+                                        d.child(
+                                            div()
+                                                .id("mute")
+                                                .cursor_pointer()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded(px(4.))
+                                                .border_1()
+                                                .border_color(rgb(theme::hairline()))
+                                                .hover(|s| s.border_color(rgb(theme::muted())))
+                                                .text_size(px(12.0))
+                                                .on_click(move |_, _, cx| {
+                                                    let h = mute_handle.clone();
+                                                    h.update(cx, |view, cx| {
+                                                        view.muted = !view.muted;
+                                                        let mut rx = view
+                                                            .core
+                                                            .set_muted(view.who, view.muted);
+                                                        cx.spawn(async move |_, _| {
+                                                            while rx.recv().await.is_some() {}
+                                                        })
+                                                        .detach();
+                                                        cx.notify();
+                                                    });
+                                                })
+                                                .when(muted, |d| {
+                                                    d.text_color(rgb(theme::muted()))
+                                                        .child("Muted")
+                                                })
+                                                .when(!muted, |d| {
+                                                    d.text_color(rgb(theme::vermilion()))
+                                                        .child("Mute")
+                                                }),
+                                        )
+                                    }),
                             )
                             .when(!lud.is_empty(), |d| {
                                 // The lightning pointer (lud16 as-is; a bech32
