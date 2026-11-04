@@ -453,7 +453,16 @@ impl Core {
                 // Clone the pool out of the lock; no lock spans the awaits.
                 let pool = this.pool.lock().unwrap().as_ref().map(Arc::clone);
                 if let Some(p) = pool {
-                    match p.store.prune().await {
+                    // The own bookmark set survives the sweep — the
+                    // Bookmarks tab renders exactly these notes (v1.2).
+                    let protect: std::collections::HashSet<EventId> = this
+                        .own_bookmarked
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|h| EventId::from_hex(h).ok())
+                        .collect();
+                    match p.store.prune(&protect).await {
                         Ok(0) => {}
                         Ok(n) => eprintln!("[core] store prune: {n} event(s) past retention"),
                         Err(e) => eprintln!("[core] store prune failed: {e}"),
@@ -4538,7 +4547,12 @@ impl Core {
                         .await
                         .into_iter()
                         .collect();
-                    // (no explicit save: the SDK persists what it receives)
+                    // Explicit saves (v1.2): the SDK's saves are async and
+                    // once raced a reader — a fetched bookmark should BE
+                    // in the store before this task ends.
+                    for ev in &fetched {
+                        let _ = active.pool.store.save(ev).await;
+                    }
                     events.extend(fetched.into_iter().filter(|ev| !deletions::is_deleted(ev)));
                 }
                 events.sort_by_key(|e| std::cmp::Reverse(e.created_at));
@@ -5498,7 +5512,14 @@ impl Core {
                 Ok::<Vec<NostrList>, LoginError>(merged)
             }
             .await;
-            let _ = tx.send(lists.unwrap_or_default());
+            // Send ONLY on Ok (v1.2): an error's empty-default must never
+            // overwrite the snapshot the tab already painted.
+            match lists {
+                Ok(merged) => {
+                    let _ = tx.send(merged);
+                }
+                Err(e) => eprintln!("[core] own_lists: merge failed ({e}) — snapshot stands"),
+            }
         });
         rx
     }

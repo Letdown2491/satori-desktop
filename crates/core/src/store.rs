@@ -301,11 +301,17 @@ impl Store {
     /// freed pages for new writes, so the file plateaus rather than
     /// shrinking; there is no compaction pass (the env handle stays
     /// inside nostr-lmdb).
-    pub async fn prune(&self) -> NostrResult<u32> {
+    pub async fn prune(&self, protect: &std::collections::HashSet<EventId>) -> NostrResult<u32> {
         const PRUNE_DAYS: u64 = 90;
         const PRUNE_BATCH: usize = 500;
         let mut deleted = 0u32;
-        // Feed content: older than the retention window.
+        // Feed content: older than the retention window. Protected ids
+        // (the own bookmark set — the notes the Bookmarks tab renders)
+        // survive: the tab is a VIEW over these, and a pruned bookmark is
+        // an empty tab whenever the indexers have a slow day. A batch that
+        // is ENTIRELY protected breaks the page loop (the same query would
+        // repeat forever) — the next daily pass picks up past it as newer
+        // content ages in.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -321,11 +327,16 @@ impl Store {
                 if batch.is_empty() {
                     break;
                 }
+                let mut deleted_here = 0usize;
                 for ev in &batch {
+                    if protect.contains(&ev.id) {
+                        continue;
+                    }
                     self.delete_event(ev.id).await?;
                     deleted += 1;
+                    deleted_here += 1;
                 }
-                if batch.len() < PRUNE_BATCH {
+                if deleted_here == 0 || batch.len() < PRUNE_BATCH {
                     break;
                 }
             }
