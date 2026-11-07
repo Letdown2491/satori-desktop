@@ -481,6 +481,13 @@ pub(crate) fn qualified_count(g: &Graph) -> usize {
         .count()
 }
 
+/// Absorption diagnostics (the starving-graph investigation): (source
+/// lists applied, scored targets, qualified). Pure read.
+pub(crate) fn stats() -> (usize, usize, usize) {
+    let g = graph();
+    (g.sources.len(), g.scores.len(), qualified_count(&g))
+}
+
 /// Greedy weighted set-cover (dark-wisp `computeRelaySetCover`
 /// ExtendedNetworkRepository.kt ~line 360): repeatedly take the relay
 /// covering the most still-uncovered qualified authors, until

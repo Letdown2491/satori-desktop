@@ -229,7 +229,7 @@ impl Store {
     /// Latest kind-10002 relay list per author, batched: one query per 200
     /// authors instead of one per author. nostr-lmdb applies `limit` per
     /// author-kind cursor pair, so limit(1) here is exactly "newest list
-    /// per author" — the same semantics the per-author lookup had, minus
+    /// per author", the same semantics the per-author lookup had, minus
     /// the round trips.
     pub async fn relay_lists(&self, authors: &[PublicKey]) -> NostrResult<Vec<Event>> {
         let mut out = Vec::new();

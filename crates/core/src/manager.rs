@@ -110,7 +110,7 @@ pub type FeedRx = mpsc::UnboundedReceiver<FeedEvent>;
 // --- Notification tier + receipts (issue #2 WS4) --------------------------------
 
 /// One notification the WoT tier suppressed — a receipt, never a silent
-/// void: the bell's "N hidden — see why" surface lists these with the
+/// void: the bell's "N hidden, see why" surface lists these with the
 /// verdict and reason, and a per-item "show anyway" exemption.
 #[derive(Debug, Clone)]
 pub struct SuppressedNotif {
@@ -717,7 +717,7 @@ impl Core {
                     continue;
                 };
                 crate::dlog!(
-                    "watchdog: wall jumped {:?} vs monotonic {:?} — machine slept; reconnecting relays",
+                    "watchdog: wall jumped {:?} vs monotonic {:?}, machine slept; reconnecting relays",
                     wall_d, mono_d
                 );
                 pool.client().connect().await;
@@ -828,7 +828,7 @@ impl Core {
                         session::clear();
                         (
                             None,
-                            Some("Couldn't unlock your saved session — sign in again \
+                            Some("Couldn't unlock your saved session, sign in again \
                                   below. Your keys stay with your signer."
                                 .into()),
                         )
@@ -837,7 +837,7 @@ impl Core {
                     // the session — the next launch retries the resume.
                     _ => (
                         None,
-                        Some("Couldn't reach your signer just now — Satori retries \
+                        Some("Couldn't reach your signer just now, Satori retries \
                               on next launch, or sign in below."
                             .into()),
                     ),
@@ -969,12 +969,9 @@ impl Core {
                 limit
             );
             {
-                let g = crate::wot::graph();
+                let (src, tgt, qual) = crate::wot::stats();
                 eprintln!(
-                    "[core] wot: graph now: {} source list(s) applied, {} scored target(s), {} qualified",
-                    g.sources.len(),
-                    g.scores.len(),
-                    crate::wot::qualified_count(&g)
+                    "[core] wot: graph now: {src} source list(s) applied, {tgt} scored target(s), {qual} qualified"
                 );
             }
         });
@@ -1009,7 +1006,7 @@ impl Core {
     }
 
     /// The bell's receipts: notifications the WoT tier suppressed this
-    /// session (the "N hidden — see why" surface). Empty when the tier is
+    /// session (the "N hidden, see why" surface). Empty when the tier is
     /// off or nothing was gated — never a silent void.
     pub fn suppressed_notifications(&self) -> Vec<SuppressedNotif> {
         SUPPRESSED.lock().unwrap().clone()
@@ -1592,7 +1589,7 @@ impl Core {
             *pending = None;
         }
         drop(pending);
-        crate::dlog!("bunker: active session built — login complete");
+        crate::dlog!("bunker: active session built, login complete");
         Ok(pk)
     }
 
@@ -1747,7 +1744,7 @@ impl Core {
             *pending = None;
         }
         drop(pending);
-        crate::dlog!("nostrconnect: active session built — login complete");
+        crate::dlog!("nostrconnect: active session built, login complete");
         Ok(user_pk)
     }
 
@@ -1794,7 +1791,7 @@ impl Core {
                         {
                             let event = *event;
                             crate::dlog!(
-                                "nostrconnect probe: response event from {} — the relay DID deliver",
+                                "nostrconnect probe: response event from {}, the relay DID deliver",
                                 event.pubkey
                             );
                             match nostr::nips::nip44::decrypt(
@@ -6308,7 +6305,7 @@ impl Core {
                 Ok(merged) => {
                     let _ = tx.send(merged);
                 }
-                Err(e) => eprintln!("[core] own_lists: merge failed ({e}) — snapshot stands"),
+                Err(e) => eprintln!("[core] own_lists: merge failed ({e}), snapshot stands"),
             }
         });
         rx

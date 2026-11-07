@@ -16,7 +16,7 @@
       Inline video plays through GStreamer, click to play, one player
       at a time, no autoplay: a tile's preview is a poster the
       publisher attached, a blurhash, or a first frame decoded
-      locally — the video itself never downloads before you tap, and
+      locally, the video itself never downloads before you tap, and
       strict Tor keeps even the preview off. Keys stay in your secret
       store, relays are yours to pick (NIP-65), and private
       preferences sync end-to-end encrypted through NIP-78.

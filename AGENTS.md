@@ -49,6 +49,9 @@ into `~/.local`; `target/debug` can be deleted after).
 ## Conventions
 
 - Rust edition 2024, workspace deps in the root `Cargo.toml`.
+- No em dashes in user-facing text (UI copy, metainfo, desktop entries) or
+  documents: rephrase with commas, periods, or middots (`·`). Code comments
+  may use them, but prefer not to.
 - Ported semantics cite their origin (`// TODO(port): <ts-file> — <milestone>`);
   the cited files live in git history (`git show a4b09e8:<path>`).
 - Decisions live in `DESIGN.md` §8 (decision log); add, don't bypass.

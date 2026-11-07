@@ -106,7 +106,7 @@ impl WalletView {
                 let mut line = if info.alias.is_empty() {
                     "connected".to_string()
                 } else {
-                    format!("connected — {}", info.alias)
+                    format!("connected, {}", info.alias)
                 };
                 if let Some(msat) = info.balance_msat {
                     line.push_str(&format!(" · {} sats", msat / 1000));
@@ -228,7 +228,7 @@ impl Render for WalletView {
                 div()
                     .text_size(px(theme::T_SMALL))
                     .text_color(rgb(theme::muted()))
-                    .child("The connection secret stays in this device's secret store — never in the event cache, never in a backup."),
+                    .child("The connection secret stays in this device's secret store, never in the event cache, never in a backup."),
             )
     }
 }

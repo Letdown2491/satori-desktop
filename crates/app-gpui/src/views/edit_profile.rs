@@ -473,7 +473,7 @@ impl Render for EditProfileView {
                                     .text_size(px(theme::T_SMALL))
                                     .text_color(rgb(theme::muted()))
                                     .child(format!(
-                                        "signs as {}… — saves go out through the outbox",
+                                        "signs as {}…, saves go out through the outbox",
                                         &self.me.to_string()[..8]
                                     )),
                             ),

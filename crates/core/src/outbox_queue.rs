@@ -196,7 +196,7 @@ pub(crate) fn enqueue(event: &Event) -> bool {
                 break;
             };
             if held.map.remove(&old).is_some() {
-                eprintln!("[core] outbox: backlog over {} — dropping oldest pending", MAX_PENDING);
+                eprintln!("[core] outbox: backlog over {}, dropping oldest pending", MAX_PENDING);
             }
         }
     }

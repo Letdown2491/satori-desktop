@@ -740,7 +740,7 @@ impl Pool {
         // D36: WRITE relays join at publish time — this was the documented
         // contract, but nothing registered them anymore and nostr-sdk 0.45
         // gates every send on per-relay capability ("write actions are
-        // disabled" — the silent killer that made every publish fail
+        // disabled", the silent killer that made every publish fail
         // after the Nov 3 re-lock). add_relay UPSELLS capabilities (merge,
         // not replace), so a relay that is also a read keeps both. Connect
         // only when something new joined; sends to already-connected

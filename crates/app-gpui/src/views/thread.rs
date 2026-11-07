@@ -753,7 +753,7 @@ impl Render for ThreadView {
                                                         });
                                                     })
                                                     .child(format!(
-                                                        "{n} from outside your network — expand"
+                                                        "{n} from outside your network, expand"
                                                     )),
                                                 )
                                                 .into_any_element()

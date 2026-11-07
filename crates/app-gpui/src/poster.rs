@@ -288,7 +288,7 @@ mod tests {
     use super::*;
 
     /// The real blurhash from a live NIP-92 video note ("Me, using the new
-    /// Amethyst.") — 94 chars, decodes to a 48x27 gradient.
+    /// Amethyst."), 94 chars, decodes to a 48x27 gradient.
     #[test]
     fn real_world_blurhash_decodes() {
         let img = blurhash_png(

@@ -913,7 +913,7 @@ impl Feed {
             }
             WalletEvent::ZapUncertain { note, .. } => {
                 self.zap_pending.remove(&note);
-                self.status = "zap state unknown — check your wallet before retrying".into();
+                self.status = "zap state unknown, check your wallet before retrying".into();
             }
             WalletEvent::ZapFailed { note, reason } => {
                 self.zap_pending.remove(&note);
@@ -959,7 +959,7 @@ impl Feed {
                     PublishEvent::Failed { .. } | PublishEvent::Undone { .. } => {
                         let _ = this.update(cx, |this, cx| {
                             this.reposted.remove(&id);
-                            this.status = "repost didn't go through — try again".into();
+                            this.status = "repost didn't go through, try again".into();
                             this.touch();
                             cx.notify();
                         });
@@ -1004,7 +1004,7 @@ impl Feed {
                             } else {
                                 this.bookmarked.insert(id.clone());
                             }
-                            this.status = "bookmark didn't go through — try again".into();
+                            this.status = "bookmark didn't go through, try again".into();
                             this.touch();
                             cx.notify();
                         });

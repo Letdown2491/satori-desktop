@@ -67,7 +67,7 @@ impl ZapSheet {
                 i.multiline = false;
                 // D17 tripwire: no reason a private key ever lands here.
                 i.tripwire = true;
-                i.placeholder("custom — sats")
+                i.placeholder("custom, sats")
             }),
             sel: Some(TAP_SATS),
             recent,
@@ -226,7 +226,7 @@ impl Render for ZapSheet {
                 div()
                     .text_size(px(theme::T_SMALL))
                     .text_color(rgb(theme::muted()))
-                    .child("A public zap (NIP-57) through your wallet — the receipt shows your name."),
+                    .child("A public zap (NIP-57) through your wallet, the receipt shows your name."),
             )
             .child(preset_row)
             .children(recent_row)
@@ -291,7 +291,7 @@ impl Render for ZapSheet {
                                     .text_size(px(theme::T_SMALL))
                                     .text_color(rgb(theme::err()))
                                     .child(
-                                        "That looks like a private key (nsec…). Nothing was inserted — a key has no business in a zap sheet.",
+                                        "That looks like a private key (nsec…). Nothing was inserted, a key has no business in a zap sheet.",
                                     ),
                             )
                             .child(

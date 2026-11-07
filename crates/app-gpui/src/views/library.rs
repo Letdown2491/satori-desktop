@@ -499,7 +499,7 @@ impl Render for LibraryView {
                         if lists.is_empty() {
                             placeholder(
                                 "Lists",
-                                "Your NIP-51 lists will show here — none in the store yet.",
+                                "Your NIP-51 lists will show here, none in the store yet.",
                             )
                         } else {
                             div()

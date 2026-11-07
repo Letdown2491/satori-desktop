@@ -270,7 +270,7 @@ impl Composer {
             let mut i = Input::new(cx);
             i.multiline = false;
             i.tripwire = true;
-            i.placeholder("describe the image — for readers who can't see it")
+            i.placeholder("describe the image, for readers who can't see it")
         });
         // Restored attachments get real ids too (the upload chain only
         // ever targets fresh picks, but the invariant stays simple: ids
@@ -612,7 +612,7 @@ impl Composer {
         let when_field = self.sched_at.read(cx).content.clone();
         let Some(at) = Self::parse_schedule(&when_field) else {
             self.status =
-                "when? enter a future date and time — YYYY-MM-DD HH:MM, at least a minute ahead"
+                "when? enter a future date and time, YYYY-MM-DD HH:MM, at least a minute ahead"
                     .into();
             cx.notify();
             return;
@@ -726,7 +726,7 @@ impl Composer {
                     PublishEvent::Undone { .. } => {
                         let _ = this.update(cx, |this, cx| {
                             this.posting = false;
-                            this.status = "undone — nothing was sent".into();
+                            this.status = "undone, nothing was sent".into();
                             cx.notify();
                         });
                         return;
@@ -844,7 +844,7 @@ impl Composer {
                             // Kept on the stack with a quiet word — the draft
                             // is still there if the user wants it.
                             this.posting = false;
-                            this.status = "undone — nothing was sent".into();
+                            this.status = "undone, nothing was sent".into();
                             cx.notify();
                         });
                         return;
@@ -1396,7 +1396,7 @@ impl Render for Composer {
                                 .text_size(px(theme::T_SMALL))
                                 .text_color(rgb(theme::err()))
                                 .child(
-                                    "That looks like a private key (nsec…). Nothing was inserted — a pasted key here could sign as its owner.",
+                                    "That looks like a private key (nsec…). Nothing was inserted, a pasted key here could sign as its owner.",
                                 ),
                         )
                         .child(
@@ -1430,7 +1430,7 @@ impl Render for Composer {
                             div()
                                 .text_size(px(theme::T_SMALL))
                                 .text_color(rgb(theme::muted()))
-                                .child("broadcast at —"),
+                                .child("broadcast at:"),
                         )
                         .child(
                             div()
@@ -1468,7 +1468,7 @@ impl Render for Composer {
                             cx.notify();
                         }))
                         .child(format!(
-                            "{} scheduled — {} waiting",
+                            "{} scheduled, {} waiting",
                             if sched_list_open { "▾" } else { "▸" },
                             scheduled.len()
                         )),

@@ -2,7 +2,7 @@
 Type=Application
 Name=Satori
 GenericName=Nostr Client
-Comment=A quiet Nostr client — ink on washi
+Comment=A quiet Nostr client, ink on washi
 Exec=satori-desktop %u
 Icon=io.github.Letdown2491.satori
 Terminal=false

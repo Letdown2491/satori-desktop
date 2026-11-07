@@ -68,7 +68,7 @@ pub enum MediaError {
 impl std::fmt::Display for MediaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MediaError::Transient => write!(f, "media fetch failed — will retry"),
+            MediaError::Transient => write!(f, "media fetch failed, will retry"),
             MediaError::NotMedia => write!(f, "not an image"),
         }
     }
@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn media_error_display() {
-        assert_eq!(MediaError::Transient.to_string(), "media fetch failed — will retry");
+        assert_eq!(MediaError::Transient.to_string(), "media fetch failed, will retry");
         assert_eq!(MediaError::NotMedia.to_string(), "not an image");
     }
 

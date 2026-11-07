@@ -98,7 +98,7 @@ impl std::fmt::Display for PayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Code(s) => write!(f, "{s}"),
-            Self::Uncertain => write!(f, "payment state unknown — check your wallet before retrying"),
+            Self::Uncertain => write!(f, "payment state unknown, check your wallet before retrying"),
             Self::NoWallet => write!(f, "no wallet connected"),
         }
     }
@@ -114,7 +114,7 @@ fn classify_pay_error(raw: &str) -> PayError {
         return PayError::Code("not enough balance in the wallet".into());
     }
     if lower.contains("ratelimited") {
-        return PayError::Code("wallet is rate-limiting — try again later".into());
+        return PayError::Code("wallet is rate-limiting, try again later".into());
     }
     if lower.contains("quotaexceeded") {
         return PayError::Code("wallet spending quota exceeded".into());
@@ -676,7 +676,7 @@ mod tests {
         );
         assert_eq!(
             classify_pay_error("slow down [RateLimited]"),
-            PayError::Code("wallet is rate-limiting — try again later".into())
+            PayError::Code("wallet is rate-limiting, try again later".into())
         );
         assert!(matches!(
             classify_pay_error("route not found [PaymentFailed]"),

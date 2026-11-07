@@ -170,12 +170,12 @@ impl LoginView {
             ConnectEvent::Waiting => {}
             ConnectEvent::AuthUrl(url) => self.auth_url = Some(url),
             ConnectEvent::Uri(uri) => {
-                dlog!("[login] uri event — QR refreshed");
+                dlog!("[login] uri event, QR refreshed");
                 self.qr = qr_image(&uri);
                 self.qr_uri = Some(uri);
             }
             ConnectEvent::Approved(_) => {
-                dlog!("[login] approved — swapping to the shell");
+                dlog!("[login] approved, swapping to the shell");
                 cx.emit(Login::Approved);
                 return false;
             }
@@ -554,7 +554,7 @@ impl Render for LoginView {
                                         }))
                                         .child(match (&qr_uri, self.copied) {
                                             (_, true) => {
-                                                "Copied — paste it in your signer".to_string()
+                                                "Copied, paste it in your signer".to_string()
                                             }
                                             (Some(uri), _) => {
                                                 format!("{} · click to copy", uri_brief(uri))
@@ -569,7 +569,7 @@ impl Render for LoginView {
                                 .text_color(rgb(theme::muted()))
                                 .text_align(TextAlign::Center)
                                 .child(
-                                    "Click to open your signer — the key never \
+                                    "Click to open your signer, the key never \
                                      touches Satori.",
                                 )
                                 .into_any_element(),

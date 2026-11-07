@@ -1243,7 +1243,7 @@ impl Render for Shell {
                     .when(self.outbox_pending > 0, |d| {
                         let n = self.outbox_pending;
                         d.child(states::offline_pill(&format!(
-                            "{n} note{} queued for delivery — the relays will answer",
+                            "{n} note{} queued for delivery, the relays will answer",
                             if n == 1 { "" } else { "s" }
                         )))
                     })
@@ -1299,7 +1299,7 @@ impl Shell {
         let text = if let Some(e) = &held.err {
             format!("failed: {e}")
         } else if held.undone {
-            "undone — nothing was sent".to_string()
+            "undone, nothing was sent".to_string()
         } else {
             let left = held
                 .deadline

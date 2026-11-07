@@ -310,7 +310,7 @@ fn poll_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> Div
         );
     }
     if voted {
-        card = card.child(meta_line("Your ballot is in — thanks for the ink."));
+        card = card.child(meta_line("Your ballot is in, thanks for the ink."));
     } else if closed {
         card = card.child(meta_line("Poll closed."));
     }
@@ -705,7 +705,7 @@ fn highlight_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) 
             }
         }
     }
-    // The citation (highlight.ts): "— by X, Y" from the role-filtered p
+    // The citation (highlight.ts): "by X, Y" from the role-filtered p
     // tags, then the source row — a web page opens the browser, an `e` ref
     // opens the thread in-app, anything else lands on njump.
     if !data.authors.is_empty() {
@@ -719,7 +719,7 @@ fn highlight_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) 
                     .unwrap_or_else(|| short(pk))
             })
             .collect();
-        card = card.child(meta_line(format!("— by {}", names.join(", "))));
+        card = card.child(meta_line(format!("by {}", names.join(", "))));
     }
     match &data.source {
         Some(highlight::Source::Url(url)) if url.starts_with("http") => {

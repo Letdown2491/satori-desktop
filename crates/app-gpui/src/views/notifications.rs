@@ -85,8 +85,8 @@ pub struct NotificationsView {
     /// floating back-to-top whisper covers this pane too — same shape as
     /// the feed's (feed.rs deep).
     pub(crate) deep: bool,
-    /// WS4 receipts: the bell's audit trail open? (the "N hidden — see
-    /// why" strip at the pane's bottom — a silent void is a bug).
+    /// WS4 receipts: the bell's audit trail open? (the "N hidden, see
+    /// why" strip at the pane's bottom, a silent void is a bug).
     receipts_open: bool,
     list: ListState,
 }
@@ -653,7 +653,7 @@ impl Render for NotificationsView {
                         .into_any_element()
                     }),
             )
-            // WS4 receipts: "N hidden — see why" at the bottom of the pane
+            // WS4 receipts: "N hidden, see why" at the bottom of the pane
             // — the audit trail is the core requirement; a silent void is
             // a bug. Open, it lists every suppressed item (author, verdict,
             // reason) with a per-item one-session "show anyway".
@@ -679,9 +679,9 @@ impl Render for NotificationsView {
                                 cx.notify();
                             }))
                             .child(if receipts_open {
-                                format!("{} hidden — close", suppressed.len())
+                                format!("{} hidden, close", suppressed.len())
                             } else {
-                                format!("{} hidden — see why", suppressed.len())
+                                format!("{} hidden, see why", suppressed.len())
                             }),
                     );
                 if receipts_open {

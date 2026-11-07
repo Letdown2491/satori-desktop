@@ -67,6 +67,7 @@ pub struct SettingsView {
     // Relay-health pane (session-scoped): the "show all N relays" expand,
     // collapsed by default — flagged rows render inline, the full table hides.
     show_all_relays: bool,
+    show_spam: bool,
     // Toast equivalent (the pane has no header seal to hang one on).
     status: String,
     status_err: bool,
@@ -158,6 +159,7 @@ impl SettingsView {
             status: String::new(),
             status_err: false,
             show_all_relays: false,
+            show_spam: false,
             tab: SettingsTab::General,
         };
         view.pump_feed(core.fetch_media_servers(), cx);
@@ -281,7 +283,7 @@ impl SettingsView {
             // answer. Settings is a form pane, so the strip rides the pane's
             // existing err-styled status line (set_status(_, true)).
             FeedEvent::Failed(e) => {
-                self.set_status(format!("The relays didn't answer — {e}"), true)
+                self.set_status(format!("The relays didn't answer, {e}"), true)
             }
             _ => {}
         }
@@ -427,7 +429,7 @@ impl SettingsView {
             .map(|r| r.url.clone())
             .collect();
         if read.is_empty() && write.is_empty() {
-            self.set_status("Nothing to publish — add a relay first".into(), true);
+            self.set_status("Nothing to publish, add a relay first".into(), true);
             cx.notify();
             return;
         }
@@ -438,7 +440,7 @@ impl SettingsView {
     fn publish_servers(&mut self, cx: &mut Context<Self>) {
         let servers = self.servers.clone();
         if servers.is_empty() {
-            self.set_status("Nothing to publish — add a media server first".into(), true);
+            self.set_status("Nothing to publish, add a media server first".into(), true);
             cx.notify();
             return;
         }
@@ -534,9 +536,9 @@ fn wot_settings_group(&self, cx: &mut Context<Self>) -> Div {
     let badge_on = prefs::get_bool_or("profile_badge", true);
     let dedup_on = prefs::get_bool_or("dedup_enabled", true);
     let status_line = match self.core.wot_status() {
-        WotStatus::SignedOut => "Signed out — every verdict reads unknown.".to_string(),
+        WotStatus::SignedOut => "Signed out, every verdict reads unknown.".to_string(),
         WotStatus::OverCap => format!(
-            "Over the {}-follow cap — the graph is off, every verdict reads unknown.",
+            "Over the {}-follow cap, the graph is off, every verdict reads unknown.",
             wot::MAX_FOLLOWS
         ),
         WotStatus::Live(follows, qualified, rebuilt) => {
@@ -549,7 +551,7 @@ fn wot_settings_group(&self, cx: &mut Context<Self>) -> Div {
                         .map(|d| d.as_secs().saturating_sub(at) > wot::STALE_SECS)
                         .unwrap_or(false)
                     {
-                        line.push_str(" · stale — waiting for fresh contact lists");
+                        line.push_str(" · stale, waiting for fresh contact lists");
                     }
                 }
                 None => line.push_str(" · rebuilding from your follows…"),
@@ -655,7 +657,7 @@ fn spam_group(&self, cx: &mut Context<Self>) -> Div {
                                 .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::ink()))
                                 .child(format!(
-                                    "{} — {} duplicate(s) · last {}",
+                                    "{}, {} duplicate(s) · last {}",
                                     short_author(&rec.pubkey),
                                     rec.count,
                                     ago(rec.last_seen)
@@ -681,14 +683,37 @@ fn spam_group(&self, cx: &mut Context<Self>) -> Div {
         .collect();
     let (title, desc) = (
         "Spam receipts",
-        "Authors whose duplicate content the filter caught — per-relay \
-         attribution, un-hide on every row.",
+        "Authors whose duplicate content the filter caught, with per-relay \
+         attribution and un-hide on every row.",
     );
+    // Collapsible independently of the dedup toggle (the ledger outlives
+    // the filter being switched off: switching dedup off stops catching,
+    // it doesn't burn the receipts). Collapsed to a count by default.
+    let toggle_label = if self.show_spam {
+        "hide".to_string()
+    } else {
+        format!("show ({})", report.len())
+    };
+    let show = self.show_spam;
     group(title, desc)
-        .when(rows.is_empty(), |g| {
-            g.child(muted("No one caught this session."))
+        .child(
+            div()
+                .id("spam-receipts-toggle")
+                .cursor_pointer()
+                .text_size(px(theme::T_SMALL))
+                .text_color(rgb(theme::muted()))
+                .child(theme::pressable(div().child(toggle_label)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.show_spam = !this.show_spam;
+                    cx.notify();
+                })),
+        )
+        .when(show, |g| {
+            g.when(rows.is_empty(), |g| {
+                g.child(muted("No one caught this session."))
+            })
+            .child(div().w_full().flex().flex_col().children(rows))
         })
-        .child(div().w_full().flex().flex_col().children(rows))
 }
 
 
@@ -797,7 +822,7 @@ fn spam_group(&self, cx: &mut Context<Self>) -> Div {
             .child(
                 group(
                     "Appearance",
-                    "Ink on paper — the day palette or the night one. Applies at once.",
+                    "Ink on paper, the day palette or the night one. Applies at once.",
                 )
                 .child(
                     div()
@@ -1060,7 +1085,7 @@ fn spam_group(&self, cx: &mut Context<Self>) -> Div {
             .child(
                 group(
                     "Relays",
-                    "Where your events go and come from — published as your NIP-65 list. \
+                    "Where your events go and come from, published as your NIP-65 list. \
                      Five indexers always serve reads.",
                 )
                 .child(div().w_full().flex().flex_col().gap_0p5().children(
@@ -1160,9 +1185,9 @@ fn spam_group(&self, cx: &mut Context<Self>) -> Div {
             .flex_col()
             // --- Trust (web of trust) + spam receipts (WS4) -----------------
             .child(self.wot_settings_group(cx))
-            .when(prefs::get_bool_or("dedup_enabled", true), |d| {
-                d.child(self.spam_group(cx))
-            })
+            // The receipts ledger is independent of the dedup switch:
+            // switching the filter off stops the catching, not the ledger.
+            .child(self.spam_group(cx))
     }
 
     fn notifications_tab(&self, cx: &mut Context<Self>) -> Div {
@@ -1224,7 +1249,7 @@ fn spam_group(&self, cx: &mut Context<Self>) -> Div {
                                         .child("Hide machine notes"),
                                 )
                                 .child(muted(
-                                    "Kind-1 events whose entire content is JSON — app data \
+                                    "Kind-1 events whose entire content is JSON, app data \
                                      transports, not speech",
                                 )),
                         )
@@ -1315,7 +1340,7 @@ fn spam_group(&self, cx: &mut Context<Self>) -> Div {
                                         let mut line = if info.alias.is_empty() {
                                             "Wallet connected".to_string()
                                         } else {
-                                            format!("Wallet connected — {}", info.alias)
+                                            format!("Wallet connected, {}", info.alias)
                                         };
                                         if let Some(msat) = info.balance_msat {
                                             line.push_str(&format!(" · {} sats", msat / 1000));
@@ -1529,7 +1554,7 @@ impl SettingsView {
 
         let mut pane = group(
             "Relay health",
-            "What everyday queries have learned about each relay — response \
+            "What everyday queries have learned about each relay, response \
              times, and relays that stopped answering reads or writes.",
         );
         if flagged.is_empty() {
@@ -1539,7 +1564,7 @@ impl SettingsView {
                 .when(degraded, |d| {
                     d.child(
                         div().py_1().child(states::offline_pill(
-                            "the relays didn't answer — reading is degraded",
+                            "the relays didn't answer, reading is degraded",
                         )),
                     )
                 })
