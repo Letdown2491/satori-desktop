@@ -665,10 +665,10 @@ impl Render for Tip {
         div()
             .px_2()
             .py_1()
-            .rounded(px(3.0))
+            .rounded(px(theme::R_EMBED))
             .bg(rgb(theme::ink()))
             .text_color(rgb(theme::washi()))
-            .text_size(px(11.5))
+            .text_size(px(theme::T_SMALL))
             .font_family(theme::SANS)
             .child(self.label)
     }
@@ -958,7 +958,7 @@ impl Shell {
                 div()
                     .id("back")
                     .cursor_pointer()
-                    .text_size(px(13.0))
+                    .text_size(px(theme::T_UI))
                     .text_color(rgb(theme::muted()))
                     .on_click(cx.listener(|shell, _, _, cx| shell.back(cx)))
                     .child("‹ Back"),
@@ -966,7 +966,7 @@ impl Shell {
             .child(
                 div()
                     .flex_1()
-                    .text_size(px(13.0))
+                    .text_size(px(theme::T_UI))
                     .text_color(rgb(theme::ink()))
                     .child(self.title(cx)),
             )
@@ -1200,13 +1200,13 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .rounded(px(6.))
+                    .rounded(px(theme::R_EMBED))
                     .border_1()
                     .border_color(rgb(theme::hairline()))
                     .bg(rgb(theme::panel()))
                     .px_4()
                     .py_2()
-                    .text_size(px(12.5))
+                    .text_size(px(theme::T_UI))
                     .text_color(rgb(theme::muted()))
                     .child(text)
                     .when(held.undone || held.err.is_some(), |d| d), // shape only
@@ -1218,11 +1218,11 @@ impl Shell {
                         .cursor_pointer()
                         .px_2()
                         .py(px(2.))
-                        .rounded(px(4.))
+                        .rounded(px(theme::R_EMBED))
                         .border_1()
                         .border_color(rgb(theme::vermilion()))
                         .text_color(rgb(theme::vermilion()))
-                        .text_size(px(12.5))
+                        .text_size(px(theme::T_UI))
                         .on_click(cx.listener(|shell, _, _, cx| {
                             if let Some(h) = shell.hold.as_ref() {
                                 shell.core.undo(h.token);
@@ -1261,7 +1261,7 @@ fn lightbox_overlay(urls: &[String], idx: usize, cx: &mut Context<Shell>) -> imp
                 .py_2()
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(0xb8b2a6))
                         .child(caption),
                 )
@@ -1270,7 +1270,7 @@ fn lightbox_overlay(urls: &[String], idx: usize, cx: &mut Context<Shell>) -> imp
                         .id("lb-close")
                         .cursor_pointer()
                         .px_2()
-                        .text_size(px(13.0))
+                        .text_size(px(theme::T_UI))
                         .text_color(rgb(0xb8b2a6))
                         .on_click(cx.listener(|shell, _, _, cx| {
                             shell.lightbox = None;
@@ -1315,7 +1315,7 @@ fn lightbox_overlay(urls: &[String], idx: usize, cx: &mut Context<Shell>) -> imp
                                 .object_fit(ObjectFit::Contain)
                                 .into_any_element(),
                             None => div()
-                                .text_size(px(12.0))
+                                .text_size(px(theme::T_SMALL))
                                 .text_color(rgb(0xb8b2a6))
                                 .child("…")
                                 .into_any_element(),
@@ -1378,7 +1378,7 @@ fn video_overlay(url: &str, cx: &mut Context<Shell>) -> impl IntoElement {
                 .py_2()
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(0xb8b2a6))
                         .child("▶"),
                 )
@@ -1387,7 +1387,7 @@ fn video_overlay(url: &str, cx: &mut Context<Shell>) -> impl IntoElement {
                         .id("vid-close")
                         .cursor_pointer()
                         .px_2()
-                        .text_size(px(13.0))
+                        .text_size(px(theme::T_UI))
                         .text_color(rgb(0xb8b2a6))
                         .on_click(cx.listener(|shell, _, _, cx| shell.close_video(cx)))
                         .child("✕"),
@@ -1413,7 +1413,7 @@ fn video_overlay(url: &str, cx: &mut Context<Shell>) -> impl IntoElement {
                             Some(v) => crate::video::element(&v, content::COL_W - 64.0, 480.0)
                                 .into_any_element(),
                             None => div()
-                                .text_size(px(12.0))
+                                .text_size(px(theme::T_SMALL))
                                 .text_color(rgb(0xb8b2a6))
                                 .child("…")
                                 .into_any_element(),
@@ -1430,7 +1430,7 @@ fn video_overlay(url: &str, cx: &mut Context<Shell>) -> impl IntoElement {
                             div()
                                 .id("vid-toggle")
                                 .cursor_pointer()
-                                .text_size(px(14.0))
+                                .text_size(px(theme::T_BODY))
                                 .text_color(rgb(0xb8b2a6))
                                 .on_click(|_, _, cx| {
                                     cx.stop_propagation();
@@ -1442,7 +1442,7 @@ fn video_overlay(url: &str, cx: &mut Context<Shell>) -> impl IntoElement {
                             div()
                                 .id("vid-browser")
                                 .cursor_pointer()
-                                .text_size(px(14.0))
+                                .text_size(px(theme::T_BODY))
                                 .text_color(rgb(0xb8b2a6))
                                 .on_click(move |_, _, cx| {
                                     cx.stop_propagation();

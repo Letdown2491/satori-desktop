@@ -225,7 +225,12 @@ impl SettingsView {
                     }
                 }
             }
-            FeedEvent::Failed(e) => self.set_status(format!("… {e}"), true),
+            // §4.3: kinded copy, not a raw "… {e}" dump — the relays didn't
+            // answer. Settings is a form pane, so the strip rides the pane's
+            // existing err-styled status line (set_status(_, true)).
+            FeedEvent::Failed(e) => {
+                self.set_status(format!("The relays didn't answer — {e}"), true)
+            }
             _ => {}
         }
         cx.notify();
@@ -593,7 +598,7 @@ fn group(title: &str, description: &str) -> Div {
         .border_color(rgb(theme::hairline()))
         .child(
             div()
-                .text_size(px(12.0))
+                .text_size(px(theme::T_SMALL))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgb(theme::muted()))
                 .child(title.to_string()),
@@ -601,7 +606,7 @@ fn group(title: &str, description: &str) -> Div {
         .when(!description.is_empty(), |d| {
             d.child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(theme::T_SMALL))
                     .text_color(rgb(theme::muted()))
                     .child(description.to_string()),
             )
@@ -617,7 +622,7 @@ fn field(input: Entity<Input>, id: &str) -> impl IntoElement {
         .min_w_0()
         .h(px(30.))
         .px_2()
-        .rounded_sm()
+        .rounded(px(theme::R_EMBED))
         .bg(rgb(theme::panel()))
         .border_1()
         .border_color(rgb(theme::hairline()))
@@ -636,14 +641,14 @@ fn seal(id: impl Into<SharedString>, label: &str, color: u32) -> Stateful<Div> {
         .cursor_pointer()
         .px_2()
         .py_1()
-        .text_size(px(13.0))
+        .text_size(px(theme::T_UI))
         .text_color(rgb(color))
         .child(label.to_string())
 }
 
 fn muted(text: impl Into<String>) -> Div {
     div()
-        .text_size(px(11.0))
+        .text_size(px(theme::T_SMALL))
         .text_color(rgb(theme::muted()))
         .child(text.into())
 }
@@ -703,7 +708,7 @@ impl Render for SettingsView {
                             div()
                                 .id("theme-light")
                                 .cursor_pointer()
-                                .text_size(px(13.0))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(if !dark { theme::ink() } else { theme::muted() }))
                                 .when(!dark, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
                                 .on_click(cx.listener(|_this, _, _, cx| {
@@ -713,7 +718,7 @@ impl Render for SettingsView {
                         )
                         .child(
                             div()
-                                .text_size(px(13.0))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::hairline()))
                                 .child("·"),
                         )
@@ -721,7 +726,7 @@ impl Render for SettingsView {
                             div()
                                 .id("theme-dark")
                                 .cursor_pointer()
-                                .text_size(px(13.0))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(if dark { theme::ink() } else { theme::muted() }))
                                 .when(dark, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
                                 .on_click(cx.listener(|_this, _, _, cx| {
@@ -747,7 +752,7 @@ impl Render for SettingsView {
                         .child(
                             div()
                                 .flex_1()
-                                .text_size(px(13.0))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::ink()))
                                 .child(match &self.me_name {
                                     Some(name) => format!("Signed in as {name}"),
@@ -758,7 +763,7 @@ impl Render for SettingsView {
                             div()
                                 .id("sign-out")
                                 .cursor_pointer()
-                                .text_size(px(13.0))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::vermilion()))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     cx.emit(Nav::SignOut);
@@ -790,7 +795,7 @@ impl Render for SettingsView {
                         .child(
                             div()
                                 .flex_1()
-                                .text_size(px(13.0))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::ink()))
                                 .child(match &self.wallet {
                                     Status::Disconnected => "No wallet connected".to_string(),
@@ -810,7 +815,7 @@ impl Render for SettingsView {
                         )
                         .child(
                             div()
-                                .text_size(px(13.0))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::vermilion()))
                                 .child("Manage"),
                         )
@@ -836,7 +841,7 @@ impl Render for SettingsView {
                         .child(
                             div()
                                 .flex_1()
-                                .text_size(px(13.0))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::ink()))
                                 .child("Undo window"),
                         )
@@ -859,7 +864,7 @@ impl Render for SettingsView {
                         .when(!undo_enabled, |d| {
                             d.child(
                                 div()
-                                    .text_size(px(13.0))
+                                    .text_size(px(theme::T_UI))
                                     .text_color(rgb(theme::muted()))
                                     .child("Posts publish immediately."),
                             )
@@ -887,7 +892,7 @@ impl Render for SettingsView {
                                 .flex_col()
                                 .child(
                                     div()
-                                        .text_size(px(13.0))
+                                        .text_size(px(theme::T_UI))
                                         .text_color(rgb(theme::ink()))
                                         .child("Hide machine notes"),
                                 )
@@ -912,7 +917,7 @@ impl Render for SettingsView {
                         .child(
                             div()
                                 .flex_1()
-                                .text_size(px(13.0))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::ink()))
                                 .child(label.to_string()),
                         )
@@ -939,7 +944,7 @@ impl Render for SettingsView {
                         .child(
                             div()
                                 .flex_1()
-                                .text_size(px(13.0))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::ink()))
                                 .child("Show reactions in notifications"),
                         )
@@ -968,7 +973,7 @@ impl Render for SettingsView {
                         .child(
                             div()
                                 .flex_1()
-                                .text_size(px(13.0))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::ink()))
                                 .child("Stars write public bookmarks"),
                         )
@@ -998,7 +1003,7 @@ impl Render for SettingsView {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_size(px(13.0))
+                                    .text_size(px(theme::T_UI))
                                     .text_color(rgb(theme::ink()))
                                     .child(url.clone()),
                             )
@@ -1007,7 +1012,7 @@ impl Render for SettingsView {
                                     .id(SharedString::from(format!("media-remove-{url}")))
                                     .cursor_pointer()
                                     .px_1()
-                                    .text_size(px(13.0))
+                                    .text_size(px(theme::T_UI))
                                     .text_color(rgb(theme::muted()))
                                     .child("×")
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1065,7 +1070,7 @@ impl Render for SettingsView {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_size(px(13.0))
+                                    .text_size(px(theme::T_UI))
                                     .text_color(rgb(theme::ink()))
                                     .child(relay.url.clone()),
                             )
@@ -1086,7 +1091,7 @@ impl Render for SettingsView {
                                     .id(SharedString::from(format!("relay-remove-{}", relay.url)))
                                     .cursor_pointer()
                                     .px_1()
-                                    .text_size(px(13.0))
+                                    .text_size(px(theme::T_UI))
                                     .text_color(rgb(theme::muted()))
                                     .child("×")
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1153,7 +1158,7 @@ impl Render for SettingsView {
                         .child(
                             div()
                                 .flex_1()
-                                .text_size(px(13.0))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::ink()))
                                 .child("Export"),
                         )
@@ -1172,7 +1177,7 @@ impl Render for SettingsView {
                         .child(
                             div()
                                 .flex_1()
-                                .text_size(px(13.0))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::ink()))
                                 .child("Import & restore"),
                         )
@@ -1188,7 +1193,7 @@ impl Render for SettingsView {
                     div()
                         .p_4()
                         .pt_2()
-                        .text_size(px(12.0))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(if status_err {
                             theme::err()
                         } else {

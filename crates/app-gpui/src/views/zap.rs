@@ -126,14 +126,14 @@ impl ZapSheet {
             .cursor_pointer()
             .px_2()
             .py_0p5()
-            .rounded(px(3.0))
+            .rounded(px(theme::R_EMBED))
             .border_1()
             .border_color(rgb(if on {
                 theme::vermilion()
             } else {
                 theme::hairline()
             }))
-            .text_size(px(12.5))
+            .text_size(px(theme::T_UI))
             .text_color(rgb(if on { theme::ink() } else { theme::muted() }))
             .when(on, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
             .child(format_sats(sats))
@@ -214,13 +214,13 @@ impl Render for ZapSheet {
             .gap_2()
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(px(theme::T_UI))
                     .text_color(rgb(theme::ink()))
                     .child(format!("Zap {who}")),
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(px(theme::T_SMALL))
                     .text_color(rgb(theme::muted()))
                     .child("A public zap (NIP-57) through your wallet — the receipt shows your name."),
             )
@@ -243,7 +243,7 @@ impl Render for ZapSheet {
                             .h(px(34.))
                             .px_2()
                             .pt_1()
-                            .rounded(px(3.0))
+                            .rounded(px(theme::R_EMBED))
                             .bg(rgb(theme::panel()))
                             .border_1()
                             .border_color(rgb(theme::hairline()))
@@ -260,7 +260,7 @@ impl Render for ZapSheet {
                             .cursor_pointer()
                             .px_2()
                             .py_1()
-                            .text_size(px(13.0))
+                            .text_size(px(theme::T_UI))
                             .text_color(rgb(theme::vermilion()))
                             .child("Zap"),
                     ),
@@ -275,7 +275,7 @@ fn muted_status(status: String, err: bool) -> Div {
         return div();
     }
     div()
-        .text_size(px(11.5))
+        .text_size(px(theme::T_SMALL))
         .text_color(rgb(if err { theme::err() } else { theme::muted() }))
         .child(status)
 }

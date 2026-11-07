@@ -285,7 +285,7 @@ impl Render for LoginView {
                                 div()
                                     .id("waiting-qr-open")
                                     .cursor_pointer()
-                                    .rounded_sm()
+                                    .rounded(px(theme::R_EMBED))
                                     .border_1()
                                     .border_color(rgb(theme::hairline()))
                                     .hover(|s| s.border_color(rgb(theme::muted())))
@@ -296,7 +296,7 @@ impl Render for LoginView {
                                             cx.open_url(&uri);
                                         }
                                     })
-                                    .child(img(code).size(px(280.0)).rounded_sm())
+                                    .child(img(code).size(px(280.0)).rounded(px(theme::R_EMBED)))
                                     .into_any_element()
                             } else {
                                 // Reduced motion (the portal's
@@ -327,7 +327,7 @@ impl Render for LoginView {
                                 .child(status)
                                 .into_any_element(),
                             div()
-                                .text_size(px(12.0))
+                                .text_size(px(theme::T_SMALL))
                                 .text_color(rgb(theme::muted()))
                                 .child(hint)
                                 .into_any_element(),
@@ -337,7 +337,7 @@ impl Render for LoginView {
                                 .map(|uri| {
                                     div()
                                         .id("qr-uri")
-                                        .text_size(px(11.0))
+                                        .text_size(px(theme::T_SMALL))
                                         .text_color(rgb(theme::muted()))
                                         .overflow_x_scroll()
                                         .max_w(px(360.))
@@ -351,7 +351,7 @@ impl Render for LoginView {
                                     div()
                                         .id("login-auth-url")
                                         .cursor_pointer()
-                                        .text_size(px(12.0))
+                                        .text_size(px(theme::T_SMALL))
                                         .text_color(rgb(theme::live()))
                                         .overflow_x_scroll()
                                         .max_w(px(360.))
@@ -365,7 +365,7 @@ impl Render for LoginView {
                                 .cursor_pointer()
                                 .p_1()
                                 .px_2()
-                                .text_size(px(13.0))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::muted()))
                                 .on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))
                                 .child("Cancel")
@@ -381,7 +381,7 @@ impl Render for LoginView {
                                 .into_any_element(),
                             div()
                                 .w_full()
-                                .text_size(px(12.0))
+                                .text_size(px(theme::T_SMALL))
                                 .text_color(rgb(theme::muted()))
                                 .text_align(TextAlign::Center)
                                 .child("A quiet Nostr client. Your key never has to touch it.")
@@ -395,7 +395,7 @@ impl Render for LoginView {
                                 .when(!error.is_empty(), |d| {
                                     d.child(
                                         div()
-                                            .text_size(px(12.0))
+                                            .text_size(px(theme::T_SMALL))
                                             .text_color(rgb(err_color))
                                             .text_align(TextAlign::Center)
                                             .child(error),
@@ -414,7 +414,7 @@ impl Render for LoginView {
                                         .cursor_pointer()
                                         .p_1()
                                         .px_2()
-                                        .text_size(px(13.0))
+                                        .text_size(px(theme::T_UI))
                                         .text_color(rgb(theme::vermilion()))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.connect_bunker(cx)
@@ -424,7 +424,7 @@ impl Render for LoginView {
                                 .into_any_element(),
                             div()
                                 .w_full()
-                                .text_size(px(11.0))
+                                .text_size(px(theme::T_SMALL))
                                 .text_color(rgb(theme::muted()))
                                 .text_align(TextAlign::Center)
                                 .child(
@@ -450,7 +450,7 @@ impl Render for LoginView {
                                 .child(
                                     div()
                                         .font_family(theme::SERIF)
-                                        .text_size(px(15.0))
+                                        .text_size(px(theme::T_READER))
                                         .child("Scan with your signer"),
                                 )
                                 .child(
@@ -458,7 +458,7 @@ impl Render for LoginView {
                                         Some(code) => div()
                                             .id("qr-open")
                                             .cursor_pointer()
-                                            .rounded_sm()
+                                            .rounded(px(theme::R_EMBED))
                                             .border_1()
                                             .border_color(rgb(theme::hairline()))
                                             .hover(|s| {
@@ -467,7 +467,7 @@ impl Render for LoginView {
                                             .child(
                                                 img(code.clone())
                                                     .size(px(240.0))
-                                                    .rounded_sm(),
+                                                    .rounded(px(theme::R_EMBED)),
                                             )
                                             // The desktop's nostrconnect:// handler
                                             // (kumaOS: the built-in signer panel) pops
@@ -513,11 +513,11 @@ impl Render for LoginView {
                                         .cursor_pointer()
                                         .p_1()
                                         .px_2()
-                                        .rounded_sm()
+                                        .rounded(px(theme::R_EMBED))
                                         .border_1()
                                         .border_color(rgb(theme::hairline()))
                                         .hover(|s| s.border_color(rgb(theme::muted())))
-                                        .text_size(px(11.0))
+                                        .text_size(px(theme::T_SMALL))
                                         .text_color(rgb(theme::muted()))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             // Handshake dead (timeout, relay loss)?
@@ -565,7 +565,7 @@ impl Render for LoginView {
                                 .into_any_element(),
                             div()
                                 .w_full()
-                                .text_size(px(11.0))
+                                .text_size(px(theme::T_SMALL))
                                 .text_color(rgb(theme::muted()))
                                 .text_align(TextAlign::Center)
                                 .child(
@@ -590,7 +590,7 @@ fn field(input: Entity<Input>) -> impl IntoElement {
         .h(px(34.))
         .px_2()
         .pt_1()
-        .rounded_sm()
+        .rounded(px(theme::R_EMBED))
         .bg(rgb(theme::panel()))
         .border_1()
         .border_color(rgb(theme::hairline()))

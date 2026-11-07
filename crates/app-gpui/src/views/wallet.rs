@@ -116,12 +116,12 @@ impl WalletView {
         };
         if let Some(err) = &self.err {
             return div()
-                .text_size(px(11.5))
+                .text_size(px(theme::T_SMALL))
                 .text_color(rgb(theme::err()))
                 .child(err.clone());
         }
         div()
-            .text_size(px(11.5))
+            .text_size(px(theme::T_SMALL))
             .text_color(rgb(color))
             .child(text)
     }
@@ -145,7 +145,7 @@ impl Render for WalletView {
             .gap_2()
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(px(theme::T_UI))
                     .text_color(rgb(theme::ink()))
                     .child("Wallet"),
             )
@@ -166,7 +166,7 @@ impl Render for WalletView {
                             .h(px(34.))
                             .px_2()
                             .pt_1()
-                            .rounded(px(3.0))
+                            .rounded(px(theme::R_EMBED))
                             .bg(rgb(theme::panel()))
                             .border_1()
                             .border_color(rgb(theme::hairline()))
@@ -185,7 +185,7 @@ impl Render for WalletView {
                             .cursor_pointer()
                             .px_2()
                             .py_1()
-                            .text_size(px(13.0))
+                            .text_size(px(theme::T_UI))
                             .text_color(rgb(theme::vermilion()))
                             .child("Connect")
                             .on_click(cx.listener(|this, _, _, cx| this.connect(cx))),
@@ -195,7 +195,7 @@ impl Render for WalletView {
             .when(connecting, |d| {
                 d.child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(theme::muted()))
                         .child("approving in your wallet app…"),
                 )
@@ -203,7 +203,7 @@ impl Render for WalletView {
             .when(ready, |d| {
                 d.child(
                     div()
-                        .text_size(px(11.5))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(theme::muted()))
                         .child("Zaps go out as public NIP-57 requests; the wallet pays the invoice."),
                 )
@@ -214,7 +214,7 @@ impl Render for WalletView {
                             .cursor_pointer()
                             .px_2()
                             .py_1()
-                            .text_size(px(13.0))
+                            .text_size(px(theme::T_UI))
                             .text_color(rgb(theme::err()))
                             .child("Disconnect")
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -226,7 +226,7 @@ impl Render for WalletView {
             })
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(theme::T_SMALL))
                     .text_color(rgb(theme::muted()))
                     .child("The connection secret stays in this device's secret store — never in the event cache, never in a backup."),
             )

@@ -19,7 +19,7 @@ use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
 
 use crate::{icons, media, theme};
-use super::{content, nav::Nav};
+use super::{content, nav::Nav, states};
 
 pub struct ThreadView {
     core: Arc<Core>,
@@ -29,6 +29,10 @@ pub struct ThreadView {
     profiles: HashMap<String, Profile>,
     quotes: content::Quotes,
     status: String,
+    /// §4.3: the kinded error strip (replaces the raw `… {e}` status dump).
+    error: Option<states::PaneError>,
+    /// The pane's anchor — Retry re-asks it (and the thread) by id.
+    anchor_id: EventId,
     list: ListState,
 }
 
@@ -46,6 +50,8 @@ impl ThreadView {
             profiles: HashMap::new(),
             quotes: HashMap::new(),
             status: "loading the thread…".into(),
+            error: None,
+            anchor_id: id,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
         // The anchor rides in with its author's profile; replies follow.
@@ -116,6 +122,7 @@ impl ThreadView {
                     return;
                 }
                 self.anchor = Some(note.clone());
+                self.error = None;
                 if let Some(p) = profile {
                     self.profiles.insert(p.pubkey.clone(), p);
                 }
@@ -141,7 +148,10 @@ impl ThreadView {
                     self.profiles.insert(p.pubkey.clone(), p);
                 }
             }
-            FeedEvent::Failed(e) => self.status = format!("… {e}"),
+            FeedEvent::Failed(e) => {
+                // §4.3: transient — a relay round trip; Retry re-asks.
+                self.error = Some(states::PaneError::transient("The thread", &e));
+            }
             _ => {}
         }
         self.list.reset(self.replies.len());
@@ -265,7 +275,7 @@ fn reply_row(
                         .child(media::avatar(media, &picture, &name, 24.0))
                         .child(
                             div()
-                                .text_size(px(12.5))
+                                .text_size(px(theme::T_UI))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(theme::ink()))
                                 .child(name),
@@ -277,7 +287,7 @@ fn reply_row(
                     div()
                         .id(SharedString::from(format!("reply-time-{idx}")))
                         .cursor_pointer()
-                        .text_size(px(11.5))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(theme::muted()))
                         .on_click(|_, _, cx| crate::timefmt::cycle(cx))
                         .child(time),
@@ -313,22 +323,25 @@ fn reply_row(
                 .gap_4()
                 .items_center()
                 .child(
-                    div()
-                        .id(SharedString::from(format!("reply-to-{idx}")))
-                        .cursor_pointer()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_size(px(11.5))
-                        .text_color(rgb(theme::muted()))
-                        .on_click(move |_, _, cx| {
-                            let ev = ev_for_reply.clone();
-                            reply_handle.update(cx, |_view, cx| {
-                                cx.emit(Nav::OpenComposer(Some(ev)));
-                            });
-                        })
-                        .child(icons::bubble_icon(theme::muted()))
-                        .child("Reply"),
+                    // D23's one-link-token rule: pressable = muted + underline
+                    // at rest, vermilion on hover (theme::pressable).
+                    theme::pressable(
+                        div()
+                            .id(SharedString::from(format!("reply-to-{idx}")))
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_size(px(theme::T_SMALL)),
+                    )
+                    .on_click(move |_, _, cx| {
+                        let ev = ev_for_reply.clone();
+                        reply_handle.update(cx, |_view, cx| {
+                            cx.emit(Nav::OpenComposer(Some(ev)));
+                        });
+                    })
+                    .child(icons::bubble_icon(theme::muted()))
+                    .child("Reply"),
                 ),
         )
 }
@@ -405,7 +418,7 @@ impl Render for ThreadView {
                                         ))
                                         .child(
                                             div()
-                                                .text_size(px(13.0))
+                                                .text_size(px(theme::T_UI))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(rgb(theme::ink()))
                                                 .child(self.name_for(&note)),
@@ -418,7 +431,7 @@ impl Render for ThreadView {
                                         quotes: &quotes,
                                         profiles: &profiles,
                                     },
-                                    handle,
+                                    handle.clone(),
                                 ))
                                 .child(
                                     div()
@@ -426,22 +439,24 @@ impl Render for ThreadView {
                                         .gap_5()
                                         .items_center()
                                         .child(
-                                            div()
-                                                .id("anchor-reply")
-                                                .cursor_pointer()
-                                                .flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .text_size(px(11.5))
-                                                .text_color(rgb(theme::muted()))
-                                                .on_click(move |_, _, cx| {
-                                                    let ev = anchor_reply.clone();
-                                                    reply_all_handle.update(cx, |_view, cx| {
-                                                        cx.emit(Nav::OpenComposer(Some(ev)));
-                                                    });
-                                                })
-                                                .child(icons::bubble_icon(theme::muted()))
-                                                .child("Reply"),
+                                            // D23's one-link-token rule: pressable.
+                                            theme::pressable(
+                                                div()
+                                                    .id("anchor-reply")
+                                                    .cursor_pointer()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .text_size(px(theme::T_SMALL)),
+                                            )
+                                            .on_click(move |_, _, cx| {
+                                                let ev = anchor_reply.clone();
+                                                reply_all_handle.update(cx, |_view, cx| {
+                                                    cx.emit(Nav::OpenComposer(Some(ev)));
+                                                });
+                                            })
+                                            .child(icons::bubble_icon(theme::muted()))
+                                            .child("Reply"),
                                         ),
                                 )
                                 .into_any_element()
@@ -453,6 +468,40 @@ impl Render for ThreadView {
                             .text_color(rgb(theme::muted()))
                             .child(status.clone())
                             .into_any_element(),
+                    })
+                    // §4.3: the kinded error strip on the reading column.
+                    .when_some(self.error.clone(), |d, err| {
+                        let retry = handle.clone();
+                        let dismiss = handle.clone();
+                        d.child(
+                            div()
+                                .w_full()
+                                .max_w(px(content::COL_W))
+                                .child(states::error_strip(
+                                    &err,
+                                    // Retry: re-ask the anchor and the thread.
+                                    move |_, _, cx| {
+                                        retry.update(cx, |view, cx| {
+                                            view.error = None;
+                                            view.pump(
+                                                view.core.event_by_id(
+                                                    view.anchor_id,
+                                                    Vec::new(),
+                                                    None,
+                                                ),
+                                                cx,
+                                            );
+                                            view.pump(view.core.thread(view.anchor_id), cx);
+                                        });
+                                    },
+                                    move |_, _, cx| {
+                                        dismiss.update(cx, |view, cx| {
+                                            view.error = None;
+                                            cx.notify();
+                                        });
+                                    },
+                                )),
+                        )
                     })
                     .child(if replies_empty {
                         div()

@@ -23,7 +23,7 @@ use satori_core::wallet::{Status, WalletEvent};
 use crate::prefs;
 
 use crate::{icons, media, theme};
-use super::{content, nav::Nav, cards};
+use super::{content, nav::Nav, cards, states};
 
 /// Which surface a feed pane carries: the timeline (the visible catalog),
 /// the articles shelf (kind 30023 from the same follows), or a hashtag
@@ -84,6 +84,9 @@ pub struct Feed {
     voted: HashSet<EventId>,
     rsvped: HashMap<EventId, String>,
     status: String,
+    /// §4.3: the pane's kinded error — the strip replaces the old raw
+    /// `format!("… {e}")` status-line dump (deficiency 8).
+    error: Option<states::PaneError>,
     /// Endless scroll: the relays may have more; a round trip is in flight.
     has_more: bool,
     paging: bool,
@@ -184,6 +187,7 @@ impl Feed {
             voted: HashSet::new(),
             rsvped: HashMap::new(),
             status: "connecting to the relays…".into(),
+            error: None,
             has_more: true,
             paging: false,
             oldest_ts: None,
@@ -391,6 +395,20 @@ impl Feed {
         self.snap_dirty = true;
     }
 
+    /// §4.3 Retry: re-ask what this pane asks on open, per mode. The strip's
+    /// Retry action only re-runs a relay round trip — it never pages.
+    fn retry_load(&mut self, cx: &mut Context<Self>) {
+        self.error = None;
+        let rx = match &self.mode {
+            FeedMode::Hashtag(tag) => self.core.hashtag(tag.clone()),
+            FeedMode::Profile(who) => self.core.profile(*who),
+            FeedMode::Bookmarks => self.core.bookmarked_notes(),
+            _ => self.core.refresh(self.mode.kinds()),
+        };
+        self.pump(rx, cx);
+        cx.notify();
+    }
+
     fn on_event(&mut self, ev: FeedEvent, cx: &mut Context<Self>) {
         self.touch();
         enum Reflow {
@@ -405,6 +423,7 @@ impl Feed {
                 self.absorb(page.notes, page.profiles, cx);
                 self.want_parents(cx);
                 self.status.clear();
+                self.error = None;
                 // The bookmark list is finite (D38) — never page it.
                 self.has_more = !matches!(self.mode, FeedMode::Bookmarks);
             }
@@ -456,7 +475,9 @@ impl Feed {
                 cx.notify();
             }
             FeedEvent::Failed(e) => {
-                self.status = format!("… {e}");
+                // §4.3: the kinded strip, not a raw "… {e}" status dump —
+                // the leading ellipsis collided with the loading convention.
+                self.error = Some(states::PaneError::transient("The feed", &e));
                 // A failed round trip must not wedge the end cap.
                 self.paging = false;
             }
@@ -971,13 +992,16 @@ fn note_card(
 
     // No card box: posts sit directly on the washi, separated by whitespace
     // alone (sumi-e — the empty space carries the composition).
+    // §2.1 anatomy: py S4 (12px/side, not 16), and the head→body gap (S2,
+    // 4px) is TIGHTER than body→actions (S3, 8px) — hierarchy via one
+    // exception here, not per-call nudges.
     div()
         .w_full()
         .flex()
         .flex_col()
-        .gap_2()
+        .gap_1()
         .px_4()
-        .py_4()
+        .py(px(theme::S4))
         .child(
             div()
                 .flex()
@@ -990,7 +1014,7 @@ fn note_card(
                         .id(SharedString::from(format!("author-{idx}")))
                         .cursor_pointer()
                         .flex_1()
-                        .text_size(px(14.0))
+                        .text_size(px(theme::T_BODY))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(theme::ink()))
                         .on_click(move |_, _, cx| {
@@ -1007,7 +1031,7 @@ fn note_card(
                     div()
                         .id(SharedString::from(format!("time-{idx}")))
                         .cursor_pointer()
-                        .text_size(px(12.0))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(theme::muted()))
                         .hover(|s| s.text_color(rgb(theme::ink())))
                         .on_click(|_, _, cx| crate::timefmt::cycle(cx))
@@ -1051,10 +1075,13 @@ fn note_card(
                 )),
         )
         .child(
+            // §2.1: body→actions sits at S3 (8px) — the extra S1 on top of
+            // the card's S2 gap.
             div()
                 .flex()
                 .gap_5()
                 .items_center()
+                .mt_1()
                 // The reply door (thread.rs reply-to): opens the composer
                 // carrying this note as the parent.
                 .child(
@@ -1067,7 +1094,7 @@ fn note_card(
                                 cx.emit(Nav::OpenComposer(Some((*ev).clone())));
                             });
                         })
-                        .hover(|s| s.opacity(0.72))
+                        .hover(|s| s.bg(theme::hover_wash()))
                         .child(icons::bubble_icon(theme::muted())),
                 )
                 .child(
@@ -1078,7 +1105,7 @@ fn note_card(
                             let ev = ev_for_like.clone();
                             handle_like.update(cx, |feed, cx| feed.toggle_like(&ev, cx));
                         })
-                        .hover(|s| s.opacity(0.72))
+                        .hover(|s| s.bg(theme::hover_wash()))
                         .child(icons::heart_icon(if engaged {
                             theme::vermilion()
                         } else {
@@ -1106,7 +1133,7 @@ fn note_card(
                     let bolt = div()
                         .id(SharedString::from(format!("zap-{idx}")))
                         .cursor_pointer()
-                        .hover(|s| s.opacity(0.72))
+                        .hover(|s| s.bg(theme::hover_wash()))
                         // Right-click opens the sheet at once.
                         .on_mouse_down(gpui::MouseButton::Right, {
                             let ev = ev_for_zap.clone();
@@ -1166,7 +1193,7 @@ fn note_card(
                             let ev = ev_for_repost.clone();
                             handle_repost.update(cx, |feed, cx| feed.toggle_repost(&ev, cx));
                         })
-                        .hover(|s| s.opacity(0.72))
+                        .hover(|s| s.bg(theme::hover_wash()))
                         .child(icons::repost_icon(if shared {
                             theme::vermilion()
                         } else {
@@ -1183,7 +1210,7 @@ fn note_card(
                                 cx.emit(Nav::OpenQuote((*ev).clone()));
                             });
                         })
-                        .hover(|s| s.opacity(0.72))
+                        .hover(|s| s.bg(theme::hover_wash()))
                         .child(icons::quote_icon(theme::muted())),
                 )
                 .child(
@@ -1194,7 +1221,7 @@ fn note_card(
                             let ev = ev_for_bookmark.clone();
                             handle_bookmark.update(cx, |feed, cx| feed.toggle_bookmark(&ev, cx));
                         })
-                        .hover(|s| s.opacity(0.72))
+                        .hover(|s| s.bg(theme::hover_wash()))
                         .child(icons::bookmark_icon(if saved {
                             theme::vermilion()
                         } else {
@@ -1253,18 +1280,41 @@ impl Render for Feed {
             .flex()
             .flex_col()
             // Relay status line — the shell header carries the title now, so
-            // this only speaks when there's something to say.
-            .when(!status.is_empty(), |d| {
-                d.child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .text_size(px(12.0))
-                        .text_color(rgb(theme::muted()))
-                        .border_b_1()
-                        .border_color(rgb(theme::hairline()))
-                        .child(status),
-                )
+            // this only speaks when there's something to say (loading; the
+            // errors have their own strip below, §4.3).
+            .when(!status.is_empty(), {
+                let status = status.clone();
+                move |d| {
+                    d.child(
+                        div()
+                            .px_4()
+                            .py_2()
+                            .text_size(px(theme::T_SMALL))
+                            .text_color(rgb(theme::muted()))
+                            .border_b_1()
+                            .border_color(rgb(theme::hairline()))
+                            .child(status),
+                    )
+                }
+            })
+            // The kinded error strip (§4.3): dismissible, retryable.
+            .when_some(self.error.clone(), |d, err| {
+                let retry = handle.clone();
+                let dismiss = handle.clone();
+                d.child(states::error_strip(
+                    &err,
+                    // Retry: re-ask, per mode (retry_load).
+                    move |_, _, cx| {
+                        retry.update(cx, |feed, cx| feed.retry_load(cx));
+                    },
+                    // Dismiss: quiet, no reload.
+                    move |_, _, cx| {
+                        dismiss.update(cx, |feed, cx| {
+                            feed.error = None;
+                            cx.notify();
+                        });
+                    },
+                ))
             })
             // The new-notes pill (the live subscription's push signal):
             // a small centered chip on the washi — content-sized, not a
@@ -1289,7 +1339,7 @@ impl Render for Feed {
                                 .rounded_full()
                                 .border_1()
                                 .border_color(rgb(theme::hairline()))
-                                .text_size(px(12.0))
+                                .text_size(px(theme::T_SMALL))
                                 .text_color(rgb(theme::vermilion()))
                                 .hover(|s| {
                                     s.border_color(rgb(theme::vermilion()))
@@ -1317,13 +1367,18 @@ impl Render for Feed {
                     .flex()
                     .justify_center()
                     .child(if empty {
-                        div()
-                            .w_full()
-                            .max_w(px(content::COL_W))
-                            .p_8()
-                            .text_color(rgb(theme::muted()))
-                            .child("Nothing here yet — the relays are still answering.")
-                            .into_any_element()
+                        // §4.1: "the relays are still answering" was wrong for
+                        // a persistently empty feed — it never resolves. Split:
+                        // first load pending → the loading line; loaded, zero
+                        // events → the honest quiet.
+                        if !status.is_empty() {
+                            states::empty(&status, None)
+                        } else {
+                            states::empty(
+                                "Quiet here.",
+                                Some("The relays remember nothing from this view."),
+                            )
+                        }
                     } else {
                         // GPUI rule (D13): an entity can't be read while it renders,
                         // so snapshot the data into the item closure; only the click
@@ -1460,7 +1515,7 @@ fn repost_card(
                 .w_full()
                 .px_4()
                 .py_3()
-                .text_size(px(12.0))
+                .text_size(px(theme::T_SMALL))
                 .text_color(rgb(theme::muted()))
                 .child(format!("{name} boosted"))
         },
@@ -1485,7 +1540,7 @@ fn repost_card(
                     div()
                         .id(SharedString::from(format!("boost-time-{}", ev.id)))
                         .cursor_pointer()
-                        .text_size(px(12.0))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(theme::muted()))
                         .hover(|s| s.text_color(rgb(theme::ink())))
                         .on_click(|_, _, cx| crate::timefmt::cycle(cx))
@@ -1579,7 +1634,7 @@ fn reply_whisper(
                 match &name {
                     Some(name) => rows.push(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(theme::T_SMALL))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(theme::ink()))
                             .child(format!("↳ replying to {name}"))
@@ -1587,7 +1642,7 @@ fn reply_whisper(
                     ),
                     None => rows.push(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(theme::T_SMALL))
                             .text_color(rgb(theme::muted()))
                             .child("↳ reply")
                             .into_any_element(),
@@ -1600,7 +1655,7 @@ fn reply_whisper(
                         div()
                             .font_family(theme::SERIF)
                             .italic()
-                            .text_size(px(12.5))
+                            .text_size(px(theme::T_UI))
                             .text_color(rgb(theme::muted()))
                             .child(snippet.clone())
                             .into_any_element(),
@@ -1637,7 +1692,7 @@ fn end_cap(paging: bool, more: bool) -> Div {
             .child(
                 div()
                     .font_family(theme::SERIF)
-                    .text_size(px(13.0))
+                    .text_size(px(theme::T_UI))
                     .line_height(relative(1.2))
                     .text_color(rgb(theme::muted()))
                     .child(words.to_string()),

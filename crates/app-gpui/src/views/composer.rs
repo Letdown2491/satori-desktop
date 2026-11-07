@@ -120,7 +120,7 @@ const LINES_MIN: f32 = 10.0;
 /// muted) — the poll panel's two groups.
 fn poll_label(text: &str) -> gpui::Div {
     div()
-        .text_size(px(12.0))
+        .text_size(px(theme::T_SMALL))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(theme::muted()))
         .child(text.to_string())
@@ -792,7 +792,7 @@ impl Render for Composer {
                     div()
                         .flex_col()
                         .gap_1()
-                        .rounded(px(6.))
+                        .rounded(px(theme::R_EMBED))
                         .border_1()
                         .border_color(rgb(theme::hairline()))
                         .bg(rgb(theme::washi()))
@@ -805,7 +805,7 @@ impl Render for Composer {
                                 .child(media::avatar(&quote_snap, &picture, &name, 20.0))
                                 .child(
                                     div()
-                                        .text_size(px(12.5))
+                                        .text_size(px(theme::T_UI))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb(theme::ink()))
                                         .child(name),
@@ -813,7 +813,7 @@ impl Render for Composer {
                         )
                         .child(
                             div()
-                                .text_size(px(13.))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::muted()))
                                 .child(snippet),
                         ),
@@ -837,8 +837,8 @@ impl Render for Composer {
                         .flex_col()
                         // Tabs on top square the box's shoulders; a reply
                         // (no tabs) keeps the full rounding.
-                        .when(replying, |d| d.rounded(px(6.)))
-                        .when(!replying, |d| d.rounded_b(px(6.)))
+                        .when(replying, |d| d.rounded(px(theme::R_EMBED)))
+                        .when(!replying, |d| d.rounded_b(px(theme::R_EMBED)))
                         .child(input),
                 )
             })
@@ -851,7 +851,7 @@ impl Render for Composer {
                         .max_h_full()
                         .min_h_0()
                         .overflow_y_scroll()
-                        .rounded_b(px(6.))
+                        .rounded_b(px(theme::R_EMBED))
                         .border_1()
                         .border_color(rgb(theme::hairline()))
                         .bg(rgb(theme::panel()))
@@ -867,8 +867,8 @@ impl Render for Composer {
                             // fills its parent; auto would collapse it.
                             div()
                                 .flex()
-                                .h(window.line_height() * question_lines.max(1.0) + px(16.0))
-                                .rounded(px(4.))
+                                .h(window.line_height() * question_lines.max(1.0) + px(theme::S5))
+                                .rounded(px(theme::R_EMBED))
                                 .border_1()
                                 .border_color(rgb(theme::hairline()))
                                 .bg(rgb(theme::washi()))
@@ -889,7 +889,7 @@ impl Render for Composer {
                                 .child(if poll_multi {
                                     div()
                                         .size(px(13.))
-                                        .rounded(px(3.))
+                                        .rounded(px(theme::R_EMBED))
                                         .border_1()
                                         .border_color(rgb(theme::hairline()))
                                         .flex_shrink_0()
@@ -906,7 +906,7 @@ impl Render for Composer {
                                         .flex_1()
                                         .flex()
                                         .h(window.line_height() * (opt_lines + 0.8))
-                                        .rounded(px(4.))
+                                        .rounded(px(theme::R_EMBED))
                                         .border_1()
                                         .border_color(rgb(theme::hairline()))
                                         .bg(rgb(theme::washi()))
@@ -918,7 +918,7 @@ impl Render for Composer {
                                         div()
                                             .id(SharedString::from(format!("rm-opt-{i}")))
                                             .cursor_pointer()
-                                            .text_size(px(14.))
+                                            .text_size(px(theme::T_BODY))
                                             .text_color(rgb(theme::muted()))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 if !this.posting && this.poll_options.len() > 2 {
@@ -938,7 +938,7 @@ impl Render for Composer {
                                 .items_center()
                                 .gap_2()
                                 .pl(px(21.))
-                                .text_size(px(12.5))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::muted()))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     if !this.posting && this.poll_options.len() < 6 {
@@ -955,7 +955,7 @@ impl Render for Composer {
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .text_size(px(12.5))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(if poll_multi {
                                     theme::vermilion()
                                 } else {
@@ -964,7 +964,7 @@ impl Render for Composer {
                                 .child(
                                     div()
                                         .size(px(13.))
-                                        .rounded(px(3.))
+                                        .rounded(px(theme::R_EMBED))
                                         .border_1()
                                         .border_color(rgb(if poll_multi {
                                             theme::vermilion()
@@ -997,7 +997,7 @@ impl Render for Composer {
                                 .cursor_pointer()
                                 .px_3()
                                 .py_1()
-                                .text_size(px(13.))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(if tab == Tab::Note {
                                     theme::ink()
                                 } else {
@@ -1006,7 +1006,7 @@ impl Render for Composer {
                                 .when(tab == Tab::Note, |d| {
                                     d.font_weight(gpui::FontWeight::SEMIBOLD)
                                         .bg(rgb(theme::panel()))
-                                        .rounded_t(px(6.))
+                                        .rounded_t(px(theme::R_EMBED))
                                         .border_t_1()
                                         .border_l_1()
                                         .border_r_1()
@@ -1023,7 +1023,7 @@ impl Render for Composer {
                                 .cursor_pointer()
                                 .px_3()
                                 .py_1()
-                                .text_size(px(13.))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(if tab == Tab::Poll {
                                     theme::ink()
                                 } else {
@@ -1032,7 +1032,7 @@ impl Render for Composer {
                                 .when(tab == Tab::Poll, |d| {
                                     d.font_weight(gpui::FontWeight::SEMIBOLD)
                                         .bg(rgb(theme::panel()))
-                                        .rounded_t(px(6.))
+                                        .rounded_t(px(theme::R_EMBED))
                                         .border_t_1()
                                         .border_l_1()
                                         .border_r_1()
@@ -1058,10 +1058,10 @@ impl Render for Composer {
                                 .cursor_pointer()
                                 .px_2()
                                 .py_0p5()
-                                .rounded(px(3.))
+                                .rounded(px(theme::R_EMBED))
                                 .border_1()
                                 .border_color(rgb(theme::hairline()))
-                                .text_size(px(12.))
+                                .text_size(px(theme::T_SMALL))
                                 .text_color(rgb(theme::ink()))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.pick_mention(i, cx);
@@ -1081,7 +1081,7 @@ impl Render for Composer {
                             .cursor_pointer()
                             .px_3()
                             .py_1()
-                            .text_size(px(13.))
+                            .text_size(px(theme::T_UI))
                             .text_color(rgb(theme::muted()))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.pick_attachments(cx);
@@ -1094,10 +1094,10 @@ impl Render for Composer {
                             .cursor_pointer()
                             .px_4()
                             .py_1()
-                            .rounded(px(4.))
+                            .rounded(px(theme::R_EMBED))
                             .border_1()
                             .border_color(rgb(theme::vermilion()))
-                            .text_size(px(13.5))
+                            .text_size(px(theme::T_BODY))
                             .text_color(rgb(theme::vermilion()))
                             .on_click(cx.listener(|this, _, _, cx| this.post(cx)))
                             .child(if posting {
@@ -1111,7 +1111,7 @@ impl Render for Composer {
             .when(!status.is_empty(), |d| {
                 d.child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(theme::muted()))
                         .child(status),
                 )
@@ -1153,7 +1153,7 @@ impl Composer {
                     .child(
                         div()
                             .size(px(72.))
-                            .rounded(px(4.))
+                            .rounded(px(theme::R_EMBED))
                             .border_1()
                             .border_color(rgb(theme::hairline()))
                             .overflow_hidden()
@@ -1174,7 +1174,7 @@ impl Composer {
                                         .object_fit(gpui::ObjectFit::Cover)
                                         .into_any_element(),
                                     None => div()
-                                        .text_size(px(11.))
+                                        .text_size(px(theme::T_SMALL))
                                         .text_color(rgb(theme::muted()))
                                         .child("…")
                                         .into_any_element(),
@@ -1185,7 +1185,7 @@ impl Composer {
                         div()
                             .id(SharedString::from(format!("rm-att-{i}")))
                             .cursor_pointer()
-                            .text_size(px(11.))
+                            .text_size(px(theme::T_SMALL))
                             .text_color(rgb(theme::muted()))
                             .on_click(remove)
                             .when(i < tiles, |d| {

@@ -18,7 +18,7 @@ use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, Profile};
 
 use crate::{input::Input, media, theme, uris};
-use super::{content, nav::Nav};
+use super::{content, nav::Nav, states};
 
 /// The results pane's tab.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -37,6 +37,8 @@ pub struct SearchView {
     profiles: HashMap<String, Profile>,
     quotes: content::Quotes,
     status: String,
+    /// §4.3: the kinded error strip (replaces "Search failed: {m}").
+    error: Option<states::PaneError>,
     /// The question as typed — the nothing-found state reads it back.
     query: String,
     /// People matches (pubkeys, row order; the display data lives in
@@ -80,6 +82,7 @@ impl SearchView {
             profiles: HashMap::new(),
             quotes: HashMap::new(),
             status: String::new(),
+            error: None,
             query: String::new(),
             people: vec![],
             target: None,
@@ -137,7 +140,8 @@ impl SearchView {
         self.list.reset(0);
         self.query = q.clone();
         self.tab = SearchTab::Notes;
-        self.status = "Searching…".into();
+        self.status = states::loading("Searching…");
+        self.error = None;
         // People from the cache and the direct-open target are per-question
         // too (the clean-answer rule). The rows are on screen while the
         // pane idles — render touches stop with rendering, so the rows'
@@ -175,7 +179,7 @@ impl SearchView {
         div()
             .id(SharedString::from(format!("tab-{label}")))
             .cursor_pointer()
-            .text_size(px(12.5))
+            .text_size(px(theme::T_UI))
             .text_color(rgb(if on { theme::ink() } else { theme::muted() }))
             .when(on, |d| d.underline())
             .child(label)
@@ -216,7 +220,10 @@ impl SearchView {
                     self.tab = SearchTab::People;
                 }
             }
-            FeedEvent::Failed(m) => self.status = format!("Search failed: {m}"),
+            FeedEvent::Failed(m) => {
+                // §4.3: transient — Retry re-runs the question.
+                self.error = Some(states::PaneError::transient("The search", &m));
+            }
             _ => {}
         }
         cx.notify();
@@ -317,7 +324,7 @@ impl Render for SearchView {
                             .h(field_h)
                             .px_2()
                             .py_1()
-                            .rounded_sm()
+                            .rounded(px(theme::R_EMBED))
                             .bg(rgb(theme::panel()))
                             .border_1()
                             .border_color(rgb(theme::hairline()))
@@ -329,7 +336,7 @@ impl Render for SearchView {
                             .cursor_pointer()
                             .px_2()
                             .py_1()
-                            .text_size(px(13.0))
+                            .text_size(px(theme::T_UI))
                             .text_color(rgb(theme::vermilion()))
                             .on_click(cx.listener(|this, _, _, cx| this.run(cx)))
                             .child("Search"),
@@ -355,10 +362,10 @@ impl Render for SearchView {
                                 .cursor_pointer()
                                 .px_2()
                                 .py_1()
-                                .rounded_sm()
+                                .rounded(px(theme::R_EMBED))
                                 .border_1()
                                 .border_color(rgb(theme::hairline()))
-                                .text_size(px(12.5))
+                                .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::ink()))
                                 .hover(|s| {
                                     s.border_color(rgb(theme::vermilion()))
@@ -397,9 +404,25 @@ impl Render for SearchView {
                     div()
                         .px_4()
                         .pt_2()
-                        .text_size(px(12.0))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(theme::muted()))
                         .child(status.clone()),
+                )
+            })
+            // §4.3: the kinded error strip — Retry re-runs the question.
+            .when_some(self.error.clone(), |d, err| {
+                d.child(
+                    div()
+                        .px_4()
+                        .pt_2()
+                        .child(states::error_strip(
+                            &err,
+                            cx.listener(move |this, _, _, cx| this.run(cx)),
+                            cx.listener(move |this, _, _, cx| {
+                                this.error = None;
+                                cx.notify();
+                            }),
+                        )),
                 )
             })
             .child(if self.generation == 0 {
@@ -416,13 +439,13 @@ impl Render for SearchView {
                     .child(
                         div()
                             .font_family(theme::SERIF)
-                            .text_size(px(15.0))
+                            .text_size(px(theme::T_READER))
                             .text_color(rgb(theme::muted()))
                             .child("Search the notes your relays hold."),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(theme::T_SMALL))
                             .text_color(rgb(theme::muted()))
                             .child(
                                 "Operators some relays honor: by: p: t: has: since: site:",
@@ -445,7 +468,7 @@ impl Render for SearchView {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_size(px(12.0))
+                                .text_size(px(theme::T_SMALL))
                                 .text_color(rgb(theme::muted()))
                                 .child("No people matched."),
                         )
@@ -455,7 +478,7 @@ impl Render for SearchView {
                             div()
                                 .px_4()
                                 .pt_2()
-                                .text_size(px(11.0))
+                                .text_size(px(theme::T_SMALL))
                                 .text_color(rgb(theme::muted()))
                                 .child("From the profiles your relays have sent."),
                         );
@@ -493,7 +516,7 @@ impl Render for SearchView {
                                     ))
                                     .child(
                                         div()
-                                            .text_size(px(13.5))
+                                            .text_size(px(theme::T_BODY))
                                             .text_color(rgb(theme::ink()))
                                             .child(if p.name.is_empty() {
                                                 content::short_bech32(&p.pubkey)
@@ -504,7 +527,7 @@ impl Render for SearchView {
                                     .when(!p.nip05.is_empty(), |row| {
                                         row.child(
                                             div()
-                                                .text_size(px(12.0))
+                                                .text_size(px(theme::T_SMALL))
                                                 .text_color(rgb(theme::muted()))
                                                 .child(p.nip05.clone()),
                                         )
@@ -558,13 +581,13 @@ impl Render for SearchView {
                     .child(
                         div()
                             .font_family(theme::SERIF)
-                            .text_size(px(15.0))
+                            .text_size(px(theme::T_READER))
                             .text_color(rgb(theme::muted()))
                             .child(format!("Nothing found for “{}”.", self.query)),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(theme::T_SMALL))
                             .text_color(rgb(theme::muted()))
                             .child("Relays without NIP-50 search answer nothing."),
                     )

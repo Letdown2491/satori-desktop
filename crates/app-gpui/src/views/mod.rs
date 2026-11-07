@@ -12,6 +12,7 @@ pub mod reader;
 pub mod search;
 pub mod settings;
 pub mod shell;
+pub mod states;
 pub mod thread;
 pub mod wallet;
 pub mod zap;

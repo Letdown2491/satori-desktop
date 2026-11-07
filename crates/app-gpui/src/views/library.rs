@@ -168,7 +168,7 @@ impl LibraryView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(13.5))
+                    .text_size(px(theme::T_BODY))
                     .text_color(rgb(theme::ink()))
                     .text_ellipsis()
                     .child(l.display()),
@@ -179,7 +179,7 @@ impl LibraryView {
                 d.child(
                     div()
                         .flex_none()
-                        .text_size(px(11.5))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(theme::muted()))
                         .child(if count == 1 {
                             "1 person".to_string()
@@ -191,7 +191,7 @@ impl LibraryView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(12.))
+                    .text_size(px(theme::T_SMALL))
                     .text_color(rgb(theme::muted()))
                     .child("›"),
             )
@@ -236,7 +236,7 @@ impl LibraryView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(13.5))
+                    .text_size(px(theme::T_BODY))
                     .text_color(rgb(theme::ink()))
                     .text_ellipsis()
                     .child(name),
@@ -245,7 +245,7 @@ impl LibraryView {
                 row.child(
                     div()
                         .flex_none()
-                        .text_size(px(12.0))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(theme::muted()))
                         .child(nip05),
                 )
@@ -356,7 +356,7 @@ impl LibraryView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(10.5))
+                    .text_size(px(theme::T_SMALL))
                     .text_color(rgb(theme::vermilion()))
                     .child(label),
             )
@@ -364,7 +364,7 @@ impl LibraryView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(13.))
+                    .text_size(px(theme::T_UI))
                     .text_color(rgb(theme::ink()))
                     .text_ellipsis()
                     .child(if snippet.is_empty() {
@@ -379,7 +379,7 @@ impl LibraryView {
                     .flex_none()
                     .cursor_pointer()
                     .px_2()
-                    .text_size(px(11.))
+                    .text_size(px(theme::T_SMALL))
                     .text_color(rgb(theme::muted()))
                     .hover(|s| s.text_color(rgb(theme::err())))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -403,7 +403,7 @@ impl LibraryView {
         div()
             .id(SharedString::from(format!("tab-{label}")))
             .cursor_pointer()
-            .text_size(px(12.5))
+            .text_size(px(theme::T_UI))
             .text_color(rgb(if on { theme::ink() } else { theme::muted() }))
             .when(on, |d| d.underline())
             .child(label)
@@ -551,7 +551,7 @@ impl LibraryView {
                     .cursor_pointer()
                     .px_4()
                     .py_2()
-                    .text_size(px(12.5))
+                    .text_size(px(theme::T_UI))
                     .text_color(rgb(theme::muted()))
                     .hover(|s| s.text_color(rgb(theme::ink())))
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -569,14 +569,14 @@ impl LibraryView {
                     .gap_2()
                     .child(
                         div()
-                            .text_size(px(14.))
+                            .text_size(px(theme::T_BODY))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(theme::ink()))
                             .child(name),
                     )
                     .child(
                         div()
-                            .text_size(px(11.5))
+                            .text_size(px(theme::T_SMALL))
                             .text_color(rgb(theme::muted()))
                             .child(if count == 1 {
                                 "1 person".to_string()
@@ -590,7 +590,7 @@ impl LibraryView {
                     div()
                         .px_4()
                         .py_4()
-                        .text_size(px(12.5))
+                        .text_size(px(theme::T_UI))
                         .text_color(rgb(theme::muted()))
                         .child("Nobody in this list yet."),
                 )
@@ -617,13 +617,13 @@ fn placeholder(title: &'static str, note: &'static str) -> AnyElement {
         .gap_2()
         .child(
             div()
-                .text_size(px(14.))
+                .text_size(px(theme::T_BODY))
                 .text_color(rgb(theme::ink()))
                 .child(title),
         )
         .child(
             div()
-                .text_size(px(12.))
+                .text_size(px(theme::T_SMALL))
                 .text_color(rgb(theme::muted()))
                 .child(note),
         )

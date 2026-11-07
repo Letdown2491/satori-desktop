@@ -180,7 +180,7 @@ fn render_block(
                         .child(
                             div()
                                 .font_family(theme::SERIF)
-                                .text_size(px(15.0))
+                                .text_size(px(theme::T_READER))
                                 .text_color(rgb(theme::muted()))
                                 .child(marker),
                         )
@@ -195,10 +195,10 @@ fn render_block(
                 .overflow_x_scroll()
                 .w_full()
                 .p_3()
-                .rounded(px(4.))
+                .rounded(px(theme::R_EMBED))
                 .bg(rgb(theme::panel()))
                 .font_family(theme::MONO)
-                .text_size(px(12.5))
+                .text_size(px(theme::T_UI))
                 .line_height(relative(1.35))
                 .text_color(rgb(theme::ink()))
                 .child(text);
@@ -314,7 +314,7 @@ fn image_tile(url: &str, snap: &media::Snapshot) -> Div {
         .h(px(height))
         .flex_none()
         .overflow_hidden()
-        .rounded(px(4.))
+        .rounded(px(theme::R_EMBED))
         .border_1()
         .border_color(rgb(theme::hairline()))
         .bg(rgb(theme::panel()));
@@ -436,7 +436,7 @@ impl Render for ArticleView {
                                                 .flex()
                                                 .items_baseline()
                                                 .gap_2()
-                                                .text_size(px(12.5))
+                                                .text_size(px(theme::T_UI))
                                                 .text_color(rgb(theme::muted()))
                                                 .child(
                                                     div()

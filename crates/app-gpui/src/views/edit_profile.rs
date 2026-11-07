@@ -252,7 +252,7 @@ impl EditProfileView {
                     .flex_none()
                     .w(px(LABEL_W))
                     .pt(px(7.))
-                    .text_size(px(12.))
+                    .text_size(px(theme::T_SMALL))
                     .text_color(rgb(theme::muted()))
                     .child(label),
             )
@@ -265,7 +265,7 @@ impl EditProfileView {
                     .min_h(px(30.))
                     .px_2()
                     .py_1()
-                    .rounded_sm()
+                    .rounded(px(theme::R_EMBED))
                     .bg(rgb(theme::panel()))
                     .border_1()
                     .border_color(rgb(theme::hairline()))
@@ -295,14 +295,14 @@ impl EditProfileView {
                 if let Some(png) = snap.png(u) {
                     div()
                         .size(px(40.))
-                        .rounded_sm()
+                        .rounded(px(theme::R_EMBED))
                         .overflow_hidden()
                         .child(img(png).size_full().object_fit(ObjectFit::Cover))
                         .into_any_element()
                 } else {
                     div()
                         .size(px(40.))
-                        .rounded_sm()
+                        .rounded(px(theme::R_EMBED))
                         .border_1()
                         .border_color(rgb(theme::hairline()))
                         .bg(rgb(theme::panel()))
@@ -311,7 +311,7 @@ impl EditProfileView {
             }
             _ => div()
                 .size(px(40.))
-                .rounded_sm()
+                .rounded(px(theme::R_EMBED))
                 .border_1()
                 .border_color(rgb(theme::hairline()))
                 .bg(rgb(theme::panel()))
@@ -326,7 +326,7 @@ impl EditProfileView {
                 div()
                     .flex_none()
                     .w(px(LABEL_W))
-                    .text_size(px(12.))
+                    .text_size(px(theme::T_SMALL))
                     .text_color(rgb(theme::muted()))
                     .child(label),
             )
@@ -337,18 +337,18 @@ impl EditProfileView {
                     .cursor_pointer()
                     .px_2()
                     .py_1()
-                    .rounded(px(4.))
+                    .rounded(px(theme::R_EMBED))
                     .border_1()
                     .border_color(rgb(theme::hairline()))
                     .hover(|s| s.border_color(rgb(theme::muted())))
-                    .text_size(px(12.))
+                    .text_size(px(theme::T_SMALL))
                     .on_click(cx.listener(move |this, _, _, cx| this.pick_image(which, cx)))
                     .child("choose image…"),
             )
             .when(!status.is_empty(), |d| {
                 d.child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(theme::muted()))
                         .child(status.to_string()),
                 )
@@ -377,7 +377,7 @@ impl Render for EditProfileView {
                     .border_color(rgb(theme::hairline()))
                     .child(
                         div()
-                            .text_size(px(15.))
+                            .text_size(px(theme::T_READER))
                             .font_weight(FontWeight::MEDIUM)
                             .child("Edit profile"),
                     )
@@ -385,7 +385,7 @@ impl Render for EditProfileView {
                         div()
                             .id("edit-close")
                             .cursor_pointer()
-                            .text_size(px(12.))
+                            .text_size(px(theme::T_SMALL))
                             .text_color(rgb(theme::muted()))
                             .hover(|s| s.text_color(rgb(theme::ink())))
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(Nav::Pop)))
@@ -436,7 +436,7 @@ impl Render for EditProfileView {
                                             .cursor_pointer()
                                             .px_3()
                                             .py_1()
-                                            .rounded(px(4.))
+                                            .rounded(px(theme::R_EMBED))
                                             .border_1()
                                             .border_color(rgb(if self.saving {
                                                 theme::hairline()
@@ -448,7 +448,7 @@ impl Render for EditProfileView {
                                             } else {
                                                 theme::vermilion()
                                             }))
-                                            .text_size(px(12.))
+                                            .text_size(px(theme::T_SMALL))
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.save(cx)
                                             }))
@@ -461,7 +461,7 @@ impl Render for EditProfileView {
                                     .when(!self.status.is_empty(), |d| {
                                         d.child(
                                             div()
-                                                .text_size(px(11.))
+                                                .text_size(px(theme::T_SMALL))
                                                 .text_color(rgb(theme::vermilion()))
                                                 .child(self.status.clone()),
                                         )
@@ -470,7 +470,7 @@ impl Render for EditProfileView {
                             .child(
                                 div()
                                     .pl(px(LABEL_W + 12.))
-                                    .text_size(px(11.))
+                                    .text_size(px(theme::T_SMALL))
                                     .text_color(rgb(theme::muted()))
                                     .child(format!(
                                         "signs as {}… — saves go out through the outbox",

@@ -19,7 +19,7 @@ use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
 
 use crate::{icons, media, theme};
-use super::{content, feed::Feed, nav::Nav};
+use super::{content, feed::Feed, nav::Nav, states};
 
 /// Which profile surface is up: the notes body or the media strips
 /// (Phase 2 §4.3 — Photos/Videos, three-column thumbnails).
@@ -75,6 +75,8 @@ pub struct ProfileView {
     last_visible_end: usize,
     note_ids: HashSet<EventId>,
     status: String,
+    /// §4.3: the kinded error strip (replaces the raw `… {e}` status dump).
+    error: Option<states::PaneError>,
     /// NIP-05 verdict memo: (address, verdict — None while the check is in
     /// flight). Keyed by the address so a changed one re-fires; unproven
     /// and failed both stay visually quiet (the badge is an affordance,
@@ -120,6 +122,7 @@ impl ProfileView {
             last_visible_end: 0,
             note_ids: HashSet::new(),
             status: "loading…".into(),
+            error: None,
             nip05_memo: None,
             copied: None,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
@@ -197,6 +200,7 @@ impl ProfileView {
                     self.want_media(&note, cx);
                 }
                 self.status.clear();
+                self.error = None;
             }
             // The strips' next page (endless scroll): dedupe by id — the
             // store page may hand back rows the page boundary already
@@ -222,7 +226,10 @@ impl ProfileView {
                     self.maybe_older(self.last_visible_end, cx);
                 }
             }
-            FeedEvent::Failed(e) => self.status = format!("… {e}"),
+            FeedEvent::Failed(e) => {
+                // §4.3: transient — Retry re-asks the profile + strips.
+                self.error = Some(states::PaneError::transient("The profile", &e));
+            }
             _ => {}
         }
         self.list.reset(self.row_count());
@@ -376,7 +383,7 @@ impl ProfileView {
         div()
             .id(SharedString::from(format!("tab-{label}")))
             .cursor_pointer()
-            .text_size(px(12.5))
+            .text_size(px(theme::T_UI))
             .text_color(rgb(if on { theme::ink() } else { theme::muted() }))
             .when(on, |d| d.underline())
             .child(label)
@@ -602,7 +609,7 @@ impl Render for ProfileView {
                                                                 .flex()
                                                                 .items_center()
                                                                 .gap_1()
-                                                                .text_size(px(12.0))
+                                                                .text_size(px(theme::T_SMALL))
                                                                 .text_color(rgb(if nip05_ok {
                                                                     theme::ink()
                                                                 } else {
@@ -623,7 +630,7 @@ impl Render for ProfileView {
                                                         div()
                                                             .id("npub-copy")
                                                             .cursor_pointer()
-                                                            .text_size(px(12.0))
+                                                            .text_size(px(theme::T_SMALL))
                                                             .text_color(rgb(theme::muted()))
                                                             .hover(|s| {
                                                                 s.text_color(rgb(
@@ -658,13 +665,13 @@ impl Render for ProfileView {
                                                 .cursor_pointer()
                                                 .px_2()
                                                 .py_1()
-                                                .rounded(px(4.))
+                                                .rounded(px(theme::R_EMBED))
                                                 .border_1()
                                                 .border_color(rgb(theme::hairline()))
                                                 .hover(|s| {
                                                     s.border_color(rgb(theme::muted()))
                                                 })
-                                                .text_size(px(12.0))
+                                                .text_size(px(theme::T_SMALL))
                                                 .on_click(move |_, _, cx| {
                                                     let h = follow_handle.clone();
                                                     h.update(cx, |view, cx| {
@@ -701,11 +708,11 @@ impl Render for ProfileView {
                                                 .cursor_pointer()
                                                 .px_2()
                                                 .py_1()
-                                                .rounded(px(4.))
+                                                .rounded(px(theme::R_EMBED))
                                                 .border_1()
                                                 .border_color(rgb(theme::hairline()))
                                                 .hover(|s| s.border_color(rgb(theme::muted())))
-                                                .text_size(px(12.0))
+                                                .text_size(px(theme::T_SMALL))
                                                 .on_click(move |_, _, cx| {
                                                     let h = edit_handle.clone();
                                                     h.update(cx, |view, cx| {
@@ -725,11 +732,11 @@ impl Render for ProfileView {
                                                 .cursor_pointer()
                                                 .px_2()
                                                 .py_1()
-                                                .rounded(px(4.))
+                                                .rounded(px(theme::R_EMBED))
                                                 .border_1()
                                                 .border_color(rgb(theme::hairline()))
                                                 .hover(|s| s.border_color(rgb(theme::muted())))
-                                                .text_size(px(12.0))
+                                                .text_size(px(theme::T_SMALL))
                                                 .on_click(move |_, _, cx| {
                                                     let h = mute_handle.clone();
                                                     h.update(cx, |view, cx| {
@@ -771,7 +778,7 @@ impl Render for ProfileView {
                                         .flex()
                                         .items_center()
                                         .gap_2()
-                                        .text_size(px(12.0))
+                                        .text_size(px(theme::T_SMALL))
                                         .text_color(rgb(theme::muted()))
                                         .hover(|s| s.text_color(rgb(theme::vermilion())))
                                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -812,6 +819,22 @@ impl Render for ProfileView {
                             .child(self.tab_btn(ProfileTab::Videos, "Videos", tab, cx)),
                     ),
             )
+            // §4.3: the kinded error strip — retry re-asks the profile.
+            .when_some(self.error.clone(), |d, err| {
+                d.child(states::error_strip(
+                    &err,
+                    cx.listener(move |this, _, _, cx| {
+                        let rx = this.core.profile(this.who);
+                        this.pump(rx, cx);
+                        this.error = None;
+                        cx.notify();
+                    }),
+                    cx.listener(move |this, _, _, cx| {
+                        this.error = None;
+                        cx.notify();
+                    }),
+                ))
+            })
             .child(match tab {
                 // The Notes tab IS a feed (FeedMode::Profile): the timeline's
                 // exact rows — avatar, media, the reaction row — scoped to
@@ -938,7 +961,7 @@ fn thumb_tile(
         .cursor_pointer()
         .flex_none()
         .overflow_hidden()
-        .rounded(px(4.))
+        .rounded(px(theme::R_EMBED))
         .border_1()
         .border_color(rgb(theme::hairline()))
         .bg(rgb(theme::panel()))
@@ -1000,7 +1023,7 @@ fn thumb_tile(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(if video { 22.0 } else { 11.0 }))
+                    .text_size(px(if video { 22.0 } else { theme::T_SMALL }))
                     .text_color(rgb(if video {
                         theme::vermilion()
                     } else {

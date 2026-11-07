@@ -19,8 +19,10 @@ use satori_core::nip::imeta;
 use crate::{media, theme};
 use super::nav::Nav;
 
-/// Timeline column width (web app's centered column; media_picture sized
-/// against 720px there — the desktop column is a touch narrower).
+/// Timeline column width. Deliberately 640 — the webapp's was 720
+/// (styles.css:100 `#app { max-width: 720px }`); at 12–14px desktop type,
+/// 640 is right. Recorded as a DIVERGENCE, not drift (0.2-design-spec
+/// §1.2 / deficiency 13). Media_picture is sized against 720px there.
 pub const COL_W: f32 = 640.0;
 
 /// A resolved note reference, for quote embeds (note_card.rs embed_card).
@@ -400,7 +402,7 @@ fn addr_label(bech: &str) -> String {
 fn word(text: String) -> Div {
     div()
         .font_family(theme::SERIF)
-        .text_size(px(15.0))
+        .text_size(px(theme::T_READER))
         // P052's own line box is huge (URW vertical metrics); pin the pitch
         // or every wrapped line reads double-spaced.
         .line_height(relative(1.2))
@@ -421,7 +423,7 @@ pub(crate) fn token_el<V: EventEmitter<Nav> + 'static>(
             .id(id)
             .cursor_pointer()
             .font_family(theme::SERIF)
-            .text_size(px(15.0))
+            .text_size(px(theme::T_READER))
             .line_height(relative(1.2))
             .text_color(rgb(theme::muted()))
             .underline()
@@ -670,7 +672,7 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
                 let el = div()
                     .id(seg_id("mention", trimmed))
                     .cursor_pointer()
-                    .text_size(px(13.5))
+                    .text_size(px(theme::T_BODY))
                     .text_color(rgb(theme::muted()))
                     .hover(|s| s.text_color(rgb(theme::vermilion())))
                     .on_click(move |_, _, cx| {
@@ -701,7 +703,7 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
             Some(Some(e)) => body = body.child(embed_card(&bech, e, handle.clone())),
             _ => body = body.child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(px(theme::T_SMALL))
                     .text_color(rgb(theme::muted()))
                     .child("…"),
             ),
@@ -731,7 +733,7 @@ pub(crate) fn link_row(url: &str) -> AnyElement {
     div()
         .id(seg_id("link", url))
         .cursor_pointer()
-        .text_size(px(13.5))
+        .text_size(px(theme::T_BODY))
         .text_color(rgb(theme::muted()))
         .underline()
         .hover(|s| s.text_color(rgb(theme::vermilion())))
@@ -776,7 +778,7 @@ fn video_tile(
             .id(seg_id("video-player", url))
             .flex_none()
             .overflow_hidden()
-            .rounded(px(4.))
+            .rounded(px(theme::R_EMBED))
             .border_1()
             .border_color(rgb(theme::hairline()))
             .bg(rgb(0x000000))
@@ -806,7 +808,7 @@ fn video_tile(
                         div()
                             .id(seg_id("vp-toggle", url))
                             .cursor_pointer()
-                            .text_size(px(13.0))
+                            .text_size(px(theme::T_UI))
                             .text_color(rgb(theme::ink()))
                             .on_click(|_, _, cx| {
                                 cx.stop_propagation();
@@ -818,7 +820,7 @@ fn video_tile(
                         div()
                             .id(seg_id("vp-close", url))
                             .cursor_pointer()
-                            .text_size(px(13.0))
+                            .text_size(px(theme::T_UI))
                             .text_color(rgb(theme::muted()))
                             .hover(|s| s.text_color(rgb(theme::ink())))
                             .on_click(|_, _, cx| {
@@ -831,7 +833,7 @@ fn video_tile(
                         div()
                             .id(seg_id("vp-browser", url))
                             .cursor_pointer()
-                            .text_size(px(13.0))
+                            .text_size(px(theme::T_UI))
                             .text_color(rgb(theme::muted()))
                             .hover(|s| s.text_color(rgb(theme::ink())))
                             .on_click(move |_, _, cx| {
@@ -882,7 +884,7 @@ fn video_tile(
         .cursor_pointer()
         .flex_none()
         .overflow_hidden()
-        .rounded(px(4.))
+        .rounded(px(theme::R_EMBED))
         .border_1()
         .border_color(rgb(theme::hairline()))
         .bg(rgb(theme::panel()))
@@ -1106,7 +1108,7 @@ fn media_tile<V: EventEmitter<Nav> + 'static>(
         .cursor_pointer()
         .flex_none()
         .overflow_hidden()
-        .rounded(px(4.))
+        .rounded(px(theme::R_EMBED))
         .border_1()
         .border_color(rgb(theme::hairline()))
         .bg(rgb(theme::panel()))
@@ -1132,7 +1134,7 @@ fn media_tile<V: EventEmitter<Nav> + 'static>(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(11.))
+                    .text_size(px(theme::T_SMALL))
                     .text_color(rgb(theme::muted()))
                     .child("…"),
             )
@@ -1175,14 +1177,14 @@ fn embed_card<V: EventEmitter<Nav> + 'static>(
                 .gap_2()
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(px(theme::T_SMALL))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(theme::ink()))
                         .child(e.name.clone()),
                 )
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(theme::muted()))
                         // Mode-aware without a cx (no bridge on embed
                         // paths): date mode shows dates, block keeps
@@ -1195,7 +1197,7 @@ fn embed_card<V: EventEmitter<Nav> + 'static>(
         .child(
             div()
                 .font_family(theme::SERIF)
-                .text_size(px(13.5))
+                .text_size(px(theme::T_BODY))
                 .text_color(rgb(theme::muted()))
                 .child(text),
         )
@@ -1250,7 +1252,7 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
                         .id(SharedString::from(format!("{tag}-author-{idx}")))
                         .cursor_pointer()
                         .flex_1()
-                        .text_size(px(13.0))
+                        .text_size(px(theme::T_UI))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(theme::ink()))
                         .on_click(move |_, _, cx| {
@@ -1265,7 +1267,7 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
                     div()
                         .id(SharedString::from(format!("{tag}-time-{idx}")))
                         .cursor_pointer()
-                        .text_size(px(12.0))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(theme::muted()))
                         .on_click(|_, _, cx| crate::timefmt::cycle(cx))
                         .child(time),

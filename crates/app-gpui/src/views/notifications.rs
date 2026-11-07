@@ -15,7 +15,7 @@ use satori_core::nip::{comment, nip10};
 use satori_core::notifications::parse_zap_receipt;
 
 use crate::{media, theme};
-use super::{content, nav::Nav};
+use super::{content, nav::Nav, states};
 
 /// What the event did to you (notifications.ts `add`): a comment is always
 /// a reply; kind 1 splits by whether it carries an `e` tag.
@@ -76,6 +76,11 @@ pub struct NotificationsView {
     parents_asked: HashSet<String>,
     me: String,
     status: String,
+    /// §4.3: the kinded error strip (replaces "Could not load …: {e}").
+    error: Option<states::PaneError>,
+    /// The pre-visit high-water this pane was opened with — Retry re-asks
+    /// with the same one (the New/Earlier split must not shift on a retry).
+    prev: u64,
     /// Deep-scroll state, emitted to the shell (Nav::PaneDeep) so the
     /// floating back-to-top whisper covers this pane too — same shape as
     /// the feed's (feed.rs deep).
@@ -103,7 +108,9 @@ impl NotificationsView {
             parents: HashMap::new(),
             parents_asked: HashSet::new(),
             me: String::new(),
-            status: "Gathering…".into(),
+            status: states::loading("Gathering…"),
+            error: None,
+            prev,
             deep: false,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
@@ -195,6 +202,7 @@ impl NotificationsView {
                 self.me = self.core.me().unwrap_or_default();
                 self.want_parents(cx);
                 self.status.clear();
+                self.error = None;
             }
             FeedEvent::Parents(p) => {
                 // The resolver's answer (store-first, relay for misses) —
@@ -202,7 +210,10 @@ impl NotificationsView {
                 self.parents.extend(p);
                 cx.notify();
             }
-            FeedEvent::Failed(e) => self.status = format!("Could not load notifications: {e}"),
+            FeedEvent::Failed(e) => {
+                // §4.3: transient — Retry re-asks with the same high-water.
+                self.error = Some(states::PaneError::transient("Notifications", &e));
+            }
             _ => {}
         }
         self.list.reset(self.rows.len());
@@ -312,7 +323,7 @@ fn notif_whisper<V: EventEmitter<Nav> + 'static>(
             })
             .children({
                 let mut kids = vec![div()
-                    .text_size(px(12.0))
+                    .text_size(px(theme::T_SMALL))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(theme::ink()))
                     .child(label)
@@ -322,7 +333,7 @@ fn notif_whisper<V: EventEmitter<Nav> + 'static>(
                         div()
                             .font_family(theme::SERIF)
                             .italic()
-                            .text_size(px(12.5))
+                            .text_size(px(theme::T_UI))
                             .text_color(rgb(theme::muted()))
                             .child(snippet)
                             .into_any_element(),
@@ -391,7 +402,7 @@ fn notif_card(
                         .id(SharedString::from(format!("notif-author-{idx}")))
                         .cursor_pointer()
                         .flex_1()
-                        .text_size(px(13.0))
+                        .text_size(px(theme::T_UI))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(theme::ink()))
                         .on_click(move |_, _, cx| {
@@ -406,7 +417,7 @@ fn notif_card(
                     div()
                         .id(SharedString::from(format!("notif-time-{idx}")))
                         .cursor_pointer()
-                        .text_size(px(12.0))
+                        .text_size(px(theme::T_SMALL))
                         .text_color(rgb(theme::muted()))
                         .on_click(|_, _, cx| crate::timefmt::cycle(cx))
                         .child(time),
@@ -417,7 +428,7 @@ fn notif_card(
             row = row.child(w);
         }
     let action_line = div()
-        .text_size(px(13.0))
+        .text_size(px(theme::T_UI))
         .text_color(rgb(theme::muted()))
         .child(action_word(t, ev));
     let handle_body = handle.clone();
@@ -515,7 +526,29 @@ impl Render for NotificationsView {
                     .min_h_0()
                     .flex()
                     .justify_center()
-                    .child(if empty {
+                    // §4.3: the kinded error strip — Retry re-asks with the same
+            // pre-visit high-water.
+            .when_some(self.error.clone(), |d, err| {
+                d.child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .child(states::error_strip(
+                            &err,
+                            cx.listener(move |this, _, _, cx| {
+                                let prev = this.prev;
+                                this.error = None;
+                                this.pump_at(prev, cx);
+                                cx.notify();
+                            }),
+                            cx.listener(move |this, _, _, cx| {
+                                this.error = None;
+                                cx.notify();
+                            }),
+                        )),
+                )
+            })
+            .child(if empty {
                         div()
                             .w_full()
                             .max_w(px(content::COL_W))
@@ -535,7 +568,7 @@ impl Render for NotificationsView {
                                     .max_w(px(content::COL_W))
                                     .px_4()
                                     .pt_3()
-                                    .text_size(px(12.0))
+                                    .text_size(px(theme::T_SMALL))
                                     .font_family(theme::SERIF)
                                     .text_color(rgb(theme::muted()))
                                     .child(text.to_string())

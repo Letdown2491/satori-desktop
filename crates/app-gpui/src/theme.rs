@@ -95,6 +95,72 @@ pub fn live() -> u32 {
     current().live
 }
 
+// §1.1 — derived role helpers: computed from the existing palette, no new
+// colors. Vermilion stays a seal (never body text, never large surfaces);
+// error text uses `err()`, never vermilion.
+#[allow(dead_code)] // consumed when card-internal separators land (§2.2 settings groups, WS4)
+pub fn hairline_strong() -> u32 {
+    // Separators INSIDE a composed surface — the hairline token at full
+    // strength, vs. the quiet borders around panels (0.2-design-spec §1.1).
+    current().hairline
+}
+/// `ink()` at 5% alpha — the hover background. Replaces the seven hand-rolled
+/// `hover(|s| s.opacity(0.72))` fades in feed.rs (deficiency 3): the wash
+/// marks WHERE you are without dimming the glyph itself.
+pub fn hover_wash() -> gpui::Hsla {
+    gpui::Hsla::from(gpui::rgb(current().ink)).opacity(0.05)
+}
+/// `muted()` at ~65% — placeholder-grade whispers (deficiency: ad-hoc
+/// `.opacity(0.6)` on muted rows).
+pub fn ink_faint() -> gpui::Hsla {
+    gpui::Hsla::from(gpui::rgb(current().muted)).opacity(0.65)
+}
+/// D23's one-link-token rule: rest = muted + underline, hover = vermilion.
+/// Wrap the clickable text's `div()` — the caller keeps id/on_click/children.
+pub fn pressable<E: gpui::Styled + gpui::InteractiveElement>(el: E) -> E {
+    use gpui::Styled as _;
+    el.text_color(gpui::rgb(current().muted))
+        .underline()
+        .hover(|s| s.text_color(gpui::rgb(current().vermilion)))
+}
+
+// §1.2 — the spacing scale, named at last: gpui's default p_N ladder IS a
+// 4px scale, but nothing named it, so ad-hoc values leaked (composer.rs's
+// raw px(16.0)). One irregular pair (S1=2, S7=32). Call sites keep gpui's
+// gap_N utilities where they already match; new code consumes these.
+#[allow(dead_code)]
+pub const S0: f32 = 0.0; // nothing
+#[allow(dead_code)]
+pub const S1: f32 = 2.0; // inline nudges
+#[allow(dead_code)]
+pub const S2: f32 = 4.0; // inline-control vertical, head→body gap (§2.1)
+#[allow(dead_code)]
+pub const S3: f32 = 8.0; // card/row internal gap
+pub const S4: f32 = 12.0; // feed card vertical padding per side (§2.1)
+#[allow(dead_code)]
+pub const S5: f32 = 16.0; // page gutter, card horizontal padding
+#[allow(dead_code)]
+pub const S6: f32 = 20.0;
+#[allow(dead_code)]
+pub const S7: f32 = 32.0;
+
+// §1.3 — the type scale: four sizes, not eight. Under 12px goes mushy at
+// gpui's unhinted grayscale AA — a measured constraint, not taste.
+pub const T_BODY: f32 = 14.0; // note bodies, author names
+pub const T_UI: f32 = 13.0; // timestamps, meta rows, list secondary
+pub const T_SMALL: f32 = 12.0; // whispers, glyph labels, badges
+#[allow(dead_code)]
+pub const T_READER: f32 = 15.0; // reader/article body ONLY (spec rollout step 5)
+
+// §1.4 — the radii ladder (DESIGN.md §5.1, reconciled for the no-card-box
+// feed: the boxed things are embeds, pills, media, inputs). Anything under
+// 4px is a mistake at hairline borders — the px(3.) chips read as accidental.
+pub const R_EMBED: f32 = 6.0; // quote embeds, code chips
+#[allow(dead_code)]
+pub const R_INPUT: f32 = 8.0; // text inputs, buttons, suggestion popovers
+#[allow(dead_code)]
+pub const R_MEDIA: f32 = 10.0; // images, video tiles, lightbox thumbs
+
 /// The gpui-global that carries a theme change to every observing view —
 /// `select` is the source of truth (helpers without a `cx` read it
 /// directly); this signal is only the wake-up call.
