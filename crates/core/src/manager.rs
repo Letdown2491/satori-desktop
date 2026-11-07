@@ -124,6 +124,15 @@ pub enum PublishEvent {
 
 pub type PublishRx = mpsc::UnboundedReceiver<PublishEvent>;
 
+/// What the scheduling path reports back (schedule_note).
+#[derive(Debug, Clone)]
+pub enum ScheduleEvent {
+    /// Held on disk; the sweep publishes it at `scheduled_at`.
+    Scheduled { token: String, scheduled_at: u64 },
+    /// Refused (cap reached, sign failure, logged out).
+    Failed { error: String },
+}
+
 #[derive(Clone)]
 struct Active {
     session: Session,
@@ -361,6 +370,9 @@ pub struct Core {
     /// The outbox drainer spawns once per process (D36), on the first
     /// bootstrap that has a write set; later logins are no-ops.
     outbox_started: std::sync::atomic::AtomicBool,
+    /// The scheduled sweep spawns once per process (WS4), on the first
+    /// bootstrap — same discipline as the outbox drainer.
+    scheduled_started: std::sync::atomic::AtomicBool,
     /// The NIP-47 wallet handle (D20) — one per process, like the pool.
     wallet: Arc<Wallet>,
     /// Bitcoin timestamp→height service (blocktime, Phase 2 §4.4) — one
@@ -420,6 +432,7 @@ impl Core {
             pending: Mutex::new(None),
             hold_seq: AtomicU64::new(1),
             outbox_started: std::sync::atomic::AtomicBool::new(false),
+            scheduled_started: std::sync::atomic::AtomicBool::new(false),
             login_seq: AtomicU64::new(1),
             pool: Mutex::new(None),
             own_liked: Mutex::new(HashSet::new()),
@@ -1683,6 +1696,9 @@ impl Core {
             // D36: the outbox drainer arms on the first bootstrap —
             // crash leftovers and queued failures come due here.
             this.spawn_outbox_drain();
+            // WS4: the scheduled-posts sweep arms alongside it — restart
+            // catch-up is just its first tick finding due entries on disk.
+            this.spawn_scheduled_sweep();
             if let Err(e) = this.bootstrap_inner(&tx, kinds).await {
                 let _ = tx.send(FeedEvent::Failed(e.to_string()));
             }
@@ -2365,6 +2381,12 @@ impl Core {
             .as_ref()
             .map(|a| a.session.pubkey.clone())
             .unwrap_or_default()
+    }
+
+    /// The active account's pubkey, when logged in — scheduled_list /
+    /// scheduled_cancel gate on it (only the author touches their posts).
+    fn active_pubkey_opt(&self) -> Option<PublicKey> {
+        PublicKey::from_str(&self.active_pubkey()).ok()
     }
 
     /// One page projection: store query (a PAGE+1 window so "has more" is
@@ -3762,16 +3784,16 @@ impl Core {
         rx
     }
 
-    async fn post_note_inner(
-        self: &Arc<Self>,
-        tx: &mpsc::UnboundedSender<PublishEvent>,
+    /// Tag + content building for a note — shared by the immediate path
+    /// (post_note) and the scheduled path (schedule_note), so a scheduled
+    /// note's tags are byte-identical to an instant one.
+    fn note_tags(
         content: String,
         reply_to: Option<Event>,
         mentions: Vec<PublicKey>,
         quote: Option<Event>,
-    ) -> Result<()> {
-        let active = self.active().await?;
-        let me = active.me();
+        me: PublicKey,
+    ) -> (String, Vec<Tag>) {
         let mut tags: Vec<Tag> = Vec::new();
         // The NIP-18 quote rides FIRST: a q tag (id, relay hint, author) and
         // the nostr: reference folded into the text the reader sees.
@@ -3833,6 +3855,21 @@ impl Core {
                 tags.push(Tag::public_key(who));
             }
         }
+        (content, tags)
+    }
+
+    async fn post_note_inner(
+        self: &Arc<Self>,
+        tx: &mpsc::UnboundedSender<PublishEvent>,
+        content: String,
+        reply_to: Option<Event>,
+        mentions: Vec<PublicKey>,
+        quote: Option<Event>,
+    ) -> Result<()> {
+        let active = self.active().await?;
+        let me = active.me();
+        let (content, tags) =
+            Self::note_tags(content, reply_to, mentions, quote, me);
         let unsigned = UnsignedEvent::new(
             me,
             Timestamp::now(),
@@ -3855,6 +3892,132 @@ impl Core {
             None => Self::commit(&active, &signed, tx).await?,
         }
         Ok(())
+    }
+
+    /// Schedule a note for later broadcast (scheduled.ts holdScheduled):
+    /// signed AT COMPOSE with `created_at` == the scheduled time — it
+    /// reads as ≈now when the sweep fires it, and relays don't reject
+    /// future-dating. Held in scheduled.json (0600, synchronous flush),
+    /// published by the 30s sweep through the SAME funnel as an instant
+    /// post (store → outbox write-ahead → publish → dequeue). No undo
+    /// window on the schedule itself — undoing IS cancelling
+    /// (scheduled_cancel). Reports on ScheduleEvent.
+    pub fn schedule_note(
+        self: &Arc<Self>,
+        content: String,
+        reply_to: Option<Event>,
+        mentions: Vec<PublicKey>,
+        quote: Option<Event>,
+        scheduled_at: u64,
+    ) -> mpsc::UnboundedReceiver<ScheduleEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<String> = async {
+                let active = this.active().await?;
+                let me = active.me();
+                let (content, tags) = Self::note_tags(content, reply_to, mentions, quote, me);
+                let unsigned = UnsignedEvent::new(
+                    me,
+                    Timestamp::from_secs(scheduled_at),
+                    Kind::TextNote,
+                    tags,
+                    content,
+                );
+                let signed = active.signer.sign_event(unsigned).await?;
+                crate::scheduled::hold(&me, signed, scheduled_at).ok_or_else(|| {
+                    LoginError::Connect(format!(
+                        "you have reached the maximum of {} scheduled posts; cancel some to schedule more",
+                        crate::scheduled::MAX_PER_USER
+                    ))
+                })
+            }
+            .await;
+            match res {
+                Ok(token) => {
+                    let _ = tx.send(ScheduleEvent::Scheduled { token, scheduled_at });
+                }
+                Err(e) => {
+                    let _ = tx.send(ScheduleEvent::Failed { error: e.to_string() });
+                }
+            }
+        });
+        rx
+    }
+
+    /// The active account's pending scheduled posts, soonest first (the
+    /// composer's schedule list). Empty when logged out.
+    pub fn scheduled_list(&self) -> Vec<crate::scheduled::ScheduledPost> {
+        self.active_pubkey_opt()
+            .map(|me| crate::scheduled::list(&me))
+            .unwrap_or_default()
+    }
+
+    /// Cancel a scheduled post before its time (scheduled.ts
+    /// cancelScheduled): only the author's own token goes, synchronously
+    /// flushed so a confirmed cancel can't resurrect after a restart.
+    pub fn scheduled_cancel(&self, token: &str) -> bool {
+        let Some(me) = self.active_pubkey_opt() else { return false };
+        crate::scheduled::cancel(&me, token)
+    }
+
+    /// The scheduled sweep (scheduled.ts startScheduledSweep, 30s): ONE
+    /// task per process, armed on the first bootstrap next to the outbox
+    /// drainer. Its first tick catches anything already due at boot — the
+    /// restart catch-up: the store is the only state, there are no
+    /// per-post timers. Due entries publish through the same funnel as
+    /// instant posting (Self::commit's order: store save → outbox
+    /// write-ahead → publish → dequeue on acceptance) and are removed only
+    /// on acceptance — PUBLISH-BEFORE-MARK, see the scheduled.rs module
+    /// doc. A session-less stretch just sleeps; entries persist on disk.
+    fn spawn_scheduled_sweep(self: &Arc<Self>) {
+        if self.scheduled_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        eprintln!("[core] scheduled: sweep armed");
+        let weak = Arc::downgrade(self);
+        self.rt.spawn(async move {
+            loop {
+                let Some(core) = weak.upgrade() else { break }; // app closing
+                let now = crate::scheduled::now_secs();
+                let Some(due) = crate::scheduled::take_due(now) else {
+                    drop(core);
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    continue;
+                };
+                let mut settled: Vec<String> = Vec::new();
+                if let Ok(active) = core.active().await {
+                    for p in due {
+                        // Same funnel as Self::commit (the publish-before-
+                        // mark discipline: acceptance is the durability
+                        // decision; removal rides the debounced flusher).
+                        let _ = active.pool.store.save(&p.event).await;
+                        crate::outbox_queue::enqueue(&p.event);
+                        let targets = crate::outbox_queue::targets(&active.write_relays);
+                        let report = active.pool.publish(&p.event, &targets).await;
+                        for r in &report.ok {
+                            crate::relay_latency::record_write_result(r, true);
+                        }
+                        for (r, _m) in &report.failed {
+                            crate::relay_latency::record_write_result(r, false);
+                        }
+                        if report.accepted() {
+                            crate::outbox_queue::remove(&p.event);
+                            settled.push(p.token);
+                        } else if crate::scheduled::give_up(now, p.scheduled_at) {
+                            eprintln!("[core] scheduled: giving up on {}", p.token);
+                            settled.push(p.token);
+                        }
+                        // else: kept; the next tick retries (relay may be down)
+                    }
+                }
+                // Logged out: nothing settles, nothing drops — the sweep
+                // just spins quietly until a session returns.
+                crate::scheduled::finish_sweep(&settled);
+                drop(core);
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        });
     }
 
     /// A random 9-char option id (nip88.ts generateOptionId): xorshift off

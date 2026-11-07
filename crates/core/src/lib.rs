@@ -38,6 +38,7 @@ pub mod outbox_queue;
 pub mod pool;
 pub mod publish;
 pub mod relay_latency;
+pub mod scheduled;
 pub mod seen;
 pub mod store;
 pub mod tor;
