@@ -1,9 +1,12 @@
 //! The full outbox model — port of `src/nostr/nip65.ts` (routeAuthorsToRelays,
 //! caps, normalize) + `src/data/feeds.ts` (routeFor shape): route each follow
-//! to the relays THEY write to, a greedy set-cover bounding the relay set, 2x
-//! redundancy per author, and orphan recovery — an author whose relays missed
-//! the cut is routed to their OWN best relay, never silently dumped on the
-//! indexers (whose mirrors may not carry them at all).
+//! to the relays THEY write to, a greedy set-cover bounding the relay set, ≥3x
+//! redundancy per author where their relay list allows it (WS1: Dark Wisp's
+//! `relay/RelayScoreBoard.kt` keeps up to MIN_REDUNDANCY = 3 write relays per
+//! followed author in `recompute()`, ~line 88 — raised here from the TS port's
+//! 2), and orphan recovery — an author whose relays missed the cut is routed
+//! to their OWN best relay, never silently dumped on the indexers (whose
+//! mirrors may not carry them at all).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -163,16 +166,25 @@ fn is_public_ip(ip: &std::net::IpAddr) -> bool {
 }
 
 // Caps (nip65.ts): 3 write relays per author considered; the greedy set-cover
-// stops at 70 relays; redundancy routes each author to 2 of their relays so a
-// note on only one of them still surfaces; the orphan tail may open NEW
-// sockets past the soft cap up to the hard one; past it, the indexers.
+// stops at 70 relays; redundancy routes each author to up to
+// RELAYS_PER_AUTHOR_TARGET of their relays so a note on only one of them
+// still surfaces — 3 (Dark Wisp's RelayScoreBoard.kt MIN_REDUNDANCY, WS1),
+// gracefully degrading to however many the author actually has; the orphan
+// tail may open NEW sockets past the soft cap up to the hard one; past it,
+// the indexers.
 pub const MAX_RELAYS_PER_AUTHOR: usize = 3;
 pub const MAX_RELAYS: usize = 70;
-pub const RELAYS_PER_AUTHOR_TARGET: usize = 2;
+pub const RELAYS_PER_AUTHOR_TARGET: usize = 3;
 pub const HARD_MAX_RELAYS: usize = MAX_RELAYS * 2;
 /// Relay filters silently truncate around 200 authors (nip65.ts
-/// MAX_AUTHORS_PER_FILTER) — split bigger shards.
+/// MAX_AUTHORS_PER_FILTER) — split bigger shards. Dark Wisp's
+/// `relay/OutboxRouter.kt` enforces the same ceiling
+/// (MAX_AUTHORS_PER_FILTER = 200, ~lines 20–31) after big relays rejected
+/// oversized REQs with "total filter items too large".
 pub const MAX_AUTHORS_PER_FILTER: usize = 200;
+/// Same failure class on the id dimension (OutboxRouter.kt
+/// MAX_ETAGS_PER_FILTER = 150): an ids filter longer than 150 gets split.
+pub const MAX_ETAGS_PER_FILTER: usize = 150;
 
 /// The routing output: relay url → the authors to query on it.
 pub type Route = BTreeMap<String, BTreeSet<String>>;
@@ -214,7 +226,8 @@ pub fn route(
 
     // want = how many MORE relays each author still wants. An author stays in
     // the cover pool until they've been routed to TARGET relays — the greedy
-    // keeps adding a 2nd relay per author after the 1st pass.
+    // keeps adding relays per author across passes (WS1: target 3, degrading
+    // to the author's relay count when smaller).
     let mut want: HashMap<&String, usize> = HashMap::new();
     for author in authors {
         let n = author_relays[author].len();
@@ -346,9 +359,10 @@ mod tests {
         "wss://idx".to_string()
     }
 
-    /// Each author routes to up to TWO of their own write relays (redundancy:
-    /// a note on only one of them still surfaces), and the greedy set-cover
-    /// shares relays across authors.
+    /// Each author routes to up to THREE of their own write relays (WS1:
+    /// RelayScoreBoard.kt MIN_REDUNDANCY — a note on only one of them still
+    /// surfaces), degrading gracefully to however many they actually have,
+    /// and the greedy set-cover shares relays across authors.
     #[test]
     fn routes_with_redundancy_and_shares_relays() {
         let l = lists(&[
@@ -365,6 +379,29 @@ mod tests {
         assert_eq!(route["wss://z"], BTreeSet::from(["b".into()]));
     }
 
+    /// WS1 (RelayScoreBoard.kt MIN_REDUNDANCY = 3): an author with three or
+    /// more write relays routes onto three of them — and one with fewer is
+    /// routed onto ALL they have (graceful degradation), never dropped.
+    #[test]
+    fn redundancy_target_is_three_with_graceful_fallback() {
+        // Three relays: routed to all three.
+        let l3 = lists(&[("a", "wss://x,wss://y,wss://z")]);
+        let route3 = route(&l3, &authors(&["a"]), &[], |_| 1.0);
+        assert_eq!(route3.len(), 3);
+        for r in ["wss://x", "wss://y", "wss://z"] {
+            assert!(route3[r].contains("a"));
+        }
+        // Five relays: capped at the target of 3 (greedy: coverage-first,
+        // so three distinct relays each covering one author beat repeats).
+        let l5 = lists(&[("a", "wss://p,wss://q,wss://r,wss://s,wss://t")]);
+        let route5 = route(&l5, &authors(&["a"]), &[], |_| 1.0);
+        assert_eq!(route5.len(), 3);
+        // Two relays: both (the old target) — fewer known relays never
+        // under-route the author.
+        let l2 = lists(&[("a", "wss://x,wss://y")]);
+        let route2 = route(&l2, &authors(&["a"]), &[], |_| 1.0);
+        assert_eq!(route2.len(), 2);
+    }
     /// An author whose relays lost the greedy (cap hit) recovers onto their
     /// OWN relay — not the indexers.
     #[test]
@@ -438,6 +475,22 @@ mod tests {
         assert_eq!(route.len(), 141);
         let idx: &BTreeSet<String> = &route["wss://idx"];
         assert_eq!(idx.len(), 10);
+    }
+
+    /// REQ chunk ceilings (OutboxRouter.kt): a filter can never exceed the
+    /// per-REQ caps — authors 200 (MAX_AUTHORS_PER_FILTER), e-tags 150
+    /// (MAX_ETAGS_PER_FILTER) — whatever the caller starts from.
+    #[test]
+    fn chunk_enforces_ceilings() {
+        let ids: Vec<usize> = (0..350).collect();
+        let shards = chunk(&ids, MAX_AUTHORS_PER_FILTER);
+        assert_eq!(shards, vec![(0..200).collect::<Vec<_>>(), (200..350).collect::<Vec<_>>()]);
+        let shards = chunk(&ids, MAX_ETAGS_PER_FILTER);
+        assert_eq!(shards.len(), 3); // 150 + 150 + 50
+        assert!(shards[..2].iter().all(|s| s.len() == MAX_ETAGS_PER_FILTER));
+        assert_eq!(shards[2].len(), 50);
+        // Under the ceiling: one shard, nothing split.
+        assert_eq!(chunk(&ids[..150], MAX_ETAGS_PER_FILTER).len(), 1);
     }
 
     /// Normalization: case + trailing slashes fold together; non-ws schemes

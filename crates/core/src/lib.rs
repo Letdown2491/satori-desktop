@@ -16,6 +16,7 @@ pub mod config;
 pub mod deletions;
 pub mod diag;
 pub mod error;
+pub mod hints;
 pub mod manager;
 pub mod nip40;
 pub mod privacy;

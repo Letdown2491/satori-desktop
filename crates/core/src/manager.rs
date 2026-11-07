@@ -17,6 +17,7 @@ use crate::blocktime::Blocktime;
 use crate::error::{LoginError, Result};
 use crate::nip::nip78;
 use crate::deletions;
+use crate::hints;
 use crate::nip40;
 use crate::outbox;
 use crate::pool::{Pool, INDEXERS};
@@ -3228,20 +3229,24 @@ impl Core {
                 if !missing.is_empty() {
                     // feeds.ts fetchEventsByIds: a TARGETED query on the
                     // indexers (parents' authors are unknown until they
-                    // resolve, so seen-on can't narrow this one) instead of
-                    // the client-level broadcast.
-                    let n = missing.len();
-                    let filter = Filter::new().ids(missing).limit(n);
+                    // resolve, so seen-on can't narrow this one). Split at
+                    // the REQ ceiling (WS1: OutboxRouter.kt
+                    // MAX_ETAGS_PER_FILTER — big relays reject oversized
+                    // filters).
                     let fallback: Vec<String> =
                         INDEXERS.iter().map(|s| s.to_string()).collect();
-                    let fetched: Vec<Event> = active
-                        .pool
-                        .get_from(&fallback, &filter)
-                        .await
-                        .into_iter()
-                        .collect();
-                    // (no explicit save: the SDK persists what it receives)
-                    events.extend(fetched);
+                    for id_shard in outbox::chunk(&missing, outbox::MAX_ETAGS_PER_FILTER) {
+                        let n = id_shard.len();
+                        let filter = Filter::new().ids(id_shard).limit(n);
+                        let fetched: Vec<Event> = active
+                            .pool
+                            .get_from(&fallback, &filter)
+                            .await
+                            .into_iter()
+                            .collect();
+                        // (no explicit save: the SDK persists what it receives)
+                        events.extend(fetched);
+                    }
                 }
                 for ev in events {
                     let snippet = plain_snippet(&ev.content, 140);
@@ -4537,24 +4542,29 @@ impl Core {
                 if !missing.is_empty() {
                     // feeds.ts fetchEventsByIds: a TARGETED query on the
                     // indexers (a bookmarked note's author may be outside
-                    // the follows — seen-on can't narrow this one).
-                    let n = missing.len();
-                    let filter = Filter::new().ids(missing).limit(n);
+                    // the follows — seen-on can't narrow this one). Split
+                    // at the REQ ceiling (WS1: OutboxRouter.kt
+                    // MAX_ETAGS_PER_FILTER).
                     let fallback: Vec<String> =
                         INDEXERS.iter().map(|s| s.to_string()).collect();
-                    let fetched: Vec<Event> = active
-                        .pool
-                        .get_from(&fallback, &filter)
-                        .await
-                        .into_iter()
-                        .collect();
-                    // Explicit saves (v1.2): the SDK's saves are async and
-                    // once raced a reader — a fetched bookmark should BE
-                    // in the store before this task ends.
-                    for ev in &fetched {
-                        let _ = active.pool.store.save(ev).await;
+                    for id_shard in outbox::chunk(&missing, outbox::MAX_ETAGS_PER_FILTER) {
+                        let n = id_shard.len();
+                        let filter = Filter::new().ids(id_shard).limit(n);
+                        let fetched: Vec<Event> = active
+                            .pool
+                            .get_from(&fallback, &filter)
+                            .await
+                            .into_iter()
+                            .collect();
+                        // Explicit saves (v1.2): the SDK's saves are async and
+                        // once raced a reader — a fetched bookmark should BE
+                        // in the store before this task ends.
+                        for ev in &fetched {
+                            let _ = active.pool.store.save(ev).await;
+                        }
+                        events
+                            .extend(fetched.into_iter().filter(|ev| !deletions::is_deleted(ev)));
                     }
-                    events.extend(fetched.into_iter().filter(|ev| !deletions::is_deleted(ev)));
                 }
                 events.sort_by_key(|e| std::cmp::Reverse(e.created_at));
                 let profiles = Self::profiles_for(&active, &events).await;
@@ -5167,8 +5177,10 @@ impl Core {
                 // Seen-on memory (seen-relays.ts recordSeenOn): which
                 // relays we ACTUALLY receive each author from — the live
                 // bell is the same drain the TS wrapped around its
-                // subscription's onevent.
+                // subscription's onevent. The author-keyed hint store
+                // (WS1, RelayHintStore.kt) feeds off the same drain.
                 seen::record(&event.pubkey, &[relay_url.as_str()]);
+                hints::observe(&event, relay_url.as_str());
                 // The chokepoint lives here too (pool.ts onevent):
                 // kind:5s are recorded as tombstones; expired copies
                 // (NIP-40) and author-deleted content (NIP-09) never

@@ -1,8 +1,9 @@
 //! Relay pool — port of `src/data/pool.ts` + `src/nostr/nip65.ts` semantics,
 //! v2 (slices 1+2): a nostr-sdk client over the LMDB store.
 //!
-//! - READ: outbox-routed (outbox.rs quality-weighted set-cover, ≤2/author,
-//!   ≤70 relays), ONE relay per shard via manual `ReqTarget`s, each shard
+//! - READ: outbox-routed (outbox.rs quality-weighted set-cover, ≥3/author
+//!   where availability allows — WS1, D39), ONE relay per shard via manual
+//!   `ReqTarget`s, each shard
 //!   on its adaptive latency budget (relay_latency.rs: profiled-empty
 //!   relays bail to the floor, rich-but-truncating ones earn the ceiling),
 //!   read-dead relays skipped mid-session; indexers as the fallback set.
@@ -28,6 +29,7 @@ use nostr_sdk::prelude::*;
 use nostr_sdk::relay::EventSendStatus;
 
 use crate::deletions;
+use crate::hints;
 use crate::nip40;
 use crate::outbox::{self, RelayList, Route};
 use crate::relay_latency;
@@ -72,6 +74,29 @@ fn consume_and_filter(events: impl IntoIterator<Item = Event>) -> BTreeSet<Event
             u16::from(e.kind) != 5 && !nip40::is_expired(e) && !deletions::is_deleted(e)
         })
         .collect()
+}
+
+/// WS1 (issue #1): the no-kind-10002 fallback tier. An author who
+/// publishes no relay list is routed on their learned author-keyed hints
+/// (hints.rs — RelayHintStore.kt's provenance + tag-hint accumulation)
+/// BEFORE falling to the indexers, whose mirrors may not carry them at
+/// all. Hint relays were screened (routable, non-indexer) at record time,
+/// exactly the discipline relay_lists' consumers apply to kind:10002
+/// entries.
+fn hint_seeded_lists(
+    mut lists: HashMap<String, RelayList>,
+    authors: &[PublicKey],
+) -> HashMap<String, RelayList> {
+    for pk in authors {
+        let key = pk.to_string();
+        if lists.get(&key).is_none_or(RelayList::is_empty) {
+            let seeded = hints::for_pubkey(pk);
+            if !seeded.is_empty() {
+                lists.insert(key, RelayList { write: seeded, read: Vec::new() });
+            }
+        }
+    }
+    lists
 }
 
 /// Routed-relay retention (audit Nov 2026: nothing ever removed a relay —
@@ -489,6 +514,11 @@ impl Pool {
             relay_latency::record(&url, elapsed.as_millis() as u64, truncated, events.len());
             for ev in &events {
                 seen::record(&ev.pubkey, &[url.as_str()]);
+                // Author-keyed relay hints (WS1, RelayHintStore.kt):
+                // provenance + e/p-tag relay urls, feeding the
+                // no-kind-10002 routing fallback (get_routed /
+                // subscribe_routed seed their route from these).
+                hints::observe(ev, url.as_str());
             }
             merged.extend(consume_and_filter(events));
         }
@@ -541,6 +571,8 @@ impl Pool {
             relay_latency::record(&url, elapsed.as_millis() as u64, truncated, events.len());
             for ev in &events {
                 seen::record(&ev.pubkey, &[url.as_str()]);
+                // Same hint feed as fetch_route (WS1).
+                hints::observe(ev, url.as_str());
             }
             merged.extend(consume_and_filter(events));
         }
@@ -564,7 +596,7 @@ impl Pool {
             return Default::default();
         }
         let keys: Vec<String> = authors.iter().map(|p| p.to_string()).collect();
-        let lists = self.relay_lists(authors).await;
+        let lists = hint_seeded_lists(self.relay_lists(authors).await, authors);
         let fallback: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
         // relay_score = the learned quality profile (relay-latency.ts
         // relayQuality): known-empty relays deprioritized (0.15), never
@@ -588,7 +620,7 @@ impl Pool {
             return Err(SdkError::other("no authors to subscribe"));
         }
         let keys: Vec<String> = authors.iter().map(|p| p.to_string()).collect();
-        let lists = self.relay_lists(authors).await;
+        let lists = hint_seeded_lists(self.relay_lists(authors).await, authors);
         let fallback: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
         // Same learned quality as get_routed.
         let route = outbox::route(&lists, &keys, &fallback, relay_latency::quality);
