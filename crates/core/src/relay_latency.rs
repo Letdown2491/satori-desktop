@@ -74,6 +74,13 @@ struct RelayStat {
     denied_at: Option<u64>,
     #[serde(default, skip_serializing_if = "is_zero")]
     write_fails: u32,
+    /// Last PROOF OF LIFE on this relay (epoch secs): an event actually
+    /// delivered (record with events > 0, a live-bell arrival —
+    /// mark_delivery), or a publish ACK (record_write_result true). The
+    /// rail's live dot reads this (connected); a record that carries no
+    /// success leaves it untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ok_at: Option<u64>,
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -203,6 +210,11 @@ pub fn record(relay: &str, ms: u64, truncated: bool, events: usize) {
         at: now_secs(),
         denied_at: prev.as_ref().and_then(|p| p.denied_at),
         write_fails: prev.as_ref().map(|p| p.write_fails).unwrap_or(0),
+        ok_at: if events > 0 {
+            Some(now_secs())
+        } else {
+            prev.as_ref().and_then(|p| p.ok_at)
+        },
     };
     held.map.insert(url.clone(), stat);
     held.order.push_back(url);
@@ -316,11 +328,13 @@ pub fn record_write_result(relay: &str, ok: bool) {
     } else {
         prev.as_ref().map(|p| p.write_fails).unwrap_or(0) + 1
     };
+    let now = now_secs();
     held.map.insert(
         url.clone(),
         RelayStat {
             write_fails: fails,
-            at: now_secs(),
+            at: now,
+            ok_at: if ok { Some(now) } else { prev.as_ref().and_then(|p| p.ok_at) },
             ..prev.unwrap_or_default()
         },
     );
@@ -343,6 +357,50 @@ pub fn is_write_dead(relay: &str) -> bool {
     held.map
         .get(&key(relay))
         .is_some_and(|s| s.write_fails >= WRITE_DEAD_N)
+}
+
+/// Proof-of-life mark for the LIVE stream path (manager.rs's bell): an
+/// event arrived over this relay's socket. The query paths stamp the same
+/// field inside record(); the bell delivers between queries, so it needs
+/// its own (cheap) door.
+pub fn mark_delivery(relay: &str) {
+    let url = key(relay);
+    if url.is_empty() {
+        return;
+    }
+    let mut held = stats().lock().unwrap();
+    match held.map.get_mut(&url) {
+        Some(s) => s.ok_at = Some(now_secs()),
+        // First contact on an unprofiled relay: a one-field seed. (No
+        // `order` touch — the LRU discipline treats this as metadata, and
+        // the next real query sample re-arrants it.)
+        None => {
+            held.map.insert(
+                url,
+                RelayStat { ok_at: Some(now_secs()), ..RelayStat::default() },
+            );
+        }
+    }
+}
+
+/// The window the rail's live dot reads (0.2-design-spec §4.4): a relay
+/// that delivered within the last five minutes counts as pool-liveness.
+/// Deliberately minutes-wide — an idle-but-connected pool goes quiet
+/// between the feed's queries, and the dot must not flicker on that.
+const CONNECTED_WINDOW_SECS: u64 = 300;
+
+/// Pool connectivity, honestly stated: did ANY relay deliver an event or
+/// ACK a publish inside the window? This is NOT socket state (nostr-sdk
+/// doesn't surface per-relay connection status we could trust) — it is
+/// "the pool recently did something real". False therefore covers startup
+/// (nothing proven yet) and full disconnection alike, which is exactly the
+/// one quiet state §4.4 wants the rail to show: dot grey, nothing moves.
+pub fn connected() -> bool {
+    let now = now_secs();
+    let held = stats().lock().unwrap();
+    held.map
+        .values()
+        .any(|s| s.ok_at.is_some_and(|at| now.saturating_sub(at) < CONNECTED_WINDOW_SECS))
 }
 
 /// One relay's learned health, for the settings pane (WS4): the EWMA
@@ -480,5 +538,36 @@ mod tests {
         record_read_denial("wss://wall.example");
         assert!(is_read_denial("CLOSED: auth-required: please sign in"));
         assert!(!is_read_denial("CLOSED by relay: connection closed cleanly"));
+    }
+
+    #[test]
+    fn connected_reads_recent_proof_of_life() {
+        let _env = EnvGuard::new("lat-connected");
+        // NOTE: connected() scans the whole process-wide profile map, and
+        // the other tests in this file record deliveries concurrently —
+        // so the pool-level verdict is asserted only in the positive
+        // direction; the negative case (grey) is asserted per-relay.
+        // A query that delivered events proves life.
+        record("wss://alive.example", 200, false, 5);
+        assert!(connected());
+        // A zero-delivery sample does NOT (a denial or an empty EOSE is
+        // not proof the pool answers with content).
+        record("wss://alive.example", 200, false, 0);
+        assert!(connected()); // the earlier proof still stands (window)
+        // A live-bell arrival on an unprofiled relay seeds the field.
+        mark_delivery("wss://bell.example");
+        assert!(connected());
+        // A publish ACK proves life; a failure keeps whatever stood.
+        record_write_result("wss://ack.example", true);
+        assert!(connected());
+        record_write_result("wss://ack.example", false);
+        assert!(connected());
+        // Per-relay honesty: a failure mark doesn't erase the success
+        // stamp, and an unprofiled relay has none.
+        let held = stats().lock().unwrap();
+        let ack = held.map.get("wss://ack.example").unwrap();
+        assert_eq!(ack.write_fails, 1);
+        assert!(ack.ok_at.is_some());
+        assert!(!held.map.contains_key("wss://never.example"));
     }
 }

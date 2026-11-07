@@ -654,6 +654,34 @@ impl Pool {
         self.client.subscribe(ReqTarget::manual(targets)).await
     }
 
+    /// Subscribe the VIEWPORT engagement fan (WS2, viewport.rs): one
+    /// subscription id spanning every `#e` filter shard, kinds fixed by
+    /// viewport::ENGAGEMENT_KINDS. Engagement authors are ARBITRARY (anyone
+    /// can react), so outbox author-routing doesn't apply — the filters ride
+    /// the connected read set (the same targets the main bell's filters
+    /// use). Events arrive through the client's shared notification stream;
+    /// the manager's viewport task filters by the returned subscription id.
+    /// Chunked at the D39 e-tag ceiling (viewport.rs chunks_for_ids).
+    pub async fn subscribe_for_ids(
+        &self,
+        kinds: Vec<Kind>,
+        ids: &[EventId],
+        since: Option<Timestamp>,
+    ) -> Result<Output<SubscriptionId>, SdkError> {
+        if ids.is_empty() {
+            return Err(SdkError::other("no ids to subscribe"));
+        }
+        let mut filters = Vec::new();
+        for shard in crate::viewport::chunks_for_ids(ids) {
+            let mut filter = Filter::new().kinds(kinds.clone()).events(shard);
+            if let Some(s) = since {
+                filter = filter.since(s);
+            }
+            filters.push(filter);
+        }
+        self.client.subscribe(filters).await
+    }
+
     /// Publish to the write set (own write relays, fallback indexers) and
     /// report per-relay outcomes (D36): the SDK's per-relay Output is
     /// PRESERVED — the old `let _ = ...?; Ok(())` discarded it, which is

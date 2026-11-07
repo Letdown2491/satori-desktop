@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use nostr::prelude::*;
 use nostr_connect::prelude::*;
+use nostr_sdk::client::Output;
 use tokio::sync::mpsc;
 
 use crate::blocktime::Blocktime;
@@ -177,6 +178,10 @@ pub enum Live {
     Post,
     /// NIP-78 app-data sync landed (login): remote prefs won — re-read.
     PrefsSynced,
+    /// Engagement on a viewport note arrived live (WS2, viewport.rs): the
+    /// event is already in the store (the SDK saves on receive) — the open
+    /// feed re-reads its state and repaints.
+    Engagement,
 }
 
 /// A reply's parent, for the timeline context whisper: author + a plain
@@ -398,6 +403,13 @@ pub struct Core {
     live_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// Refresh single-flight (audit perf M4).
     refreshing: std::sync::atomic::AtomicBool,
+    /// Viewport engagement ids (WS2, viewport.rs): the feed's settled
+    /// visible window. The long-lived viewport task watches this channel,
+    /// replacing ONE `#e` subscription as the window moves.
+    viewport_ids: tokio::sync::watch::Sender<Vec<EventId>>,
+    /// The viewport task spawns once per process (the outbox drainer's
+    /// discipline).
+    viewport_started: std::sync::atomic::AtomicBool,
     /// Bootstrap session-phase single-flight (audit perf M5).
     session_boot: tokio::sync::Mutex<()>,
 }
@@ -425,6 +437,10 @@ impl Core {
         // versioned dir starts clean, the legacy dir goes (media.rs).
         rt.spawn(async { crate::media::purge_legacy_cache(); });
         let blocktime = Arc::new(Blocktime::new(rt.handle().clone()));
+        // The viewport channel: the receiver half rides the viewport task
+        // (subscribe() below); this seed receiver keeps send() honest
+        // before the task arms.
+        let (viewport_ids, _viewport_seed_rx) = tokio::sync::watch::channel(Vec::new());
         Self {
             rt,
             blocktime,
@@ -450,6 +466,8 @@ impl Core {
             live_on: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             live_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             refreshing: std::sync::atomic::AtomicBool::new(false),
+            viewport_ids,
+            viewport_started: std::sync::atomic::AtomicBool::new(false),
             session_boot: tokio::sync::Mutex::new(()),
         }
     }
@@ -674,6 +692,9 @@ impl Core {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.live_on
             .store(false, std::sync::atomic::Ordering::SeqCst);
+        // The viewport engagement sub closes with the session too (the
+        // empty set plans a Drop; the pool it rides outlives the session).
+        let _ = self.viewport_ids.send(Vec::new());
     }
 
     pub fn init(&self) -> (Option<Session>, Option<String>) {
@@ -1772,7 +1793,8 @@ impl Core {
                 if n > 0 {
                     eprintln!("[core] outbox: {n} item(s) pending, drain armed");
                 }
-                active.pool.connect_reads(read).await.ok();
+                active.pool.connect_reads(read.clone()).await.ok();
+                self.spawn_relay_info(&read);
                 let follows = active.pool.follows(me).await.unwrap_or_default();
                 active.follows = follows.clone();
                 if let Some(a) = self.active.lock().unwrap().as_mut() {
@@ -1808,10 +1830,12 @@ impl Core {
                     if let Some(a) = self.active.lock().unwrap().as_mut() {
                         a.read_relays = read.clone();
                     }
-                    active.pool.connect_reads(read).await.ok();
+                    active.pool.connect_reads(read.clone()).await.ok();
+                    self.spawn_relay_info(&read);
                 } else {
                     // No cached list at all: indexers only, still connect.
                     active.pool.connect_reads(Vec::new()).await.ok();
+                    self.spawn_relay_info(&[]);
                 }
                 // D36: the WRITE half too. A warm start previously left
                 // the write set empty (only `.read` was hydrated), so
@@ -5004,6 +5028,36 @@ impl Core {
         crate::relay_latency::snapshot()
     }
 
+    /// Pool connectivity for the shell rail's live dot (0.2-design-spec
+    /// §4.4), read off the D33/D36 latency machinery — the SDK's socket
+    /// states are not surfaced per relay, so "connected" means the only
+    /// thing we can honestly claim: some relay DELIVERED an event or ACKed
+    /// a publish inside the recent window. False = no recent proof of life
+    /// (startup, all relays dead, offline).
+    pub fn pool_connected() -> bool {
+        crate::relay_latency::connected()
+    }
+
+    /// Remembered NIP-11 capabilities (nip11.rs): what each relay
+    /// ADVERTISES it can do, for honest degradation whispers. A relay we
+    /// never fetched is absent or `search: None` — unknown, not refused.
+    pub fn relay_capabilities() -> Vec<crate::nip11::RelayCaps> {
+        crate::nip11::snapshot()
+    }
+
+    /// NIP-11 capability sweep for the read set (nip11.rs refresh_stale):
+    /// TTL-gated (7d), background, fire-and-forget — capabilities are
+    /// whispers, not routing. Spawned wherever the read set joins the pool.
+    fn spawn_relay_info(&self, reads: &[String]) {
+        let mut urls: Vec<String> = crate::pool::INDEXERS.iter().map(|s| s.to_string()).collect();
+        urls.extend(reads.iter().cloned());
+        urls.sort();
+        urls.dedup();
+        self.rt.spawn(async move {
+            crate::nip11::refresh_stale(&urls).await;
+        });
+    }
+
     /// Pending outbox items (D36): notes signed and saved but not yet ACKed
     /// by any relay. The shell's "queued for delivery" honesty state.
     pub fn outbox_pending() -> usize {
@@ -5044,6 +5098,7 @@ impl Core {
                 // New reads join the pool; reads the user dropped are
                 // retired live (they used to drain only on restart).
                 active.pool.set_reads(&read).await;
+                this.spawn_relay_info(&read);
                 Ok(())
             }
             .await;
@@ -5261,6 +5316,163 @@ impl Core {
         self.live.subscribe()
     }
 
+    // --- viewport engagement (WS2, viewport.rs) ---------------------------------
+
+    /// The feed's settled visible window: the ids whose engagement should
+    /// arrive LIVE. One subscription, closed/replaced as the window moves
+    /// (no-op when the id set is unchanged). An empty vec drops the sub.
+    pub fn set_viewport(self: &Arc<Self>, ids: Vec<EventId>) {
+        // Unchanged sets don't mark the watch — no churn on no-op calls.
+        let _ = self.viewport_ids.send(ids);
+        self.start_viewport();
+    }
+
+    /// ONE task per process owns the viewport subscription's lifecycle
+    /// (the live bell's discipline, minus the session scoping — the pool
+    /// is per-process): watch the id channel; on change, plan → close the
+    /// current sub → arm the next; deliver matching events into the store
+    /// (the SDK saves on receive) and signal `Live::Engagement`.
+    fn start_viewport(self: &Arc<Self>) {
+        if self
+            .viewport_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            use futures_util::StreamExt as _;
+            // The pool is built before any session paints a feed; a task
+            // that raced it simply re-arms on the next set_viewport.
+            let Some(pool) = this.pool.lock().unwrap().clone() else {
+                this.viewport_started
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                return;
+            };
+            let mut rx_ids = this.viewport_ids.subscribe();
+            let mut tracker = crate::viewport::ViewportTracker::default();
+            let mut current: Option<Output<SubscriptionId>> = None;
+            let kinds: Vec<Kind> = crate::viewport::ENGAGEMENT_KINDS
+                .iter()
+                .map(|k| Kind::from_u16(*k))
+                .collect();
+            let mut notifs = pool.client().notifications();
+            loop {
+                tokio::select! {
+                    res = rx_ids.changed() => {
+                        if res.is_err() {
+                            // All senders gone (process teardown).
+                            return;
+                        }
+                        let ids = rx_ids.borrow().clone();
+                        match tracker.plan(&ids) {
+                            crate::viewport::Plan::Keep => {}
+                            crate::viewport::Plan::Drop => {
+                                // The viewport went away (pane closed, no
+                                // rows): the sub MUST close with it.
+                                if let Some(o) = current.take() {
+                                    let _ = pool.client().unsubscribe(o.id()).await;
+                                }
+                                tracker.commit(Vec::new());
+                            }
+                            crate::viewport::Plan::Replace(shards) => {
+                                // Close before arming — never two live
+                                // viewport subs (D24: no churn pileup).
+                                if let Some(o) = current.take() {
+                                    let _ = pool.client().unsubscribe(o.id()).await;
+                                }
+                                match pool
+                                    .subscribe_for_ids(
+                                        kinds.clone(),
+                                        &shards.iter().flatten().copied().collect::<Vec<_>>(),
+                                        Some(Timestamp::now()),
+                                    )
+                                    .await
+                                {
+                                    Ok(o) => {
+                                        tracker
+                                            .commit(shards.iter().flatten().copied().collect());
+                                        current = Some(o);
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[core] viewport: subscribe failed ({e})"
+                                        );
+                                        // Bookkeeping matches the relay's
+                                        // view so the next change re-arms.
+                                        tracker.commit(Vec::new());
+                                        current = None;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some(n) = notifs.next() => {
+                        // Only OUR subscription's events; the bell's own
+                        // loop consumes its own ids from the same stream.
+                        let Some(o) = &current else { continue };
+                        match n {
+                            nostr_sdk::client::ClientNotification::Event {
+                                relay_url,
+                                subscription_id,
+                                event,
+                                ..
+                            } if o.id() == &subscription_id => {
+                                // Same ingestion discipline as the bell:
+                                // seen-on + author hints, the chokepoint
+                                // gates, then the signal. The SDK has
+                                // already saved the event.
+                                seen::record(&event.pubkey, &[relay_url.as_str()]);
+                                hints::observe(&event, relay_url.as_str());
+                                // Proof of life for the rail's live dot
+                                // (relay_latency::connected): an event
+                                // arrived over this relay's socket.
+                                crate::relay_latency::mark_delivery(relay_url.as_str());
+                                if u16::from(event.kind) == 5 {
+                                    deletions::record(&event, false);
+                                    continue;
+                                }
+                                if nip40::is_expired(&event) || deletions::is_deleted(&event) {
+                                    continue;
+                                }
+                                // Own engagement arriving from the relays
+                                // (another device/client): the mirrors are
+                                // the render state — flip them live.
+                                if Some(event.pubkey) == this.pubkey() {
+                                    let target = event
+                                        .tags
+                                        .clone()
+                                        .event_ids()
+                                        .next()
+                                        .map(|t| t.to_string());
+                                    if let Some(target) = target {
+                                        match u16::from(event.kind) {
+                                            7 => {
+                                                this.own_liked
+                                                    .lock()
+                                                    .unwrap()
+                                                    .insert(target);
+                                            }
+                                            6 | 16 => {
+                                                this.own_reposted
+                                                    .lock()
+                                                    .unwrap()
+                                                    .insert(target);
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                let _ = this.live.send(Live::Engagement);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     /// The hold-state mirror for the shell's undo toast (Held → countdown,
     /// Committed/Undone/Failed → clear). The composer pops on Held, so the
     /// toast outlives it — subscribe once at shell creation.
@@ -5395,6 +5607,8 @@ impl Core {
                 // (WS1, RelayHintStore.kt) feeds off the same drain.
                 seen::record(&event.pubkey, &[relay_url.as_str()]);
                 hints::observe(&event, relay_url.as_str());
+                // Same proof-of-life mark (the live dot, §4.4).
+                crate::relay_latency::mark_delivery(relay_url.as_str());
                 // The chokepoint lives here too (pool.ts onevent):
                 // kind:5s are recorded as tombstones; expired copies
                 // (NIP-40) and author-deleted content (NIP-09) never

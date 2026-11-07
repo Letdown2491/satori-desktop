@@ -18,6 +18,7 @@ pub mod diag;
 pub mod error;
 pub mod hints;
 pub mod manager;
+pub mod nip11;
 pub mod nip40;
 pub mod privacy;
 pub mod profiles;
@@ -29,6 +30,7 @@ pub mod undo;
 
 pub mod dms;
 pub mod engagement;
+pub mod viewport;
 pub mod kinds;
 pub mod media;
 pub mod nip;
