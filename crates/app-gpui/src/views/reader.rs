@@ -114,12 +114,13 @@ impl ArticleView {
     }
 }
 
-/// One list item: the reading column's width + the block's bottom rhythm
-/// (list items carry no gaps of their own).
+/// One list item: the reading column's width (content::COL_W — the same
+/// measure every pane reads at; §1.2) + the block's bottom rhythm
+/// (list items carry no gaps of their own; pads are theme::S steps).
 fn block_item(el: Div, pad: f32) -> Div {
     div()
         .w_full()
-        .max_w(px(660.0))
+        .max_w(px(content::COL_W))
         .pb(px(pad))
         .child(el)
 }
@@ -134,15 +135,28 @@ fn render_block(
 ) -> AnyElement {
     match block {
         markdown::Block::Para(text) => {
-            block_item(md_flow(&text, 15.0, false, ctx, handle), 14.0).into_any_element()
+            block_item(
+                md_flow(&text, theme::T_READER, false, ctx, handle),
+                theme::S4,
+            )
+            .into_any_element()
         }
         markdown::Block::Heading(level, text) => {
-            // The ladder sits UNDER the 22px title (H1 just below it, deeper
-            // levels stepping down toward body size); a little air ABOVE each
+            // The ladder sits UNDER the title (H1 just below it, deeper
+            // levels stepping down to T_READER then T_BODY — no 14.5/14.0
+            // stragglers off the type scale, §1.3); a little air ABOVE each
             // heading separates it from the paragraph it introduces — the
-            // reading rhythm hangs on that gap.
-            let size = [20.0, 18.0, 16.0, 15.0, 14.5, 14.0][(level - 1).clamp(0, 5)];
-            let top = [10.0, 8.0, 6.0, 4.0, 2.0, 0.0][(level - 1).clamp(0, 5)];
+            // reading rhythm hangs on that gap (air on the S scale too).
+            let size = [
+                18.0,
+                16.0,
+                theme::T_READER,
+                theme::T_READER,
+                theme::T_BODY,
+                theme::T_BODY,
+            ][(level - 1).clamp(0, 5)];
+            let top = [theme::S3, theme::S3, theme::S2, theme::S2, theme::S1, theme::S0]
+                [(level - 1).clamp(0, 5)];
             let head = div()
                 .w_full()
                 .pt(px(top))
@@ -152,7 +166,7 @@ fn render_block(
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(theme::ink()))
                 .child(text);
-            block_item(head, 8.0).into_any_element()
+            block_item(head, theme::S3).into_any_element()
         }
         markdown::Block::Quote(text) => {
             let q = div()
@@ -161,8 +175,8 @@ fn render_block(
                 .py_1()
                 .border_l_2()
                 .border_color(rgb(theme::hairline()))
-                .child(md_flow(&text, 14.0, true, ctx, handle));
-            block_item(q, 14.0).into_any_element()
+                .child(md_flow(&text, theme::T_BODY, true, ctx, handle));
+            block_item(q, theme::S4).into_any_element()
         }
         markdown::Block::List { items, ordered } => {
             let mut list_el = div().w_full().flex().flex_col().gap_1();
@@ -184,10 +198,10 @@ fn render_block(
                                 .text_color(rgb(theme::muted()))
                                 .child(marker),
                         )
-                        .child(md_flow(&li, 15.0, false, ctx, handle)),
+                        .child(md_flow(&li, theme::T_READER, false, ctx, handle)),
                 );
             }
-            block_item(list_el, 14.0).into_any_element()
+            block_item(list_el, theme::S4).into_any_element()
         }
         markdown::Block::Code(text) => {
             let code = div()
@@ -202,11 +216,11 @@ fn render_block(
                 .line_height(relative(1.35))
                 .text_color(rgb(theme::ink()))
                 .child(text);
-            block_item(div().w_full().child(code), 14.0).into_any_element()
+            block_item(div().w_full().child(code), theme::S4).into_any_element()
         }
         markdown::Block::Break => {
             // An author's own <br>: a quiet spacer, not a rule.
-            block_item(div().w_full().h(px(6.0)), 0.0).into_any_element()
+            block_item(div().w_full().h(px(theme::S2)), 0.0).into_any_element()
         }
         markdown::Block::Rule => {
             let rule = div()
@@ -214,10 +228,10 @@ fn render_block(
                 .py_1()
                 .border_b_1()
                 .border_color(rgb(theme::hairline()));
-            block_item(rule, 14.0).into_any_element()
+            block_item(rule, theme::S4).into_any_element()
         }
         markdown::Block::Image { url } => {
-            block_item(image_tile(&url, ctx.media), 14.0).into_any_element()
+            block_item(image_tile(&url, ctx.media), theme::S4).into_any_element()
         }
     }
 }
@@ -239,7 +253,7 @@ fn md_flow(
         // A <br> span: a full-width spacer — flex-wrap pushes the rest of
         // the flow to the next line (the web's literal line break).
         if span.br {
-            flow = flow.child(div().w_full().h(px(2.0)));
+            flow = flow.child(div().w_full().h(px(theme::S1)));
             continue;
         }
         let is_link = span.link.is_some();
@@ -303,12 +317,14 @@ fn md_flow(
 /// semantics, fed by the shared cache.
 fn image_tile(url: &str, snap: &media::Snapshot) -> Div {
     let png = snap.png(url);
-    // Aspect-correct once the bytes are in (reading column ~660 minus
-    // padding); a provisional box until then.
+    // Aspect-correct once the bytes are in (reading column content::COL_W
+    // minus the frame's side padding); a provisional box until then.
     let height = snap
         .size(url)
         .filter(|(w, _)| *w > 0)
-        .map_or(360.0, |(w, h)| (628.0 * h as f32 / w as f32).clamp(80.0, 560.0));
+        .map_or(360.0, |(w, h)| {
+            ((content::COL_W - 32.0) * h as f32 / w as f32).clamp(80.0, 560.0)
+        });
     let frame = div()
         .w_full()
         .h(px(height))
@@ -412,12 +428,14 @@ impl Render for ArticleView {
                                     div()
                                         .w_full()
                                         .font_family(theme::SERIF)
-                                        .text_size(px(22.0))
+                                        // Display serif for the h1 (spec
+                                        // §1.3: 17–20; top of the ladder).
+                                        .text_size(px(20.0))
                                         .line_height(relative(1.25))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb(theme::ink()))
                                         .child(title.clone()),
-                                    10.0,
+                                    theme::S3,
                                 )
                                 .into_any_element(),
                                 1 => block_item(
@@ -461,12 +479,12 @@ impl Render for ArticleView {
                                                 )
                                                 .child(format!("· {minutes} min read")),
                                         ),
-                                    18.0,
+                                    theme::S5,
                                 )
                                 .into_any_element(),
                                 2 if cover.is_some() => block_item(
                                     image_tile(cover.as_deref().unwrap_or(""), &media),
-                                    18.0,
+                                    theme::S5,
                                 )
                                 .into_any_element(),
                                 i => render_block(
@@ -478,7 +496,7 @@ impl Render for ArticleView {
                             }
                         })
                         .w_full()
-                        .max_w(px(660.0))
+                        .max_w(px(content::COL_W))
                         .h_full(),
                     ),
             )

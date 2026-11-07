@@ -554,6 +554,9 @@ pub(crate) fn word_flow<V: EventEmitter<Nav> + 'static>(
 struct BodyParse {
     cover: Option<String>,
     dims: HashMap<String, Option<(u32, u32)>>,
+    /// NIP-68 `alt` per url (WS4): the reader-side badge reads it here,
+    /// the composer-side editor wrote it into the same tag.
+    alts: HashMap<String, String>,
     murls: std::sync::Arc<[String]>,
     assets: Vec<MediaAsset>,
     media_links: Vec<String>,
@@ -590,9 +593,14 @@ fn body_parse_cached(ev: &Event) -> std::sync::Arc<BodyParse> {
         .iter()
         .map(|m| (m.url.clone(), m.dim))
         .collect();
+    let alts: HashMap<String, String> = imeta::parse(ev)
+        .iter()
+        .filter_map(|m| m.alt.clone().map(|a| (m.url.clone(), a)))
+        .collect();
     let parsed = std::sync::Arc::new(BodyParse {
         cover,
         dims,
+        alts,
         murls: media_urls(ev).into(),
         assets,
         media_links,
@@ -692,7 +700,7 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
     // item full-width by its aspect, several as a horizontal strip; picture
     // tiles open the lightbox, video tiles open the browser.
     if !murls.is_empty()
-        && let Some(section) = media_section(assets, dims, ctx, &handle)
+        && let Some(section) = media_section(assets, dims, &parsed.alts, ctx, &handle)
     {
         body = body.child(section);
     }
@@ -946,6 +954,7 @@ fn video_tile(
 pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
     assets: &[MediaAsset],
     dims: &HashMap<String, Option<(u32, u32)>>,
+    alts: &HashMap<String, String>,
     ctx: &Body,
     handle: &Entity<V>,
 ) -> Option<AnyElement> {
@@ -1005,6 +1014,7 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
                 height(url, None, 360.0),
                 pictures,
                 0,
+                alts.get(url).map(|s| s.as_str()),
                 ctx,
                 handle,
             )
@@ -1020,6 +1030,25 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
             )
             .into_any_element(),
         });
+    }
+
+    // Multi-image (NIP-68 multi-imeta): a carousel, not a strip — one
+    // image at a time with ‹ › arrows and position dots (dark-wisp
+    // MediaCarousel; the strip hid every picture after the first). The
+    // selection is a STATE CHANGE, not an animation (§3) — reduced motion
+    // is honored by construction, there is nothing to reduce. Keyboard:
+    // a click/Enter on the image opens the lightbox, whose arrow keys
+    // walk the same set.
+    let pictures_only = visible.iter().all(|a| matches!(a, MediaAsset::Picture { .. }));
+    if pictures_only && visible.len() > 1 {
+        let urls: Vec<String> = visible
+            .iter()
+            .filter_map(|a| match a {
+                MediaAsset::Picture { url } => Some(url.clone()),
+                _ => None,
+            })
+            .collect();
+        return Some(carousel(&urls, alts, pictures, ctx, handle).into_any_element());
     }
 
     let id = seg_id(
@@ -1040,7 +1069,7 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
                     }
                 });
                 strip = strip.child(media_tile(
-                    &url, Some(560.0), height, pictures.clone(), pic_idx, ctx, handle,
+                    &url, Some(560.0), height, pictures.clone(), pic_idx, alts.get(&url).map(|s| s.as_str()), ctx, handle,
                 ));
                 pic_idx += 1;
             }
@@ -1092,13 +1121,17 @@ fn dim_or(
 
 /// One gallery tile: the picture when the shared cache has it, a quiet
 /// loading frame otherwise; click opens the lightbox at this index. `w`:
-/// `None` fills the column, `Some(px)` fixes a strip-tile width.
+/// `None` fills the column, `Some(px)` fixes a strip-tile width. `alt`:
+/// the NIP-68 imeta alt — an "ALT" badge rides the frame's corner
+/// (dark-wisp AltTextBadge; quiet, on hairline, never a vermilion seal).
+#[allow(clippy::too_many_arguments)]
 fn media_tile<V: EventEmitter<Nav> + 'static>(
     url: &str,
     w: Option<f32>,
     h: f32,
     lightbox: Vec<String>,
     idx: usize,
+    alt: Option<&str>,
     ctx: &Body,
     handle: &Entity<V>,
 ) -> AnyElement {
@@ -1121,25 +1154,174 @@ fn media_tile<V: EventEmitter<Nav> + 'static>(
             cx.stop_propagation();
             handle.update(cx, |_, cx| cx.emit(Nav::OpenLightbox(lightbox.clone(), idx)));
         });
-    match ctx.media.png(url) {
+    let frame = match ctx.media.png(url) {
         // Contain, not Cover: the whole picture shows (the quiet panel frame
         // letterboxes); full size is the lightbox's job.
         Some(png) => frame
-            .child(img(png).w_full().h_full().object_fit(ObjectFit::Contain))
-            .into_any_element(),
-        None => frame
+            .child(img(png).w_full().h_full().object_fit(ObjectFit::Contain)),
+        None => frame.child(
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(theme::T_SMALL))
+                .text_color(rgb(theme::muted()))
+                .child("…"),
+        ),
+    };
+    match alt {
+        Some(_) => frame
             .child(
                 div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
+                    .absolute()
+                    .left_2()
+                    .bottom_2()
+                    .px_1()
+                    .rounded(px(theme::R_EMBED))
+                    .bg(rgb(theme::washi()))
+                    .border_1()
+                    .border_color(rgb(theme::hairline()))
                     .text_size(px(theme::T_SMALL))
                     .text_color(rgb(theme::muted()))
-                    .child("…"),
+                    .child("ALT"),
             )
             .into_any_element(),
+        None => frame.into_any_element(),
     }
+}
+
+// --- the multi-image carousel (dark-wisp MediaCarousel) ---------------------
+
+/// Per-carousel selection, keyed by the carousel's seg id — a cx-less
+/// static map (the theme.rs/timefmt.rs split, media_urls_cached's bound):
+/// the state IS the map. The wake-up rides the host entity's notify (the
+/// handle media_section already carries), so no view needs to observe a
+/// global and feed.rs stays untouched. Bounded, oldest-dropped.
+fn sel_map() -> &'static std::sync::Mutex<HashMap<String, usize>> {
+    static SEL: std::sync::OnceLock<std::sync::Mutex<HashMap<String, usize>>> =
+        std::sync::OnceLock::new();
+    SEL.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn carousel_sel(id: &str, n: usize) -> usize {
+    let map = sel_map().lock().unwrap();
+    map.get(id).copied().unwrap_or(0).min(n.saturating_sub(1))
+}
+
+fn carousel_step<V: 'static>(
+    id: &str,
+    n: usize,
+    delta: i64,
+    handle: &Entity<V>,
+    cx: &mut gpui::App,
+) {
+    {
+        let mut map = sel_map().lock().unwrap();
+        if map.len() >= 4096 && !map.contains_key(id) {
+            let oldest = map.keys().next().cloned();
+            if let Some(k) = oldest {
+                map.remove(&k);
+            }
+        }
+        let cur = map.get(id).copied().unwrap_or(0).min(n.saturating_sub(1)) as i64;
+        // Wrap-around: past the last image, the first — a carousel, not a list.
+        let next = ((cur + delta).rem_euclid(n as i64)) as usize;
+        map.insert(id.to_string(), next);
+    }
+    handle.update(cx, |_, cx| cx.notify());
+}
+
+/// The carousel frame: one image at a time (full column width, the
+/// single-tile aspect math), ‹ › arrows, position dots. Pure state —
+/// no slide, no fade (§3: a state appears; it does not travel).
+fn carousel<V: EventEmitter<Nav> + 'static>(
+    urls: &[String],
+    alts: &HashMap<String, String>,
+    lightbox: Vec<String>,
+    ctx: &Body,
+    handle: &Entity<V>,
+) -> AnyElement {
+    let n = urls.len();
+    let key = seg_id("car", &urls.join("|"));
+    let idx = carousel_sel(&key, n);
+    let url = &urls[idx];
+    let width = COL_W - 32.0;
+    // The visible image keeps the single-tile aspect discipline.
+    let aspect = dim_or(ctx.media, url, None);
+    let height = aspect.map_or(480.0, |(w, h)| {
+        if w > 0 {
+            (width * h as f32 / w as f32).clamp(240.0, 480.0)
+        } else {
+            480.0
+        }
+    });
+    let handle_cl = handle.clone();
+    let mk_arrow = |which: &str, label: &'static str, delta: i64| {
+        let key = key.clone();
+        let handle = handle_cl.clone();
+        div()
+            .id(SharedString::from(format!("{key}-{which}")))
+            .cursor_pointer()
+            .px_2()
+            .rounded(px(theme::R_EMBED))
+            .border_1()
+            .border_color(rgb(theme::hairline()))
+            .text_size(px(theme::T_UI))
+            .text_color(rgb(theme::muted()))
+            .hover(|s| s.text_color(rgb(theme::ink())))
+            .on_click(move |_, _, cx| carousel_step(&key, n, delta, &handle, cx))
+            .child(label)
+    };
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(media_tile(
+            url,
+            None,
+            height,
+            lightbox,
+            idx,
+            alts.get(url).map(|s| s.as_str()),
+            ctx,
+            handle,
+        ))
+        .child(
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(mk_arrow("prev", "‹", -1))
+                .child(
+                    div()
+                        .flex()
+                        .gap_1()
+                        .items_center()
+                        .children(urls.iter().enumerate().map(|(i, _)| {
+                            let key = key.clone();
+                            let handle = handle_cl.clone();
+                            div()
+                                .id(SharedString::from(format!("{key}-dot-{i}")))
+                                .cursor_pointer()
+                                .size(px(6.))
+                                .rounded_full()
+                                .bg(rgb(if i == idx {
+                                    theme::ink()
+                                } else {
+                                    theme::hairline()
+                                }))
+                                .on_click(move |_, _, cx| {
+                                    carousel_step(&key, n, i as i64 - idx as i64, &handle, cx)
+                                })
+                        })),
+                )
+                .child(mk_arrow("next", "›", 1)),
+        )
+        .into_any_element()
 }
 
 /// Compact embed card for quotes: left rule, name + time + clamped text

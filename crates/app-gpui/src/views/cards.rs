@@ -328,7 +328,13 @@ fn article_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) ->
         let mut dims: HashMap<String, Option<(u32, u32)>> = HashMap::new();
         dims.insert(img.clone(), None);
         let asset = content::MediaAsset::Picture { url: img.clone() };
-        if let Some(cover) = content::media_section(std::slice::from_ref(&asset), &dims, ctx, feed) {
+        if let Some(cover) = content::media_section(
+            std::slice::from_ref(&asset),
+            &dims,
+            &HashMap::new(),
+            ctx,
+            feed,
+        ) {
             card = card.child(cover);
         }
     }
@@ -419,7 +425,13 @@ fn classified_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState)
             .iter()
             .map(|u| content::MediaAsset::Picture { url: u.clone() })
             .collect();
-        if let Some(gallery) = content::media_section(&assets, &dims, ctx, feed) {
+        let gallery_alts: HashMap<String, String> = imeta::parse(ev)
+            .into_iter()
+            .filter_map(|m| m.alt.map(|a| (m.url, a)))
+            .collect();
+        if let Some(gallery) =
+            content::media_section(&assets, &dims, &gallery_alts, ctx, feed)
+        {
             card = card.child(gallery);
         }
     }

@@ -961,7 +961,8 @@ fn thumb_tile(
         .cursor_pointer()
         .flex_none()
         .overflow_hidden()
-        .rounded(px(theme::R_EMBED))
+        // §1.4 ladder: media tiles ride R_MEDIA, not the embed radius.
+        .rounded(px(theme::R_MEDIA))
         .border_1()
         .border_color(rgb(theme::hairline()))
         .bg(rgb(theme::panel()))

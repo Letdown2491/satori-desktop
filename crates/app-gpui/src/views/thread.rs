@@ -16,7 +16,7 @@ use gpui::{
     ListState, Render, SharedString, Window,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
+use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile};
 
 use crate::{icons, media, theme};
 use super::{content, nav::Nav, states};
@@ -33,6 +33,11 @@ pub struct ThreadView {
     error: Option<states::PaneError>,
     /// The pane's anchor — Retry re-asks it (and the thread) by id.
     anchor_id: EventId,
+    /// Lazy parent hydration (the webapp's "↩ in reply to an earlier note",
+    /// render/note.ts reply-context): direct parents that aren't in the
+    /// thread — id → author + snippet, asked-set keeps misses from looping.
+    parents: HashMap<String, ParentNote>,
+    parents_asked: HashSet<String>,
     list: ListState,
 }
 
@@ -52,6 +57,8 @@ impl ThreadView {
             status: "loading the thread…".into(),
             error: None,
             anchor_id: id,
+            parents: HashMap::new(),
+            parents_asked: HashSet::new(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
         // The anchor rides in with its author's profile; replies follow.
@@ -128,7 +135,8 @@ impl ThreadView {
                 }
                 self.want_media(&note, cx);
                 self.want_quotes(&note, cx);
-                self.want_names(&[note], cx);
+                self.want_names(std::slice::from_ref(&note), cx);
+                self.want_parents(std::slice::from_ref(&note), cx);
             }
             FeedEvent::One(None, _) => self.status = "this note is gone or unreachable".into(),
             FeedEvent::Replies(replies, profiles) => {
@@ -142,6 +150,7 @@ impl ThreadView {
                 }
                 self.status.clear();
                 self.want_names(&replies, cx);
+                self.want_parents(&replies, cx);
             }
             FeedEvent::Profiles(profiles) => {
                 for p in profiles {
@@ -151,6 +160,23 @@ impl ThreadView {
             FeedEvent::Failed(e) => {
                 // §4.3: transient — a relay round trip; Retry re-asks.
                 self.error = Some(states::PaneError::transient("The thread", &e));
+            }
+            FeedEvent::Parents(p) => {
+                // Lazy parents landing (want_parents): the whisper upgrades
+                // from the generic line to author + snippet. The parent's
+                // author needs a name too — one ensure_profiles pump.
+                let mut missing: Vec<PublicKey> = Vec::new();
+                for (pid, note) in p {
+                    self.parents.insert(pid, note.clone());
+                    if !self.profiles.contains_key(&note.author)
+                        && let Ok(pk) = PublicKey::from_hex(&note.author)
+                    {
+                        missing.push(pk);
+                    }
+                }
+                if !missing.is_empty() {
+                    self.pump(self.core.ensure_profiles(missing), cx);
+                }
             }
             _ => {}
         }
@@ -186,6 +212,74 @@ impl ThreadView {
             .map(|p| p.display())
             .unwrap_or_else(|| format!("{}…", &key[..8]))
     }
+
+    /// Lazy parent hydration (webapp render/note.ts:216–219, the "↩ in
+    /// reply to an earlier note" line): a note whose DIRECT parent isn't in
+    /// the thread shows the whisper now and fetches the parent in the
+    /// background (load_parents: store first, one targeted indexer round
+    /// trip for the misses) instead of blocking the tree on it. The
+    /// asked-set keeps misses from re-requesting per render.
+    fn want_parents(&mut self, notes: &[Event], cx: &mut Context<Self>) {
+        let present: HashSet<String> = self
+            .replies
+            .iter()
+            .map(|(e, _)| e.id.to_string())
+            .chain(self.anchor.iter().map(|a| a.id.to_string()))
+            .collect();
+        let mut ids: Vec<String> = Vec::new();
+        for ev in notes {
+            if let Some(pid) = direct_parent_id(ev)
+                && !present.contains(&pid)
+                && !self.parents.contains_key(&pid)
+                && self.parents_asked.insert(pid.clone())
+            {
+                ids.push(pid);
+            }
+        }
+        if ids.is_empty() {
+            return;
+        }
+        let mut rx = self.core.load_parents(ids);
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| this.on_event(ev, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// The whisper text for an unloaded parent: the generic line until the
+    /// lazy fetch lands, then author + a one-line snippet (T_SMALL quiet,
+    /// ink_faint — context, not content).
+    fn parent_whisper(&self, pid: &str) -> String {
+        match self.parents.get(pid) {
+            Some(p) => {
+                let name = self
+                    .profiles
+                    .get(&p.author)
+                    .map(|pr| pr.display())
+                    .unwrap_or_else(|| format!("{}…", &p.author[..8]));
+                if p.snippet.is_empty() {
+                    format!("↩ in reply to {name}'s earlier note")
+                } else {
+                    format!("↩ in reply to {name}: {}", p.snippet)
+                }
+            }
+            None => "↩ in reply to an earlier note…".to_string(),
+        }
+    }
+}
+
+/// A note's direct parent id (NIP-10 marked-e reads right-to-left: the
+/// LAST e tag), when that isn't the note itself — the same rule
+/// nest_replies uses to place rows.
+fn direct_parent_id(ev: &Event) -> Option<String> {
+    ev.tags
+        .clone()
+        .event_ids()
+        .last()
+        .map(|id| id.to_string())
+        .filter(|pid| *pid != ev.id.to_string())
 }
 
 /// The NIP-10 tree, flattened pre-order with depths (thread.rs nest_replies).
@@ -236,6 +330,7 @@ fn reply_row(
     ev: &Event,
     depth: usize,
     name: String,
+    parent_whisper: Option<String>,
     media: &media::Snapshot,
     quotes: &content::Quotes,
     profiles: &HashMap<String, Profile>,
@@ -262,6 +357,14 @@ fn reply_row(
         .pl(px(indent))
         .pr_4()
         .py_3()
+        // The lazy-parent whisper (render/note.ts reply-context): "↩ in
+        // reply to an earlier note…" until the background fetch lands.
+        .children(parent_whisper.map(|w| {
+            div()
+                .text_size(px(theme::T_SMALL))
+                .text_color(theme::ink_faint())
+                .child(w)
+        }))
         .child(
             div()
                 .flex()
@@ -375,6 +478,26 @@ impl Render for ThreadView {
         let anchor = self.anchor.clone();
         let anchor_handle = handle.clone();
         let reply_all_handle = handle.clone();
+        // Lazy-parent whispers (want_parents): computed once per render —
+        // the generic line until the fetch lands, then author + snippet.
+        let present: HashSet<String> = replies
+            .iter()
+            .map(|(e, _)| e.id.to_string())
+            .chain(anchor.iter().map(|a| a.id.to_string()))
+            .collect();
+        let whispers: Vec<Option<String>> = replies
+            .iter()
+            .map(|(ev, _)| {
+                direct_parent_id(ev)
+                    .filter(|pid| !present.contains(pid))
+                    .map(|pid| self.parent_whisper(&pid))
+            })
+            .collect();
+        let anchor_whisper = anchor
+            .as_ref()
+            .and_then(direct_parent_id)
+            .filter(|pid| !present.contains(pid))
+            .map(|pid| self.parent_whisper(&pid));
 
         div()
             .flex_1()
@@ -424,6 +547,12 @@ impl Render for ThreadView {
                                                 .child(self.name_for(&note)),
                                         ),
                                 )
+                                .children(anchor_whisper.map(|w| {
+                                    div()
+                                        .text_size(px(theme::T_SMALL))
+                                        .text_color(theme::ink_faint())
+                                        .child(w)
+                                }))
                                 .child(content::body(
                                     &note,
                                     &content::Body {
@@ -535,6 +664,7 @@ impl Render for ThreadView {
                                         ev,
                                         *depth,
                                         name,
+                                        whispers.get(idx).cloned().flatten(),
                                         &media,
                                         &quotes,
                                         &profiles,

@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    div, prelude::*, px, rgb, App, Context, Div, Entity, FocusHandle, Focusable, KeyDownEvent,
-    Render, SharedString, Stateful, Window,
+    div, prelude::*, px, rgb, AnyElement, App, Context, Div, Entity, FocusHandle, Focusable,
+    KeyDownEvent, Render, SharedString, Stateful, Window,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, PublishEvent};
@@ -23,7 +23,7 @@ use gpui::EventEmitter;
 
 use crate::{input::Input, prefs, theme};
 
-use super::nav::Nav;
+use super::{nav::Nav, states};
 
 pub struct SettingsView {
     core: Arc<Core>,
@@ -120,6 +120,15 @@ impl SettingsView {
         view.pump_feed(core.fetch_media_servers(), cx);
         view.pump_me(cx);
         view.pump_wallet(cx);
+        // Relay health (D33/D36) refreshes on a slow poll: the latency
+        // profiles update as queries run, and this pane is the only reader.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(30)).await;
+                let _ = this.update(cx, |_this, cx| cx.notify());
+            }
+        })
+        .detach();
         // The pane is a projection — bootstrap may still be landing the
         // NIP-65 (settings.rs catch-up poll: 30 × 800ms).
         cx.spawn(async move |this, cx| {
@@ -594,8 +603,11 @@ fn group(title: &str, description: &str) -> Div {
         .gap_1()
         .p_4()
         .pt_3()
+        // The group's inner separator: hairline at FULL strength — this is
+        // a rule inside the pane's composed surface, not a panel border
+        // (theme::hairline_strong, 0.2 spec §1.1's two-stroke discipline).
         .border_b_1()
-        .border_color(rgb(theme::hairline()))
+        .border_color(rgb(theme::hairline_strong()))
         .child(
             div()
                 .text_size(px(theme::T_SMALL))
@@ -622,7 +634,7 @@ fn field(input: Entity<Input>, id: &str) -> impl IntoElement {
         .min_w_0()
         .h(px(30.))
         .px_2()
-        .rounded(px(theme::R_EMBED))
+        .rounded(px(theme::R_INPUT))
         .bg(rgb(theme::panel()))
         .border_1()
         .border_color(rgb(theme::hairline()))
@@ -651,6 +663,113 @@ fn muted(text: impl Into<String>) -> Div {
         .text_size(px(theme::T_SMALL))
         .text_color(rgb(theme::muted()))
         .child(text.into())
+}
+
+/// The relay-health group (WS4): surface what core already LEARNS about
+/// each relay (D33 latency EWMA + read-dead, D36 write-dead) as a passive
+/// pane — no probing, no edits; everyday queries did the measuring. All
+/// configured relays read-dead renders §4.4's degraded pill (a state, not
+/// an error — D26's split).
+fn relay_health_group(relays: &[RelayEntry]) -> Div {
+    use satori_core::relay_latency::RelayHealth;
+    let health: Vec<RelayHealth> = satori_core::manager::Core::relay_health();
+    let lookup =
+        |url: &str| health.iter().find(|h| h.url == url).cloned();
+    // Configured relays first, in list order; profiled-but-dropped ones
+    // (the LRU still remembers them) append, alphabetically for stable order.
+    let mut extras: Vec<RelayHealth> = health
+        .iter()
+        .filter(|h| !relays.iter().any(|r| r.url == h.url))
+        .cloned()
+        .collect();
+    extras.sort_by(|a, b| a.url.cmp(&b.url));
+
+    let degraded = !relays.is_empty()
+        && relays
+            .iter()
+            .all(|r| lookup(&r.url).is_some_and(|h| h.read_dead));
+
+    let stat_line = |h: &RelayHealth| {
+        if h.n == 0 {
+            "no samples yet".to_string()
+        } else {
+            format!("{} ms · {} queries", h.ms, h.n)
+        }
+    };
+
+    // Configured relays first, in list order; profiled-but-dropped ones
+    // (the LRU still remembers them) append, alphabetically for stability.
+    let mut rows: Vec<(String, Option<RelayHealth>)> = relays
+        .iter()
+        .map(|r| (r.url.clone(), lookup(&r.url)))
+        .collect();
+    rows.extend(extras.into_iter().map(|h| (h.url.clone(), Some(h))));
+
+    let rows_el: Vec<AnyElement> = rows
+        .into_iter()
+        .map(|(url, h)| {
+            let mut row = div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_2()
+                .py_0p5()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(theme::T_UI))
+                        .text_color(rgb(theme::ink()))
+                        .child(url),
+                );
+            if let Some(h) = h {
+                if h.read_dead {
+                    row = row.child(
+                        div()
+                            .text_size(px(theme::T_SMALL))
+                            .text_color(rgb(theme::err()))
+                            .child("read-dead"),
+                    );
+                }
+                if h.write_dead {
+                    row = row.child(
+                        div()
+                            .text_size(px(theme::T_SMALL))
+                            .text_color(rgb(theme::warn()))
+                            .child("write-dead"),
+                    );
+                }
+                row = row.child(
+                    div()
+                        .text_size(px(theme::T_SMALL))
+                        .text_color(rgb(theme::muted()))
+                        .child(stat_line(&h)),
+                );
+            }
+            row.into_any_element()
+        })
+        .collect();
+
+    group(
+        "Relay health",
+        "What everyday queries have learned about each relay — response \
+         times, and relays that stopped answering reads or writes.",
+    )
+    .when(degraded, |d| {
+        d.child(
+            div().py_1().child(states::offline_pill(
+                "the relays didn't answer — reading is degraded",
+            )),
+        )
+    })
+    .child(
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .children(rows_el),
+    )
 }
 
 impl EventEmitter<Nav> for SettingsView {}
@@ -1142,6 +1261,8 @@ impl Render for SettingsView {
                         ),
                 ),
             )
+            // --- Relay health (D33/D36 learned state, WS1's last item) ------
+            .child(relay_health_group(&relays))
             // --- Backup: the signed list events ------------------------------
             .child(
                 group(

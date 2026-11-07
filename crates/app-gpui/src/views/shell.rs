@@ -30,6 +30,7 @@ use super::{
     reader::ArticleView,
     search::SearchView,
     settings::SettingsView,
+    states,
     thread::ThreadView,
     wallet::WalletView,
     zap::ZapSheet,
@@ -98,6 +99,10 @@ pub struct Shell {
     /// Bell dot: anything newer than the read-state high-water? Polled every
     /// 90s like the GTK shell (poll_notif); cleared when the pane opens.
     notif_unread: bool,
+    /// D36's honesty state (research §3.4): pending outbox items — notes
+    /// signed and saved but not yet ACKed by any relay. A quiet pill, not
+    /// an error (D26's split); the drainer owns the retries.
+    outbox_pending: usize,
     stack: Vec<Pane>,
     /// The signed-in identity: the rail's top mark is the user's avatar
     /// (replacing the ensō as the home glyph).
@@ -146,6 +151,7 @@ impl Shell {
             video_overlay: None,
             hold: None,
             notif_unread: false,
+            outbox_pending: 0,
             stack: vec![],
             me: None,
             me_profile: None,
@@ -159,6 +165,7 @@ impl Shell {
             .and_then(|hex| PublicKey::from_str(&hex).ok());
         shell.want_avatar(cx);
         shell.watch_notif(cx);
+        shell.outbox_pending = Core::outbox_pending();
         shell
     }
 
@@ -390,6 +397,18 @@ impl Shell {
             }
         })
         .detach();
+        // The outbox count's slow poll: the drainer's backoff retries and
+        // restart-time queue loads land between publish events — 30s keeps
+        // the honesty pill from sticking after a silent drain.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(30))
+                    .await;
+                let _ = this.update(cx, |shell, cx| shell.check_outbox(cx));
+            }
+        })
+        .detach();
         // Push: any reply/mention tagging me lights the bell at once.
         let mut live_rx = self.core.subscribe_live();
         cx.spawn(async move |this, cx| {
@@ -468,7 +487,7 @@ impl Shell {
                     Ok(PublishEvent::Committed { .. }) => {
                         let _ = this.update(cx, |shell, cx| {
                             shell.hold = None;
-                            cx.notify();
+                            shell.check_outbox(cx);
                         });
                     }
                     Ok(PublishEvent::Undone { .. }) => {
@@ -506,7 +525,8 @@ impl Shell {
                                     })
                                 }
                             }
-                            cx.notify();
+                            // Zero-accept publishes keep their outbox item.
+                            shell.check_outbox(cx);
                         });
                     }
                     Ok(_) => {}
@@ -536,6 +556,28 @@ impl Shell {
             }
         })
         .detach();
+    }
+
+    /// The outbox honesty count (D36): re-read on every publish event and
+    /// on a slow poll (the drainer's retries land between events).
+    fn check_outbox(&mut self, cx: &mut Context<Self>) {
+        let n = Core::outbox_pending();
+        if n != self.outbox_pending {
+            self.outbox_pending = n;
+            cx.notify();
+        }
+    }
+
+    /// j/k feed navigation (the shell's key handler): the active feed pane
+    /// moves its row cursor one note down/up. Quiet — the list scrolls,
+    /// nothing else changes.
+    fn feed_nav(&mut self, delta: isize, cx: &mut Context<Self>) {
+        match self.stack.last().cloned() {
+            Some(Pane::Feed(view)) | Some(Pane::Articles(view)) | Some(Pane::Hashtag(view)) => {
+                view.update(cx, |feed, _| feed.key_nav(delta));
+            }
+            _ => {}
+        }
     }
 
     /// The lightbox: show `urls[idx]` full-screen (lightbox.rs open). Every
@@ -1058,7 +1100,7 @@ impl Render for Shell {
                     cx.notify();
                     return;
                 }
-                // TODO(port): crates/app/src/main.rs escape-to-back — P1.
+                // Ported: crates/app/src/main.rs escape-to-back — P1.
                 if ev.keystroke.key == "escape" {
                     shell.back(cx);
                     return;
@@ -1085,10 +1127,20 @@ impl Render for Shell {
                     if ev.keystroke.key == "u" {
                         shell.open_notifications(cx);
                     }
-                    // TODO(port): crates/app/src/main.rs — "/" opens search
+                    // Ported: crates/app/src/main.rs — "/" opens search
                     // (app.goto-search accel).
                     if ev.keystroke.key == "/" {
                         shell.open_search(cx);
+                    }
+                    // j/k: one note down/up in the active feed (the list
+                    // model makes it a scroll_to — nothing fancy, §1.3
+                    // quiet-by-default; the cursor rides the scroll stream,
+                    // so a mouse scroll re-anchors it).
+                    if ev.keystroke.key == "j" {
+                        shell.feed_nav(1, cx);
+                    }
+                    if ev.keystroke.key == "k" {
+                        shell.feed_nav(-1, cx);
                     }
                     if ev.keystroke.key == "a" {
                         shell.open_articles(cx);
@@ -1128,6 +1180,17 @@ impl Render for Shell {
                     // title row: all begin 16px down).
                     .pt(px(16.0))
                     .when(depth > 1, |d| d.child(self.title_row(cx)))
+                    // The reading column's top band is the pane's, but the
+                    // outbox honesty pill (D26: a state, not an error; §4.4)
+                    // floats over any pane — queued notes are the SHELL's
+                    // news, whatever you're reading.
+                    .when(self.outbox_pending > 0, |d| {
+                        let n = self.outbox_pending;
+                        d.child(states::offline_pill(&format!(
+                            "{n} note{} queued for delivery — the relays will answer",
+                            if n == 1 { "" } else { "s" }
+                        )))
+                    })
                     .child(match pane {
                         Pane::Feed(view) => view.clone().into_any_element(),
                         Pane::Articles(view) => view.clone().into_any_element(),

@@ -11,7 +11,7 @@ use std::ops::Range;
 use gpui::{
     actions, div, fill, hsla, prelude::*, px, relative, rgb, size, App, Bounds, ClipboardItem,
     Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    FocusHandle, Focusable, GlobalElementId, KeyBinding, KeyDownEvent, MouseButton,
+    FocusHandle, Focusable, Global, GlobalElementId, KeyBinding, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpPoint, Render,
     SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, WrappedLine,
 };
@@ -102,6 +102,30 @@ pub struct Input {
     /// render runs on the loop's own notify, so this catches within a tick).
     blink_epoch: u64,
     caret_on: bool,
+    /// WS4 nsec tripwire (D17): when on, a paste that looks like a private
+    /// key (nsec1…/ncryptsec1…) is INTERCEPTED — nothing is inserted, the
+    /// value is never logged — and the shared [`NsecWarn`] global lights a
+    /// dismissible strip in the hosting pane. Off for fields that
+    /// legitimately take a key (the login door).
+    pub tripwire: bool,
+    /// The composer's `:`-emoji typeahead owns Enter while its strip is
+    /// open (it inserts the shortcode); this field must not add a newline
+    /// under it. The composer sets it from detect_emoji every frame.
+    pub suppress_newline: bool,
+}
+
+/// The tripwire's shared alert (true = show the strip). A bool global, not
+/// per-entity state: the paste happens inside the Input entity, the strip
+/// renders in the pane around it. Carries NO pasted value — the key never
+/// leaves the clipboard un-inspected, and nothing logs it.
+pub struct NsecWarn(pub bool);
+impl Global for NsecWarn {}
+
+/// Looks like a bech32 private key (NIP-06 nsec / NIP-49 ncryptsec)? The
+/// prefix is the tell; no parsing, no logging of the value.
+fn looks_like_nsec(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with("nsec1") || t.starts_with("ncryptsec1")
 }
 
 /// The classic caret duty cycle.
@@ -123,6 +147,8 @@ impl Input {
             scroll_x: px(0.),
             blink_epoch: 0,
             caret_on: true,
+            tripwire: false,
+            suppress_newline: false,
         }
     }
 
@@ -194,6 +220,15 @@ impl Input {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            // D17 tripwire: a key pasted into a non-secret field is the
+            // accident that ends accounts. Intercept, warn, insert NOTHING,
+            // log NOTHING (not even a prefix — the value stays in the
+            // clipboard where the user put it).
+            if self.tripwire && looks_like_nsec(&text) {
+                cx.update_global::<NsecWarn, _>(|w, _| w.0 = true);
+                cx.notify();
+                return;
+            }
             let text = if self.multiline { text } else { text.replace('\n', " ") };
             self.replace_text_in_range(None, &text, window, cx);
         }
@@ -221,7 +256,11 @@ impl Input {
         if self.marked_range.is_some() {
             return;
         }
-        if ev.keystroke.key == "enter" && self.multiline && !ev.keystroke.modifiers.platform {
+        if ev.keystroke.key == "enter"
+            && self.multiline
+            && !ev.keystroke.modifiers.platform
+            && !self.suppress_newline
+        {
             self.insert("\n", cx);
         }
     }

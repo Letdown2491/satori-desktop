@@ -113,6 +113,8 @@ pub struct Feed {
     /// re-reads this field for the ACTIVE pane at render, so it must be
     /// visible across views' modules.
     pub(crate) deep: bool,
+    /// j/k's row cursor (key_nav); the scroll handler re-anchors it.
+    cursor: usize,
     list: ListState,
 }
 
@@ -196,6 +198,9 @@ impl Feed {
             mode,
             note_ids: HashSet::new(),
             last_visible_end: 0,
+            // j/k's row cursor (feed.rs key_nav) — re-anchored by every
+            // scroll event, so mouse and keys never disagree for long.
+            cursor: 0,
             deep: false,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
@@ -206,6 +211,9 @@ impl Feed {
         feed.list.set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
             let _ = this.update(cx, |feed, cx| {
                 feed.last_visible_end = ev.visible_range.end;
+                // j/k's cursor rides the scroll stream: keys move it one
+                // row, the wheel re-anchors it to the top visible row.
+                feed.cursor = ev.visible_range.start;
                 // Deep-scroll whisper: the shell floats a back-to-top button
                 // once the reader is a few items down — a dozen was too
                 // deep (the owner kept scrolling before thinking "where is
@@ -307,8 +315,25 @@ impl Feed {
     pub fn scroll_top(&mut self) {
         self.last_visible_end = 0;
         self.deep = false;
+        self.cursor = 0;
         self.list.scroll_to(ListOffset {
             item_ix: 0,
+            offset_in_item: px(0.),
+        });
+    }
+
+    /// j/k (the shell's key handler): move the row cursor one note and
+    /// scroll it into view. The cursor rides the scroll stream — a wheel
+    /// scroll re-anchors it — so this is a nudge, not a selection model.
+    pub fn key_nav(&mut self, delta: isize) {
+        let len = self.notes.len();
+        if len == 0 {
+            return;
+        }
+        let next = (self.cursor as isize + delta).clamp(0, len as isize - 1) as usize;
+        self.cursor = next;
+        self.list.scroll_to(ListOffset {
+            item_ix: next,
             offset_in_item: px(0.),
         });
     }

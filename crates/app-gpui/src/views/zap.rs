@@ -49,6 +49,8 @@ impl EventEmitter<Nav> for ZapSheet {}
 impl ZapSheet {
     pub fn new(core: Arc<Core>, note: Event, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx);
+        cx.observe_global::<crate::input::NsecWarn>(|_, cx| cx.notify())
+            .detach();
         // The ledger is the seed bed: recent amounts, newest first,
         // deduped (the picker grows around the user's habits).
         let mut seen = std::collections::HashSet::new();
@@ -63,6 +65,8 @@ impl ZapSheet {
             custom: cx.new(|cx| {
                 let mut i = Input::new(cx);
                 i.multiline = false;
+                // D17 tripwire: no reason a private key ever lands here.
+                i.tripwire = true;
                 i.placeholder("custom — sats")
             }),
             sel: Some(TAP_SATS),
@@ -266,6 +270,45 @@ impl Render for ZapSheet {
                     ),
             )
             .child(muted_status(status, status_err))
+            .when(
+                cx.try_global::<crate::input::NsecWarn>()
+                    .is_some_and(|w| w.0),
+                |d| {
+                    d.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded(px(theme::R_EMBED))
+                            .border_1()
+                            .border_color(rgb(theme::err()))
+                            .px_3()
+                            .py_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(theme::T_SMALL))
+                                    .text_color(rgb(theme::err()))
+                                    .child(
+                                        "That looks like a private key (nsec…). Nothing was inserted — a key has no business in a zap sheet.",
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("zap-nsec-dismiss")
+                                    .cursor_pointer()
+                                    .text_size(px(theme::T_SMALL))
+                                    .text_color(rgb(theme::muted()))
+                                    .hover(|s| s.text_color(rgb(theme::ink())))
+                                    .on_click(|_, _, cx| {
+                                        cx.set_global(crate::input::NsecWarn(false))
+                                    })
+                                    .child("×"),
+                            ),
+                    )
+                },
+            )
     }
 }
 

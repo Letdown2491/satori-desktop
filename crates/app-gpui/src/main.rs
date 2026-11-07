@@ -4,6 +4,7 @@
 //! NOTE: shares the LMDB store with the GTK app — run one at a time until P4.
 
 mod desktop;
+mod emoji;
 mod icons;
 mod input;
 mod media;
@@ -210,6 +211,9 @@ fn main() {
         // Shared decoded-image cache (media.rs) — avatars, tiles and the
         // lightbox all key off it.
         cx.default_global::<media::Cache>();
+        // The nsec tripwire's shared alert (input.rs): off until a paste
+        // in a tripwired field finds a key.
+        cx.set_global(input::NsecWarn(false));
         // The desktop's appearance (portal): the system scheme the `dark:
         // None` pref follows, and the reduced-motion flag the login
         // screen's breathing ensō honors. One blocking round trip, before
