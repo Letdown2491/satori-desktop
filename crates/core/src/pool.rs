@@ -62,16 +62,30 @@ const CEILING_BUDGET: Duration = Duration::from_secs(8);
 /// expired copies (NIP-40) and author-deleted ones (NIP-09) — out of the
 /// results. Two passes, so a deletion takes effect even on the result
 /// set that carried it, regardless of arrival order within it.
-fn consume_and_filter(events: impl IntoIterator<Item = Event>) -> BTreeSet<Event> {
+fn consume_and_filter(events: impl IntoIterator<Item = Event>, relay: &str) -> BTreeSet<Event> {
     let all: Vec<Event> = events.into_iter().collect();
     for e in &all {
         if u16::from(e.kind) == 5 {
             deletions::record(e, false);
         }
+        // WoT graph feed (issue #2 WS1): kind-3 contact lists flowing
+        // through ANY read apply to the two-hop graph incrementally
+        // (Amethyst applyKind3 discipline — wot.rs ignores non-follows).
+        if u16::from(e.kind) == 3 {
+            crate::wot::observe(e);
+        }
     }
     all.into_iter()
         .filter(|e| {
-            u16::from(e.kind) != 5 && !nip40::is_expired(e) && !deletions::is_deleted(e)
+            u16::from(e.kind) != 5
+                && !nip40::is_expired(e)
+                && !deletions::is_deleted(e)
+                // Duplicate-content gate (issue #2 WS2, Amethyst
+                // AntiSpamFilter.kt): 5+ duplicates → the author's
+                // events stop coming through. Relay attribution rides
+                // the shard the events arrived on ("" for client-level
+                // fetches, where the relay is not single).
+                && !crate::dedup::observe(e, relay)
         })
         .collect()
 }
@@ -94,6 +108,35 @@ fn hint_seeded_lists(
             if !seeded.is_empty() {
                 lists.insert(key, RelayList { write: seeded, read: Vec::new() });
             }
+        }
+    }
+    lists
+}
+
+/// WS1 (issue #2): the extended-network fallback tier. An author with
+/// NEITHER a kind:10002 NOR learned hints (D39) still routes somewhere
+/// useful if they're in the qualified two-hop network: the greedy
+/// relay cover of that network (wot.rs, dark-wisp computeRelaySetCover)
+/// — the relays that collectively carry everyone your follows follow.
+/// Precedence chain (unchanged for listed authors): kind:10002 →
+/// D39 hints → extended-network cover (this tier) → indexers.
+fn extended_cover_seeded(
+    mut lists: HashMap<String, RelayList>,
+    authors: &[PublicKey],
+) -> HashMap<String, RelayList> {
+    let cover = crate::wot::extended_relays();
+    if cover.is_empty() {
+        return lists;
+    }
+    for pk in authors {
+        let key = pk.to_string();
+        if lists.get(&key).is_none_or(RelayList::is_empty)
+            && crate::wot::is_qualified(pk)
+        {
+            lists.insert(
+                key,
+                RelayList { write: cover.clone(), read: Vec::new() },
+            );
         }
     }
     lists
@@ -338,7 +381,8 @@ impl Pool {
             .fetch_events(filter)
             .timeout(READ_BUDGET)
             .await
-            .map(consume_and_filter)
+            // Client-level fetch: no single relay to attribute to.
+            .map(|events| consume_and_filter(events, ""))
     }
 
     /// Own contact list: fresh from relays, cached into the store.
@@ -520,7 +564,7 @@ impl Pool {
                 // subscribe_routed seed their route from these).
                 hints::observe(ev, url.as_str());
             }
-            merged.extend(consume_and_filter(events));
+            merged.extend(consume_and_filter(events, url.as_str()));
         }
         merged
     }
@@ -574,7 +618,7 @@ impl Pool {
                 // Same hint feed as fetch_route (WS1).
                 hints::observe(ev, url.as_str());
             }
-            merged.extend(consume_and_filter(events));
+            merged.extend(consume_and_filter(events, url.as_str()));
         }
         merged
     }
@@ -596,7 +640,7 @@ impl Pool {
             return Default::default();
         }
         let keys: Vec<String> = authors.iter().map(|p| p.to_string()).collect();
-        let lists = hint_seeded_lists(self.relay_lists(authors).await, authors);
+        let lists = extended_cover_seeded(hint_seeded_lists(self.relay_lists(authors).await, authors), authors);
         let fallback: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
         // relay_score = the learned quality profile (relay-latency.ts
         // relayQuality): known-empty relays deprioritized (0.15), never
@@ -620,7 +664,7 @@ impl Pool {
             return Err(SdkError::other("no authors to subscribe"));
         }
         let keys: Vec<String> = authors.iter().map(|p| p.to_string()).collect();
-        let lists = hint_seeded_lists(self.relay_lists(authors).await, authors);
+        let lists = extended_cover_seeded(hint_seeded_lists(self.relay_lists(authors).await, authors), authors);
         let fallback: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
         // Same learned quality as get_routed.
         let route = outbox::route(&lists, &keys, &fallback, relay_latency::quality);

@@ -13,6 +13,7 @@
 
 pub mod blocktime;
 pub mod config;
+pub mod dedup;
 pub mod deletions;
 pub mod diag;
 pub mod error;
@@ -46,6 +47,7 @@ pub mod store;
 pub mod tor;
 pub mod upload;
 pub mod wallet;
+pub mod wot;
 
 #[cfg(test)]
 pub(crate) mod test_env {

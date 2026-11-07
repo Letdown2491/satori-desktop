@@ -107,6 +107,65 @@ pub enum FeedEvent {
 
 pub type FeedRx = mpsc::UnboundedReceiver<FeedEvent>;
 
+// --- Notification tier + receipts (issue #2 WS4) --------------------------------
+
+/// One notification the WoT tier suppressed — a receipt, never a silent
+/// void: the bell's "N hidden — see why" surface lists these with the
+/// verdict and reason, and a per-item "show anyway" exemption.
+#[derive(Debug, Clone)]
+pub struct SuppressedNotif {
+    /// The suppressed event itself (the surface renders author + action).
+    pub event: Event,
+    /// The verdict that gated it ("outside your network").
+    pub reason: String,
+}
+
+static SUPPRESSED: Mutex<Vec<SuppressedNotif>> = Mutex::new(Vec::new());
+/// One-session "show anyway" exemptions (pubkey hex): the user chose to
+/// see an author's suppressed notifications — the tier stops gating them
+/// until sign-out. NOT a pref (the posture: the exemption is a conscious
+/// per-session act, visible in the receipts it empties).
+static NOTIF_EXEMPT: std::sync::LazyLock<Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// The notification tier's pref (`notif_wot_tier` in prefs.json, default
+/// ON per the issue posture: the only auto-actions live in notifications,
+/// and they leave receipts).
+fn notif_tier_enabled() -> bool {
+    crate::config::prefs()
+        .and_then(|v| v.get("notif_wot_tier").and_then(|b| b.as_bool()))
+        .unwrap_or(true)
+}
+
+/// Apply the tier to one page: reactions/reposts (kinds 6/7 — engagement
+/// noise, not speech) from authors the graph KNOWS are NotInNetwork are
+/// pulled out as receipts. Replies/mentions/zaps pass; Unknown authors
+/// pass (never punish the graph not knowing); exempted authors pass.
+fn split_wot_tier(notifs: Vec<Event>) -> (Vec<Event>, Vec<SuppressedNotif>) {
+    let mut kept = Vec::new();
+    let mut suppressed = Vec::new();
+    for ev in notifs {
+        let engagement = matches!(u16::from(ev.kind), 6 | 7);
+        let gated = engagement
+            && notif_tier_enabled()
+            && !NOTIF_EXEMPT
+                .lock()
+                .unwrap()
+                .contains(&ev.pubkey.to_string())
+            && crate::wot::verdict(&ev.pubkey) == crate::wot::Verdict::NotInNetwork;
+        if gated {
+            suppressed.push(SuppressedNotif {
+                reason: "outside your network".to_string(),
+                event: ev,
+            });
+        } else {
+            kept.push(ev);
+        }
+    }
+    (kept, suppressed)
+}
+
+
 /// What the write path reports back.
 #[derive(Debug, Clone)]
 pub enum PublishEvent {
@@ -669,6 +728,13 @@ impl Core {
         self.own_drafts.lock().unwrap().clear();
         self.own_zapped.lock().unwrap().clear();
         self.muted.lock().unwrap().clear();
+        // The WoT graph + dedup exemptions are per-session identity
+        // state: disarm so verdicts read Unknown until the next login.
+        // The bell's receipts + one-session exemptions go with them.
+        crate::wot::clear_identity();
+        crate::dedup::clear();
+        SUPPRESSED.lock().unwrap().clear();
+        NOTIF_EXEMPT.lock().unwrap().clear();
         // The profile mirror is display state for the logged-in session's
         // reading; a next login re-hydrates it from its own feed pages.
         self.profiles_mem.lock().unwrap().clear();
@@ -755,6 +821,64 @@ impl Core {
         eprintln!("[core] logout");
     }
 
+    /// Rebuild the two-hop WoT graph from the store's cached kind-3
+    /// contact lists of the follows, then compute the extended-network
+    /// relay cover from the qualified set's kind-10002s (issue #2 WS1;
+    /// dark-wisp ExtendedNetworkRepository's qualification + greedy
+    /// `computeRelaySetCover`). In-memory projection of the LMDB store
+    /// — disposable, nothing persisted.
+    async fn rebuild_wot_graph(&self, active: &Active, follows: &[PublicKey]) {
+        let start = std::time::Instant::now();
+        let sources = active
+            .pool
+            .store
+            .contact_lists(follows)
+            .await
+            .unwrap_or_default();
+        for ev in &sources {
+            crate::wot::observe(ev);
+        }
+        let qualified = crate::wot::qualified();
+        let cover = if qualified.is_empty() {
+            Vec::new()
+        } else {
+            let lists = active
+                .pool
+                .store
+                .relay_lists(&qualified)
+                .await
+                .unwrap_or_default();
+            let mut parsed: HashMap<String, Vec<String>> = HashMap::new();
+            for ev in lists {
+                let urls: Vec<String> = crate::outbox::parse_relay_list(&ev)
+                    .read
+                    .into_iter()
+                    .filter(|u| crate::outbox::routable_relay(u))
+                    .collect();
+                if !urls.is_empty() {
+                    parsed.insert(ev.pubkey.to_string(), urls);
+                }
+            }
+            let authors: Vec<String> =
+                qualified.iter().map(|p| p.to_string()).collect();
+            crate::wot::relay_cover(
+                &parsed,
+                &authors,
+                crate::wot::MAX_EXTENDED_RELAYS,
+                crate::wot::MAX_AUTHORS_PER_RELAY,
+            )
+        };
+        crate::wot::set_cover(cover);
+        crate::wot::note_rebuilt();
+        eprintln!(
+            "[core] wot: {} source list(s), {} qualified, {} cover relay(s) ({:?})",
+            sources.len(),
+            crate::wot::qualified().len(),
+            crate::wot::extended_relays().len(),
+            start.elapsed()
+        );
+    }
+
     /// Follow-state lookup for profile pages (from the cached contact list).
     pub fn is_following(&self, who: &PublicKey) -> bool {
         self.active
@@ -765,14 +889,62 @@ impl Core {
             .unwrap_or(false)
     }
 
+    /// Trust verdict for an author (issue #2 WS1): the shared
+    /// vocabulary every gate consumes — see `wot::Verdict`. UNKNOWN
+    /// means the graph can't say yet, never "outside".
+    pub fn verdict(&self, who: &PublicKey) -> crate::wot::Verdict {
+        crate::wot::verdict(who)
+    }
+
+    /// Shared-follows count for the trust badge ("N shared follows").
+    pub fn shared_follows(&self, who: &PublicKey) -> usize {
+        crate::wot::shared_follows(who)
+    }
+
+    /// The WoT graph's honest status for the settings surface (graph size,
+    /// qualified set, last rebuild, staleness state).
+    pub fn wot_status(&self) -> crate::wot::WotStatus {
+        crate::wot::status()
+    }
+
+    /// The bell's receipts: notifications the WoT tier suppressed this
+    /// session (the "N hidden — see why" surface). Empty when the tier is
+    /// off or nothing was gated — never a silent void.
+    pub fn suppressed_notifications(&self) -> Vec<SuppressedNotif> {
+        SUPPRESSED.lock().unwrap().clone()
+    }
+
+    /// The receipts' per-item "show anyway": a ONE-SESSION exemption for
+    /// this author — the tier stops gating them until sign-out (session
+    /// teardown clears the set). The caller re-opens the notifications
+    /// stream; the exempted items then pass the gate.
+    pub fn show_suppressed_author(&self, pubkey_hex: &str) {
+        NOTIF_EXEMPT
+            .lock()
+            .unwrap()
+            .insert(pubkey_hex.to_string());
+    }
+
+    /// Caught spammers with per-relay attribution (issue #2 WS2
+    /// receipts; the settings surface lands with the UI phase).
+    pub fn spam_report(&self) -> Vec<crate::dedup::SpamRecord> {
+        crate::dedup::snapshot()
+    }
+
+    /// The SpammingUsers surface's un-hide: clear one author's spammer
+    /// record so their events store again (dedup::unhide — the threshold
+    /// re-arms on a fresh duplicate streak).
+    pub fn unhide_spammer(&self, pubkey_hex: &str) {
+        crate::dedup::unhide(pubkey_hex);
+    }
+
     pub fn is_muted(&self, who: &PublicKey) -> bool {
         self.muted.lock().unwrap().contains(&who.to_string())
     }
 
     /// Engagement lookups for card rendering (pure set membership, render is a
     /// projection — DESIGN.md §1.2).
-    pub fn is_liked(&self, event_id: &EventId) -> bool {
-        self.own_liked.lock().unwrap().contains(&event_id.to_string())
+    pub fn is_liked(&self, event_id: &EventId) -> bool {        self.own_liked.lock().unwrap().contains(&event_id.to_string())
     }
 
     /// The engagement sets, for a view's session snapshot (feed.rs seeds its
@@ -1867,6 +2039,14 @@ impl Core {
         }
         // The phase (or its store pickup) left active.follows authoritative.
         let follows = active.follows.clone();
+        // Trust graph (issue #2 WS1): arm the WoT vocabulary + dedup
+        // exemptions for this session, then rebuild the two-hop graph
+        // from the store's cached kind-3s (an in-memory projection —
+        // new kind-3s apply incrementally at the chokepoint/live bell).
+        crate::wot::set_identity(me, &follows);
+        crate::wot::set_muted(self.muted.lock().unwrap().clone());
+        crate::dedup::set_exemptions(me, &follows);
+        self.rebuild_wot_graph(&active, &follows).await;
         self.start_live(kinds.clone()).await;
 
         // Profiles + engagement + deep fetch: parallel, none block paint.
@@ -2162,6 +2342,10 @@ impl Core {
             for pk in ev.tags.clone().public_keys() {
                 m.insert(pk.to_string());
             }
+            drop(m);
+            // The WoT graph consults mutes at qualification time
+            // (dark-wisp filters muted/blocked out) — push the set.
+            crate::wot::set_muted(self.muted.lock().unwrap().clone());
         }
     }
 
@@ -2607,6 +2791,13 @@ impl Core {
                     let muted = this.muted.lock().unwrap();
                     cached.retain(|ev| !muted.contains(&ev.pubkey.to_string()));
                 }
+                // The WoT tier (WS4): out-of-network reactions/reposts come
+                // out as receipts — the cached phase's list rides the same
+                // gates the relay phase wears (the phase-equality rule
+                // above). The final union re-splits; the receipts store
+                // holds the union.
+                let (kept, mut cached_suppressed) = split_wot_tier(cached);
+                cached = kept;
                 {
                     let authors: Vec<PublicKey> = cached.iter().map(|e| e.pubkey).collect();
                     let profiles = active
@@ -2712,6 +2903,16 @@ impl Core {
                     })
                     .collect();
                 notifs.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
+
+                // The tier on the final union, then the receipts store
+                // becomes the union of both phases' pulls (deduped by id) —
+                // the bell's "N hidden" reads exactly this.
+                let (kept, mut suppressed) = split_wot_tier(notifs);
+                cached_suppressed.append(&mut suppressed);
+                let mut seen_sup = HashSet::new();
+                cached_suppressed.retain(|s| seen_sup.insert(s.event.id));
+                *SUPPRESSED.lock().unwrap() = cached_suppressed;
+                let notifs = kept;
 
                 let authors: Vec<PublicKey> = notifs.iter().map(|e| e.pubkey).collect();
                 let cached = active
@@ -5169,6 +5370,8 @@ impl Core {
                 let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(10000), [], content);
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;
+                // Keep the WoT qualification's mute screen in step.
+                crate::wot::set_muted(this.muted.lock().unwrap().clone());
                 Ok(())
             }
             .await;
@@ -5620,6 +5823,18 @@ impl Core {
                     continue;
                 }
                 if nip40::is_expired(&event) || deletions::is_deleted(&event) {
+                    continue;
+                }
+                // WoT graph feed (issue #2 WS1): live contact lists
+                // apply to the two-hop graph incrementally.
+                if u16::from(event.kind) == 3 {
+                    crate::wot::observe(&event);
+                }
+                // Duplicate-content gate (issue #2 WS2, AntiSpamFilter
+                // .kt): a hidden spammer's events never ping the bell
+                // (the SDK has already persisted them — the gate keeps
+                // them out of every view; the record rides with it).
+                if crate::dedup::observe(&event, relay_url.as_str()) {
                     continue;
                 }
                 let sig = if event.tags.clone().public_keys().any(|pk| pk == me) {

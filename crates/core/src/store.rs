@@ -243,6 +243,21 @@ impl Store {
         Ok(out)
     }
 
+    /// Contact lists (kind 3) for a set of authors, newest per author —
+    /// the WoT graph's source data (wot.rs rebuilds from these at
+    /// bootstrap; same per-author cursor quirk as `relay_lists`).
+    pub async fn contact_lists(&self, authors: &[PublicKey]) -> NostrResult<Vec<Event>> {
+        let mut out = Vec::new();
+        for chunk in authors.chunks(200) {
+            let filter = Filter::new()
+                .kind(Kind::ContactList)
+                .authors(chunk.to_vec())
+                .limit(1);
+            out.extend(self.query(filter).await?);
+        }
+        Ok(out)
+    }
+
     /// Latest event of one kind by one author (contact list, relay list, ...).
     pub async fn latest_by_kind(
         &self,
