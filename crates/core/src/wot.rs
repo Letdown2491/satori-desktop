@@ -86,6 +86,12 @@ pub const MAX_EXTENDED_RELAYS: usize = 100;
 /// Per-relay author-coverage cap in the greedy pick (dark-wisp
 /// `MAX_AUTHORS_PER_RELAY = 300`).
 pub const MAX_AUTHORS_PER_RELAY: usize = 300;
+/// Bootstrap source-fetch ceiling (satori D24): at graph-rebuild time the
+/// manager proactively fetches the follows' kind-3 contact lists the store
+/// is missing or finds stale — at most this many per rebuild pass, one pass
+/// per launch (no retry loop; the next bootstrap retries what it missed).
+/// Two outbox shards of [`crate::outbox::MAX_AUTHORS_PER_FILTER`] each.
+pub const MAX_FETCH_TARGETS: usize = 400;
 
 /// The single trust vocabulary every gate consumes (issue #2 WS1).
 ///
@@ -328,6 +334,36 @@ pub fn observe(ev: &Event) {
             insert_target(&mut g, &t.to_string(), &follower, MAX_TRACKED_TARGETS);
         }
     }
+}
+
+/// Which of the user's follows need their kind-3 contact list FETCHED at
+/// the bootstrap rebuild: the store holds no cached list for them, or the
+/// cached one is older than [`STALE_SECS`] (a fresh list is never
+/// re-fetched). Capped at `cap` (the D24 ceiling), first come first
+/// served in follows order — deterministic, so one pass per launch is a
+/// bounded, honest shortfall. Pure; the manager feeds it the store's
+/// cached kind-3s.
+pub fn fetch_targets(
+    follows: &[PublicKey],
+    cached: &[Event],
+    now: u64,
+    cap: usize,
+) -> Vec<PublicKey> {
+    let latest: HashMap<String, u64> = cached
+        .iter()
+        .filter(|e| u16::from(e.kind) == 3)
+        .map(|e| (e.pubkey.to_string(), e.created_at.as_secs()))
+        .collect();
+    follows
+        .iter()
+        .filter(|f| {
+            latest
+                .get(&f.to_string())
+                .is_none_or(|t| now.saturating_sub(*t) > STALE_SECS)
+        })
+        .take(cap)
+        .copied()
+        .collect()
 }
 
 /// The verdict for an author (the badge, the notification tier, the
@@ -696,6 +732,51 @@ mod tests {
         let cover = relay_cover(&mega, &authors, 10, 2);
         assert_eq!(cover.len(), 2);
         assert!(cover.contains(&"wss://tight".to_string()));
+    }
+
+    /// Bootstrap source-fetch selection: a missing list is fetched, a
+    /// STALE one is re-fetched, a FRESH one is never re-fetched; the
+    /// D24 cap (MAX_FETCH_TARGETS) truncates deterministically in
+    /// follows order, and the whole fetch set chunks under the outbox
+    /// author ceiling (D39, two shards of 200).
+    #[test]
+    fn fetch_targets_selection_and_cap() {
+        let follows = ids(4);
+        let cached = vec![
+            kind3(&follows[0], &[&Keys::generate()], now()), // fresh — skip
+            kind3(
+                &follows[1],
+                &[&Keys::generate()],
+                now() - STALE_SECS - 60,
+            ), // stale — fetch
+            // follows[2] has NO cached list — fetch.
+            kind3(
+                &follows[3],
+                &[&Keys::generate()],
+                now() - STALE_SECS,
+            ), // exactly 24h is still fresh (fresh(): <= STALE_SECS)
+        ];
+        let pks = |v: &[Keys]| -> Vec<PublicKey> { v.iter().map(|k| k.public_key()).collect() };
+        let want = fetch_targets(&pks(&follows), &cached, now(), MAX_FETCH_TARGETS);
+        assert_eq!(want, vec![follows[1].public_key(), follows[2].public_key()]);
+        // Cap: 10 follows, cap 3 — the FIRST three in follows order.
+        let many = ids(10);
+        let got = fetch_targets(&pks(&many), &[], now(), 3);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got, pks(&many[..3]));
+        // Non-kind-3 events in the cache never count as a source.
+        let one = ids(1);
+        assert_eq!(fetch_targets(&pks(&one), &[], now(), MAX_FETCH_TARGETS).len(), 1);
+        // The ceiling composes with the outbox author ceiling (D39):
+        // a full pass is at most two shards, never an unsplit mega-REQ.
+        let shards = crate::outbox::chunk(
+            &(0..MAX_FETCH_TARGETS)
+                .map(|i| i.to_string())
+                .collect::<Vec<String>>(),
+            crate::outbox::MAX_AUTHORS_PER_FILTER,
+        );
+        assert_eq!(shards.len(), 2);
+        assert!(shards.iter().all(|s| s.len() <= crate::outbox::MAX_AUTHORS_PER_FILTER));
     }
 
     /// Non-follows' contact lists never feed the graph (Amethyst

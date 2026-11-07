@@ -921,6 +921,49 @@ impl Core {
             crate::wot::extended_relays().len(),
             start.elapsed()
         );
+        self.spawn_wot_source_fetch(active, follows, &sources).await;
+    }
+
+    /// Bootstrap source fetch (issue #2): the graph rebuilds only from
+    /// kind-3s the store HAPPENS to hold — without this pass a fresh
+    /// install reads "253 follows · 0 qualified" forever, because nothing
+    /// ever fetched the follows' contact lists. Select the follows whose
+    /// cached list is missing or older than `wot::STALE_SECS`, cap at
+    /// `wot::MAX_FETCH_TARGETS` (D24: two outbox shards of 200 authors),
+    /// and fire ONE routed read-tier fetch per launch — no retry loop,
+    /// the next bootstrap retries what this one missed. Fire-and-forget
+    /// like the other bootstrap fetches: as results land, the pool
+    /// chokepoint's `wot::observe` applies every kind-3 to the graph
+    /// incrementally (diff-based, newest-wins), so authors re-qualify
+    /// live — verdicts are computed from `scores` on demand, no second
+    /// rebuild is needed.
+    async fn spawn_wot_source_fetch(
+        &self,
+        active: &Active,
+        follows: &[PublicKey],
+        cached: &[Event],
+    ) {
+        if crate::wot::status() == crate::wot::WotStatus::OverCap {
+            return; // the graph shut off; fetching sources feeds nothing
+        }
+        let targets =
+            crate::wot::fetch_targets(follows, cached, now_secs(), crate::wot::MAX_FETCH_TARGETS);
+        if targets.is_empty() {
+            return;
+        }
+        eprintln!(
+            "[core] wot: fetching {} stale/missing contact list(s)",
+            targets.len()
+        );
+        let pool = Arc::clone(&active.pool);
+        let limit = targets.len();
+        self.rt.spawn(async move {
+            // The value is not read: the SDK persists what it receives,
+            // and the chokepoint's wot::observe feeds the graph.
+            let _ = pool
+                .get_routed(vec![Kind::ContactList], &targets, None, None, limit)
+                .await;
+        });
     }
 
     /// Follow-state lookup for profile pages (from the cached contact list).
