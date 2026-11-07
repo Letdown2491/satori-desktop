@@ -103,6 +103,11 @@ pub struct Shell {
     /// signed and saved but not yet ACKed by any relay. A quiet pill, not
     /// an error (D26's split); the drainer owns the retries.
     outbox_pending: usize,
+    /// The rail's live dot (§4.4): did ANY relay recently deliver or ACK?
+    /// Read off core's latency machinery (Core::pool_connected), polled on
+    /// the settings pane's slow 30s cadence — the signal is minutes-wide
+    /// by design, so nothing faster is honest.
+    pool_live: bool,
     stack: Vec<Pane>,
     /// The signed-in identity: the rail's top mark is the user's avatar
     /// (replacing the ensō as the home glyph).
@@ -152,6 +157,7 @@ impl Shell {
             hold: None,
             notif_unread: false,
             outbox_pending: 0,
+            pool_live: Core::pool_connected(),
             stack: vec![],
             me: None,
             me_profile: None,
@@ -166,6 +172,22 @@ impl Shell {
         shell.want_avatar(cx);
         shell.watch_notif(cx);
         shell.outbox_pending = Core::outbox_pending();
+        // The live dot's slow poll (the settings relay-health pane's
+        // cadence): connectivity is a state, not an event stream — nothing
+        // in the pool broadcasts "all sockets died", so we re-ask.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
+                let _ = this.update(cx, |shell, cx| {
+                    let live = Core::pool_connected();
+                    if live != shell.pool_live {
+                        shell.pool_live = live;
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
         shell
     }
 
@@ -580,6 +602,20 @@ impl Shell {
         }
     }
 
+    /// ←/→ carousel control (content.rs's per-carousel selection): the
+    /// active feed pane's cursor row steps if it paints a multi-image
+    /// carousel, and the pane repaints; otherwise the key does nothing.
+    fn carousel_nav(&mut self, delta: isize, cx: &mut Context<Self>) {
+        match self.stack.last().cloned() {
+            Some(Pane::Feed(view)) | Some(Pane::Articles(view)) | Some(Pane::Hashtag(view)) => {
+                view.update(cx, |feed, cx| {
+                    feed.carousel_nav(delta, cx);
+                });
+            }
+            _ => {}
+        }
+    }
+
     /// The lightbox: show `urls[idx]` full-screen (lightbox.rs open). Every
     /// URL is pre-joined into the shared media cache so ‹/› are instant once
     /// tiles have loaded.
@@ -948,6 +984,17 @@ impl Shell {
                     }
                 }),
             ))
+            // The live dot (§4.4): ink while some relay recently answered,
+            // grey the moment nothing has. The one quiet connectivity
+            // state — it never moves on its own, only flips.
+            .child(
+                div()
+                    .mt_auto()
+                    .mb(px(12.0))
+                    .size(px(5.0))
+                    .rounded_full()
+                    .bg(rgb(if self.pool_live { theme::ink() } else { theme::muted() })),
+            )
     }
 
     fn rail_button(
@@ -1141,6 +1188,15 @@ impl Render for Shell {
                     }
                     if ev.keystroke.key == "k" {
                         shell.feed_nav(-1, cx);
+                    }
+                    // ←/→: the cursor row's multi-image carousel (the same
+                    // selection the ‹ › arrows move). A row without one
+                    // leaves the key unhandled.
+                    if ev.keystroke.key == "left" {
+                        shell.carousel_nav(-1, cx);
+                    }
+                    if ev.keystroke.key == "right" {
+                        shell.carousel_nav(1, cx);
                     }
                     if ev.keystroke.key == "a" {
                         shell.open_articles(cx);

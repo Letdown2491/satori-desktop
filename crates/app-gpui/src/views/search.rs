@@ -569,7 +569,16 @@ impl Render for SearchView {
             } else if status.is_empty() {
                 // The search came back empty: a centered answer, not a
                 // status line. Relays without NIP-50 search answer
-                // nothing — say so once, quietly.
+                // nothing — say so once, quietly, and only as loudly as
+                // the NIP-11 capability memory honestly knows (deficiency
+                // 9 generalized: a read set that advertises the absence
+                // says so outright; a search-capable set that still found
+                // nothing needs no excuse).
+                let whisper = match nip50_verdict(&self.core) {
+                    Some(true) => None,
+                    Some(false) => Some("None of your relays advertise NIP-50 search."),
+                    None => Some("Relays without NIP-50 search answer nothing."),
+                };
                 div()
                     .flex_1()
                     .min_h_0()
@@ -585,15 +594,46 @@ impl Render for SearchView {
                             .text_color(rgb(theme::muted()))
                             .child(format!("Nothing found for “{}”.", self.query)),
                     )
-                    .child(
+                    .children(whisper.map(|w| {
                         div()
                             .text_size(px(theme::T_SMALL))
                             .text_color(rgb(theme::muted()))
-                            .child("Relays without NIP-50 search answer nothing."),
-                    )
+                            .child(w)
+                    }))
                     .into_any_element()
             } else {
                 div().flex_1().min_h_0().into_any_element()
             })
     }
+}
+
+/// The NIP-50 verdict over the set the search actually rode (pool.rs
+/// set_reads: the indexers + the session's own reads): Some(true) = at
+/// least one relay advertises `limitation.search`, Some(false) = every
+/// relay we have a document for answered and NONE does, None = the NIP-11
+/// memory (nip11.rs) doesn't know enough to say. Capability urls are
+/// keyed by the same normalization the pool uses (outbox::relay_key).
+fn nip50_verdict(core: &Core) -> Option<bool> {
+    let mut urls: Vec<String> =
+        satori_core::pool::INDEXERS.iter().map(|s| s.to_string()).collect();
+    urls.extend(core.current_relays().0);
+    let caps = Core::relay_capabilities();
+    let mut any_capable = false;
+    let mut any_known = false;
+    for url in &urls {
+        let key = satori_core::outbox::relay_key(url);
+        let Some(c) = caps.iter().find(|c| c.url == key) else {
+            // Never fetched at all: the set isn't fully known either.
+            return None;
+        };
+        match c.search {
+            Some(true) => any_capable = true,
+            Some(false) => {}
+            // A relay that never described itself: not evidence of
+            // absence — the memory says nothing about the set.
+            None => return None,
+        }
+        any_known = true;
+    }
+    (any_known).then_some(any_capable)
 }

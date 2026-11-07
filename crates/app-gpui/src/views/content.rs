@@ -1232,6 +1232,35 @@ fn carousel_step<V: 'static>(
     handle.update(cx, |_, cx| cx.notify());
 }
 
+/// Keyboard path for the carousel (the feed's ←/→, via the shell's key
+/// handler → feed.rs carousel_nav): the cursor row's multi-image
+/// selection steps exactly as its ‹ › arrows do. The seg id is
+/// re-derived the way media_section paints the carousel (media_assets →
+/// the not_media screen → the joined picture urls), so the keys hit the
+/// live selection; a row without a carousel answers false and the shell
+/// ignores the key. No wake-up here — the caller owns the entity and
+/// notifies it (it IS the view being updated).
+pub fn carousel_key_step(ev: &Event, media: &media::Snapshot, delta: i64) -> bool {
+    let urls: Vec<String> = media_assets(ev)
+        .iter()
+        .filter_map(|a| match a {
+            MediaAsset::Picture { url } if !media.not_media(url) => Some(url.clone()),
+            _ => None,
+        })
+        .collect();
+    if urls.len() < 2 {
+        return false;
+    }
+    let n = urls.len();
+    let key = seg_id("car", &urls.join("|"));
+    let mut map = sel_map().lock().unwrap();
+    let cur = map.get(key.as_ref()).copied().unwrap_or(0).min(n - 1) as i64;
+    // Same wrap-around as carousel_step: past the last image, the first.
+    let next = ((cur + delta).rem_euclid(n as i64)) as usize;
+    map.insert(key.to_string(), next);
+    true
+}
+
 /// The carousel frame: one image at a time (full column width, the
 /// single-tile aspect math), ‹ › arrows, position dots. Pure state —
 /// no slide, no fade (§3: a state appears; it does not travel).

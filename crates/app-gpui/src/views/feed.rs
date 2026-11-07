@@ -115,6 +115,10 @@ pub struct Feed {
     pub(crate) deep: bool,
     /// j/k's row cursor (key_nav); the scroll handler re-anchors it.
     cursor: usize,
+    /// WS2 viewport debounce: bumps on every scroll/nav/landing; the
+    /// spawned push only fires if the pulse_id is still current (fast
+    /// scrolling coalesces into ONE core.set_viewport per settle).
+    viewport_gen: usize,
     list: ListState,
 }
 
@@ -201,6 +205,7 @@ impl Feed {
             // j/k's row cursor (feed.rs key_nav) — re-anchored by every
             // scroll event, so mouse and keys never disagree for long.
             cursor: 0,
+            viewport_gen: 0,
             deep: false,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
@@ -227,6 +232,9 @@ impl Feed {
                 // The trim can only fire once the reader is back above the
                 // trim line — the scroll stream is where that happens.
                 feed.trim_window(cx);
+                // WS2: the visible window moved — re-scope the engagement
+                // subscription (debounced in viewport_pulse).
+                feed.viewport_pulse(cx);
             });
         });
         // Live push: fresh follow posts bump the new-notes pill (the list
@@ -255,6 +263,14 @@ impl Feed {
                             feed.live_new += 1;
                             cx.notify();
                         });
+                    }
+                    // WS2: engagement on a viewport note arrived live —
+                    // the event is in the store (the SDK saves on
+                    // receive); re-seed the own-engagement mirrors and
+                    // repaint. No new rendering path: this is the same
+                    // snapshot invalidation every data change rides.
+                    Ok(Live::Engagement) => {
+                        let _ = this.update(cx, |feed, cx| feed.on_engagement(cx));
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -322,9 +338,9 @@ impl Feed {
         });
     }
 
-    /// j/k (the shell's key handler): move the row cursor one note and
-    /// scroll it into view. The cursor rides the scroll stream — a wheel
-    /// scroll re-anchors it — so this is a nudge, not a selection model.
+    /// WS2: j/k moves the cursor within the buffer — the window is
+    /// unchanged unless the anchor scrolls, and scroll_to fires the scroll
+    /// stream (which pulses) whenever it does.
     pub fn key_nav(&mut self, delta: isize) {
         let len = self.notes.len();
         if len == 0 {
@@ -336,6 +352,22 @@ impl Feed {
             item_ix: next,
             offset_in_item: px(0.),
         });
+    }
+
+    /// ←/→ (shell.rs key handler): step the cursor row's multi-image
+    /// carousel — the same selection the ‹ › arrows move (content.rs
+    /// carousel_key_step re-derives the carousel's seg id). False = the
+    /// row has no carousel; the shell treats the key as unhandled.
+    pub fn carousel_nav(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+        let Some(ev) = self.notes.get(self.cursor) else {
+            return false;
+        };
+        let media = media::Snapshot::new(cx);
+        let stepped = content::carousel_key_step(ev, &media, delta as i64);
+        if stepped {
+            cx.notify();
+        }
+        stepped
     }
 
     /// Near the bottom, order the next older page. The scroll handler calls
@@ -531,6 +563,8 @@ impl Feed {
         // A landing can cross the ceiling on its own (a big bootstrap); the
         // reader is above the trim line in that case almost by definition.
         self.trim_window(cx);
+        // WS2: a landing changed which notes sit under the viewport.
+        self.viewport_pulse(cx);
         cx.notify();
     }
 
@@ -811,6 +845,62 @@ impl Feed {
         cx.notify();
     }
 
+    /// WS2 (viewport.rs): the settled viewport pulse. The scroll stream
+    /// calls this on every wheel tick and every landing; only the LAST
+    /// pulse inside the settle window reaches core (the generation guard
+    /// drops superseded timers) — fast scrolling coalesces into one
+    /// `set_viewport`, no subscription churn (D24).
+    fn viewport_pulse(&mut self, cx: &mut Context<Self>) {
+        self.viewport_gen += 1;
+        let pulse_id = self.viewport_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(
+                    satori_core::viewport::SETTLE_MS,
+                ))
+                .await;
+            let _ = this.update(cx, |feed, cx| {
+                if feed.viewport_gen != pulse_id {
+                    return; // a newer scroll superseded this pulse
+                }
+                feed.push_viewport(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The settled window → core: the visible range (+ buffer, capped)
+    /// becomes the live engagement id set. The per-paint/store loads stay
+    /// as the fallback for distant rows — this only ADDS liveness.
+    fn push_viewport(&mut self, _cx: &mut Context<Self>) {
+        if self.notes.is_empty() {
+            self.core.set_viewport(Vec::new());
+            return;
+        }
+        let end = self.last_visible_end.max(self.cursor);
+        let (start, stop) = satori_core::viewport::window(
+            self.notes.len(),
+            self.cursor,
+            end,
+            satori_core::viewport::VIEWPORT_BUFFER,
+            satori_core::viewport::MAX_LIVE_IDS,
+        );
+        let ids = satori_core::viewport::ids_in_window(&self.notes, start, stop);
+        self.core.set_viewport(ids);
+    }
+
+    /// A viewport engagement event landed in the store (WS2): re-seed the
+    /// own-engagement mirrors (they are the glyphs' render state) and
+    /// repaint. The same snapshot invalidation every data change rides —
+    /// no new rendering path.
+    fn on_engagement(&mut self, cx: &mut Context<Self>) {
+        self.liked = self.core.liked_set();
+        self.reposted = self.core.reposted_set();
+        self.zapped = self.core.zapped_set();
+        self.touch();
+        cx.notify();
+    }
+
     /// The wallet broadcast → glyph states + the quiet status whisper.
     fn on_wallet(&mut self, ev: WalletEvent, cx: &mut Context<Self>) {
         match ev {
@@ -937,6 +1027,15 @@ impl Feed {
             }
         })
         .detach();
+    }
+}
+
+impl Drop for Feed {
+    fn drop(&mut self) {
+        // WS2 (viewport.rs): the pane is gone — its viewport ids go with
+        // it. The manager's task plans a Drop and closes the subscription;
+        // nothing keeps a REQ alive for a feed nobody renders.
+        self.core.set_viewport(Vec::new());
     }
 }
 
