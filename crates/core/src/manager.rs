@@ -2084,6 +2084,29 @@ impl Core {
                 }
                 active.pool.connect_reads(read.clone()).await.ok();
                 self.spawn_relay_info(&read);
+                // Arm the trust vocabulary from LOCAL state first (D45):
+                // the fresh contact-list fetch below is a relay round-trip,
+                // and until the graph is armed every verdict reads Unknown,
+                // which lets the notification tier pass everything — spam
+                // painted first and got cleaned up a minute later. The
+                // store's cached own list + the wot sidecar are local
+                // reads; gating must be correct from the FIRST paint.
+                // The fresh fetch below re-arms with a newer list (all
+                // rebuilds are idempotent and ms-cheap; observe is
+                // newest-wins).
+                if let Ok(Some(own)) = active
+                    .pool
+                    .store
+                    .latest_by_kind(me, Kind::ContactList)
+                    .await
+                {
+                    let local_follows: Vec<PublicKey> =
+                        own.tags.public_keys().collect();
+                    crate::wot::set_identity(me, &local_follows);
+                    crate::wot::set_muted(self.muted.lock().unwrap().clone());
+                    crate::dedup::set_exemptions(me, &local_follows);
+                    self.rebuild_wot_graph(&active, &local_follows).await;
+                }
                 let follows = active.pool.follows(me).await.unwrap_or_default();
                 active.follows = follows.clone();
                 if let Some(a) = self.active.lock().unwrap().as_mut() {
