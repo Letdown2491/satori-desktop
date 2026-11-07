@@ -960,9 +960,14 @@ impl Core {
         self.rt.spawn(async move {
             // The value is not read: the SDK persists what it receives,
             // and the chokepoint's wot::observe feeds the graph.
-            let _ = pool
+            let got = pool
                 .get_routed(vec![Kind::ContactList], &targets, None, None, limit)
                 .await;
+            eprintln!(
+                "[core] wot: source fetch returned {} list(s) for {} target(s)",
+                got.len(),
+                limit
+            );
         });
     }
 
