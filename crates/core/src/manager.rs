@@ -873,6 +873,17 @@ impl Core {
     /// — disposable, nothing persisted.
     async fn rebuild_wot_graph(&self, active: &Active, follows: &[PublicKey]) {
         let start = std::time::Instant::now();
+        // The sidecar first (D45): the applied sources the SDK's one-shot
+        // fetch never persisted. The store's cached kind-3s replay after
+        // and win on newer (observe's newest-wins diff).
+        let persisted = crate::wot::load_disk();
+        for (pk, at, list) in &persisted {
+            crate::wot::apply_persisted(pk, *at, list);
+        }
+        let sidecar: HashMap<String, u64> = persisted
+            .iter()
+            .map(|(pk, at, _)| (pk.clone(), *at))
+            .collect();
         let sources = active
             .pool
             .store
@@ -921,7 +932,8 @@ impl Core {
             crate::wot::extended_relays().len(),
             start.elapsed()
         );
-        self.spawn_wot_source_fetch(active, follows, &sources).await;
+        self.spawn_wot_source_fetch(active, follows, &sources, &sidecar)
+            .await;
     }
 
     /// Bootstrap source fetch (issue #2): the graph rebuilds only from
@@ -942,12 +954,18 @@ impl Core {
         active: &Active,
         follows: &[PublicKey],
         cached: &[Event],
+        sidecar: &HashMap<String, u64>,
     ) {
         if crate::wot::status() == crate::wot::WotStatus::OverCap {
             return; // the graph shut off; fetching sources feeds nothing
         }
-        let targets =
-            crate::wot::fetch_targets(follows, cached, now_secs(), crate::wot::MAX_FETCH_TARGETS);
+        let targets = crate::wot::fetch_targets(
+            follows,
+            cached,
+            now_secs(),
+            crate::wot::MAX_FETCH_TARGETS,
+            sidecar,
+        );
         if targets.is_empty() {
             return;
         }

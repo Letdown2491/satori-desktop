@@ -25,6 +25,7 @@ pub mod files {
     pub const RELAYS_CACHE: &str = "relays-cache.json";
     pub const SEEN_RELAYS: &str = "seen-relays.json";
     pub const RELAY_HINTS: &str = "relay-hints.json";
+    pub const WOT_SOURCES: &str = "wot-sources.json";
     pub const RELAY_LATENCY: &str = "relay-latency.json";
     pub const DELETIONS: &str = "deletions.json";
     pub const OUTBOX_PENDING: &str = "outbox-pending.json";

@@ -57,7 +57,8 @@
 //! state the store DOESN'T hold). Core-clean: no UI deps.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{LazyLock, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nostr::prelude::*;
@@ -69,7 +70,12 @@ use crate::store::parse_key;
 pub const QUALIFICATION_THRESHOLD: usize = 10;
 /// Source-list staleness: a follow's kind-3 older than this contributes
 /// nothing (dark-wisp `STALE_HOURS`, ExtendedNetworkRepository.kt:91).
-pub const STALE_SECS: u64 = 24 * 60 * 60;
+/// Refetch cadence, NOT validity: a follow's contact list is the best
+/// known truth about who they follow however old it is (most users only
+/// rewrite kind-3s every few months; excluding old lists starved the
+/// graph to 0 qualified — D45). The age only decides when we go refetch
+/// the list for a fresher copy (fetch_targets).
+pub const STALE_SECS: u64 = 7 * 24 * 60 * 60;
 /// The graph SHUTS OFF past this many follows (Amethyst WoTService.kt:302
 /// `MAX_FOLLOWS = 2000`): verdicts degrade to Unknown, never to a wrong
 /// "outside".
@@ -191,10 +197,131 @@ fn fresh(created_at: u64) -> bool {
 
 /// The lifetime graph lock. Identities and state live for the process;
 /// the manager re-arms at every bootstrap.
-pub(crate) fn graph() -> std::sync::MutexGuard<'static, Graph> {
+fn graph() -> std::sync::MutexGuard<'static, Graph> {
     GRAPH
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+// --- Persistence (D45) — the sidecar that survives restarts. The SDK's
+// one-shot fetch does not persist (probed: 98 lists fetched one session,
+// 2 in the store the next), so the applied sources are written here and
+// replayed at bootstrap. Same discipline as hints.rs: 0600 temp-sibling
+// + rename, debounced park_timeout flusher, dirty flag.
+
+const FLUSH_SECS: u64 = 10;
+static DIRTY: AtomicBool = AtomicBool::new(false);
+static FLUSHER: OnceLock<()> = OnceLock::new();
+
+fn wot_dirty() {
+    DIRTY.store(true, Ordering::Relaxed);
+    FLUSHER.get_or_init(|| {
+        std::thread::Builder::new()
+            .name("wot-flush".into())
+            .spawn(|| loop {
+                std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
+                if DIRTY.swap(false, Ordering::Relaxed) {
+                    write_disk();
+                }
+            })
+            .ok();
+    });
+}
+
+fn write_disk() {
+    // Persist the newest MAX_FOLLOWS sources (the only ones observe can
+    // ever apply — non-follows are refused at the door).
+    let g = graph();
+    let mut list: Vec<(&String, &Source)> = g.sources.iter().collect();
+    list.sort_by_key(|(_, s)| std::cmp::Reverse(s.created_at));
+    list.truncate(MAX_FOLLOWS);
+    let arr: Vec<serde_json::Value> = list
+        .iter()
+        .map(|(pk, s)| {
+            serde_json::json!({
+                "pk": pk,
+                "at": s.created_at,
+                "follows": s.follows.iter().map(|f| f.to_string()).collect::<Vec<String>>(),
+            })
+        })
+        .collect();
+    drop(g);
+    let path = crate::config::state_file(crate::config::files::WOT_SOURCES);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tmp = path.with_extension(format!("tmp-{}-{nanos}", std::process::id()));
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+    else {
+        return;
+    };
+    if f.write_all(serde_json::Value::Array(arr).to_string().as_bytes()).is_ok() {
+        drop(f);
+        let _ = std::fs::rename(&tmp, &path);
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Disk sources: (pubkey as stored, created_at, follows). The manager
+/// feeds these back through [`apply_persisted`] before the store rebuild.
+pub fn load_disk() -> Vec<(String, u64, Vec<PublicKey>)> {
+    let Ok(raw) = std::fs::read_to_string(crate::config::state_file(
+        crate::config::files::WOT_SOURCES,
+    )) else {
+        return Vec::new();
+    };
+    let Ok(arr) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    arr.as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|e| {
+            let pk = e.get("pk")?.as_str()?.to_string();
+            let at = e.get("at")?.as_u64()?;
+            let follows = e
+                .get("follows")?
+                .as_array()?
+                .iter()
+                .filter_map(|f| PublicKey::parse(f.as_str()?).ok())
+                .collect::<Vec<PublicKey>>();
+            (!follows.is_empty()).then_some((pk, at, follows))
+        })
+        .collect()
+}
+
+/// Replay a persisted source (bootstrap, before the store's cached
+/// kind-3s — their observe() wins on newer). Same door as observe():
+/// only the user's follows apply; over-cap answers nothing.
+pub fn apply_persisted(pk: &str, created_at: u64, follows: &[PublicKey]) {
+    let mut g = graph();
+    if g.me.is_none() || g.over_cap {
+        return;
+    }
+    if !g.follows.contains(pk) {
+        return;
+    }
+    g.sources.insert(
+        pk.to_string(),
+        Source {
+            created_at,
+            follows: follows.to_vec(),
+        },
+    );
+    for t in follows {
+        insert_target(&mut g, &t.to_string(), pk, MAX_TRACKED_TARGETS);
+    }
 }
 
 /// Arm the graph for a session: the user and their first-degree follows.
@@ -222,8 +349,7 @@ pub fn clear_identity() {
     *g = Graph {
         me: None,
         follows: HashSet::new(),
-        over_cap: false,
-        sources: HashMap::new(),
+        over_cap: false, sources: HashMap::new(),
         scores: HashMap::new(),
         target_order: VecDeque::new(),
         in_order: HashSet::new(),
@@ -305,11 +431,10 @@ pub fn observe(ev: &Event) {
     // list neither allocates for 100k targets nor wedges the lock.
     let follows: Vec<PublicKey> = ev.tags.public_keys().take(MAX_FOLLOWS_PER_EVENT).collect();
 
-    // Diff out the OLD list's contributions — only if they counted
-    // (fresh at the time; re-freshness is judged on the OLD timestamp).
-    if let Some(old) = g.sources.remove(&follower)
-        && fresh(old.created_at)
-    {
+    // Diff out the OLD list's contributions — everything applied was
+    // counted when it landed (age excludes nothing; D45), so the diff
+    // is unconditional.
+    if let Some(old) = g.sources.remove(&follower) {
         for t in &old.follows {
             let key = t.to_string();
             if let Some(set) = g.scores.get_mut(&key) {
@@ -321,7 +446,6 @@ pub fn observe(ev: &Event) {
         }
     }
 
-    let counts = fresh(created_at);
     g.sources.insert(
         follower.clone(),
         Source {
@@ -329,11 +453,10 @@ pub fn observe(ev: &Event) {
             follows: follows.clone(),
         },
     );
-    if counts {
-        for t in &follows {
-            insert_target(&mut g, &t.to_string(), &follower, MAX_TRACKED_TARGETS);
-        }
+    for t in &follows {
+        insert_target(&mut g, &t.to_string(), &follower, MAX_TRACKED_TARGETS);
     }
+    wot_dirty();
 }
 
 /// Which of the user's follows need their kind-3 contact list FETCHED at
@@ -342,17 +465,21 @@ pub fn observe(ev: &Event) {
 /// re-fetched). Capped at `cap` (the D24 ceiling), first come first
 /// served in follows order — deterministic, so one pass per launch is a
 /// bounded, honest shortfall. Pure; the manager feeds it the store's
-/// cached kind-3s.
+/// cached kind-3s AND the sidecar's applied sources (D45: the SDK's
+/// one-shot fetch does not persist, so without the sidecar every
+/// restart refetched the whole graph from scratch).
 pub fn fetch_targets(
     follows: &[PublicKey],
     cached: &[Event],
     now: u64,
     cap: usize,
+    sidecar: &HashMap<String, u64>,
 ) -> Vec<PublicKey> {
     let latest: HashMap<String, u64> = cached
         .iter()
         .filter(|e| u16::from(e.kind) == 3)
         .map(|e| (e.pubkey.to_string(), e.created_at.as_secs()))
+        .chain(sidecar.iter().map(|(k, v)| (k.clone(), *v)))
         .collect();
     follows
         .iter()
@@ -474,7 +601,7 @@ pub fn status() -> WotStatus {
     WotStatus::Live(g.follows.len(), qualified_count(&g), g.rebuilt)
 }
 
-pub(crate) fn qualified_count(g: &Graph) -> usize {
+fn qualified_count(g: &Graph) -> usize {
     g.scores
         .iter()
         .filter(|(k, s)| s.len() >= QUALIFICATION_THRESHOLD && !g.muted.contains(k.as_str()))
@@ -667,19 +794,24 @@ mod tests {
     /// Staleness: a follow list older than 24h contributes nothing, and
     /// replacing a fresh list with a stale one removes its contribution.
     #[test]
-    fn stale_sources_do_not_qualify() {
+    fn stale_sources_still_qualify() {
+        // D45: age excludes nothing. A follow's contact list is the best
+        // known truth about who they follow however old it is (most users
+        // only rewrite kind-3s every few months); STALE_SECS drives the
+        // REFETCH cadence only, never the scoring.
         let follows = ids(2);
         let _s = Session::new(&follows);
         let target = Keys::generate();
         let old = now() - STALE_SECS - 3600;
         observe(&kind3(&follows[0], &[&target], old));
-        assert_eq!(shared_follows(&target.public_key()), 0);
-        assert_eq!(verdict(&target.public_key()), Verdict::Unknown);
-        // Fresh list from the same follow counts.
+        assert_eq!(shared_follows(&target.public_key()), 1);
+        // Known-but-unqualified reads NotInNetwork (Known = the graph
+        // can say; Unknown is only for no-data).
+        assert_eq!(verdict(&target.public_key()), Verdict::NotInNetwork);
+        // A newer list replaces it (newest statement wins — observe's
+        // newer-wins rule), and an OLDER republish never does.
         observe(&kind3(&follows[0], &[&target], now()));
         assert_eq!(shared_follows(&target.public_key()), 1);
-        // An OLDER republish (fresh or stale) never replaces the newer
-        // list — newest statement wins (newer-wins rule at observe).
         observe(&kind3(&follows[0], &[&target], now() - STALE_SECS - 60));
         assert_eq!(shared_follows(&target.public_key()), 1);
     }
@@ -746,6 +878,33 @@ mod tests {
     /// D24 cap (MAX_FETCH_TARGETS) truncates deterministically in
     /// follows order, and the whole fetch set chunks under the outbox
     /// author ceiling (D39, two shards of 200).
+    /// D45 sidecar: applied sources replay at bootstrap (only follows
+    /// apply; over-cap and signed-out refuse).
+    #[test]
+    fn persisted_sources_replay() {
+        let follows = ids(2);
+        let target = Keys::generate();
+        // Signed out: refused.
+        apply_persisted(
+            &follows[0].public_key().to_string(),
+            now(),
+            &[target.public_key()],
+        );
+        assert_eq!(shared_follows(&target.public_key()), 0);
+        let _s = Session::new(&follows);
+        // Not a follow: refused.
+        let stranger = Keys::generate();
+        apply_persisted(&stranger.public_key().to_string(), now(), &[target.public_key()]);
+        assert_eq!(shared_follows(&target.public_key()), 0);
+        // A follow: applied.
+        apply_persisted(
+            &follows[0].public_key().to_string(),
+            now(),
+            &[target.public_key()],
+        );
+        assert_eq!(shared_follows(&target.public_key()), 1);
+    }
+
     #[test]
     fn fetch_targets_selection_and_cap() {
         let follows = ids(4);
@@ -764,16 +923,16 @@ mod tests {
             ), // exactly 24h is still fresh (fresh(): <= STALE_SECS)
         ];
         let pks = |v: &[Keys]| -> Vec<PublicKey> { v.iter().map(|k| k.public_key()).collect() };
-        let want = fetch_targets(&pks(&follows), &cached, now(), MAX_FETCH_TARGETS);
+        let want = fetch_targets(&pks(&follows), &cached, now(), MAX_FETCH_TARGETS, &HashMap::new());
         assert_eq!(want, vec![follows[1].public_key(), follows[2].public_key()]);
         // Cap: 10 follows, cap 3 — the FIRST three in follows order.
         let many = ids(10);
-        let got = fetch_targets(&pks(&many), &[], now(), 3);
+        let got = fetch_targets(&pks(&many), &[], now(), 3, &HashMap::new());
         assert_eq!(got.len(), 3);
         assert_eq!(got, pks(&many[..3]));
         // Non-kind-3 events in the cache never count as a source.
         let one = ids(1);
-        assert_eq!(fetch_targets(&pks(&one), &[], now(), MAX_FETCH_TARGETS).len(), 1);
+        assert_eq!(fetch_targets(&pks(&one), &[], now(), MAX_FETCH_TARGETS, &HashMap::new()).len(), 1);
         // The ceiling composes with the outbox author ceiling (D39):
         // a full pass is at most two shards, never an unsplit mega-REQ.
         let shards = crate::outbox::chunk(
