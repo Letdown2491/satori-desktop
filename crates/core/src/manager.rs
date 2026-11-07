@@ -2824,7 +2824,11 @@ impl Core {
                 let my_notes = active
                     .pool
                     .store
-                    .feed_page(&[me], None, 100)
+                    // 500, not 100: bots hunt OLDER notes (a reply to
+                    // anything past the window isn't a "reply" and would
+                    // ring the bell ungated). 500 own ids is still one
+                    // small HashSet (D24: bounded, named).
+                    .feed_page(&[me], None, 500)
                     .await
                     .unwrap_or_default();
                 let ids: Vec<EventId> = my_notes.iter().map(|e| e.id).collect();
