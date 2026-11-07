@@ -88,6 +88,17 @@ pub fn get_bool(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// A top-level bool pref that defaults ON when missing (the WoT gates:
+/// `notif_wot_tier`, `thread_collapse`, `profile_badge` — issue #2's
+/// posture makes the tier default-on; core reads the same keys via
+/// config::prefs()).
+pub fn get_bool_or(key: &str, default: bool) -> bool {
+    read_value(config::files::PREFS)
+        .get(key)
+        .and_then(|b| b.as_bool())
+        .unwrap_or(default)
+}
+
 /// The Tor privacy mode (`privacy_mode` in prefs.json — privacy.ts). Only
 /// strict has a face in the UI today: the Phase 3 facade degrades video to
 /// links (nothing media-heavy may fetch direct). M5 wires the full toggle.

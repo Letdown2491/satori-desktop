@@ -19,6 +19,7 @@ use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
 
 use crate::{icons, media, theme};
+use satori_core::wot::Verdict;
 use super::{content, feed::Feed, nav::Nav, states};
 
 /// Which profile surface is up: the notes body or the media strips
@@ -500,6 +501,25 @@ impl Render for ProfileView {
         let follow_handle = handle.clone();
         let edit_handle = handle.clone();
         let mute_handle = handle.clone();
+        // The profile trust badge (WS3): one quiet pill under the name,
+        // the shared verdict vocabulary's answer for this author. Unknown
+        // renders NOTHING — the graph declining to answer is not a
+        // judgment, and an honest absence beats a wrong label. Vermilion
+        // stays a seal: the pill is washi + muted, never tinted.
+        let badge = crate::prefs::get_bool_or("profile_badge", true)
+            .then(|| {
+                let (v, shared) =
+                    self.core.verdict(&self.who).with_count(self.core.shared_follows(&self.who));
+                match v {
+                    Verdict::Follow => Some("You follow".to_string()),
+                    Verdict::Trusted => {
+                        Some(format!("In your network · {shared} shared follows"))
+                    }
+                    Verdict::NotInNetwork => Some("Outside your network".to_string()),
+                    _ => None,
+                }
+            })
+            .flatten();
         let ctx = content::Body {
             media: &media,
             quotes: &quotes,
@@ -650,7 +670,24 @@ impl Render for ProfileView {
                                                                 format!("{npub_brief} · copied")
                                                             } else {
                                                                 format!("{npub_brief} · click to copy")
-                                                            }),
+                                                            })
+                                                            // The trust badge: a washi pill under the
+                                                            // name (WS3). Unknown renders nothing —
+                                                            // the graph declining to answer is honest.
+                                                            .children(badge.map(|text| {
+                                                                div()
+                                                                    .flex_none()
+                                                                    .px_2()
+                                                                    .py_0p5()
+                                                                    .rounded_full()
+                                                                    .border_1()
+                                                                    .border_color(rgb(theme::hairline()))
+                                                                    .bg(rgb(theme::washi()))
+                                                                    .text_size(px(theme::T_SMALL))
+                                                                    .text_color(rgb(theme::muted()))
+                                                                    .child(text)
+                                                                    .into_any_element()
+                                                            })),
                                                     ),
                                             ),
                                     )

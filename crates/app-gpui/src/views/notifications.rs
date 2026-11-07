@@ -85,6 +85,9 @@ pub struct NotificationsView {
     /// floating back-to-top whisper covers this pane too — same shape as
     /// the feed's (feed.rs deep).
     pub(crate) deep: bool,
+    /// WS4 receipts: the bell's audit trail open? (the "N hidden — see
+    /// why" strip at the pane's bottom — a silent void is a bug).
+    receipts_open: bool,
     list: ListState,
 }
 
@@ -112,6 +115,7 @@ impl NotificationsView {
             error: None,
             prev,
             deep: false,
+            receipts_open: false,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
         view.pump_at(prev, cx);
@@ -201,6 +205,7 @@ impl NotificationsView {
                 self.rows = sectioned(prev, &notifs);
                 self.me = self.core.me().unwrap_or_default();
                 self.want_parents(cx);
+                self.want_receipt_names(cx);
                 self.status.clear();
                 self.error = None;
             }
@@ -224,6 +229,29 @@ impl NotificationsView {
         for url in content::media_urls_cached(note).iter().cloned() {
             media::fetch(&self.core, url, cx.entity_id(), cx);
         }
+    }
+
+    /// WS4 receipts: resolve the suppressed authors' names so the audit
+    /// trail shows who, not a bare npub (one ensure_profiles pump; the
+    /// render-side strip reads the same profiles map).
+    fn want_receipt_names(&mut self, cx: &mut Context<Self>) {
+        let missing: Vec<PublicKey> = self
+            .core
+            .suppressed_notifications()
+            .iter()
+            .map(|s| s.event.pubkey)
+            .filter(|pk| !self.profiles.contains_key(&pk.to_string()))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let mut rx = self.core.ensure_profiles(missing);
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| this.on_event(ev, 0, cx));
+            }
+        })
+        .detach();
     }
 
     fn pump_quote(&self, bech: String, mut rx: FeedRx, cx: &mut Context<Self>) {
@@ -510,6 +538,28 @@ impl Render for NotificationsView {
         let parents = self.parents.clone();
         let me = self.me.clone();
         let empty = rows.is_empty();
+        // WS4 receipts: the suppressed page (core's last notifications
+        // build) — the pane's bottom strip lists each hidden item (author,
+        // verdict, reason) with a per-item one-session "show anyway".
+        let suppressed = self.core.suppressed_notifications();
+        let receipts_open = self.receipts_open;
+        let receipts: Vec<(String, String, String, String)> = suppressed
+            .iter()
+            .map(|s| {
+                let key = s.event.pubkey.to_string();
+                let name = self
+                    .profiles
+                    .get(&key)
+                    .map(|p| p.display())
+                    .unwrap_or_else(|| format!("{}…", &key[..8]));
+                (
+                    name,
+                    action_word(notif_type(&s.event), &s.event),
+                    s.reason.clone(),
+                    key,
+                )
+            })
+            .collect();
 
         div()
             .flex_1()
@@ -561,6 +611,7 @@ impl Render for NotificationsView {
                             })
                             .into_any_element()
                     } else {
+                        let list_handle = handle.clone();
                         list(self.list.clone(), move |idx, _w, cx| {
                             match rows.get(idx) {
                                 Some(Row::Label(text)) => div()
@@ -590,7 +641,7 @@ impl Render for NotificationsView {
                                         &quotes,
                                         &me,
                                         time,
-                                        handle.clone(),
+                                        list_handle.clone(),
                                     )
                                 }
                                 None => div().into_any_element(),
@@ -602,5 +653,89 @@ impl Render for NotificationsView {
                         .into_any_element()
                     }),
             )
+            // WS4 receipts: "N hidden — see why" at the bottom of the pane
+            // — the audit trail is the core requirement; a silent void is
+            // a bug. Open, it lists every suppressed item (author, verdict,
+            // reason) with a per-item one-session "show anyway".
+            .when(!suppressed.is_empty(), |d| {
+                let mut strip = div()
+                    .w_full()
+                    .flex_none()
+                    .border_t_1()
+                    .border_color(rgb(theme::hairline()))
+                    .flex()
+                    .flex_col()
+                    .px_4()
+                    .py_2()
+                    .child(
+                        div()
+                            .id("receipts-toggle")
+                            .cursor_pointer()
+                            .text_size(px(theme::T_SMALL))
+                            .text_color(rgb(theme::muted()))
+                            .hover(|s| s.text_color(rgb(theme::ink())))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.receipts_open = !this.receipts_open;
+                                cx.notify();
+                            }))
+                            .child(if receipts_open {
+                                format!("{} hidden — close", suppressed.len())
+                            } else {
+                                format!("{} hidden — see why", suppressed.len())
+                            }),
+                    );
+                if receipts_open {
+                    for (i, (name, action, reason, key)) in receipts.iter().enumerate() {
+                        let hex = key.clone();
+                        strip = strip.child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .py_0p5()
+                                .child(
+                                    div()
+                                        .text_size(px(theme::T_UI))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(theme::ink()))
+                                        .child(name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(px(theme::T_SMALL))
+                                        .text_color(rgb(theme::muted()))
+                                        .child(format!("{action} · {reason}")),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("receipt-show-{i}")))
+                                        .cursor_pointer()
+                                        .text_size(px(theme::T_SMALL))
+                                        .child(theme::pressable(div().child("show anyway")))
+                                        .on_click({
+                                            let handle = handle.clone();
+                                            move |_, _, cx| {
+                                                let hex = hex.clone();
+                                                handle.update(cx, |view, cx| {
+                                                    // One-session exemption: the
+                                                    // tier stops gating this author
+                                                    // until sign-out; the pane
+                                                    // re-asks so the item paints.
+                                                    view.core.show_suppressed_author(&hex);
+                                                    let prev = view.prev;
+                                                    view.pump_at(prev, cx);
+                                                    cx.notify();
+                                                });
+                                            }
+                                        }),
+                                ),
+                        );
+                    }
+                }
+                d.child(strip)
+            })
     }
 }

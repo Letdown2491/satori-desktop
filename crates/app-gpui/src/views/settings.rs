@@ -464,6 +464,191 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// A WoT pref flips (WS4): `notif_wot_tier`, `thread_collapse`,
+    /// `profile_badge`, `dedup_enabled` — all default ON (core reads the
+    /// same keys per call, so a flip lands on the next event / stream).
+    fn toggle_wot_pref(&mut self, key: &'static str, cx: &mut Context<Self>) {
+        prefs::set_bool(key, !prefs::get_bool_or(key, true));
+        cx.notify();
+    }
+
+    /// The SpammingUsers surface's un-hide: clear one author's spammer
+    /// record so their events store again (the threshold re-arms on a
+    /// fresh duplicate streak).
+    fn unhide_spammer(&mut self, hex: &str, cx: &mut Context<Self>) {
+        self.core.unhide_spammer(hex);
+        cx.notify();
+    }
+
+/// The WoT settings group (WS4): the three honest switches plus the
+/// graph's own status — size, qualified set, last rebuild, staleness.
+/// Feature-off is a first-class state: every switch explains what its off
+/// position means.
+fn wot_settings_group(&self, cx: &mut Context<Self>) -> Div {
+    use satori_core::wot::{self, WotStatus};
+    let tier_on = prefs::get_bool_or("notif_wot_tier", true);
+    let collapse_on = prefs::get_bool_or("thread_collapse", true);
+    let badge_on = prefs::get_bool_or("profile_badge", true);
+    let dedup_on = prefs::get_bool_or("dedup_enabled", true);
+    let status_line = match self.core.wot_status() {
+        WotStatus::SignedOut => "Signed out — every verdict reads unknown.".to_string(),
+        WotStatus::OverCap => format!(
+            "Over the {}-follow cap — the graph is off, every verdict reads unknown.",
+            wot::MAX_FOLLOWS
+        ),
+        WotStatus::Live(follows, qualified, rebuilt) => {
+            let mut line = format!("{follows} follows · {qualified} qualified");
+            match rebuilt {
+                Some(at) => {
+                    line.push_str(&format!(" · rebuilt {}", ago(at)));
+                    if std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs().saturating_sub(at) > wot::STALE_SECS)
+                        .unwrap_or(false)
+                    {
+                        line.push_str(" · stale — waiting for fresh contact lists");
+                    }
+                }
+                None => line.push_str(" · rebuilding from your follows…"),
+            }
+            line
+        }
+    };
+    group(
+        "Trust (web of trust)",
+        "Who the graph knows: ten or more of your follows following someone \
+         qualifies them. Unknown is never treated as outside — and the feed \
+         is never filtered, only annotated.",
+    )
+    .child(
+        div()
+            .text_size(px(theme::T_SMALL))
+            .text_color(rgb(theme::muted()))
+            .child(status_line),
+    )
+    .child(
+        wot_row(
+            "notif-tier",
+            "Gate out-of-network reactions in notifications",
+            "Reactions and reposts from authors outside your network stay out of \
+             the bell — listed as receipts at the bottom of the pane. Replies, \
+             mentions and zaps always come through.",
+            tier_on,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.toggle_wot_pref("notif_wot_tier", cx)
+        })),
+    )
+    .child(
+        wot_row(
+            "thread-collapse",
+            "Collapse out-of-network thread replies",
+            "Replies from authors outside your network start collapsed with a \
+             count; one click expands them. Nothing is ever deleted.",
+            collapse_on,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.toggle_wot_pref("thread_collapse", cx)
+        })),
+    )
+    .child(
+        wot_row(
+            "profile-badge",
+            "Show the profile trust badge",
+            "A quiet pill under the name: You follow / In your network / Outside \
+             your network. Unknown shows nothing.",
+            badge_on,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.toggle_wot_pref("profile_badge", cx)
+        })),
+    )
+    .child(
+        wot_row(
+            "dedup",
+            "Duplicate-content filter",
+            "Identical content re-delivered five times stops being stored, per \
+             relay-attributed receipts below. Objective and bounded.",
+            dedup_on,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.toggle_wot_pref("dedup_enabled", cx)
+        })),
+    )
+}
+
+/// The SpammingUsers group (WS2's surface, Amethyst SpammingUsersScreen
+/// shape): caught spammers as data — author, duplicate count, per-relay
+/// attribution, last seen — each with an un-hide. Receipts, never labels.
+fn spam_group(&mut self, cx: &mut Context<Self>) -> Div {
+    let report = self.core.spam_report();
+    let rows: Vec<AnyElement> = report
+        .iter()
+        .map(|rec| {
+            let relays = rec
+                .relays
+                .iter()
+                .map(|(url, n)| format!("{url} ×{n}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let hex = rec.pubkey.clone();
+            div()
+                .w_full()
+                .flex()
+                .items_start()
+                .gap_2()
+                .py_1()
+                .border_t_1()
+                .border_color(rgb(theme::hairline()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child(format!(
+                                    "{} — {} duplicate(s) · last {}",
+                                    short_author(&rec.pubkey),
+                                    rec.count,
+                                    ago(rec.last_seen)
+                                )),
+                        )
+                        .child(muted(match relays.is_empty() {
+                            true => "no per-relay attribution".to_string(),
+                            false => relays,
+                        })),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("unhide-{hex}")))
+                        .cursor_pointer()
+                        .text_size(px(theme::T_UI))
+                        .child(theme::pressable(div().child("un-hide")))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.unhide_spammer(&hex, cx);
+                        })),
+                )
+                .into_any_element()
+        })
+        .collect();
+    let (title, desc) = (
+        "Spam receipts",
+        "Authors whose duplicate content the filter caught — per-relay \
+         attribution, un-hide on every row.",
+    );
+    group(title, desc)
+        .when(rows.is_empty(), |g| {
+            g.child(muted("No one caught this session."))
+        })
+        .child(div().w_full().flex().flex_col().children(rows))
+}
+
+
     // --- Backup: the signed list events, out and back -------------------------
 
     fn export_backup(&mut self, cx: &mut Context<Self>) {
@@ -542,6 +727,114 @@ impl SettingsView {
         cx.notify();
     }
 }
+/// The relay-health group (WS4): surface what core already LEARNS about
+/// each relay (D33 latency EWMA + read-dead, D36 write-dead) as a passive
+/// pane — no probing, no edits; everyday queries did the measuring. All
+/// configured relays read-dead renders §4.4's degraded pill (a state, not
+/// an error — D26's split).
+fn relay_health_group(relays: &[RelayEntry]) -> Div {
+    use satori_core::relay_latency::RelayHealth;
+    let health: Vec<RelayHealth> = satori_core::manager::Core::relay_health();
+    let lookup =
+        |url: &str| health.iter().find(|h| h.url == url).cloned();
+    // Configured relays first, in list order; profiled-but-dropped ones
+    // (the LRU still remembers them) append, alphabetically for stable order.
+    let mut extras: Vec<RelayHealth> = health
+        .iter()
+        .filter(|h| !relays.iter().any(|r| r.url == h.url))
+        .cloned()
+        .collect();
+    extras.sort_by(|a, b| a.url.cmp(&b.url));
+
+    let degraded = !relays.is_empty()
+        && relays
+            .iter()
+            .all(|r| lookup(&r.url).is_some_and(|h| h.read_dead));
+
+    let stat_line = |h: &RelayHealth| {
+        if h.n == 0 {
+            "no samples yet".to_string()
+        } else {
+            format!("{} ms · {} queries", h.ms, h.n)
+        }
+    };
+
+    // Configured relays first, in list order; profiled-but-dropped ones
+    // (the LRU still remembers them) append, alphabetically for stability.
+    let mut rows: Vec<(String, Option<RelayHealth>)> = relays
+        .iter()
+        .map(|r| (r.url.clone(), lookup(&r.url)))
+        .collect();
+    rows.extend(extras.into_iter().map(|h| (h.url.clone(), Some(h))));
+
+    let rows_el: Vec<AnyElement> = rows
+        .into_iter()
+        .map(|(url, h)| {
+            let mut row = div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_2()
+                .py_0p5()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(theme::T_UI))
+                        .text_color(rgb(theme::ink()))
+                        .child(url),
+                );
+            if let Some(h) = h {
+                if h.read_dead {
+                    row = row.child(
+                        div()
+                            .text_size(px(theme::T_SMALL))
+                            .text_color(rgb(theme::err()))
+                            .child("read-dead"),
+                    );
+                }
+                if h.write_dead {
+                    row = row.child(
+                        div()
+                            .text_size(px(theme::T_SMALL))
+                            .text_color(rgb(theme::warn()))
+                            .child("write-dead"),
+                    );
+                }
+                row = row.child(
+                    div()
+                        .text_size(px(theme::T_SMALL))
+                        .text_color(rgb(theme::muted()))
+                        .child(stat_line(&h)),
+                );
+            }
+            row.into_any_element()
+        })
+        .collect();
+
+    group(
+        "Relay health",
+        "What everyday queries have learned about each relay — response \
+         times, and relays that stopped answering reads or writes.",
+    )
+    .when(degraded, |d| {
+        d.child(
+            div().py_1().child(states::offline_pill(
+                "the relays didn't answer — reading is degraded",
+            )),
+        )
+    })
+    .child(
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .children(rows_el),
+    )
+}
+
+
 
 fn relay_rows((read, write): (Vec<String>, Vec<String>)) -> Vec<RelayEntry> {
     let mut rows: Vec<RelayEntry> = read
@@ -665,112 +958,57 @@ fn muted(text: impl Into<String>) -> Div {
         .child(text.into())
 }
 
-/// The relay-health group (WS4): surface what core already LEARNS about
-/// each relay (D33 latency EWMA + read-dead, D36 write-dead) as a passive
-/// pane — no probing, no edits; everyday queries did the measuring. All
-/// configured relays read-dead renders §4.4's degraded pill (a state, not
-/// an error — D26's split).
-fn relay_health_group(relays: &[RelayEntry]) -> Div {
-    use satori_core::relay_latency::RelayHealth;
-    let health: Vec<RelayHealth> = satori_core::manager::Core::relay_health();
-    let lookup =
-        |url: &str| health.iter().find(|h| h.url == url).cloned();
-    // Configured relays first, in list order; profiled-but-dropped ones
-    // (the LRU still remembers them) append, alphabetically for stable order.
-    let mut extras: Vec<RelayHealth> = health
-        .iter()
-        .filter(|h| !relays.iter().any(|r| r.url == h.url))
-        .cloned()
-        .collect();
-    extras.sort_by(|a, b| a.url.cmp(&b.url));
+/// Relative staleness for the WoT status lines ("rebuilt 5m ago").
+fn ago(secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let d = now.saturating_sub(secs);
+    match d {
+        0..=90 => "just now".to_string(),
+        _ if d < 3600 => format!("{}m ago", d / 60),
+        _ if d < 86_400 => format!("{}h ago", d / 3600),
+        _ => format!("{}d ago", d / 86_400),
+    }
+}
 
-    let degraded = !relays.is_empty()
-        && relays
-            .iter()
-            .all(|r| lookup(&r.url).is_some_and(|h| h.read_dead));
+/// A caught spammer's short display key (settings.rs me_npub_short shape):
+/// npub prefix when the hex parses, the hex prefix otherwise.
+fn short_author(hex: &str) -> String {
+    PublicKey::from_str(hex)
+        .ok()
+        .and_then(|pk| pk.to_bech32().ok())
+        .map(|full| format!("{}…", &full[..12]))
+        .unwrap_or_else(|| format!("{}…", &hex[..8.min(hex.len())]))
+}
 
-    let stat_line = |h: &RelayHealth| {
-        if h.n == 0 {
-            "no samples yet".to_string()
-        } else {
-            format!("{} ms · {} queries", h.ms, h.n)
-        }
-    };
-
-    // Configured relays first, in list order; profiled-but-dropped ones
-    // (the LRU still remembers them) append, alphabetically for stability.
-    let mut rows: Vec<(String, Option<RelayHealth>)> = relays
-        .iter()
-        .map(|r| (r.url.clone(), lookup(&r.url)))
-        .collect();
-    rows.extend(extras.into_iter().map(|h| (h.url.clone(), Some(h))));
-
-    let rows_el: Vec<AnyElement> = rows
-        .into_iter()
-        .map(|(url, h)| {
-            let mut row = div()
-                .w_full()
+/// One WoT settings row: label + the quiet pill toggle, the undo row's
+/// shape (the group() helpers' most common child).
+fn wot_row(id: &str, label: &str, sub: &str, on: bool) -> gpui::Stateful<Div> {
+    div()
+        .id(SharedString::from(format!("wot-row-{id}")))
+        .w_full()
+        .flex()
+        .items_start()
+        .gap_2()
+        .py_1()
+        .child(
+            div()
+                .flex_1()
                 .flex()
-                .items_center()
-                .gap_2()
-                .py_0p5()
+                .flex_col()
                 .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
                         .text_size(px(theme::T_UI))
                         .text_color(rgb(theme::ink()))
-                        .child(url),
-                );
-            if let Some(h) = h {
-                if h.read_dead {
-                    row = row.child(
-                        div()
-                            .text_size(px(theme::T_SMALL))
-                            .text_color(rgb(theme::err()))
-                            .child("read-dead"),
-                    );
-                }
-                if h.write_dead {
-                    row = row.child(
-                        div()
-                            .text_size(px(theme::T_SMALL))
-                            .text_color(rgb(theme::warn()))
-                            .child("write-dead"),
-                    );
-                }
-                row = row.child(
-                    div()
-                        .text_size(px(theme::T_SMALL))
-                        .text_color(rgb(theme::muted()))
-                        .child(stat_line(&h)),
-                );
-            }
-            row.into_any_element()
-        })
-        .collect();
-
-    group(
-        "Relay health",
-        "What everyday queries have learned about each relay — response \
-         times, and relays that stopped answering reads or writes.",
-    )
-    .when(degraded, |d| {
-        d.child(
-            div().py_1().child(states::offline_pill(
-                "the relays didn't answer — reading is degraded",
-            )),
+                        .child(label.to_string()),
+                )
+                .child(muted(sub)),
         )
-    })
-    .child(
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap_0p5()
-            .children(rows_el),
-    )
+        .child(toggle(SharedString::from(format!("wot-toggle-{id}")), on))
 }
+
 
 impl EventEmitter<Nav> for SettingsView {}
 
@@ -1263,6 +1501,11 @@ impl Render for SettingsView {
             )
             // --- Relay health (D33/D36 learned state, WS1's last item) ------
             .child(relay_health_group(&relays))
+            // --- Trust (web of trust) + spam receipts (WS4) -----------------
+            .child(self.wot_settings_group(cx))
+            .when(prefs::get_bool_or("dedup_enabled", true), |d| {
+                d.child(self.spam_group(cx))
+            })
             // --- Backup: the signed list events ------------------------------
             .child(
                 group(

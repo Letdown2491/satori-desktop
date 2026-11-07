@@ -17,6 +17,7 @@ use gpui::{
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile};
+use satori_core::wot::Verdict;
 
 use crate::{icons, media, theme};
 use super::{content, nav::Nav, states};
@@ -26,6 +27,10 @@ pub struct ThreadView {
     anchor: Option<Event>,
     /// Replies flattened pre-order with their NIP-10 depth (nest_replies).
     replies: Vec<(Event, usize)>,
+    /// One-session expanded set for the WS3 collapse: a reply the user
+    /// expanded stays open until the pane closes (click is a state change,
+    /// not a re-hide).
+    expanded: HashSet<EventId>,
     profiles: HashMap<String, Profile>,
     quotes: content::Quotes,
     status: String,
@@ -52,6 +57,7 @@ impl ThreadView {
             core,
             anchor: None,
             replies: vec![],
+            expanded: HashSet::new(),
             profiles: HashMap::new(),
             quotes: HashMap::new(),
             status: "loading the thread…".into(),
@@ -322,6 +328,66 @@ fn nest_replies(replies: &[Event]) -> Vec<(Event, usize)> {
     out
 }
 
+// --- WS3: collapse of out-of-network replies ---------------------------------
+
+/// One reply row's collapse plan (render-time projection; unit-tested
+/// below). `hidden_by` is the row index of the collapsed reply that
+/// suppresses this row — Some(i) means row i IS a collapsed root; None
+/// renders normally. `hidden` counts 1 (the root itself) + every
+/// descendant folded under it — the "N from outside your network" line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CollapsePlan {
+    hidden_by: Option<usize>,
+    hidden: usize,
+}
+
+/// The collapse rule (issue #2 WS3, Amethyst ThreadFeedView model): with
+/// the pref on, a reply whose author the graph KNOWS is NotInNetwork
+/// starts collapsed; its descendants fold under it and are counted (not
+/// deleted — one click reveals them). Follows/Self/Trusted never collapse;
+/// Unknown authors never collapse (informed absence of judgment); an
+/// explicitly expanded reply stays open.
+fn collapse_plan(
+    replies: &[(Event, usize)],
+    outside: &impl Fn(&PublicKey) -> bool,
+    expanded: &HashSet<EventId>,
+    enabled: bool,
+) -> Vec<CollapsePlan> {
+    let mut plan = replies
+        .iter()
+        .map(|_| CollapsePlan {
+            hidden_by: None,
+            hidden: 0,
+        })
+        .collect::<Vec<_>>();
+    // Roots first: each out-of-network, not-yet-expanded reply collapses.
+    for (i, (ev, _)) in replies.iter().enumerate() {
+        if enabled && !expanded.contains(&ev.id) && outside(&ev.pubkey) {
+            plan[i] = CollapsePlan {
+                hidden_by: Some(i),
+                hidden: 1,
+            };
+        }
+    }
+    // Descendants fold under their nearest collapsed ancestor (the flat
+    // list is pre-ordered, so a subtree is a contiguous run of rows deeper
+    // than the ancestor's).
+    for j in 0..plan.len() {
+        if plan[j].hidden_by != Some(j) {
+            continue;
+        }
+        let depth = replies[j].1;
+        for i in j + 1..replies.len() {
+            if replies[i].1 <= depth {
+                break;
+            }
+            plan[i].hidden_by = Some(j);
+            plan[j].hidden += 1;
+        }
+    }
+    plan
+}
+
 // The card takes the full render-time snapshot — one struct would hide the
 // shape, and GPUI's no-entity-reads-during-render rule makes them explicit.
 #[allow(clippy::too_many_arguments)]
@@ -478,6 +544,9 @@ impl Render for ThreadView {
         let anchor = self.anchor.clone();
         let anchor_handle = handle.clone();
         let reply_all_handle = handle.clone();
+        // The WS3 collapse line's click target (the list closure moves its
+        // own clone; `handle` stays for the anchor above).
+        let collapse_handle = handle.clone();
         // Lazy-parent whispers (want_parents): computed once per render —
         // the generic line until the fetch lands, then author + snippet.
         let present: HashSet<String> = replies
@@ -498,6 +567,12 @@ impl Render for ThreadView {
             .and_then(direct_parent_id)
             .filter(|pid| !present.contains(pid))
             .map(|pid| self.parent_whisper(&pid));
+        // WS3 collapse plan: out-of-network replies start collapsed, their
+        // descendants folded under them and counted (never deleted). The
+        // pref (`thread_collapse`, default ON) turns the whole rule off.
+        let enabled = crate::prefs::get_bool_or("thread_collapse", true);
+        let outside = |pk: &PublicKey| self.core.verdict(pk) == Verdict::NotInNetwork;
+        let plans = collapse_plan(&replies, &outside, &self.expanded.clone(), enabled);
 
         div()
             .flex_1()
@@ -648,30 +723,71 @@ impl Render for ThreadView {
                         list(self.list.clone(), move |idx, _w, cx| {
                             match replies.get(idx) {
                                 Some((ev, depth)) => {
-                                    let key = ev.pubkey.to_string();
-                                    let name = profiles
-                                        .get(&key)
-                                        .map(|p| p.display())
-                                        .unwrap_or_else(|| format!("{}…", &key[..8]));
-                                    // The stamp reads the current mode +
-                                    // blocktime cache per frame; ensure
-                                    // refines Block mode from the bridge.
-                                    let secs = ev.created_at.as_secs();
-                                    let time = crate::timefmt::stamp(secs, cx);
-                                    crate::timefmt::ensure(secs, cx);
-                                    reply_row(
-                                        idx,
-                                        ev,
-                                        *depth,
-                                        name,
-                                        whispers.get(idx).cloned().flatten(),
-                                        &media,
-                                        &quotes,
-                                        &profiles,
-                                        time,
-                                        anchor_handle.clone(),
-                                    )
-                                    .into_any_element()
+                                    // WS3: the collapse projection — a
+                                    // collapsed root renders the count line
+                                    // (whisper style, the ↩ house model); a
+                                    // row folded under one renders nothing.
+                                    match plans[idx].hidden_by {
+                                        Some(j) if j == idx => {
+                                            let ev = ev.clone();
+                                            let n = plans[idx].hidden;
+                                            let collapse_handle = collapse_handle.clone();
+                                            div()
+                                                .w_full()
+                                                .max_w(px(content::COL_W))
+                                                .pl(px(20.0))
+                                                .py_1()
+                                                .child(
+                                                    theme::pressable(
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "collapse-{idx}"
+                                                            )))
+                                                            .cursor_pointer()
+                                                            .text_size(px(theme::T_SMALL)),
+                                                    )
+                                                    .on_click(move |_, _, cx| {
+                                                        collapse_handle.update(cx, |view, cx| {
+                                                            view.expanded.insert(ev.id);
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                                    .child(format!(
+                                                        "{n} from outside your network — expand"
+                                                    )),
+                                                )
+                                                .into_any_element()
+                                        }
+                                        Some(_) => div().into_any_element(),
+                                        None => {
+                                            let key = ev.pubkey.to_string();
+                                            let name = profiles
+                                                .get(&key)
+                                                .map(|p| p.display())
+                                                .unwrap_or_else(|| {
+                                                    format!("{}…", &key[..8])
+                                                });
+                                            // The stamp reads the current mode +
+                                            // blocktime cache per frame; ensure
+                                            // refines Block mode from the bridge.
+                                            let secs = ev.created_at.as_secs();
+                                            let time = crate::timefmt::stamp(secs, cx);
+                                            crate::timefmt::ensure(secs, cx);
+                                            reply_row(
+                                                idx,
+                                                ev,
+                                                *depth,
+                                                name,
+                                                whispers.get(idx).cloned().flatten(),
+                                                &media,
+                                                &quotes,
+                                                &profiles,
+                                                time,
+                                                anchor_handle.clone(),
+                                            )
+                                            .into_any_element()
+                                        }
+                                    }
                                 }
                                 None => div().into_any_element(),
                             }
@@ -682,5 +798,83 @@ impl Render for ThreadView {
                         .into_any_element()
                     }),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys() -> Keys {
+        Keys::generate()
+    }
+
+    /// One kind-1 note, optionally an NIP-10 reply to `parent`.
+    fn note(author: &Keys, parent: Option<&Event>) -> Event {
+        let mut t = Tags::new();
+        if let Some(p) = parent {
+            t.push(Tag::event(p.id));
+        }
+        let unsigned = UnsignedEvent::new(
+            author.public_key(),
+            Timestamp::from_secs(1),
+            Kind::TextNote,
+            t,
+            "a reply body long enough to be a note".to_string(),
+        );
+        author.sign_event(unsigned).unwrap()
+    }
+
+    fn plan(
+        replies: &[(Event, usize)],
+        outside: &[PublicKey],
+        expanded: &HashSet<EventId>,
+        enabled: bool,
+    ) -> Vec<CollapsePlan> {
+        collapse_plan(replies, &|pk| outside.contains(pk), expanded, enabled)
+    }
+
+    /// The rule: out-of-network roots collapse (counting themselves);
+    /// follows/self/unknown never collapse; Unknown authors pass (informed
+    /// absence of judgment); a collapsed subtree folds and is COUNTED,
+    /// never deleted; the pref off renders everything.
+    #[test]
+    fn collapse_counting() {
+        let known = keys(); // NotInNetwork author (the graph knows: outside)
+        let unseen = keys(); // Unknown author (the graph can't say)
+        let root = note(&known, None);
+        let child = note(&unseen, Some(&root)); // Unknown under a collapsed root
+        let replies = vec![(root, 0), (child, 1)];
+
+        // Both fold under the root's collapse: N = 2 (root + descendant).
+        let p = plan(&replies, &[known.public_key()], &HashSet::new(), true);
+        assert_eq!(p[0].hidden_by, Some(0));
+        assert_eq!(p[0].hidden, 2);
+        assert_eq!(p[1].hidden_by, Some(0));
+
+        // Expanded: the user's click is a state change — everything shows.
+        let mut expanded = HashSet::new();
+        expanded.insert(replies[0].0.id);
+        let p = plan(&replies, &[known.public_key()], &expanded, true);
+        assert_eq!(p[0].hidden_by, None);
+        assert_eq!(p[1].hidden_by, None);
+
+        // An Unknown author never collapses (not a judgment).
+        let r = note(&unseen, None);
+        let p = plan(&[(r.clone(), 0)], &[known.public_key()], &HashSet::new(), true);
+        assert_eq!(p[0], CollapsePlan { hidden_by: None, hidden: 0 });
+
+        // The pref off: nothing collapses (feature-off is a first-class state).
+        let p = plan(&replies, &[known.public_key()], &HashSet::new(), false);
+        assert!(p.iter().all(|p| p.hidden_by.is_none()));
+
+        // Two separate out-of-network roots each count their own subtree.
+        let r2 = note(&known, None);
+        let replies = vec![(replies[0].0.clone(), 0), (r2, 0)];
+        let p = plan(&replies, &[known.public_key()], &HashSet::new(), true);
+        assert_eq!(p[0].hidden_by, Some(0));
+        assert_eq!(p[0].hidden, 1);
+        assert_eq!(p[1].hidden_by, Some(1));
+        assert_eq!(p[1].hidden, 1);
     }
 }
