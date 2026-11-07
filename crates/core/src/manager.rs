@@ -968,6 +968,15 @@ impl Core {
                 got.len(),
                 limit
             );
+            {
+                let g = crate::wot::graph();
+                eprintln!(
+                    "[core] wot: graph now: {} source list(s) applied, {} scored target(s), {} qualified",
+                    g.sources.len(),
+                    g.scores.len(),
+                    crate::wot::qualified_count(&g)
+                );
+            }
         });
     }
 

@@ -191,7 +191,7 @@ fn fresh(created_at: u64) -> bool {
 
 /// The lifetime graph lock. Identities and state live for the process;
 /// the manager re-arms at every bootstrap.
-fn graph() -> std::sync::MutexGuard<'static, Graph> {
+pub(crate) fn graph() -> std::sync::MutexGuard<'static, Graph> {
     GRAPH
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -474,7 +474,7 @@ pub fn status() -> WotStatus {
     WotStatus::Live(g.follows.len(), qualified_count(&g), g.rebuilt)
 }
 
-fn qualified_count(g: &Graph) -> usize {
+pub(crate) fn qualified_count(g: &Graph) -> usize {
     g.scores
         .iter()
         .filter(|(k, s)| s.len() >= QUALIFICATION_THRESHOLD && !g.muted.contains(k.as_str()))
