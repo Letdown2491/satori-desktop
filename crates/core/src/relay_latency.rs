@@ -277,21 +277,26 @@ pub fn record_read_denial(relay: &str) {
     DIRTY.store(true, Ordering::Relaxed);
 }
 
-/// True when reading from this relay is known-futile (relay-latency.ts
-/// isReadDead): it denied us recently, or its profile is the
-/// write-only-blaster shape. Routing treats read-dead as score 0 (never
-/// picked) and shard skips drop it at query time.
-pub fn is_read_dead(relay: &str) -> bool {
-    let held = stats().lock().unwrap();
-    let Some(s) = held.map.get(&key(relay)) else {
-        return false;
-    };
+/// The read-dead shape test on one stat (shared by [`is_read_dead`] and
+/// [`snapshot`], which must not take the lock twice).
+fn stat_read_dead(s: &RelayStat) -> bool {
     if let Some(at) = s.denied_at
         && now_secs().saturating_sub(at) < DENIAL_TTL_SECS
     {
         return true;
     }
     s.n >= DEAD_N && s.ev < EV_EMPTY && s.trunc as f64 / s.n as f64 >= DEAD_TRUNC
+}
+
+/// True when reading from this relay is known-futile (relay-latency.ts
+/// isReadDead): it denied us recently, or its profile is the
+/// write-only-blaster shape. Routing treats read-dead as score 0 (never
+/// picked) and shard skips drop it at query time.
+pub fn is_read_dead(relay: &str) -> bool {
+    let held = stats().lock().unwrap();
+    held.map
+        .get(&key(relay))
+        .is_some_and(stat_read_dead)
 }
 
 /// Note a publish outcome for this relay (D36 write-dead learning — the
@@ -338,6 +343,37 @@ pub fn is_write_dead(relay: &str) -> bool {
     held.map
         .get(&key(relay))
         .is_some_and(|s| s.write_fails >= WRITE_DEAD_N)
+}
+
+/// One relay's learned health, for the settings pane (WS4): the EWMA
+/// latency, sample count, and the two dead-markers (D33 read-dead /
+/// D36 write-dead). A copy — the pane renders it, the lock is never
+/// held across a paint.
+#[derive(Debug, Clone)]
+pub struct RelayHealth {
+    pub url: String,
+    /// EWMA of time-to-last-event in ms (relay responsiveness).
+    pub ms: u64,
+    /// Samples behind the profile (low n = the numbers aren't trusted yet).
+    pub n: u32,
+    pub read_dead: bool,
+    pub write_dead: bool,
+}
+
+/// Snapshot of every profiled relay, unordered (settings.rs relay-health
+/// pane sorts and merges it with the configured list).
+pub fn snapshot() -> Vec<RelayHealth> {
+    let held = stats().lock().unwrap();
+    held.map
+        .iter()
+        .map(|(url, s)| RelayHealth {
+            url: url.clone(),
+            ms: s.ms,
+            n: s.n,
+            read_dead: stat_read_dead(s),
+            write_dead: s.write_fails >= WRITE_DEAD_N,
+        })
+        .collect()
 }
 
 /// Selection weight in (0,1] for outbox routing (relay-latency.ts

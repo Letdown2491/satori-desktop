@@ -3908,6 +3908,7 @@ impl Core {
         reply_to: Option<Event>,
         mentions: Vec<PublicKey>,
         quote: Option<Event>,
+        imetas: Vec<Vec<String>>,
         scheduled_at: u64,
     ) -> mpsc::UnboundedReceiver<ScheduleEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -3916,11 +3917,48 @@ impl Core {
             let res: Result<String> = async {
                 let active = this.active().await?;
                 let me = active.me();
-                let (content, tags) = Self::note_tags(content, reply_to, mentions, quote, me);
+                // A gallery schedules as the SAME kind-20 picture event an
+                // instant post makes (post_picture_inner's tag build) — a
+                // scheduled post must not lose its images.
+                let (kind, content, tags) = if imetas.is_empty() {
+                    let (content, tags) = Self::note_tags(content, reply_to, mentions, quote, me);
+                    (Kind::TextNote, content, tags)
+                } else {
+                    let mut tags: Vec<Tag> = vec![Tag::custom(
+                        "title",
+                        [first_caption_line(&content)],
+                    )];
+                    let mut xs: Vec<String> = Vec::new();
+                    let mut mimes: Vec<String> = Vec::new();
+                    for m in &imetas {
+                        if m.len() >= 2 && m[0] == "imeta" {
+                            tags.push(Tag::custom("imeta", m[1..].iter()));
+                        }
+                        for v in m.iter().skip(1) {
+                            if let Some(x) = v.strip_prefix("x ")
+                                && !xs.contains(&x.to_string())
+                            {
+                                xs.push(x.to_string());
+                            }
+                            if let Some(mm) = v.strip_prefix("m ")
+                                && !mimes.contains(&mm.to_string())
+                            {
+                                mimes.push(mm.to_string());
+                            }
+                        }
+                    }
+                    for x in &xs {
+                        tags.push(Tag::custom("x", [x.as_str()]));
+                    }
+                    for m in &mimes {
+                        tags.push(Tag::custom("m", [m.as_str()]));
+                    }
+                    (Kind::Custom(20), content, tags)
+                };
                 let unsigned = UnsignedEvent::new(
                     me,
                     Timestamp::from_secs(scheduled_at),
-                    Kind::TextNote,
+                    kind,
                     tags,
                     content,
                 );
@@ -4957,6 +4995,19 @@ impl Core {
             .as_ref()
             .map(|a| (a.read_relays.clone(), a.write_relays.clone()))
             .unwrap_or_default()
+    }
+
+    /// The learned per-relay health (D33/D36: latency EWMA, read-dead,
+    /// write-dead) for the settings relay-health pane. A free function on
+    /// the type — the data is a process-wide sidecar, not per-account.
+    pub fn relay_health() -> Vec<crate::relay_latency::RelayHealth> {
+        crate::relay_latency::snapshot()
+    }
+
+    /// Pending outbox items (D36): notes signed and saved but not yet ACKed
+    /// by any relay. The shell's "queued for delivery" honesty state.
+    pub fn outbox_pending() -> usize {
+        crate::outbox_queue::len()
     }
 
     /// Publish the NIP-65 relay list (kind:10002 RMW) and swap it in live:
