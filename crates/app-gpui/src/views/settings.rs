@@ -1623,7 +1623,7 @@ fn toggle(id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
         .h(px(16.))
         .rounded_full()
         .border_1()
-        .border_color(rgb(if on { theme::vermilion() } else { theme::hairline() }))
+        .border_color(rgb(if on { theme::vermilion() } else { theme::muted() }))
         .bg(rgb(theme::washi()))
         .flex()
         .items_center()
@@ -1634,7 +1634,7 @@ fn toggle(id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
             div()
                 .size(px(10.))
                 .rounded_full()
-                .bg(rgb(if on { theme::vermilion() } else { theme::hairline() })),
+                .bg(rgb(if on { theme::vermilion() } else { theme::muted() })),
         )
 }
 
