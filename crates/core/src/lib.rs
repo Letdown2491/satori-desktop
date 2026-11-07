@@ -40,6 +40,7 @@ pub mod outbox;
 pub mod outbox_queue;
 pub mod pool;
 pub mod publish;
+pub mod rate;
 pub mod relay_latency;
 pub mod scheduled;
 pub mod seen;

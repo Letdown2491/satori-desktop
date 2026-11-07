@@ -138,35 +138,74 @@ fn notif_tier_enabled() -> bool {
 }
 
 /// Apply the tier to one page: reactions/reposts (kinds 6/7 — engagement
-/// noise, not speech) from authors the graph KNOWS are NotInNetwork are
-/// pulled out as receipts. Replies/mentions/zaps pass; Unknown authors
-/// pass (never punish the graph not knowing); exempted authors pass.
-fn split_wot_tier(notifs: Vec<Event>) -> (Vec<Event>, Vec<SuppressedNotif>) {
+/// noise, not speech) AND kind-1 replies to the user's own notes (D43's
+/// anti-bot amendment — bot replies are the cheapest notification attack)
+/// from authors the graph KNOWS are NotInNetwork are pulled out as
+/// receipts. Mentions/zaps pass; and the second D43 path: an Unknown
+/// author whose replies hit the reply-velocity verdict (rate.rs) is
+/// suppressed into the receipts too — 1–4 replies pass untouched, the
+/// counter is fed only by DELIVERED replies, and exempted authors pass
+/// everything (the exemption is a conscious per-session act).
+///
+/// `my_notes` is the user's recent note ids — what makes a kind-1 a REPLY
+/// (an `e` tag at one of them) rather than a mention. `count_velocity`
+/// feeds the rate counter: the final-union split sets it; the cached-phase
+/// split leaves it false so overlapping phases don't double-count (the
+/// cached phase still wears the flood GATE via `reply_flooded` — the
+/// phase-equality rule).
+fn split_wot_tier(
+    notifs: Vec<Event>,
+    my_notes: &HashSet<EventId>,
+    count_velocity: bool,
+) -> (Vec<Event>, Vec<SuppressedNotif>) {
     // Hoisted (audit fix): the pref read (one metadata syscall + Arc) and
     // the exempt-set lock were per EVENT — now per PAGE.
     let tier_on = notif_tier_enabled();
     let mut kept = Vec::new();
     let mut suppressed = Vec::new();
     for ev in notifs {
-        let engagement = matches!(u16::from(ev.kind), 6 | 7);
-        let gated = engagement
-            && tier_on
-            && crate::wot::verdict(&ev.pubkey) == crate::wot::Verdict::NotInNetwork
-            && !NOTIF_EXEMPT
-                .lock()
-                .unwrap()
-                .contains(&ev.pubkey.to_string());
-        if gated {
-            suppressed.push(SuppressedNotif {
+        let kind = u16::from(ev.kind);
+        let engagement = matches!(kind, 6 | 7);
+        let reply = matches!(kind, 1 | 1111)
+            && ev.tags.event_ids().any(|id| my_notes.contains(&id));
+        if !(tier_on && (engagement || reply)) {
+            kept.push(ev);
+            continue;
+        }
+        let exempt = NOTIF_EXEMPT
+            .lock()
+            .unwrap()
+            .contains(&ev.pubkey.to_string());
+        if exempt {
+            kept.push(ev);
+            continue;
+        }
+        match crate::wot::verdict(&ev.pubkey) {
+            // Known and outside: gated regardless of kind or velocity.
+            crate::wot::Verdict::NotInNetwork => suppressed.push(SuppressedNotif {
                 reason: "outside your network".to_string(),
                 event: ev,
-            });
-        } else {
-            kept.push(ev);
+            }),
+            // The D43 mule rule: Unknown + reply velocity. The check runs
+            // on both phases; only the delivering phase feeds the counter.
+            crate::wot::Verdict::Unknown if reply => {
+                if crate::rate::reply_flooded(&ev.pubkey, ev.created_at.as_secs())
+                    || (count_velocity
+                        && !crate::rate::admit_reply(&ev.pubkey, ev.created_at.as_secs()))
+                {
+                    suppressed.push(SuppressedNotif {
+                        reason: crate::rate::flood_reason(),
+                        event: ev,
+                    });
+                } else {
+                    kept.push(ev);
+                }
+            }
+            _ => kept.push(ev),
         }
     }
     (kept, suppressed)
-    }
+}
 
 /// What the write path reports back.
 #[derive(Debug, Clone)]
@@ -735,6 +774,9 @@ impl Core {
         // The bell's receipts + one-session exemptions go with them.
         crate::wot::clear_identity();
         crate::dedup::clear();
+        // The reply-velocity counter is per-session identity state too
+        // (D43): a different account never inherits a mule verdict.
+        crate::rate::clear();
         SUPPRESSED.lock().unwrap().clear();
         NOTIF_EXEMPT.lock().unwrap().clear();
         // The profile mirror is display state for the logged-in session's
@@ -2799,7 +2841,9 @@ impl Core {
                 // gates the relay phase wears (the phase-equality rule
                 // above). The final union re-splits; the receipts store
                 // holds the union.
-                let (kept, mut cached_suppressed) = split_wot_tier(cached);
+                let my_note_ids: HashSet<EventId> = ids.iter().copied().collect();
+                let (kept, mut cached_suppressed) =
+                    split_wot_tier(cached, &my_note_ids, false);
                 cached = kept;
                 {
                     let authors: Vec<PublicKey> = cached.iter().map(|e| e.pubkey).collect();
@@ -2910,7 +2954,13 @@ impl Core {
                 // The tier on the final union, then the receipts store
                 // becomes the union of both phases' pulls (deduped by id) —
                 // the bell's "N hidden" reads exactly this.
-                let (kept, mut suppressed) = split_wot_tier(notifs);
+                // `count_velocity = true`: this is the delivering split —
+                // the receipts store is written from it, so only its
+                // admitted replies feed the velocity counter (a suppressed
+                // reply must never count toward the flood verdict; the
+                // cached-phase pass above checked the gate without
+                // counting).
+                let (kept, mut suppressed) = split_wot_tier(notifs, &my_note_ids, true);
                 cached_suppressed.append(&mut suppressed);
                 let mut seen_sup = HashSet::new();
                 cached_suppressed.retain(|s| seen_sup.insert(s.event.id));
@@ -6557,5 +6607,154 @@ mod tests {
             Some(_) => {}
             None => panic!("notifications never resolved after re-login"),
         }
+    }
+
+    // --- notification tier + reply velocity (D41/D43) -----------------------
+
+    use crate::test_env::EnvGuard as TierEnv;
+
+    fn note(k: &Keys, kind: Kind, tags: Tags, content: &str, at: u64) -> Event {
+        let unsigned = UnsignedEvent::new(
+            k.public_key(),
+            Timestamp::from_secs(at),
+            kind,
+            tags,
+            content.to_string(),
+        );
+        k.sign_event(unsigned).unwrap()
+    }
+
+    /// A graph where `outsider` is known NotInNetwork (one fresh follow's
+    /// list vouches for them, sub-threshold) — the rule-1 fixture.
+    fn tier_session() -> (EventId, Keys, Keys, Keys) {
+        crate::wot::clear_identity();
+        crate::rate::clear();
+        let me = Keys::generate();
+        let follow = Keys::generate();
+        let outsider = Keys::generate();
+        crate::wot::set_identity(me.public_key(), &[follow.public_key()]);
+        // kind3(follow → outsider): seen, sub-threshold → NotInNetwork.
+        // Fresh list (now_secs): stale lists contribute nothing (D41b).
+        let mut tags = Tags::new();
+        tags.push(Tag::public_key(outsider.public_key()));
+        crate::wot::observe(&note(
+            &follow,
+            Kind::ContactList,
+            tags,
+            "",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        ));
+        let my_note = EventId::from_byte_array([7u8; 32]);
+        (my_note, me, follow, outsider)
+    }
+
+    fn reply(k: &Keys, parent: EventId, at: u64) -> Event {
+        let mut tags = Tags::new();
+        tags.push(Tag::event(parent));
+        note(k, Kind::TextNote, tags, "gm", at)
+    }
+
+    #[test]
+    fn tier_gates_not_in_network_replies_and_engagement() {
+        let _env = TierEnv::new("tier-nin");
+        let (my_note, _me, _f, outsider) = tier_session();
+        let my_notes: HashSet<EventId> = [my_note].into();
+        let at = 1000;
+        // Replies: the amendment's target — gated.
+        let (kept, sup) = split_wot_tier(vec![reply(&outsider, my_note, at)], &my_notes, false);
+        assert!(kept.is_empty());
+        assert_eq!(sup.len(), 1);
+        assert_eq!(sup[0].reason, "outside your network");
+        // Reactions were already gated (D41).
+        let mut tags = Tags::new();
+        tags.push(Tag::event(my_note));
+        let (kept, sup) = split_wot_tier(
+            vec![note(&outsider, Kind::Reaction, tags, "+", at)],
+            &my_notes,
+            false,
+        );
+        assert!(kept.is_empty() && sup.len() == 1 && sup[0].reason == "outside your network");
+        // Mentions and zaps stay passing — direct attention that is NOT a
+        // reply to your note.
+        let mut mention = Tags::new();
+        mention.push(Tag::public_key(_me.public_key()));
+        let (kept, sup) = split_wot_tier(
+            vec![note(&outsider, Kind::TextNote, mention, "hi", at)],
+            &my_notes,
+            false,
+        );
+        assert_eq!(kept.len(), 1, "mention passes");
+        assert!(sup.is_empty());
+        let (kept, sup) = split_wot_tier(
+            vec![note(&outsider, Kind::Custom(9735), Tags::new(), "", at)],
+            &my_notes,
+            false,
+        );
+        assert_eq!(kept.len(), 1, "zap passes");
+        assert!(sup.is_empty());
+        crate::wot::clear_identity();
+        crate::rate::clear();
+    }
+
+    #[test]
+    fn unknown_single_reply_passes() {
+        let _env = TierEnv::new("tier-unknown");
+        let (my_note, _me, _f, _outsider) = tier_session();
+        let my_notes: HashSet<EventId> = [my_note].into();
+        // `unseen` was observed by nobody → Unknown. One reply: passes,
+        // and the delivering pass feeds the counter (1 in window).
+        let unseen = Keys::generate();
+        let (kept, sup) =
+            split_wot_tier(vec![reply(&unseen, my_note, 1000)], &my_notes, true);
+        assert_eq!(kept.len(), 1, "Unknown ≠ outside; one reply passes");
+        assert!(sup.is_empty());
+        assert!(!crate::rate::reply_flooded(&unseen.public_key(), 1000));
+        crate::wot::clear_identity();
+        crate::rate::clear();
+    }
+
+    #[test]
+    fn velocity_flood_trips_with_receipt_reason() {
+        let _env = TierEnv::new("tier-velocity");
+        let (my_note, _me, _f, _outsider) = tier_session();
+        let my_notes: HashSet<EventId> = [my_note].into();
+        let mule = Keys::generate();
+        let at = 1000;
+        let notifs: Vec<Event> = (0..7u64).map(|i| reply(&mule, my_note, at + i)).collect();
+        let (kept, sup) = split_wot_tier(notifs, &my_notes, true);
+        // 4 pass untouched; the 5th is the trip and every later reply in
+        // the window joins it — each with the named reason.
+        assert_eq!(kept.len(), 4);
+        assert_eq!(sup.len(), 3);
+        let want = crate::rate::flood_reason();
+        assert_eq!(want, "5 replies in 30 min");
+        assert!(sup.iter().all(|s| s.reason == want));
+        // The counter was fed only by the 4 DELIVERED replies — the
+        // suppressed ones never joined (suppression is not self-justifying:
+        // the ring still trips, it did not grow past it).
+        assert!(crate::rate::reply_flooded(&mule.public_key(), at + 100));
+        // Window reset: silence past the window and the author passes.
+        assert!(!crate::rate::reply_flooded(&mule.public_key(), at + crate::rate::REPLY_WINDOW_SECS + 1));
+        crate::wot::clear_identity();
+        crate::rate::clear();
+    }
+
+    #[test]
+    fn velocity_clears_at_session_boundary() {
+        let _env = TierEnv::new("tier-clear");
+        let (my_note, _me, _f, _outsider) = tier_session();
+        let my_notes: HashSet<EventId> = [my_note].into();
+        let mule = Keys::generate();
+        for i in 0..4u64 {
+            split_wot_tier(vec![reply(&mule, my_note, 1000 + i)], &my_notes, true);
+        }
+        // teardown_session's rule: the counter is per-session identity
+        // state (rate::clear(); the graph clear is asserted in wot.rs).
+        crate::rate::clear();
+        assert!(!crate::rate::reply_flooded(&mule.public_key(), 1000));
+        crate::wot::clear_identity();
     }
 }
