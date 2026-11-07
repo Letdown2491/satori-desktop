@@ -64,9 +64,50 @@ pub struct SettingsView {
     // The short npub, computed once — it used to re-read session.json from
     // disk and re-bech32 the key on EVERY render of the pane.
     me_npub: String,
+    // Relay-health pane (session-scoped): the "show all N relays" expand,
+    // collapsed by default — flagged rows render inline, the full table hides.
+    show_all_relays: bool,
     // Toast equivalent (the pane has no header seal to hang one on).
     status: String,
     status_err: bool,
+    // The active tab (issue #2 IA): session-scoped only — the pane reopens
+    // on General; nothing persists.
+    tab: SettingsTab,
+}
+
+/// The six settings tabs (issue #2's approved IA), in row order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SettingsTab {
+    General,
+    Composing,
+    Relays,
+    Trust,
+    Notifications,
+    Wallet,
+}
+
+impl SettingsTab {
+    /// Row order (issue #2): General, Composing, Relays, Trust,
+    /// Notifications, Wallet.
+    const ALL: [SettingsTab; 6] = [
+        SettingsTab::General,
+        SettingsTab::Composing,
+        SettingsTab::Relays,
+        SettingsTab::Trust,
+        SettingsTab::Notifications,
+        SettingsTab::Wallet,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            SettingsTab::General => "General",
+            SettingsTab::Composing => "Composing",
+            SettingsTab::Relays => "Relays",
+            SettingsTab::Trust => "Trust",
+            SettingsTab::Notifications => "Notifications",
+            SettingsTab::Wallet => "Wallet",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -116,6 +157,8 @@ impl SettingsView {
             me_npub: Self::me_npub_short(),
             status: String::new(),
             status_err: false,
+            show_all_relays: false,
+            tab: SettingsTab::General,
         };
         view.pump_feed(core.fetch_media_servers(), cx);
         view.pump_me(cx);
@@ -580,7 +623,7 @@ fn wot_settings_group(&self, cx: &mut Context<Self>) -> Div {
 /// The SpammingUsers group (WS2's surface, Amethyst SpammingUsersScreen
 /// shape): caught spammers as data — author, duplicate count, per-relay
 /// attribution, last seen — each with an un-hide. Receipts, never labels.
-fn spam_group(&mut self, cx: &mut Context<Self>) -> Div {
+fn spam_group(&self, cx: &mut Context<Self>) -> Div {
     let report = self.core.spam_report();
     let rows: Vec<AnyElement> = report
         .iter()
@@ -726,50 +769,723 @@ fn spam_group(&mut self, cx: &mut Context<Self>) -> Div {
         .detach();
         cx.notify();
     }
+
+    // --- tabs (issue #2 IA) ---------------------------------------------------
+    //
+    // The pane's group bodies are untouched — this is a pure IA restructure:
+    // the old one long .child(...) chain is cut into per-tab builders, each
+    // returning the groups its tab owns.
+
+    /// The active tab's group column (current_tab is the only dispatch point).
+    fn current_tab(&self, cx: &mut Context<Self>) -> Div {
+        match self.tab {
+            SettingsTab::General => self.general_tab(cx),
+            SettingsTab::Composing => self.composing_tab(cx),
+            SettingsTab::Relays => self.relays_tab(cx),
+            SettingsTab::Trust => self.trust_tab(cx),
+            SettingsTab::Notifications => self.notifications_tab(cx),
+            SettingsTab::Wallet => self.wallet_tab(cx),
+        }
+    }
+
+    fn general_tab(&self, cx: &mut Context<Self>) -> Div {
+        let dark = self.dark.unwrap_or(true); // None = night (today's default)
+        div()
+            .flex()
+            .flex_col()
+            // --- Appearance (light / dark) ----------------------------------
+            .child(
+                group(
+                    "Appearance",
+                    "Ink on paper — the day palette or the night one. Applies at once.",
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .py_1()
+                        .child(
+                            div()
+                                .id("theme-light")
+                                .cursor_pointer()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(if !dark { theme::ink() } else { theme::muted() }))
+                                .when(!dark, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
+                                .on_click(cx.listener(|_this, _, _, cx| {
+                                    cx.emit(Nav::SetTheme(false));
+                                }))
+                                .child("Light"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::hairline()))
+                                .child("·"),
+                        )
+                        .child(
+                            div()
+                                .id("theme-dark")
+                                .cursor_pointer()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(if dark { theme::ink() } else { theme::muted() }))
+                                .when(dark, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
+                                .on_click(cx.listener(|_this, _, _, cx| {
+                                    cx.emit(Nav::SetTheme(true));
+                                }))
+                                .child("Dark"),
+                        ),
+                ),
+            )
+            // --- Session (identity + sign out) ------------------------------
+            .child(
+                group(
+                    "Session",
+                    "The key stays in this device's secret store until you sign out.",
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child(match &self.me_name {
+                                    Some(name) => format!("Signed in as {name}"),
+                                    None => format!("Signed in as {}", self.me_npub),
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("sign-out")
+                                .cursor_pointer()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::vermilion()))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.emit(Nav::SignOut);
+                                    this.signing_out = true;
+                                    cx.notify();
+                                }))
+                                .when(
+                                    self.signing_out,
+                                    |d| d.text_color(rgb(theme::muted())).child("Signing out…"),
+                                )
+                                .when(!self.signing_out, |d| d.child("Sign out")),
+                        ),
+                ),
+            )
+            // --- List backup: the signed list events ------------------------
+            .child(
+                group(
+                    "List backup",
+                    "Your follows, mutes, bookmarks and relay lists as signed events. Restoring re-publishes them fresh.",
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child("Export"),
+                        )
+                        .child(
+                            seal("export-backup", "Save…", theme::muted())
+                                .on_click(cx.listener(|this, _, _, cx| this.export_backup(cx))),
+                        ),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child("Import & restore"),
+                        )
+                        .child(
+                            seal("import-backup", "Choose file…", theme::muted())
+                                .on_click(cx.listener(|this, _, _, cx| this.import_backup(cx))),
+                        ),
+                ),
+            )
+    }
+
+    fn composing_tab(&self, cx: &mut Context<Self>) -> Div {
+        let undo_enabled = self.undo_enabled;
+        let undo_secs = self.undo_secs.clone();
+        let servers = self.servers.clone();
+        let add_server = self.add_server.clone();
+        div()
+            .flex()
+            .flex_col()
+            // --- Composing (the undo window) --------------------------------
+            .child(
+                group(
+                    "Composing",
+                    "The undo window is the breath before speech: posts are held before they go out.",
+                )
+                .child(
+                    div()
+                        .id("undo-row")
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child("Undo window"),
+                        )
+                        .child(toggle("undo-toggle", undo_enabled))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_undo(!this.undo_enabled, cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .when(undo_enabled, |d| {
+                            d.child(field(undo_secs, "undo-secs-field"))
+                                .child(muted("seconds (1–30, Enter applies)"))
+                        })
+                        .when(!undo_enabled, |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(theme::T_UI))
+                                    .text_color(rgb(theme::muted()))
+                                    .child("Posts publish immediately."),
+                            )
+                        }),
+                ),
+            )
+            // --- Media servers (Blossom, kind 10063) -------------------------
+            .child(
+                group(
+                    "Media servers",
+                    "Where your pictures upload (Blossom). With no list, uploads use \
+                     blossom.primal.net.",
+                )
+                .child(div().w_full().flex().flex_col().gap_0p5().children(
+                    servers.iter().map(|url| {
+                        let url_for_x = url.clone();
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .py_0p5()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(theme::T_UI))
+                                    .text_color(rgb(theme::ink()))
+                                    .child(url.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("media-remove-{url}")))
+                                    .cursor_pointer()
+                                    .px_1()
+                                    .text_size(px(theme::T_UI))
+                                    .text_color(rgb(theme::muted()))
+                                    .child("×")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.remove_server(&url_for_x, cx);
+                                    })),
+                            )
+                    }),
+                ))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .pt_1()
+                        .child(field(add_server, "add-server-field"))
+                        .child(
+                            seal("add-server", "Add", theme::vermilion())
+                                .on_click(cx.listener(|this, _, _, cx| this.add_server(cx))),
+                        ),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_end()
+                        .pt_1()
+                        .child(
+                            seal("publish-media", "Publish media server list", theme::vermilion())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.publish_servers(cx);
+                                })),
+                        ),
+                ),
+            )
+    }
+
+    fn relays_tab(&self, cx: &mut Context<Self>) -> Div {
+        let relays = self.relays.clone();
+        let relay_read = self.relay_read;
+        let relay_write = self.relay_write;
+        let add_relay = self.add_relay.clone();
+        div()
+            .flex()
+            .flex_col()
+            // --- Relays (NIP-65, kind 10002) ---------------------------------
+            .child(
+                group(
+                    "Relays",
+                    "Where your events go and come from — published as your NIP-65 list. \
+                     Five indexers always serve reads.",
+                )
+                .child(div().w_full().flex().flex_col().gap_0p5().children(
+                    relays.iter().map(|relay| {
+                        let url_t = relay.url.clone();
+                        let url_w = relay.url.clone();
+                        let url_for_x = relay.url.clone();
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .py_0p5()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(theme::T_UI))
+                                    .text_color(rgb(theme::ink()))
+                                    .child(relay.url.clone()),
+                            )
+                            .child(
+                                toggle(SharedString::from(format!("relay-r-{}", relay.url)), relay.read)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.toggle_relay(&url_t, true, cx);
+                                    })),
+                            )
+                            .child(
+                                toggle(SharedString::from(format!("relay-w-{}", relay.url)), relay.write)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.toggle_relay(&url_w, false, cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("relay-remove-{}", relay.url)))
+                                    .cursor_pointer()
+                                    .px_1()
+                                    .text_size(px(theme::T_UI))
+                                    .text_color(rgb(theme::muted()))
+                                    .child("×")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.remove_relay(&url_for_x, cx);
+                                    })),
+                            )
+                    }),
+                ))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .pt_1()
+                        .child(field(add_relay, "add-relay-field"))
+                        .child(
+                            toggle("relay-add-read", relay_read)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.relay_read = !this.relay_read;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            toggle("relay-add-write", relay_write)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.relay_write = !this.relay_write;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            seal("add-relay", "Add", theme::vermilion())
+                                .on_click(cx.listener(|this, _, _, cx| this.add_relay(cx))),
+                        ),
+                )
+                .child(muted("the two toggles set read / write for the relay you add"))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_end()
+                        .pt_1()
+                        .child(
+                            seal("publish-relays", "Publish relay list", theme::vermilion())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.publish_relays(cx);
+                                })),
+                        ),
+                ),
+            )
+            // --- Relay health (D33/D36 learned state, WS1's last item) ------
+            .child(self.relay_health_group(cx))
+    }
+
+    fn trust_tab(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            // --- Trust (web of trust) + spam receipts (WS4) -----------------
+            .child(self.wot_settings_group(cx))
+            .when(prefs::get_bool_or("dedup_enabled", true), |d| {
+                d.child(self.spam_group(cx))
+            })
+    }
+
+    fn notifications_tab(&self, cx: &mut Context<Self>) -> Div {
+        let machine_hidden = self.machine_hidden;
+        let hidden_kinds = self.hidden_kinds.clone();
+        div()
+            .flex()
+            .flex_col()
+            // --- Notifications (the bell's content) --------------------------
+            .child(
+                group(
+                    "Notifications",
+                    "What the bell counts. Applies the next time the stream opens.",
+                )
+                .child(
+                    div()
+                        .id("reaction-notifs-row")
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child("Show reactions in notifications"),
+                        )
+                        .child(toggle("reaction-notifs", self.reaction_notifs))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toggle_reaction_notifs(cx);
+                        })),
+                ),
+            )
+            // --- Feed content (the feed catalog) -----------------------------
+            .child(
+                group(
+                    "Feed content",
+                    "What kinds your feed carries. Applies on the next home refresh.",
+                )
+                .child(
+                    div()
+                        .id("machine-notes-row")
+                        .w_full()
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(theme::T_UI))
+                                        .text_color(rgb(theme::ink()))
+                                        .child("Hide machine notes"),
+                                )
+                                .child(muted(
+                                    "Kind-1 events whose entire content is JSON — app data \
+                                     transports, not speech",
+                                )),
+                        )
+                        .child(toggle("machine-notes", machine_hidden))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_machine_notes(cx))),
+                )
+                .children(satori_core::store::CATALOG.iter().map(|(label, kinds)| {
+                    let kinds: Vec<u16> = kinds.to_vec();
+                    let on = !kinds.iter().any(|k| hidden_kinds.contains(k));
+                    div()
+                        .id(SharedString::from(format!("kind-row-{label}")))
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child(label.to_string()),
+                        )
+                        .child(toggle(format!("kind-{label}"), on))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_kind(&kinds, cx);
+                        }))
+                })),
+            )
+            // --- Bookmarks (D38) ---------------------------------------------
+            .child(
+                group(
+                    "Bookmarks",
+                    "Private bookmarks are nip44-encrypted (kind 10003). Public ones \
+                     are a plain NIP-51 list (kind 30001) anyone can read; both show \
+                     in the Library.",
+                )
+                .child(
+                    div()
+                        .id("bookmark-public-row")
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child("Stars write public bookmarks"),
+                        )
+                        .child(toggle("bookmark-public", self.bookmark_public))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toggle_bookmark_public(cx);
+                        })),
+                ),
+            )
+    }
+
+    fn wallet_tab(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            // --- Wallet (NWC zaps, D20) --------------------------------------
+            .child(
+                group(
+                    "Wallet",
+                    "Connect a lightning wallet (NIP-47) and the bolt on every note zaps.",
+                )
+                .child(
+                    div()
+                        .id("wallet-row")
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child(match &self.wallet {
+                                    Status::Disconnected => "No wallet connected".to_string(),
+                                    Status::Connecting => "Reaching the wallet…".to_string(),
+                                    Status::Ready(info) => {
+                                        let mut line = if info.alias.is_empty() {
+                                            "Wallet connected".to_string()
+                                        } else {
+                                            format!("Wallet connected — {}", info.alias)
+                                        };
+                                        if let Some(msat) = info.balance_msat {
+                                            line.push_str(&format!(" · {} sats", msat / 1000));
+                                        }
+                                        line
+                                    }
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::vermilion()))
+                                .child("Manage"),
+                        )
+                        .on_click(cx.listener(|_this, _, _, cx| {
+                            cx.emit(Nav::OpenWallet);
+                        })),
+                ),
+            )
+    }
+
+    /// The segmented tab row: six equal segments, a hairline under the row,
+    /// and the active marker is the seal's state-marking role (0.2 spec
+    /// §1.1: vermilion marks active state) — a 2px vermilion underline laid
+    /// over that hairline. Muted text for inactive tabs, ink for the active
+    /// one. The row sits OUTSIDE the scrolled region (see render), so the
+    /// groups scroll under it.
+    fn tab_row(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .rounded(px(theme::R_EMBED))
+            .border_b_1()
+            .border_color(rgb(theme::hairline()))
+            .children(SettingsTab::ALL.iter().map(|tab| {
+                let tab = *tab;
+                let active = tab == self.tab;
+                div()
+                    .id(SharedString::from(format!("settings-tab-{}", tab.label())))
+                    .cursor_pointer()
+                    .flex_1()
+                    .flex()
+                    .justify_center()
+                    .py_1()
+                    .relative()
+                    .text_size(px(theme::T_UI))
+                    .text_color(rgb(if active { theme::ink() } else { theme::muted() }))
+                    .when(active, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.tab != tab {
+                            this.tab = tab;
+                            cx.notify();
+                        }
+                    }))
+                    .child(tab.label())
+                    .when(active, |d| {
+                        // The seal's state-marking role, not decoration:
+                        // 2px vermilion over the row's hairline.
+                        d.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .h(px(2.))
+                                .bg(rgb(theme::vermilion())),
+                        )
+                    })
+            }))
+    }
 }
 /// The relay-health group (WS4): surface what core already LEARNS about
 /// each relay (D33 latency EWMA + read-dead, D36 write-dead) as a passive
-/// pane — no probing, no edits; everyday queries did the measuring. All
-/// configured relays read-dead renders §4.4's degraded pill (a state, not
-/// an error — D26's split).
-fn relay_health_group(relays: &[RelayEntry]) -> Div {
-    use satori_core::relay_latency::RelayHealth;
-    let health: Vec<RelayHealth> = satori_core::manager::Core::relay_health();
-    let lookup =
-        |url: &str| health.iter().find(|h| h.url == url).cloned();
-    // Configured relays first, in list order; profiled-but-dropped ones
-    // (the LRU still remembers them) append, alphabetically for stable order.
-    let mut extras: Vec<RelayHealth> = health
-        .iter()
-        .filter(|h| !relays.iter().any(|r| r.url == h.url))
-        .cloned()
-        .collect();
-    extras.sort_by(|a, b| a.url.cmp(&b.url));
-
-    let degraded = !relays.is_empty()
-        && relays
+/// pane — no probing, no edits; everyday queries did the measuring.
+/// Presentation-layer triage (maintainer-approved): with dozens of relays
+/// the full table was a wall of noise, so — all healthy renders ONE
+/// whisper line, and only flagged rows (read-dead, write-dead, latency
+/// outliers) render inline, with a collapsed-by-default "show all" toggle
+/// for the full table. All configured relays read-dead renders §4.4's
+/// degraded pill (a state, not an error — D26's split).
+impl SettingsView {
+    fn relay_health_group(&self, cx: &mut Context<Self>) -> Div {
+        use satori_core::relay_latency::RelayHealth;
+        let health: Vec<RelayHealth> = satori_core::manager::Core::relay_health();
+        let lookup =
+            |url: &str| health.iter().find(|h| h.url == url).cloned();
+        // Configured relays first, in list order; profiled-but-dropped ones
+        // (the LRU still remembers them) append, alphabetically for stable order.
+        let mut extras: Vec<RelayHealth> = health
             .iter()
-            .all(|r| lookup(&r.url).is_some_and(|h| h.read_dead));
+            .filter(|h| !self.relays.iter().any(|r| r.url == h.url))
+            .cloned()
+            .collect();
+        extras.sort_by(|a, b| a.url.cmp(&b.url));
 
-    let stat_line = |h: &RelayHealth| {
-        if h.n == 0 {
-            "no samples yet".to_string()
-        } else {
-            format!("{} ms · {} queries", h.ms, h.n)
-        }
-    };
+        let degraded = !self.relays.is_empty()
+            && self
+                .relays
+                .iter()
+                .all(|r| lookup(&r.url).is_some_and(|h| h.read_dead));
 
-    // Configured relays first, in list order; profiled-but-dropped ones
-    // (the LRU still remembers them) append, alphabetically for stability.
-    let mut rows: Vec<(String, Option<RelayHealth>)> = relays
-        .iter()
-        .map(|r| (r.url.clone(), lookup(&r.url)))
-        .collect();
-    rows.extend(extras.into_iter().map(|h| (h.url.clone(), Some(h))));
+        let stat_line = |h: &RelayHealth| {
+            if h.n == 0 {
+                "no samples yet".to_string()
+            } else {
+                format!("{} ms · {} queries", h.ms, h.n)
+            }
+        };
 
-    let rows_el: Vec<AnyElement> = rows
-        .into_iter()
-        .map(|(url, h)| {
+        // Configured relays first, in list order; profiled-but-dropped ones
+        // (the LRU still remembers them) append, alphabetically for stability.
+        let mut rows: Vec<(String, Option<RelayHealth>)> = self
+            .relays
+            .iter()
+            .map(|r| (r.url.clone(), lookup(&r.url)))
+            .collect();
+        rows.extend(extras.into_iter().map(|h| (h.url.clone(), Some(h))));
+
+        // Latency-outlier threshold (named, deliberate): a relay counts as
+        // an outlier only when its median-relative latency exceeds 2× the
+        // median — a simple "meaningfully slower than typical" gate, slowest
+        // 3 among those. Well under doubles read as noise (scheduling jitter
+        // alone); anything past 2× dominates the query's critical path.
+        const OUTLIER_MEDIAN_MULTIPLE: u64 = 2;
+        const OUTLIER_MAX: usize = 3;
+        let mut mss: Vec<u64> = rows
+            .iter()
+            .filter_map(|(_, h)| h.as_ref().filter(|h| h.n > 0).map(|h| h.ms))
+            .collect();
+        mss.sort_unstable();
+        let median = mss
+            .get(mss.len() / 2)
+            .copied()
+            .filter(|m| *m > 0)
+            .unwrap_or(0);
+        let mut outliers: Vec<(usize, u64)> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, h))| {
+                let h = h.as_ref()?;
+                (h.n > 0 && h.ms > OUTLIER_MEDIAN_MULTIPLE * median).then_some((i, h.ms))
+            })
+            .collect::<Vec<(usize, u64)>>();
+        outliers.sort_by_key(|a| std::cmp::Reverse(a.1));
+        outliers.truncate(OUTLIER_MAX);
+        let outlier_rows: Vec<usize> = outliers.into_iter().map(|(i, _)| i).collect();
+
+        // Flagged = dead (read or write) or a latency outlier.
+        let flagged: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, h))| {
+                let h = h.as_ref()?;
+                (h.read_dead || h.write_dead || outlier_rows.contains(&i)).then_some(i)
+            })
+            .collect();
+
+        // The one healthy line (T_SMALL, muted, `muted()`-shaped): relay
+        // count, an answering summary, and the slowest sampled latency.
+        let all_healthy = |d: Div| {
+            let n = rows.len();
+            let slowest = mss.last().copied().unwrap_or(0);
+            let summary = if mss.is_empty() {
+                format!("{n} relays · no samples yet")
+            } else {
+                format!("{n} relays · all answering · slowest {slowest} ms")
+            };
+            d.child(muted(summary))
+        };
+
+        let row_el = |(url, h): &(String, Option<RelayHealth>)| {
             let mut row = div()
                 .w_full()
                 .flex()
@@ -782,7 +1498,7 @@ fn relay_health_group(relays: &[RelayEntry]) -> Div {
                         .min_w_0()
                         .text_size(px(theme::T_UI))
                         .text_color(rgb(theme::ink()))
-                        .child(url),
+                        .child(url.clone()),
                 );
             if let Some(h) = h {
                 if h.read_dead {
@@ -805,33 +1521,68 @@ fn relay_health_group(relays: &[RelayEntry]) -> Div {
                     div()
                         .text_size(px(theme::T_SMALL))
                         .text_color(rgb(theme::muted()))
-                        .child(stat_line(&h)),
+                        .child(stat_line(h)),
                 );
             }
-            row.into_any_element()
-        })
-        .collect();
+            row
+        };
 
-    group(
-        "Relay health",
-        "What everyday queries have learned about each relay — response \
-         times, and relays that stopped answering reads or writes.",
-    )
-    .when(degraded, |d| {
-        d.child(
-            div().py_1().child(states::offline_pill(
-                "the relays didn't answer — reading is degraded",
-            )),
-        )
-    })
-    .child(
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap_0p5()
-            .children(rows_el),
-    )
+        let mut pane = group(
+            "Relay health",
+            "What everyday queries have learned about each relay — response \
+             times, and relays that stopped answering reads or writes.",
+        );
+        if flagged.is_empty() {
+            pane = all_healthy(pane);
+        } else {
+            pane = pane
+                .when(degraded, |d| {
+                    d.child(
+                        div().py_1().child(states::offline_pill(
+                            "the relays didn't answer — reading is degraded",
+                        )),
+                    )
+                })
+                // Only the flagged rows render inline, in table order.
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .children(flagged.iter().map(|&i| row_el(&rows[i]))),
+                )
+                // The quiet session-scoped expand, collapsed by default.
+                .child(
+                    div()
+                        .id("relay-health-show-all")
+                        .cursor_pointer()
+                        .pt_1()
+                        .text_size(px(theme::T_SMALL))
+                        .child(theme::pressable(div().child(if self.show_all_relays {
+                            format!("hide the full list ({} relays)", rows.len())
+                        } else {
+                            format!("show all {} relays", rows.len())
+                        })))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show_all_relays = !this.show_all_relays;
+                            cx.notify();
+                        })),
+                )
+                .when(self.show_all_relays, |d| {
+                    d.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .pt_1()
+                            .children(rows.iter().map(row_el)),
+                    )
+                });
+        }
+        pane
+    }
 }
 
 
@@ -1014,19 +1765,8 @@ impl EventEmitter<Nav> for SettingsView {}
 
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let relays = self.relays.clone();
-        let servers = self.servers.clone();
-        let machine_hidden = self.machine_hidden;
-        let hidden_kinds = self.hidden_kinds.clone();
-        let undo_enabled = self.undo_enabled;
-        let dark = self.dark.unwrap_or(true); // None = night (today's default)
-        let relay_read = self.relay_read;
-        let relay_write = self.relay_write;
         let status = self.status.clone();
         let status_err = self.status_err;
-        let add_relay = self.add_relay.clone();
-        let add_server = self.add_server.clone();
-        let undo_secs = self.undo_secs.clone();
 
         div()
             .id("settings-root")
@@ -1046,525 +1786,53 @@ impl Render for SettingsView {
             }))
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
             .flex()
             .flex_col()
-            // --- Appearance (light / dark) ----------------------------------
+            // The tab row is FIXED: it lives outside the scrolled region, so
+            // the groups scroll beneath it. Esc-to-back and the Enter
+            // handlers above are unaffected by the tab state (shell.rs owns
+            // escape-to-back at a higher level).
+            .child(self.tab_row(cx))
             .child(
-                group(
-                    "Appearance",
-                    "Ink on paper — the day palette or the night one. Applies at once.",
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .py_1()
-                        .child(
+                div()
+                    .id("settings-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .child(self.current_tab(cx))
+                    // --- status --------------------------------------------------
+                    .when(!status.is_empty(), |d| {
+                        d.child(
                             div()
-                                .id("theme-light")
-                                .cursor_pointer()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(if !dark { theme::ink() } else { theme::muted() }))
-                                .when(!dark, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
-                                .on_click(cx.listener(|_this, _, _, cx| {
-                                    cx.emit(Nav::SetTheme(false));
+                                .p_4()
+                                .pt_2()
+                                .text_size(px(theme::T_SMALL))
+                                .text_color(rgb(if status_err {
+                                    theme::err()
+                                } else {
+                                    theme::muted()
                                 }))
-                                .child("Light"),
+                                .child(status),
                         )
-                        .child(
-                            div()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::hairline()))
-                                .child("·"),
-                        )
-                        .child(
-                            div()
-                                .id("theme-dark")
-                                .cursor_pointer()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(if dark { theme::ink() } else { theme::muted() }))
-                                .when(dark, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
-                                .on_click(cx.listener(|_this, _, _, cx| {
-                                    cx.emit(Nav::SetTheme(true));
-                                }))
-                                .child("Dark"),
-                        ),
-                ),
-            )
-            // --- Session (identity + sign out) ------------------------------
-            .child(
-                group(
-                    "Session",
-                    "The key stays in this device's secret store until you sign out.",
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .py_1()
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::ink()))
-                                .child(match &self.me_name {
-                                    Some(name) => format!("Signed in as {name}"),
-                                    None => format!("Signed in as {}", self.me_npub),
-                                }),
-                        )
-                        .child(
-                            div()
-                                .id("sign-out")
-                                .cursor_pointer()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::vermilion()))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    cx.emit(Nav::SignOut);
-                                    this.signing_out = true;
-                                    cx.notify();
-                                }))
-                                .when(
-                                    self.signing_out,
-                                    |d| d.text_color(rgb(theme::muted())).child("Signing out…"),
-                                )
-                                .when(!self.signing_out, |d| d.child("Sign out")),
-                        ),
-                ),
-            )
-            // --- Wallet (NWC zaps, D20) --------------------------------------
-            .child(
-                group(
-                    "Wallet",
-                    "Connect a lightning wallet (NIP-47) and the bolt on every note zaps.",
-                )
-                .child(
-                    div()
-                        .id("wallet-row")
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .py_1()
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::ink()))
-                                .child(match &self.wallet {
-                                    Status::Disconnected => "No wallet connected".to_string(),
-                                    Status::Connecting => "Reaching the wallet…".to_string(),
-                                    Status::Ready(info) => {
-                                        let mut line = if info.alias.is_empty() {
-                                            "Wallet connected".to_string()
-                                        } else {
-                                            format!("Wallet connected — {}", info.alias)
-                                        };
-                                        if let Some(msat) = info.balance_msat {
-                                            line.push_str(&format!(" · {} sats", msat / 1000));
-                                        }
-                                        line
-                                    }
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::vermilion()))
-                                .child("Manage"),
-                        )
-                        .on_click(cx.listener(|_this, _, _, cx| {
-                            cx.emit(Nav::OpenWallet);
-                        })),
-                ),
-            )
-            // --- Composing (the undo window) --------------------------------
-            .child(
-                group(
-                    "Composing",
-                    "The undo window is the breath before speech: posts are held before they go out.",
-                )
-                .child(
-                    div()
-                        .id("undo-row")
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .py_1()
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::ink()))
-                                .child("Undo window"),
-                        )
-                        .child(toggle("undo-toggle", undo_enabled))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_undo(!this.undo_enabled, cx);
-                        })),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .py_1()
-                        .when(undo_enabled, |d| {
-                            d.child(field(undo_secs, "undo-secs-field"))
-                                .child(muted("seconds (1–30, Enter applies)"))
-                        })
-                        .when(!undo_enabled, |d| {
-                            d.child(
-                                div()
-                                    .text_size(px(theme::T_UI))
-                                    .text_color(rgb(theme::muted()))
-                                    .child("Posts publish immediately."),
-                            )
-                        }),
-                ),
-            )
-            // --- Content (the feed catalog) ---------------------------------
-            .child(
-                group(
-                    "Feed content",
-                    "What kinds your feed carries. Applies on the next home refresh.",
-                )
-                .child(
-                    div()
-                        .id("machine-notes-row")
-                        .w_full()
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .py_1()
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(theme::T_UI))
-                                        .text_color(rgb(theme::ink()))
-                                        .child("Hide machine notes"),
-                                )
-                                .child(muted(
-                                    "Kind-1 events whose entire content is JSON — app data \
-                                     transports, not speech",
-                                )),
-                        )
-                        .child(toggle("machine-notes", machine_hidden))
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_machine_notes(cx))),
-                )
-                .children(satori_core::store::CATALOG.iter().map(|(label, kinds)| {
-                    let kinds: Vec<u16> = kinds.to_vec();
-                    let on = !kinds.iter().any(|k| hidden_kinds.contains(k));
-                    div()
-                        .id(SharedString::from(format!("kind-row-{label}")))
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .py_1()
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::ink()))
-                                .child(label.to_string()),
-                        )
-                        .child(toggle(format!("kind-{label}"), on))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_kind(&kinds, cx);
-                        }))
-                })),
-            )
-            // --- Notifications (the bell's content) --------------------------
-            .child(
-                group(
-                    "Notifications",
-                    "What the bell counts. Applies the next time the stream opens.",
-                )
-                .child(
-                    div()
-                        .id("reaction-notifs-row")
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .py_1()
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::ink()))
-                                .child("Show reactions in notifications"),
-                        )
-                        .child(toggle("reaction-notifs", self.reaction_notifs))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.toggle_reaction_notifs(cx);
-                        })),
-                ),
-            )
-            // --- Bookmarks (D38) ---------------------------------------------
-            .child(
-                group(
-                    "Bookmarks",
-                    "Private bookmarks are nip44-encrypted (kind 10003). Public ones \
-                     are a plain NIP-51 list (kind 30001) anyone can read; both show \
-                     in the Library.",
-                )
-                .child(
-                    div()
-                        .id("bookmark-public-row")
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .py_1()
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::ink()))
-                                .child("Stars write public bookmarks"),
-                        )
-                        .child(toggle("bookmark-public", self.bookmark_public))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.toggle_bookmark_public(cx);
-                        })),
-                ),
-            )
-            // --- Media servers (Blossom, kind 10063) -------------------------
-            .child(
-                group(
-                    "Media servers",
-                    "Where your pictures upload (Blossom). With no list, uploads use \
-                     blossom.primal.net.",
-                )
-                .child(div().w_full().flex().flex_col().gap_0p5().children(
-                    servers.iter().map(|url| {
-                        let url_for_x = url.clone();
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .py_0p5()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(theme::T_UI))
-                                    .text_color(rgb(theme::ink()))
-                                    .child(url.clone()),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("media-remove-{url}")))
-                                    .cursor_pointer()
-                                    .px_1()
-                                    .text_size(px(theme::T_UI))
-                                    .text_color(rgb(theme::muted()))
-                                    .child("×")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.remove_server(&url_for_x, cx);
-                                    })),
-                            )
                     }),
-                ))
-                .child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .pt_1()
-                        .child(field(add_server, "add-server-field"))
-                        .child(
-                            seal("add-server", "Add", theme::vermilion())
-                                .on_click(cx.listener(|this, _, _, cx| this.add_server(cx))),
-                        ),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .justify_end()
-                        .pt_1()
-                        .child(
-                            seal("publish-media", "Publish media server list", theme::vermilion())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.publish_servers(cx);
-                                })),
-                        ),
-                ),
             )
-            // --- Relays (NIP-65, kind 10002) ---------------------------------
-            .child(
-                group(
-                    "Relays",
-                    "Where your events go and come from — published as your NIP-65 list. \
-                     Five indexers always serve reads.",
-                )
-                .child(div().w_full().flex().flex_col().gap_0p5().children(
-                    relays.iter().map(|relay| {
-                        let url_t = relay.url.clone();
-                        let url_w = relay.url.clone();
-                        let url_for_x = relay.url.clone();
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .py_0p5()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(theme::T_UI))
-                                    .text_color(rgb(theme::ink()))
-                                    .child(relay.url.clone()),
-                            )
-                            .child(
-                                toggle(SharedString::from(format!("relay-r-{}", relay.url)), relay.read)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.toggle_relay(&url_t, true, cx);
-                                    })),
-                            )
-                            .child(
-                                toggle(SharedString::from(format!("relay-w-{}", relay.url)), relay.write)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.toggle_relay(&url_w, false, cx);
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("relay-remove-{}", relay.url)))
-                                    .cursor_pointer()
-                                    .px_1()
-                                    .text_size(px(theme::T_UI))
-                                    .text_color(rgb(theme::muted()))
-                                    .child("×")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.remove_relay(&url_for_x, cx);
-                                    })),
-                            )
-                    }),
-                ))
-                .child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .pt_1()
-                        .child(field(add_relay, "add-relay-field"))
-                        .child(
-                            toggle("relay-add-read", relay_read)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.relay_read = !this.relay_read;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            toggle("relay-add-write", relay_write)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.relay_write = !this.relay_write;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            seal("add-relay", "Add", theme::vermilion())
-                                .on_click(cx.listener(|this, _, _, cx| this.add_relay(cx))),
-                        ),
-                )
-                .child(muted("the two toggles set read / write for the relay you add"))
-                .child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .justify_end()
-                        .pt_1()
-                        .child(
-                            seal("publish-relays", "Publish relay list", theme::vermilion())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.publish_relays(cx);
-                                })),
-                        ),
-                ),
-            )
-            // --- Relay health (D33/D36 learned state, WS1's last item) ------
-            .child(relay_health_group(&relays))
-            // --- Trust (web of trust) + spam receipts (WS4) -----------------
-            .child(self.wot_settings_group(cx))
-            .when(prefs::get_bool_or("dedup_enabled", true), |d| {
-                d.child(self.spam_group(cx))
-            })
-            // --- Backup: the signed list events ------------------------------
-            .child(
-                group(
-                    "List backup",
-                    "Your follows, mutes, bookmarks and relay lists as signed events.                      Restoring re-publishes them fresh.",
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .py_1()
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::ink()))
-                                .child("Export"),
-                        )
-                        .child(
-                            seal("export-backup", "Save…", theme::muted())
-                                .on_click(cx.listener(|this, _, _, cx| this.export_backup(cx))),
-                        ),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .py_1()
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::ink()))
-                                .child("Import & restore"),
-                        )
-                        .child(
-                            seal("import-backup", "Choose file…", theme::muted())
-                                .on_click(cx.listener(|this, _, _, cx| this.import_backup(cx))),
-                        ),
-                ),
-            )
-            // --- status ------------------------------------------------------
-            .when(!status.is_empty(), |d| {
-                d.child(
-                    div()
-                        .p_4()
-                        .pt_2()
-                        .text_size(px(theme::T_SMALL))
-                        .text_color(rgb(if status_err {
-                            theme::err()
-                        } else {
-                            theme::muted()
-                        }))
-                        .child(status),
-                )
-            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_order_is_the_approved_ia() {
+        // Issue #2's IA: six tabs, General first and Wallet last.
+        assert_eq!(SettingsTab::ALL.len(), 6);
+        assert_eq!(SettingsTab::ALL[0], SettingsTab::General);
+        assert_eq!(SettingsTab::ALL[5], SettingsTab::Wallet);
+        for tab in SettingsTab::ALL {
+            assert!(!tab.label().is_empty());
+        }
     }
 }
