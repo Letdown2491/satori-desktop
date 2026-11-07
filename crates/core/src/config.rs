@@ -76,10 +76,16 @@ pub fn state_file(name: &str) -> PathBuf {
 /// it per page, `replies()` per query, the notifications sweep twice per
 /// run — each read was a full file read + JSON parse. The cache keys on
 /// mtime + size, so a settings Publish lands on the next read; the cost
-/// between changes is one metadata syscall.
-pub fn prefs() -> Option<serde_json::Value> {
+/// between changes is one metadata syscall. Returns the cached
+/// `Arc` (audit fix: the dedup chokepoint reads per event — a deep
+/// `Value` clone per read went with it).
+pub fn prefs() -> Option<std::sync::Arc<serde_json::Value>> {
     static CACHE: std::sync::Mutex<
-        Option<(std::time::SystemTime, u64, serde_json::Value)>,
+        Option<(
+            std::time::SystemTime,
+            u64,
+            std::sync::Arc<serde_json::Value>,
+        )>,
     > = std::sync::Mutex::new(None);
     let path = state_file(files::PREFS);
     let meta = std::fs::metadata(&path).ok()?; // no file = no prefs
@@ -89,11 +95,12 @@ pub fn prefs() -> Option<serde_json::Value> {
         && *at == modified
         && *len == meta.len()
     {
-        return Some(value.clone());
+        return Some(std::sync::Arc::clone(value));
     }
     let value =
         serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).ok()?).ok()?;
-    *held = Some((modified, meta.len(), value.clone()));
+    let value = std::sync::Arc::new(value);
+    *held = Some((modified, meta.len(), std::sync::Arc::clone(&value)));
     Some(value)
 }
 

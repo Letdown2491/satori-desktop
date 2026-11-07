@@ -107,7 +107,9 @@ fn filter() -> &'static Mutex<Filter> {
 /// The exemption set (the user + their follows). The manager re-arms it
 /// at every bootstrap, alongside the WoT graph identity.
 pub fn set_exemptions(me: PublicKey, follows: &[PublicKey]) {
-    let mut f = filter().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut f = filter()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     f.exempt.clear();
     f.exempt.insert(me.to_string());
     for pk in follows {
@@ -124,11 +126,10 @@ fn dup_key(ev: &Event) -> u64 {
     // Tags order-matter (a `p` list is content); fold each serialized
     // tag's hash in with the 31x mixing of the Kotlin original.
     let mut mix: u64 = 0;
-    for tag in ev.tags.clone().to_vec() {
-        let th = std::collections::hash_map::DefaultHasher::new();
-        match serde_json::to_string(&tag) {
+    for tag in ev.tags.iter() {
+        let mut th = std::collections::hash_map::DefaultHasher::new();
+        match serde_json::to_string(tag) {
             Ok(s) => {
-                let mut th = th;
                 s.hash(&mut th);
                 mix = mix.wrapping_mul(31).wrapping_add(th.finish());
             }
@@ -167,19 +168,28 @@ pub fn observe(ev: &Event, relay: &str) -> bool {
     if !enabled() {
         return false;
     }
-    let mut f = filter().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Cheap gates BEFORE the hashing work (the audit's fix — the
+    // chokepoint sees every network event): the length floor needs no
+    // lock, and the key is computed OUTSIDE the filter mutex so tag
+    // serialization never serializes the hot path behind it.
+    if ev.content.chars().count() < MIN_CONTENT_LEN {
+        return false;
+    }
+    let author = ev.pubkey.to_string();
+    let key = dup_key(ev);
+
+    let mut f = filter()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Exemptions (AntiSpamFilter.kt): account + follows set first —
+    // their events never even join the recent LRU.
+    if f.exempt.contains(&author) {
+        return false;
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let key = dup_key(ev);
-    let author = ev.pubkey.to_string();
-
-    // Exemptions (AntiSpamFilter.kt): account + follows set first, then
-    // the short-content floors ("GM" notes, short nostr: bot commands).
-    if f.exempt.contains(&author) || ev.content.chars().count() < MIN_CONTENT_LEN {
-        return false;
-    }
 
     let duplicate = {
         // LRU insert (recent keys, oldest-first eviction).
@@ -197,7 +207,9 @@ pub fn observe(ev: &Event, relay: &str) -> bool {
     if duplicate {
         note_spammer(&mut f, &author, relay, now);
     }
-    f.spammers.get(&author).is_some_and(|s| s.count >= DUPLICATES_TO_HIDE)
+    f.spammers
+        .get(&author)
+        .is_some_and(|s| s.count >= DUPLICATES_TO_HIDE)
 }
 
 /// The report surface's snapshot: caught spammers with per-relay
@@ -205,7 +217,9 @@ pub fn observe(ev: &Event, relay: &str) -> bool {
 /// duplicate first. A `count >= DUPLICATES_TO_HIDE` record is currently
 /// hidden; lower counts are the visible receipts.
 pub fn snapshot() -> Vec<SpamRecord> {
-    let f = filter().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let f = filter()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut out: Vec<SpamRecord> = f
         .spammers
         .iter()
@@ -225,14 +239,19 @@ pub fn snapshot() -> Vec<SpamRecord> {
 /// DUPLICATES_TO_HIDE re-hides them). The duplicate-key LRU is NOT
 /// cleared — the same content re-delivered still counts.
 pub fn unhide(pubkey: &str) {
-    let mut f = filter().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut f = filter()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     f.spammers.remove(pubkey);
     f.spammer_order.retain(|p| p != pubkey);
 }
 
 /// Session teardown: drop the filter's state (the exemption set is
 /// session identity, and the LRU maps are this session's traffic).
-pub fn clear() {    let mut f = filter().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+pub fn clear() {
+    let mut f = filter()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *f = Filter {
         recent: HashMap::new(),
         order: VecDeque::new(),

@@ -142,17 +142,20 @@ fn notif_tier_enabled() -> bool {
 /// pulled out as receipts. Replies/mentions/zaps pass; Unknown authors
 /// pass (never punish the graph not knowing); exempted authors pass.
 fn split_wot_tier(notifs: Vec<Event>) -> (Vec<Event>, Vec<SuppressedNotif>) {
+    // Hoisted (audit fix): the pref read (one metadata syscall + Arc) and
+    // the exempt-set lock were per EVENT — now per PAGE.
+    let tier_on = notif_tier_enabled();
     let mut kept = Vec::new();
     let mut suppressed = Vec::new();
     for ev in notifs {
         let engagement = matches!(u16::from(ev.kind), 6 | 7);
         let gated = engagement
-            && notif_tier_enabled()
+            && tier_on
+            && crate::wot::verdict(&ev.pubkey) == crate::wot::Verdict::NotInNetwork
             && !NOTIF_EXEMPT
                 .lock()
                 .unwrap()
-                .contains(&ev.pubkey.to_string())
-            && crate::wot::verdict(&ev.pubkey) == crate::wot::Verdict::NotInNetwork;
+                .contains(&ev.pubkey.to_string());
         if gated {
             suppressed.push(SuppressedNotif {
                 reason: "outside your network".to_string(),
@@ -163,8 +166,7 @@ fn split_wot_tier(notifs: Vec<Event>) -> (Vec<Event>, Vec<SuppressedNotif>) {
         }
     }
     (kept, suppressed)
-}
-
+    }
 
 /// What the write path reports back.
 #[derive(Debug, Clone)]
@@ -944,7 +946,8 @@ impl Core {
 
     /// Engagement lookups for card rendering (pure set membership, render is a
     /// projection — DESIGN.md §1.2).
-    pub fn is_liked(&self, event_id: &EventId) -> bool {        self.own_liked.lock().unwrap().contains(&event_id.to_string())
+    pub fn is_liked(&self, event_id: &EventId) -> bool {
+        self.own_liked.lock().unwrap().contains(&event_id.to_string())
     }
 
     /// The engagement sets, for a view's session snapshot (feed.rs seeds its

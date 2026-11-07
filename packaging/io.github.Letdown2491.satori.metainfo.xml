@@ -29,6 +29,11 @@
   <launchable type="desktop-id">io.github.Letdown2491.satori.desktop</launchable>
   <url type="homepage">https://github.com/Letdown2491/satori-desktop</url>
   <releases>
+    <release version="0.3.0" date="2026-11-07">
+      <description>
+        <p>The trust release: web of trust (in your network / outside, always annotated, never hidden), a duplicate-content spam filter with receipts, an auditable notification tier, and the four-lens audit fixes.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-11-07">
       <description>
         <p>The polish release: live feed engagement, the relay hint model, scheduled posts, a full visual pass, and the quick wins (keyboard nav, emoji typeahead, multi-image carousel, alt text, relay health pane).</p>

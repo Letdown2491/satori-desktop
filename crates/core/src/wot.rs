@@ -143,6 +143,10 @@ struct Graph {
     scores: HashMap<String, HashSet<String>>,
     /// Target insertion order (the MAX_TRACKED_TARGETS eviction LRU).
     target_order: VecDeque<String>,
+    /// Membership mirror of `target_order` (O(1) `contains` — the audit's
+    /// fix: a VecDeque `contains` per ingested tag made the bootstrap
+    /// rebuild quadratic against MAX_TRACKED_TARGETS).
+    in_order: HashSet<String>,
     /// Muted pubkeys (hex) — excluded from qualification (dark-wisp
     /// filters muted/blocked out at ExtendedNetworkRepository.kt ~273).
     muted: HashSet<String>,
@@ -161,6 +165,7 @@ static GRAPH: LazyLock<Mutex<Graph>> = LazyLock::new(|| {
         sources: HashMap::new(),
         scores: HashMap::new(),
         target_order: VecDeque::new(),
+        in_order: HashSet::new(),
         muted: HashSet::new(),
         cover: Vec::new(),
         rebuilt: None,
@@ -181,7 +186,9 @@ fn fresh(created_at: u64) -> bool {
 /// The lifetime graph lock. Identities and state live for the process;
 /// the manager re-arms at every bootstrap.
 fn graph() -> std::sync::MutexGuard<'static, Graph> {
-    GRAPH.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    GRAPH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Arm the graph for a session: the user and their first-degree follows.
@@ -198,6 +205,7 @@ pub fn set_identity(me: PublicKey, follows: &[PublicKey]) {
         g.sources.clear();
         g.scores.clear();
         g.target_order.clear();
+        g.in_order.clear();
         g.cover.clear();
     }
 }
@@ -212,6 +220,7 @@ pub fn clear_identity() {
         sources: HashMap::new(),
         scores: HashMap::new(),
         target_order: VecDeque::new(),
+        in_order: HashSet::new(),
         muted: HashSet::new(),
         cover: Vec::new(),
         rebuilt: None,
@@ -240,6 +249,7 @@ fn insert_target(g: &mut Graph, target: &str, follower: &str, cap: usize) {
                 None => break false,
                 Some(old) => {
                     if g.scores.remove(&old).is_some() {
+                        g.in_order.remove(&old);
                         break true;
                     }
                 }
@@ -253,11 +263,9 @@ fn insert_target(g: &mut Graph, target: &str, follower: &str, cap: usize) {
         .entry(target.to_string())
         .or_default()
         .insert(follower.to_string());
-    if !g.target_order.contains(&target.to_string()) {
-        // `contains` on a VecDeque is O(n) — bounded by the cap, and
-        // eviction keeps it short in practice. Re-inserted targets
-        // (diffed back in) keep their original slot: fine, the LRU
-        // is a ceiling, not a fairness guarantee.
+    if g.in_order.insert(target.to_string()) {
+        // Re-inserted targets (diffed back in) keep their original slot:
+        // fine, the LRU is a ceiling, not a fairness guarantee.
         g.target_order.push_back(target.to_string());
     }
 }
@@ -310,7 +318,10 @@ pub fn observe(ev: &Event) {
     let counts = fresh(created_at);
     g.sources.insert(
         follower.clone(),
-        Source { created_at, follows: follows.clone() },
+        Source {
+            created_at,
+            follows: follows.clone(),
+        },
     );
     if counts {
         for t in &follows {
@@ -323,7 +334,9 @@ pub fn observe(ev: &Event) {
 /// thread-collapse rule — every consumer asks the same question).
 pub fn verdict(pk: &PublicKey) -> Verdict {
     let g = graph();
-    let Some(me) = g.me else { return Verdict::Unknown };
+    let Some(me) = g.me else {
+        return Verdict::Unknown;
+    };
     if g.over_cap {
         // Shutoff (Amethyst MAX_FOLLOWS disable path): the graph can't
         // say ANYTHING — Unknown, even for self.
@@ -374,9 +387,7 @@ pub fn qualified() -> Vec<PublicKey> {
     }
     g.scores
         .iter()
-        .filter(|(k, s)| {
-            s.len() >= QUALIFICATION_THRESHOLD && !g.muted.contains(k.as_str())
-        })
+        .filter(|(k, s)| s.len() >= QUALIFICATION_THRESHOLD && !g.muted.contains(k.as_str()))
         .filter_map(|(k, _)| parse_key(k))
         .collect()
 }
@@ -529,7 +540,10 @@ mod tests {
         fn new(follows: &[Keys]) -> Self {
             let env = EnvGuard::new("wot");
             let me = Keys::generate();
-            set_identity(me.public_key(), &follows.iter().map(|k| k.public_key()).collect::<Vec<_>>());
+            set_identity(
+                me.public_key(),
+                &follows.iter().map(|k| k.public_key()).collect::<Vec<_>>(),
+            );
             Self { me, env }
         }
     }
@@ -649,19 +663,15 @@ mod tests {
     /// long tail into the pick; the relay cap stops the loop.
     #[test]
     fn greedy_cover() {
-        let mk = |authors: &[&str]| -> Vec<String> {
-            authors.iter().map(|s| s.to_string()).collect()
-        };
+        let mk =
+            |authors: &[&str]| -> Vec<String> { authors.iter().map(|s| s.to_string()).collect() };
         let mut lists = HashMap::new();
         lists.insert("wss://big".to_string(), mk(&["a", "b", "c", "d", "e", "f"]));
         lists.insert("wss://mid".to_string(), mk(&["a", "b", "c"]));
         lists.insert("wss://small".to_string(), mk(&["d"]));
         // Full coverage: big covers all six in one pick.
         let authors = mk(&["a", "b", "c", "d", "e", "f"]);
-        assert_eq!(
-            relay_cover(&lists, &authors, 10, 300),
-            vec!["wss://big"]
-        );
+        assert_eq!(relay_cover(&lists, &authors, 10, 300), vec!["wss://big"]);
         // Greedy ranking: with big absent, mid covers more than small.
         let mut partial = HashMap::new();
         partial.insert("wss://mid".to_string(), mk(&["a", "b", "c"]));
@@ -677,7 +687,10 @@ mod tests {
         // the whole network — the cover must still pick tight for x/y,
         // and c–f are left uncovered (no candidate serves them).
         let mut mega = HashMap::new();
-        mega.insert("wss://mega".to_string(), mk(&["a", "b", "c", "d", "e", "f"]));
+        mega.insert(
+            "wss://mega".to_string(),
+            mk(&["a", "b", "c", "d", "e", "f"]),
+        );
         mega.insert("wss://tight".to_string(), mk(&["x", "y"]));
         let authors = mk(&["a", "b", "c", "d", "e", "f", "x", "y"]);
         let cover = relay_cover(&mega, &authors, 10, 2);
@@ -731,6 +744,7 @@ mod tests {
             sources: HashMap::new(),
             scores: HashMap::new(),
             target_order: VecDeque::new(),
+            in_order: HashSet::new(),
             muted: HashSet::new(),
             cover: Vec::new(),
             rebuilt: None,
