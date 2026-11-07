@@ -1747,6 +1747,7 @@ fn wot_row(id: &str, label: &str, sub: &str, on: bool) -> gpui::Stateful<Div> {
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .child(
