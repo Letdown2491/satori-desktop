@@ -112,7 +112,9 @@ pub type FeedRx = mpsc::UnboundedReceiver<FeedEvent>;
 /// One notification the WoT tier suppressed — a receipt, never a silent
 /// void: the bell's "N hidden, see why" surface lists these with the
 /// verdict and reason, and a per-item "show anyway" exemption.
-#[derive(Debug, Clone)]
+/// Serializes for the D48 sidecar: receipts survive restarts (a receipt
+/// that evaporated at every launch was a weak receipt).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SuppressedNotif {
     /// The suppressed event itself (the surface renders author + action).
     pub event: Event,
@@ -121,6 +123,108 @@ pub struct SuppressedNotif {
 }
 
 static SUPPRESSED: Mutex<Vec<SuppressedNotif>> = Mutex::new(Vec::new());
+
+// --- Receipts persistence (D48): the suppressed ledger is the audit
+// trail of the app's only auto-actions; it survives restarts. Two
+// effects: the "N hidden" surface is populated from the first frame,
+// and — the load-bearing part — `split_wot_tier` re-receipts any
+// candidate already in the ledger, so a verdict that EXPIRED (the
+// velocity window) while the event sat in the store doesn't resurrect
+// old spam at boot. Same discipline as the other sidecars.
+
+/// Newest receipts kept on disk (the bell's queries are 200-limited —
+/// anything older can't re-candidate anyway).
+const SUPPRESSED_CAP: usize = 200;
+const SUPPRESSED_FLUSH_SECS: u64 = 10;
+static SUPPRESSED_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SUPPRESSED_FLUSHER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+static SUPPRESSED_LOADED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn suppressed_dirty() {
+    SUPPRESSED_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+    SUPPRESSED_FLUSHER.get_or_init(|| {
+        std::thread::Builder::new()
+            .name("suppressed-flush".into())
+            .spawn(|| loop {
+                std::thread::park_timeout(std::time::Duration::from_secs(
+                    SUPPRESSED_FLUSH_SECS,
+                ));
+                if SUPPRESSED_DIRTY.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    write_suppressed_disk();
+                }
+            })
+            .ok();
+    });
+}
+
+fn write_suppressed_disk() {
+    let mut items = SUPPRESSED.lock().unwrap().clone();
+    items.sort_by_key(|s| std::cmp::Reverse(s.event.created_at.as_secs()));
+    items.truncate(SUPPRESSED_CAP);
+    let arr: Vec<serde_json::Value> = items
+        .iter()
+        .map(|s| serde_json::json!({ "reason": s.reason, "event": s.event }))
+        .collect();
+    let path = crate::config::state_file(crate::config::files::SUPPRESSED);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tmp = path.with_extension(format!("tmp-{}-{nanos}", std::process::id()));
+    let body = serde_json::Value::Array(arr).to_string();
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+    else {
+        return;
+    };
+    if f.write_all(body.as_bytes()).is_ok() {
+        drop(f);
+        let _ = std::fs::rename(&tmp, &path);
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Merge the persisted receipts into the live store (bootstrap arm;
+/// once per process — later runs REPLACE the store with their
+/// re-derivation, and the receipted-gate keeps the merged ids in it).
+fn load_suppressed_disk() {
+    if SUPPRESSED_LOADED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let Ok(raw) =
+        std::fs::read_to_string(crate::config::state_file(crate::config::files::SUPPRESSED))
+    else {
+        return;
+    };
+    let Ok(arr) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let mut held = SUPPRESSED.lock().unwrap();
+    for e in arr.as_array().unwrap_or(&Vec::new()) {
+        let (Ok(event), Some(reason)) = (
+            serde_json::from_value::<Event>(e.get("event").cloned().unwrap_or_default()),
+            e.get("reason").and_then(|x| x.as_str()).map(String::from),
+        ) else {
+            continue;
+        };
+        if held.iter().any(|s| s.event.id == event.id) {
+            continue;
+        }
+        held.push(SuppressedNotif { event, reason });
+    }
+    held.sort_by_key(|s| std::cmp::Reverse(s.event.created_at.as_secs()));
+    held.truncate(SUPPRESSED_CAP);
+}
 /// One-session "show anyway" exemptions (pubkey hex): the user chose to
 /// see an author's suppressed notifications — the tier stops gating them
 /// until sign-out. NOT a pref (the posture: the exemption is a conscious
@@ -158,9 +262,17 @@ fn split_wot_tier(
     my_notes: &HashSet<EventId>,
     count_velocity: bool,
 ) -> (Vec<Event>, Vec<SuppressedNotif>) {
-    // Hoisted (audit fix): the pref read (one metadata syscall + Arc) and
-    // the exempt-set lock were per EVENT — now per PAGE.
+    // Hoisted (audit fix): the pref read (one metadata syscall + Arc)
+    // and the exempt-set lock were per EVENT — now per PAGE. The
+    // receipted ledger snapshots too (D48): its ids re-suppress below.
     let tier_on = notif_tier_enabled();
+    let exempt_set: HashSet<String> = NOTIF_EXEMPT.lock().unwrap().clone();
+    let receipted: HashMap<String, String> = {
+        let held = SUPPRESSED.lock().unwrap();
+        held.iter()
+            .map(|s| (s.event.id.to_string(), s.reason.clone()))
+            .collect()
+    };
     let mut kept = Vec::new();
     let mut suppressed = Vec::new();
     for ev in notifs {
@@ -168,6 +280,14 @@ fn split_wot_tier(
         let engagement = matches!(kind, 6 | 7);
         let reply = matches!(kind, 1 | 1111)
             && ev.tags.event_ids().any(|id| my_notes.contains(&id));
+        // Show-anyway first: the conscious per-session act outranks
+        // every auto-gate — including the dedup store door below
+        // (otherwise the receipts strip's button lied for
+        // duplicate-content receipts).
+        if exempt_set.contains(&ev.pubkey.to_string()) {
+            kept.push(ev);
+            continue;
+        }
         // The store door: the chokepoint stops a hidden spammer's
         // DELIVERIES, but the SDK already persisted their earlier
         // events — the cached phase reads those straight back. The
@@ -185,12 +305,17 @@ fn split_wot_tier(
             kept.push(ev);
             continue;
         }
-        let exempt = NOTIF_EXEMPT
-            .lock()
-            .unwrap()
-            .contains(&ev.pubkey.to_string());
-        if exempt {
-            kept.push(ev);
+        // Receipt durability (D48): a verdict that expired (the
+        // velocity window) while the event sat in the store must not
+        // resurrect old spam on the first frame of a launch — once
+        // receipted, still receipted. The show-anyway exemption above
+        // is the per-session override; the tier switch below (`tier_on`)
+        // is the feature-off state.
+        if let Some(reason) = receipted.get(&ev.id.to_string()) {
+            suppressed.push(SuppressedNotif {
+                reason: reason.clone(),
+                event: ev,
+            });
             continue;
         }
         match crate::wot::verdict(&ev.pubkey) {
@@ -2101,6 +2226,15 @@ impl Core {
                 }
                 active.pool.connect_reads(read.clone()).await.ok();
                 self.spawn_relay_info(&read);
+                // D48: the anti-spam ledgers reload before anything can
+                // paint — dedup's caught-spammer records + recent keys,
+                // the velocity stamps + counted ids, the receipted
+                // suppressions. Boot gates from last session's knowledge
+                // instead of re-learning it from relays (a minute of
+                // spam on the first frame). Guards make re-arms no-ops.
+                crate::dedup::load_disk();
+                crate::rate::load_disk();
+                load_suppressed_disk();
                 // Arm the trust vocabulary from LOCAL state first (D45):
                 // the fresh contact-list fetch below is a relay round-trip,
                 // and until the graph is armed every verdict reads Unknown,
@@ -3081,6 +3215,7 @@ impl Core {
                 let mut seen_sup = HashSet::new();
                 cached_suppressed.retain(|s| seen_sup.insert(s.event.id));
                 *SUPPRESSED.lock().unwrap() = cached_suppressed;
+                suppressed_dirty(); // the receipts ledger persists (D48)
                 let notifs = kept;
 
                 let authors: Vec<PublicKey> = notifs.iter().map(|e| e.pubkey).collect();

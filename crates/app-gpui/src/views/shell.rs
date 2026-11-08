@@ -407,6 +407,16 @@ impl Shell {
     /// Bell-dot poll, every 90s (shell.rs poll_notif): one notifications()
     /// drain, kept until the NotifDot verdict.
     fn watch_notif(&self, cx: &mut Context<Self>) {
+        // First beat lands at once, not after the first interval (D48):
+        // the full notifications computation runs at startup — the
+        // store warms (mentions/replies since the last session land in
+        // the cache) so the pane's first paint is complete, and the dot
+        // reads the truth from boot. The interval loop below stays the
+        // correctness net.
+        cx.spawn(async move |this, cx| {
+            let _ = this.update(cx, |shell, cx| shell.check_notif_dot(cx));
+        })
+        .detach();
         // The live subscription is the first line (instant); this poll is
         // only a correctness net for a dead stream — 15 minutes, and the
         // full notifications computation it runs is why it must be rare.

@@ -31,7 +31,8 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use nostr::prelude::*;
 
@@ -155,6 +156,7 @@ fn note_spammer(f: &mut Filter, pubkey: &str, relay: &str, now: u64) {
     s.count += 1;
     *s.relays.entry(relay.to_string()).or_insert(0) += 1;
     s.last_seen = now;
+    mark_dirty();
 }
 
 /// Ingest one event at the chokepoint. Returns true when the event is
@@ -196,6 +198,7 @@ pub fn observe(ev: &Event, relay: &str) -> bool {
         let dup = f.recent.contains_key(&key);
         if f.recent.insert(key, ()).is_none() {
             f.order.push_back(key);
+            mark_dirty(); // a new key only lands once per session
         }
         while f.order.len() > RECENT_CAP {
             if let Some(old) = f.order.pop_front() {
@@ -261,10 +264,13 @@ pub fn unhide(pubkey: &str) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     f.spammers.remove(pubkey);
     f.spammer_order.retain(|p| p != pubkey);
+    mark_dirty(); // the durable ledger un-hides them too
 }
 
 /// Session teardown: drop the filter's state (the exemption set is
-/// session identity, and the LRU maps are this session's traffic).
+/// session identity, and the LRU maps are this session's traffic). The
+/// PERSISTED ledger is untouched — who the filter caught is a durable
+/// record, and the next arm reloads it (D48).
 pub fn clear() {
     let mut f = filter()
         .lock()
@@ -276,6 +282,153 @@ pub fn clear() {
         spammer_order: VecDeque::new(),
         exempt: std::collections::HashSet::new(),
     };
+    LOADED.store(false, Ordering::Relaxed);
+}
+
+// --- Persistence (D48) — the ledger outlives the session. Boot used to
+// start from zero knowledge: the caught-spammer records were per-session,
+// so the store-held spam replies painted on the first notifications
+// frame and stayed there until relays re-taught the filter (a minute of
+// wrong state, every launch — the maintainer's "still spam replies first
+// frame"). Same discipline as wot-sources (D45)/hints: 0600
+// temp-sibling + rename, debounced park_timeout flusher. The recent-key
+// LRU persists too: identical content re-delivered after a restart
+// still counts as duplicates instead of starting a fresh streak.
+
+const FLUSH_SECS: u64 = 10;
+static DIRTY: AtomicBool = AtomicBool::new(false);
+static FLUSHER: OnceLock<()> = OnceLock::new();
+static LOADED: AtomicBool = AtomicBool::new(false);
+
+fn mark_dirty() {
+    DIRTY.store(true, Ordering::Relaxed);
+    FLUSHER.get_or_init(|| {
+        std::thread::Builder::new()
+            .name("dedup-flush".into())
+            .spawn(|| loop {
+                std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
+                if DIRTY.swap(false, Ordering::Relaxed) {
+                    write_disk();
+                }
+            })
+            .ok();
+    });
+}
+
+fn write_disk() {
+    let f = filter()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let spammers: Vec<serde_json::Value> = f
+        .spammer_order
+        .iter()
+        .filter_map(|pk| {
+            let s = f.spammers.get(pk)?;
+            Some(serde_json::json!({
+                "pk": pk,
+                "count": s.count,
+                "relays": s.relays,
+                "last_seen": s.last_seen,
+            }))
+        })
+        .collect();
+    let recent: Vec<u64> = f.order.iter().copied().collect();
+    drop(f);
+    let path = crate::config::state_file(crate::config::files::DEDUP_STATE);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tmp = path.with_extension(format!("tmp-{}-{nanos}", std::process::id()));
+    let body = serde_json::json!({ "spammers": spammers, "recent": recent }).to_string();
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+    else {
+        return;
+    };
+    if f.write_all(body.as_bytes()).is_ok() {
+        drop(f);
+        let _ = std::fs::rename(&tmp, &path);
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Merge the persisted ledger into the live filter (bootstrap arm; the
+/// manager calls it at every arm and the guard makes the rest no-ops).
+/// Merges are max/insert — idempotent, and a count is never inflated by
+/// reloads: the record only grows on real duplicates.
+pub fn load_disk() {
+    if LOADED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let Ok(raw) =
+        std::fs::read_to_string(crate::config::state_file(crate::config::files::DEDUP_STATE))
+    else {
+        return;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let mut f = filter()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(list) = v.get("spammers").and_then(|x| x.as_array()) {
+        for e in list {
+            let Some(pk) = e.get("pk").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            let count = e.get("count").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            let last_seen = e.get("last_seen").and_then(|x| x.as_u64()).unwrap_or(0);
+            let pk = pk.to_string();
+            // Merge into the record first (the entry borrow ends with
+            // the scope)…
+            {
+                let s = f.spammers.entry(pk.clone()).or_default();
+                s.count = s.count.max(count);
+                s.last_seen = s.last_seen.max(last_seen);
+                if let Some(relays) = e.get("relays").and_then(|x| x.as_object()) {
+                    for (url, n) in relays {
+                        let n = n.as_u64().unwrap_or(0) as u32;
+                        let slot = s.relays.entry(url.clone()).or_insert(0);
+                        *slot = (*slot).max(n);
+                    }
+                }
+            }
+            // …then the LRU order (a separate field, a separate borrow).
+            if !f.spammer_order.contains(&pk) {
+                f.spammer_order.push_back(pk);
+            }
+        }
+        while f.spammer_order.len() > SPAMMERS_CAP {
+            if let Some(old) = f.spammer_order.pop_front() {
+                f.spammers.remove(&old);
+            }
+        }
+    }
+    if let Some(list) = v.get("recent").and_then(|x| x.as_array()) {
+        for k in list {
+            let Some(k) = k.as_u64() else {
+                continue;
+            };
+            if f.recent.insert(k, ()).is_none() {
+                f.order.push_back(k);
+            }
+        }
+        while f.order.len() > RECENT_CAP {
+            if let Some(old) = f.order.pop_front() {
+                f.recent.remove(&old);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -417,6 +570,36 @@ mod tests {
         for i in 1..=6 {
             assert_eq!(observe(&phish_ev, "wss://a.example"), i >= 6);
         }
+    }
+
+    /// D48: the ledger persists — caught spammers + the recent duplicate
+    /// keys reload at the next arm, so the first frame gates from last
+    /// session's knowledge (the store door is warm at boot) and a
+    /// restart doesn't start a fresh duplicate streak.
+    #[test]
+    fn persisted_ledger_reloads() {
+        let _env = EnvGuard::new("dedup-persist");
+        let spammer = Keys::generate();
+        let ev = signed(&spammer, &long(), vec![]);
+        observe(&ev, "wss://a.example"); // the original — not a duplicate
+        observe(&ev, "wss://b.example"); // duplicate 1
+        observe(&ev, "wss://c.example"); // duplicate 2
+        assert!(!is_hidden(&spammer.public_key().to_string()));
+        write_disk();
+        clear();
+        assert!(snapshot().is_empty());
+        load_disk();
+        // The record survived, counts + per-relay attribution intact.
+        let snap = snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].count, 2);
+        assert_eq!(snap[0].relays.get("wss://b.example"), Some(&1));
+        // And the recent-key LRU: the same content re-delivered is still
+        // a duplicate (the count moves again; a reload never inflates it
+        // on its own).
+        assert!(!observe(&ev, "wss://a.example"));
+        assert_eq!(snapshot()[0].count, 3);
+        clear();
     }
 
     /// The snapshot is newest-duplicate-first and bounded (the spammer

@@ -26,6 +26,13 @@ pub mod files {
     pub const SEEN_RELAYS: &str = "seen-relays.json";
     pub const RELAY_HINTS: &str = "relay-hints.json";
     pub const WOT_SOURCES: &str = "wot-sources.json";
+    /// D48: the anti-spam ledgers — dedup's spammers + recent duplicate
+    /// keys, the reply-velocity stamps + counted event ids, and the
+    /// notification receipts (suppressed events + reasons). Verdicts
+    /// outlive the session: boot gates from last session's knowledge.
+    pub const DEDUP_STATE: &str = "dedup-state.json";
+    pub const RATE_STATE: &str = "rate-state.json";
+    pub const SUPPRESSED: &str = "suppressed-notifs.json";
     pub const RELAY_LATENCY: &str = "relay-latency.json";
     pub const DELETIONS: &str = "deletions.json";
     pub const OUTBOX_PENDING: &str = "outbox-pending.json";
