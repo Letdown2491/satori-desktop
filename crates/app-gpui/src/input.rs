@@ -3,8 +3,12 @@
 //! TODO(port): crates/app used AdwTextView; gpui 0.2.2 ships no editor, so this
 //! adapts the gpui `input.rs` example (IME path, actions, mouse selection) and
 //! extends it to wrapped multi-line: one shaped block per paragraph, cursor and
-//! selection mapped through WrappedLineLayout::position_for_index. P2 scope —
-//! arrow-up/down and scroll-into-view land when a view needs them.
+//! selection mapped through WrappedLineLayout::position_for_index. The
+//! composer's article body drove the full editor pass: vertical motion
+//! (goal-column memory over wrapped rows), line-wise home/end with
+//! ctrl-variants for the doc extremes, word-wise motion and deletion,
+//! and a caret-reveal that scrolls the host scroller (scroll_reveal) to
+//! keep the caret in view.
 
 use std::ops::Range;
 
@@ -21,7 +25,15 @@ use crate::theme;
 
 actions!(
     input,
-    [Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Home, End, Paste, Copy, Cut]
+    [
+        Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Paste, Copy, Cut,
+        // Vertical motion (the article body's need): goal-column moves.
+        Up, Down, SelectUp, SelectDown,
+        // Line-wise home/end + the doc-absolute extremes (ctrl variants).
+        LineStart, LineEnd, SelectLineStart, SelectLineEnd, DocStart, DocEnd,
+        // Word-wise motion (ctrl+arrows) + word deletion (ctrl+backspace/delete).
+        WordLeft, WordRight, SelectWordLeft, SelectWordRight, DeleteWordLeft, DeleteWordRight,
+    ]
 );
 
 pub fn bind_input_keys(cx: &mut App) {
@@ -31,8 +43,16 @@ pub fn bind_input_keys(cx: &mut App) {
         KeyBinding::new("delete", Delete, Some("Input")),
         KeyBinding::new("left", Left, Some("Input")),
         KeyBinding::new("right", Right, Some("Input")),
+        KeyBinding::new("up", Up, Some("Input")),
+        KeyBinding::new("down", Down, Some("Input")),
         KeyBinding::new("shift-left", SelectLeft, Some("Input")),
         KeyBinding::new("shift-right", SelectRight, Some("Input")),
+        KeyBinding::new("shift-up", SelectUp, Some("Input")),
+        KeyBinding::new("shift-down", SelectDown, Some("Input")),
+        KeyBinding::new("ctrl-left", WordLeft, Some("Input")),
+        KeyBinding::new("ctrl-right", WordRight, Some("Input")),
+        KeyBinding::new("shift-ctrl-left", SelectWordLeft, Some("Input")),
+        KeyBinding::new("shift-ctrl-right", SelectWordRight, Some("Input")),
         KeyBinding::new("ctrl-a", SelectAll, Some("Input")),
         KeyBinding::new("cmd-a", SelectAll, Some("Input")),
         KeyBinding::new("ctrl-v", Paste, Some("Input")),
@@ -41,8 +61,16 @@ pub fn bind_input_keys(cx: &mut App) {
         KeyBinding::new("cmd-c", Copy, Some("Input")),
         KeyBinding::new("ctrl-x", Cut, Some("Input")),
         KeyBinding::new("cmd-x", Cut, Some("Input")),
-        KeyBinding::new("home", Home, Some("Input")),
-        KeyBinding::new("end", End, Some("Input")),
+        // Home/end are LINE-wise (the standard in editors); the doc
+        // extremes take ctrl.
+        KeyBinding::new("home", LineStart, Some("Input")),
+        KeyBinding::new("end", LineEnd, Some("Input")),
+        KeyBinding::new("shift-home", SelectLineStart, Some("Input")),
+        KeyBinding::new("shift-end", SelectLineEnd, Some("Input")),
+        KeyBinding::new("ctrl-home", DocStart, Some("Input")),
+        KeyBinding::new("ctrl-end", DocEnd, Some("Input")),
+        KeyBinding::new("ctrl-backspace", DeleteWordLeft, Some("Input")),
+        KeyBinding::new("ctrl-delete", DeleteWordRight, Some("Input")),
     ]);
 }
 
@@ -112,6 +140,15 @@ pub struct Input {
     /// open (it inserts the shortcode); this field must not add a newline
     /// under it. The composer sets it from detect_emoji every frame.
     pub suppress_newline: bool,
+    /// The remembered x for vertical motion (up/down): the column the
+    /// caret returns to across short lines. None until an up/down runs;
+    /// every horizontal move or click clears it.
+    goal_x: Option<Pixels>,
+    /// The host scroller for the caret-reveal (the composer's body box,
+    /// set once at construction): multiline motion scrolls it so the
+    /// caret stays visible — the "End jumped somewhere invisible" fix.
+    /// None where no scroller wraps the field (single-line panels).
+    scroll_reveal: Option<gpui::ScrollHandle>,
 }
 
 /// The tripwire's shared alert (true = show the strip). A bool global, not
@@ -149,7 +186,15 @@ impl Input {
             caret_on: true,
             tripwire: false,
             suppress_newline: false,
+            goal_x: None,
+            scroll_reveal: None,
         }
+    }
+
+    /// Hand the Input its host scroller (the composer's body box): every
+    /// caret move then reveals the caret in it. Call once at build.
+    pub fn set_scroll_reveal(&mut self, handle: gpui::ScrollHandle) {
+        self.scroll_reveal = Some(handle);
     }
 
     pub fn placeholder(mut self, placeholder: &str) -> Self {
@@ -168,6 +213,7 @@ impl Input {
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);
         } else {
@@ -176,6 +222,7 @@ impl Input {
     }
 
     fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
         if self.selected_range.is_empty() {
             self.move_to(self.next_boundary(self.selected_range.end), cx);
         } else {
@@ -184,10 +231,12 @@ impl Input {
     }
 
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
         self.select_to(self.previous_boundary(self.cursor_offset()), cx);
     }
 
     fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
         self.select_to(self.next_boundary(self.selected_range.end), cx);
     }
 
@@ -196,12 +245,215 @@ impl Input {
         self.select_to(self.content.len(), cx);
     }
 
-    fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
+    fn doc_start(&mut self, _: &DocStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
         self.move_to(0, cx);
     }
 
-    fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+    fn doc_end(&mut self, _: &DocEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
         self.move_to(self.content.len(), cx);
+    }
+
+    /// The caret's visual (para, byte-col) position against the last
+    /// layout — the precondition for every line/vertical motion.
+    fn caret_layout(&self) -> Option<(usize, usize)> {
+        self.last_layout.as_ref().map(|l| l.locate(self.cursor_offset()))
+    }
+
+    fn line_start(&mut self, _: &LineStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
+        if let Some((ix, _)) = self.caret_layout() {
+            let start = self.last_layout.as_ref().unwrap().paras[ix].start;
+            self.move_to(start, cx);
+        } else {
+            self.move_to(0, cx);
+        }
+    }
+
+    fn line_end(&mut self, _: &LineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
+        if let Some((ix, _)) = self.caret_layout() {
+            let layout = self.last_layout.as_ref().unwrap();
+            let para = &layout.paras[ix];
+            self.move_to(para.start + para.len, cx);
+        } else {
+            self.move_to(self.content.len(), cx);
+        }
+    }
+
+    fn select_line_start(&mut self, _: &SelectLineStart, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((ix, _)) = self.caret_layout() {
+            let start = self.last_layout.as_ref().unwrap().paras[ix].start;
+            self.select_to(start, cx);
+        } else {
+            self.select_to(0, cx);
+        }
+    }
+
+    fn select_line_end(&mut self, _: &SelectLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((ix, _)) = self.caret_layout() {
+            let layout = self.last_layout.as_ref().unwrap();
+            let para = &layout.paras[ix];
+            self.select_to(para.start + para.len, cx);
+        } else {
+            self.select_to(self.content.len(), cx);
+        }
+    }
+
+    /// Whitespace-delimited word start backwards from `off` (skip the
+    /// space run, then the word run).
+    fn previous_word(&self, off: usize) -> usize {
+        let chars: Vec<(usize, char)> = self.content.char_indices().collect();
+        let mut skipped_word = 0;
+        for (idx, c) in chars[..chars.partition_point(|(i, _)| *i < off)].iter().rev() {
+            if c.is_whitespace() {
+                if skipped_word > 0 {
+                    return idx + c.len_utf8();
+                }
+            } else {
+                skipped_word += 1;
+            }
+        }
+        0
+    }
+
+    /// Whitespace-delimited word end forwards from `off`.
+    fn next_word(&self, off: usize) -> usize {
+        let mut seen_word = false;
+        for (i, c) in self.content.char_indices().skip_while(|(i, _)| *i < off) {
+            if c.is_whitespace() && seen_word {
+                return i;
+            }
+            seen_word |= !c.is_whitespace();
+        }
+        self.content.len()
+    }
+
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
+        self.move_to(self.previous_word(self.cursor_offset()), cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
+        self.move_to(self.next_word(self.cursor_offset()), cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
+        self.select_to(self.previous_word(self.cursor_offset()), cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.goal_x = None;
+        self.select_to(self.next_word(self.cursor_offset()), cx);
+    }
+
+    fn delete_word_left(&mut self, _: &DeleteWordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let target = self.previous_word(self.cursor_offset());
+            if target < self.cursor_offset() {
+                self.select_to(target, cx);
+            }
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_word_right(&mut self, _: &DeleteWordRight, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let target = self.next_word(self.cursor_offset());
+            if target > self.cursor_offset() {
+                self.select_to(target, cx);
+            }
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    /// Vertical motion (the P2 scope the article body needed): one visual
+    /// WRAPPED row per press, the goal column remembered across short
+    /// lines. Empty paragraphs shape as a space, so their rows position.
+    fn vertical(&mut self, dir: i32, select: bool, cx: &mut Context<Self>) {
+        if !self.multiline {
+            return;
+        }
+        // The emoji strip owns the arrows while it's open (the strip's
+        // selection moves; the caret must not wander underneath).
+        if self.suppress_newline {
+            return;
+        }
+        let Some(layout) = self.last_layout.as_ref() else {
+            return;
+        };
+        let lh = layout.line_height;
+        if layout.paras.is_empty() {
+            return;
+        }
+        let cursor = self.cursor_offset();
+        let (pix, pcol) = layout.locate(cursor);
+        let para = &layout.paras[pix];
+        let pos = para
+            .line
+            .position_for_index(pcol, lh)
+            .unwrap_or_default();
+        let goal = self.goal_x.unwrap_or(pos.x);
+        let row = (pos.y / lh).round() as i32;
+        let rows_in = |p: &Para, lh: Pixels| -> i32 {
+            ((p.line.size(lh).height / lh).round() as i32).max(1)
+        };
+
+        // The target row: same paragraph one row over, else across the
+        // paragraph boundary (last row of the previous / first row of the
+        // next). At the very top/bottom: clamp — no move, the goal column
+        // is forgotten (a fresh down starts from the caret's own column).
+        let target: Option<(usize, i32)> = if dir < 0 {
+            if row > 0 {
+                Some((pix, row - 1))
+            } else if pix > 0 {
+                let prev = &layout.paras[pix - 1];
+                Some((pix - 1, rows_in(prev, lh) - 1))
+            } else {
+                None
+            }
+        } else if row + 1 < rows_in(para, lh) {
+            Some((pix, row + 1))
+        } else if pix + 1 < layout.paras.len() {
+            Some((pix + 1, 0))
+        } else {
+            None
+        };
+        let Some((tpix, trow)) = target else {
+            self.goal_x = None;
+            return;
+        };
+        let tpara = &layout.paras[tpix];
+        let idx = tpara
+            .line
+            .closest_index_for_position(GpPoint::new(goal, trow as f32 * lh), lh)
+            .unwrap_or_else(|clamped| clamped);
+        let offset = (tpara.start + idx).min(tpara.start + tpara.len);
+        self.goal_x = Some(goal);
+        if select {
+            self.select_to(offset, cx);
+        } else {
+            self.move_to(offset, cx);
+        }
+    }
+
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        self.vertical(-1, false, cx);
+    }
+
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        self.vertical(1, false, cx);
+    }
+
+    fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.vertical(-1, true, cx);
+    }
+
+    fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.vertical(1, true, cx);
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -270,6 +522,7 @@ impl Input {
         self.content = self.content[0..range.start].to_string() + text + &self.content[range.end..];
         self.selected_range = range.start + text.len()..range.start + text.len();
         self.restart_blink(cx);
+        self.reveal_caret();
         cx.notify();
     }
 
@@ -286,6 +539,7 @@ impl Input {
         // Clicking a field hands IT the caret — every input (note, question,
         // options) needs no parent to do this for it.
         window.focus(&self.focus_handle, cx);
+        self.goal_x = None;
         self.is_selecting = true;
         let offset = self.index_for_mouse_position(event.position);
         if event.modifiers.shift {
@@ -308,7 +562,51 @@ impl Input {
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
         self.restart_blink(cx);
+        self.reveal_caret();
         cx.notify();
+    }
+
+    /// Multiline: the shaped content's full height (the host scroller's
+    /// overflow comes from the ELEMENT being content-sized — see
+    /// InputElement::request_layout). One frame behind an edit; exact for
+    /// pure caret motion.
+    pub fn content_height(&self) -> Option<Pixels> {
+        let layout = self.last_layout.as_ref()?;
+        let last = layout.paras.last()?;
+        Some(last.y + last.line.size(layout.line_height).height)
+    }
+
+    /// Scroll the host scroller (scroll_reveal) so the caret's row is
+    /// visible — the fix for "End jumped somewhere invisible". Offset
+    /// convention (gpui): NEGATIVE going down, content paints at
+    /// parent_top + offset. A no-op without a handle or layout.
+    fn reveal_caret(&self) {
+        let Some(handle) = &self.scroll_reveal else {
+            return;
+        };
+        let Some(layout) = self.last_layout.as_ref() else {
+            return;
+        };
+        let lh = layout.line_height;
+        let (pix, pcol) = layout.locate(self.cursor_offset());
+        let para = &layout.paras[pix];
+        let Some(pos) = para.line.position_for_index(pcol, lh) else {
+            return;
+        };
+        let caret_y = para.y + pos.y; // content-local (the input IS the content)
+        let viewport_h = handle.bounds().size.height;
+        let offset = handle.offset().y;
+        let margin = lh; // one line of context above/below the caret
+        let mut new_offset = offset;
+        if caret_y < -offset + margin {
+            new_offset = -(caret_y - margin).max(px(0.));
+        } else if caret_y + lh > -offset + viewport_h - margin {
+            let max_scroll = (self.content_height().unwrap_or(px(0.)) - viewport_h).max(px(0.));
+            new_offset = -(caret_y + lh + margin - viewport_h).min(max_scroll).max(px(0.));
+        }
+        if new_offset != offset {
+            handle.set_offset(GpPoint::new(px(0.), new_offset));
+        }
     }
 
     /// Keep the caret blinking from NOW: any caret move or edit calls this.
@@ -391,6 +689,7 @@ impl Input {
             self.selected_range = self.selected_range.end..self.selected_range.start;
         }
         self.restart_blink(cx);
+        self.reveal_caret();
         cx.notify();
     }
 
@@ -623,7 +922,21 @@ impl Element for InputElement {
     ) -> (gpui::LayoutId, Self::RequestLayoutState) {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = relative(1.).into();
+        // Multiline: the element IS the scroll CONTENT — its height is the
+        // shaped text's height, so the host scroller (the composer's body
+        // box) actually overflows and scrolls. (Filling the parent meant
+        // the scroller's child never overflowed: text clipped, wheel dead
+        // — "no scrolling in the body".) Measured from the last prepaint
+        // (one frame behind an edit; the first frame fills the parent).
+        let content_h = if self.input.read(cx).multiline {
+            self.input.read(cx).content_height()
+        } else {
+            None
+        };
+        match content_h {
+            Some(h) => style.size.height = h.into(),
+            None => style.size.height = relative(1.).into(),
+        }
         (window.request_layout(style, [], cx), ())
     }
 
@@ -889,14 +1202,28 @@ impl Render for Input {
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
+            .on_action(cx.listener(Self::select_up))
+            .on_action(cx.listener(Self::select_down))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::home))
-            .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::line_start))
+            .on_action(cx.listener(Self::line_end))
+            .on_action(cx.listener(Self::select_line_start))
+            .on_action(cx.listener(Self::select_line_end))
+            .on_action(cx.listener(Self::doc_start))
+            .on_action(cx.listener(Self::doc_end))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))

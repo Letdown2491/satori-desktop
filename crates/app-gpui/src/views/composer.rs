@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    actions, div, img, prelude::*, px, rgb, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, Global, Render, SharedString, Window,
+    actions, div, img, prelude::*, px, rgb, App, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, Global, Render, ScrollHandle, SharedString, Window,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, Profile, PublishEvent};
@@ -148,6 +148,10 @@ fn est_lines(text: &str, width: f32) -> f32 {
 pub struct Composer {
     core: Arc<Core>,
     input: Entity<Input>,
+    /// The body box's scroller: handed to the note Input (set_scroll_reveal)
+    /// so caret motion reveals the caret — End in a tall article used to
+    /// jump somewhere invisible.
+    body_scroll: ScrollHandle,
     tab: Tab,
     /// Photo tab (NIP-68, kind 20): the gallery's title. The CAPTION is
     /// the main note buffer (like the article's body); the attachments
@@ -222,6 +226,11 @@ impl Composer {
             .detach();
         let input = cx.new(Input::new);
         let focus = input.read(cx).focus_handle(cx);
+        // The body box's scroller doubles as the Input's caret-reveal
+        // target: multiline motion scrolls the box to keep the caret in
+        // view (input.rs reveal_caret).
+        let body_scroll = ScrollHandle::new();
+        input.update(cx, |i, _| i.set_scroll_reveal(body_scroll.clone()));
         // D17 tripwire: the note field and the alt field are not places a
         // private key belongs — a pasted nsec is intercepted with a strip.
         input.update(cx, |i, _| i.tripwire = true);        // Restored attachments (stash or synced entry) build up here.
@@ -299,6 +308,7 @@ impl Composer {
         Self {
             core,
             input,
+            body_scroll,
             tab: Tab::Note,
             photo_title: cx.new(Input::new),
             poll_question,
@@ -1572,11 +1582,16 @@ impl Render for Composer {
                 d.child(
                     div()
                         .id("composer-scroll")
+                        .track_scroll(&self.body_scroll)
                         // Ten quiet lines of breathing room; it grows
                         // with the text and scrolls when it outgrows the
                         // pane — the window never fills with an empty box.
+                        // No max: flex-shrink squeezes it against the
+                        // pane instead (min keeps the foot visible), and
+                        // the content-sized Input overflows INTO it —
+                        // that's where the wheel gets its overflow.
                         .h(window.line_height() * field_lines.max(LINES_MIN))
-                        .max_h_full()
+                        .min_h(window.line_height() * LINES_MIN)
                         .overflow_y_scroll()
                         .border_1()
                         .border_color(rgb(theme::hairline()))
