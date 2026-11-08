@@ -4521,6 +4521,51 @@ impl Core {
             .unwrap_or_default()
     }
 
+    /// Schedule an article (schedule_note's discipline, NIP-23-shaped):
+    /// signed AT COMPOSE with `created_at` == the scheduled time, held in
+    /// scheduled.json, published by the 30s sweep through the same funnel.
+    pub fn schedule_article(
+        self: &Arc<Self>,
+        draft: crate::nip::article::ArticleDraft,
+        scheduled_at: u64,
+    ) -> mpsc::UnboundedReceiver<ScheduleEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<String> = async {
+                if draft.title.trim().is_empty() || draft.body.trim().is_empty() {
+                    return Err(LoginError::Other("an article needs a title and a body".into()));
+                }
+                let active = this.active().await?;
+                let me = active.me();
+                let unsigned = UnsignedEvent::new(
+                    me,
+                    Timestamp::from_secs(scheduled_at),
+                    Kind::Custom(30023),
+                    draft.tags(scheduled_at),
+                    draft.body.clone(),
+                );
+                let signed = active.signer.sign_event(unsigned).await?;
+                crate::scheduled::hold(&me, signed, scheduled_at).ok_or_else(|| {
+                    LoginError::Connect(format!(
+                        "you have reached the maximum of {} scheduled posts; cancel some to schedule more",
+                        crate::scheduled::MAX_PER_USER
+                    ))
+                })
+            }
+            .await;
+            match res {
+                Ok(token) => {
+                    let _ = tx.send(ScheduleEvent::Scheduled { token, scheduled_at });
+                }
+                Err(e) => {
+                    let _ = tx.send(ScheduleEvent::Failed { error: e.to_string() });
+                }
+            }
+        });
+        rx
+    }
+
     /// Cancel a scheduled post before its time (scheduled.ts
     /// cancelScheduled): only the author's own token goes, synchronously
     /// flushed so a confirmed cancel can't resurrect after a restart.
@@ -4782,6 +4827,62 @@ impl Core {
             None => Self::commit(&active, &signed, tx).await?,
         }
         Ok(())
+    }
+
+    /// Post a NIP-23 article (kind:30023) — port of `signArticle` +
+    /// the article route's publish (article.ts). Top-level only (no
+    /// reply/quote; the reader's comments are NIP-22 kind-1111s). The
+    /// `d` identifier is random when the draft doesn't carry one. Same
+    /// undo window as notes/pictures.
+    pub fn post_article(
+        self: &Arc<Self>,
+        draft: crate::nip::article::ArticleDraft,
+    ) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                if draft.title.trim().is_empty() {
+                    return Err(LoginError::Other("an article needs a title".into()));
+                }
+                if draft.body.trim().is_empty() {
+                    return Err(LoginError::Other("an article needs a body".into()));
+                }
+                let active = this.active().await?;
+                let me = active.me();
+                let now = Timestamp::now().as_secs();
+                let unsigned = UnsignedEvent::new(
+                    me,
+                    Timestamp::from_secs(now),
+                    Kind::Custom(30023),
+                    draft.tags(now),
+                    draft.body.clone(),
+                );
+                let signed = active.signer.sign_event(unsigned).await?;
+                // Same undo window as notes/pictures (hold_and_commit).
+                match active.undo.hold_duration() {
+                    Some(hold) => {
+                        let token = this.hold_seq.fetch_add(1, Ordering::SeqCst);
+                        let _ = tx.send(PublishEvent::Held {
+                            token,
+                            event: signed.clone(),
+                            hold_secs: hold.as_secs(),
+                        });
+                        this.hold_and_commit(Arc::new(active.clone()), token, signed, hold, tx.clone())
+                            .await;
+                    }
+                    None => Self::commit(&active, &signed, &tx).await?,
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
     }
 
     /// Upload a blob to your Blossom servers (upload.ts). Emits

@@ -109,12 +109,14 @@ impl Attachment {
     }
 }
 
-/// The compose tab: a note (kind 1) or a poll (NIP-88, kind 1068).
-/// Replies carry no tabs — they're notes/comments by nature.
+/// The compose tab: a note (kind 1), a poll (NIP-88, kind 1068), or an
+/// article (NIP-23, kind 30023). Replies carry no tabs — they're
+/// notes/comments by nature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Note,
     Poll,
+    Article,
 }
 
 /// The compose field's resting height, in lines of text: present without
@@ -149,6 +151,16 @@ pub struct Composer {
     poll_question: Entity<Input>,
     poll_options: Vec<Entity<Input>>,
     poll_multi: bool,
+    /// Article tab (NIP-23): the structural fields. The BODY is the main
+    /// note buffer (tab switches keep its text — a half-typed body stays);
+    /// topics ride one comma-separated input (the web app's shape).
+    art_title: Entity<Input>,
+    art_summary: Entity<Input>,
+    /// Cover image URL — pasted, or the Blossom blob the upload button
+    /// writes back when it lands.
+    art_cover: Entity<Input>,
+    art_cover_busy: bool,
+    art_topics: Entity<Input>,
     /// @-mentions: the pubkeys whose p tags ride the publish (content
     /// keeps the human-readable @Name).
     mentions: Vec<PublicKey>,
@@ -285,6 +297,11 @@ impl Composer {
             poll_question,
             poll_options,
             poll_multi: false,
+            art_title: cx.new(Input::new),
+            art_summary: cx.new(Input::new),
+            art_cover: cx.new(Input::new),
+            art_cover_busy: false,
+            art_topics: cx.new(Input::new),
             mentions: vec![],
             suggest: vec![],
             mention_token: None,
@@ -750,6 +767,204 @@ impl Composer {
         .detach();
     }
 
+    /// The article fields off the inputs (the body is the note buffer).
+    fn article_draft(&self, cx: &Context<Self>) -> satori_core::nip::article::ArticleDraft {
+        let cover = self.art_cover.read(cx).content.trim().to_string();
+        satori_core::nip::article::ArticleDraft {
+            title: self.art_title.read(cx).content.trim().to_string(),
+            summary: self.art_summary.read(cx).content.trim().to_string(),
+            image: (!cover.is_empty()).then_some(cover),
+            topics: self
+                .art_topics
+                .read(cx)
+                .content
+                .split(',')
+                .map(|t| t.trim().trim_start_matches('#').to_string())
+                .filter(|t| !t.is_empty())
+                .collect(),
+            body: self.input.read(cx).content.clone(),
+            identifier: String::new(), // fresh publishes mint a random d
+        }
+    }
+
+    fn article_valid(&mut self, cx: &mut Context<Self>) -> bool {
+        let draft = self.article_draft(cx);
+        if draft.title.is_empty() || draft.body.trim().is_empty() {
+            self.status = "an article needs a title and a body".into();
+            cx.notify();
+            return false;
+        }
+        true
+    }
+
+    /// The article publish (NIP-23): pump mirrors the poll's — Held pops
+    /// the pane (the toast carries Undo), the rest report in place. No
+    /// synced draft (v1) — nothing to spend on a commit.
+    fn post_article(&mut self, cx: &mut Context<Self>) {
+        if !self.article_valid(cx) {
+            return;
+        }
+        self.posting = true;
+        self.status.clear();
+        cx.notify();
+        let core = self.core.clone();
+        let draft = self.article_draft(cx);
+        let mut rx = core.post_article(draft);
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    PublishEvent::Held { .. } => {
+                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                        return;
+                    }
+                    PublishEvent::Undone { .. } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.posting = false;
+                            this.status = "undone, nothing was sent".into();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    PublishEvent::Committed { .. } => {
+                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                        return;
+                    }
+                    PublishEvent::Failed { error, .. } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.posting = false;
+                            this.status = format!("couldn't post: {error}");
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The scheduled article: sign-at-compose (core schedule_article), the
+    /// sweep fires it — the note schedule's discipline, article-shaped.
+    fn schedule_article(&mut self, cx: &mut Context<Self>) {
+        if self.posting {
+            return;
+        }
+        if !self.article_valid(cx) {
+            return;
+        }
+        let when_field = self.sched_at.read(cx).content.clone();
+        let Some(at) = Self::parse_schedule(&when_field) else {
+            self.status =
+                "when? enter a future date and time, YYYY-MM-DD HH:MM, at least a minute ahead"
+                    .into();
+            cx.notify();
+            return;
+        };
+        self.posting = true;
+        self.status.clear();
+        cx.notify();
+        let draft = self.article_draft(cx);
+        let core = self.core.clone();
+        let mut rx = core.schedule_article(draft, at);
+        cx.spawn(async move |this, cx| {
+            if let Some(ev) = rx.recv().await {
+                match ev {
+                    satori_core::manager::ScheduleEvent::Scheduled { .. } => {
+                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                    }
+                    satori_core::manager::ScheduleEvent::Failed { error } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.posting = false;
+                            this.status = format!("couldn't schedule: {error}");
+                            cx.notify();
+                        });
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The cover's Blossom upload: pick one image, the blob URL lands in
+    /// the cover field when the upload completes (the imeta half is
+    /// unused — the article carries the bare `image` tag).
+    fn upload_cover(&mut self, cx: &mut Context<Self>) {
+        if self.posting || self.art_cover_busy {
+            return;
+        }
+        self.status = "choosing a cover…".into();
+        cx.spawn(async move |this, cx| {
+            let picked = cx
+                .background_executor()
+                .spawn(async {
+                    rfd::FileDialog::new()
+                        .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+                        .pick_file()
+                })
+                .await;
+            let Some(path) = picked else {
+                let _ = this.update(cx, |this, cx| {
+                    this.status.clear();
+                    cx.notify();
+                });
+                return;
+            };
+            let content_type = match path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase()
+                .as_str()
+            {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "webp" => "image/webp",
+                _ => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.status = "that's not an image".into();
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                let _ = this.update(cx, |this, cx| {
+                    this.status = format!("couldn't read {}", path.display());
+                    cx.notify();
+                });
+                return;
+            };
+            let Ok((_, mut rx)) = this.update(cx, |this, cx| {
+                this.art_cover_busy = true;
+                this.status = "uploading the cover…".into();
+                cx.notify();
+                let core = this.core.clone();
+                let rx = core.blossom_upload(bytes, content_type.into());
+                (core, rx)
+            }) else {
+                return;
+            };
+            while let Some(ev) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| match ev {
+                    PublishEvent::Uploaded { url, .. } => {
+                        this.art_cover_busy = false;
+                        this.status.clear();
+                        this.art_cover.update(cx, |i, cx| i.set_text(&url, cx));
+                        cx.notify();
+                    }
+                    PublishEvent::Failed { error, .. } => {
+                        this.art_cover_busy = false;
+                        this.status = format!("cover upload failed: {error}");
+                        cx.notify();
+                    }
+                    _ => {}
+                });
+            }
+        })
+        .detach();
+    }
+
     fn post(&mut self, cx: &mut Context<Self>) {
         if self.posting {
             return;
@@ -757,6 +972,17 @@ impl Composer {
         // The poll tab publishes a poll, not the note buffer.
         if self.tab == Tab::Poll {
             self.post_poll(cx);
+            return;
+        }
+        // The article tab publishes an article: the buffer IS the
+        // markdown body, the fields panel carries the structural tags.
+        // The schedule affordance reroutes it like a note's.
+        if self.tab == Tab::Article {
+            if self.sched_on {
+                self.schedule_article(cx);
+            } else {
+                self.post_article(cx);
+            }
             return;
         }
         // The schedule affordance reroutes the seal: same content path,
@@ -879,7 +1105,12 @@ impl Composer {
     /// (replies, a send in flight, an undo window pending). v1.4: the
     /// session stash carries the ready attachment imetas too.
     pub fn draft_candidate(&self, cx: &App) -> Option<SessionDraft> {
-        if self.reply_to.is_some() || self.quote.is_some() || self.posting {
+        if self.reply_to.is_some() || self.quote.is_some() || self.posting
+            || self.tab == Tab::Article
+        {
+            // The article tab keeps no draft (v1, like the poll): its
+            // body is the note buffer, and an article-shaped restore is
+            // not wired.
             return None;
         }
         Some(SessionDraft {
@@ -895,7 +1126,10 @@ impl Composer {
     /// wipe the top-level slot). v1.4: the imetas ride the entry (the
     /// blobs are on Blossom since attach time).
     pub fn draft_sync_candidate(&self, cx: &App) -> Option<DraftCandidate> {
-        if self.posting || self.tab == Tab::Poll {
+        // Polls don't draft (v1 keeps their surface small — and their
+        // empty note buffer must not wipe the top-level slot); the article
+        // tab joins that exclusion (its buffer IS the note buffer).
+        if self.posting || self.tab != Tab::Note {
             return None;
         }
         Some((
@@ -939,10 +1173,10 @@ impl Composer {
 
 impl Focusable for Composer {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        if self.tab == Tab::Poll {
-            self.poll_question.read(cx).focus_handle(cx)
-        } else {
-            self.focus.clone()
+        match self.tab {
+            Tab::Poll => self.poll_question.read(cx).focus_handle(cx),
+            Tab::Article => self.art_title.read(cx).focus_handle(cx),
+            Tab::Note => self.focus.clone(),
         }
     }
 }
@@ -955,13 +1189,16 @@ impl Render for Composer {
             self.focused_tab = Some(Tab::Note);
         }
         if self.focused_tab != Some(self.tab) {
-            // A tab switch moves the caret: the poll's question, or back
-            // to the note field. (The note handle dangles on the poll tab
-            // — its div isn't rendered — and a dangling focus eats keys.)
+            // A tab switch moves the caret: the poll's question, the
+            // article's title, or back to the note field. (The note handle
+            // dangles on the other tabs — its div isn't rendered — and a
+            // dangling focus eats keys.)
             self.focused_tab = Some(self.tab);
             match self.tab {
                 Tab::Poll => window
                     .focus(&self.poll_question.read(cx).focus_handle(cx), cx),
+                Tab::Article => window
+                    .focus(&self.art_title.read(cx).focus_handle(cx), cx),
                 Tab::Note => window.focus(&self.focus, cx),
             }
         }
@@ -990,6 +1227,11 @@ impl Render for Composer {
         let poll_question = self.poll_question.clone();
         let poll_options = self.poll_options.clone();
         let poll_multi = self.poll_multi;
+        let art_title = self.art_title.clone();
+        let art_summary = self.art_summary.clone();
+        let art_cover = self.art_cover.clone();
+        let art_topics = self.art_topics.clone();
+        let art_cover_busy = self.art_cover_busy;
         let emoji_suggest = self.emoji_suggest.clone();
         let emoji_sel = self.emoji_sel;
         let sched_on = self.sched_on;
@@ -1095,7 +1337,73 @@ impl Render for Composer {
                         ),
                 )
             })
-            .when(tab == Tab::Note, |d| {
+            .when(tab == Tab::Article, |d| {
+                // The NIP-23 structural fields; the body rides the note
+                // buffer's box below. Single-line fields wear the poll's
+                // washi row (definite height — the Input fills its parent).
+                let art_field = |input: Entity<Input>, window: &Window| -> gpui::Div {
+                    div()
+                        .flex()
+                        .h(window.line_height() + px(theme::S5))
+                        .rounded(px(theme::R_EMBED))
+                        .border_1()
+                        .border_color(rgb(theme::hairline()))
+                        .bg(rgb(theme::washi()))
+                        .p_2()
+                        .child(input)
+                };
+                d.child(
+                    div()
+                        .rounded(px(theme::R_EMBED))
+                        .border_1()
+                        .border_color(rgb(theme::hairline()))
+                        .bg(rgb(theme::panel()))
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(poll_label("Title"))
+                        .child(art_field(art_title, window))
+                        .child(poll_label("Summary (optional)"))
+                        .child(art_field(art_summary, window))
+                        .child(poll_label("Cover image (optional)"))
+                        .child(
+                            div().flex().gap_2().child(
+                                art_field(art_cover, window).flex_1(),
+                            )
+                            .child(
+                                div()
+                                    .id("cover-upload")
+                                    .cursor_pointer()
+                                    .when(!art_cover_busy, |d| d.hover(|s| s.bg(rgb(theme::washi()))))
+                                    .flex()
+                                    .items_center()
+                                    .px_3()
+                                    .rounded(px(theme::R_EMBED))
+                                    .border_1()
+                                    .border_color(rgb(theme::hairline()))
+                                    .bg(rgb(theme::panel()))
+                                    .text_size(px(theme::T_UI))
+                                    .text_color(rgb(if art_cover_busy {
+                                        theme::muted()
+                                    } else {
+                                        theme::ink()
+                                    }))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.upload_cover(cx);
+                                    }))
+                                    .child(if art_cover_busy {
+                                        "uploading…"
+                                    } else {
+                                        "upload"
+                                    }),
+                            ),
+                        )
+                        .child(poll_label("Topics (optional, comma separated)"))
+                        .child(art_field(art_topics, window)),
+                )
+            })
+            .when(tab != Tab::Poll, |d| {
                 d.child(
                     div()
                         .id("composer-scroll")
@@ -1318,6 +1626,32 @@ impl Render for Composer {
                                     this.set_tab(Tab::Poll, cx)
                                 }))
                                 .child("Poll"),
+                        )
+                        .child(
+                            div()
+                                .id("tab-article")
+                                .cursor_pointer()
+                                .px_3()
+                                .py_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(if tab == Tab::Article {
+                                    theme::ink()
+                                } else {
+                                    theme::muted()
+                                }))
+                                .when(tab == Tab::Article, |d| {
+                                    d.font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .bg(rgb(theme::panel()))
+                                        .rounded_t(px(theme::R_EMBED))
+                                        .border_t_1()
+                                        .border_l_1()
+                                        .border_r_1()
+                                        .border_color(rgb(theme::hairline()))
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_tab(Tab::Article, cx)
+                                }))
+                                .child("Article"),
                         ),
                 )
             })
@@ -1420,7 +1754,7 @@ impl Render for Composer {
                 )
             })
             .when(tab == Tab::Note, |d| d.child(self.attachment_row(cx)))
-            .when(tab == Tab::Note && sched_on, |d| {
+            .when(tab != Tab::Poll && sched_on, |d| {
                 // The schedule affordance: the when field + the pending
                 // list. Honest validation lives in parse_schedule; the
                 // status line carries its refusals.
@@ -1457,7 +1791,7 @@ impl Render for Composer {
                         ),
                 )
             })
-            .when(tab == Tab::Note && !scheduled.is_empty(), |d| {
+            .when(tab != Tab::Poll && !scheduled.is_empty(), |d| {
                 // The "Scheduled" surface: pending notes, soonest first,
                 // each with its time and a cancel (cancelScheduled).
                 d.child(
@@ -1477,7 +1811,7 @@ impl Render for Composer {
                         )),
                 )
             })
-            .when(tab == Tab::Note && sched_list_open, |d| {
+            .when(tab != Tab::Poll && sched_list_open, |d| {
                 d.child(div().w_full().flex().flex_col().gap_1().children(
                     scheduled.iter().map(|p| {
                         let token = p.token.clone();
@@ -1535,20 +1869,22 @@ impl Render for Composer {
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(
-                                div()
-                                    .id("attach")
-                                    .cursor_pointer()
-                                    .px_3()
-                                    .py_1()
-                                    .text_size(px(theme::T_UI))
-                                    .text_color(rgb(theme::muted()))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.pick_attachments(cx);
-                                    }))
-                                    .child("+ attach images"),
-                            )
-                            .when(tab == Tab::Note, |d| {
+                            .when(tab != Tab::Article, |d| {
+                                d.child(
+                                    div()
+                                        .id("attach")
+                                        .cursor_pointer()
+                                        .px_3()
+                                        .py_1()
+                                        .text_size(px(theme::T_UI))
+                                        .text_color(rgb(theme::muted()))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.pick_attachments(cx);
+                                        }))
+                                        .child("+ attach images"),
+                                )
+                            })
+                            .when(tab != Tab::Poll, |d| {
                                 d.child(
                                     div()
                                         .id("schedule-toggle")
