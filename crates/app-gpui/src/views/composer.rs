@@ -7,17 +7,22 @@
 //! match the GTK composer: a top-level compose restores whatever was stashed,
 //! and closing with un-published text stashes it again (replies get neither).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
-    actions, div, img, prelude::*, px, rgb, App, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, Global, Render, ScrollHandle, SharedString, Window,
+    actions, div, img, prelude::*, px, relative, rgb, App, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, FontWeight, Global, Render, ScrollHandle, SharedString, Window,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, Profile, PublishEvent};
+use satori_core::manager::{Core, FeedEvent, FeedRx, Profile, PublishEvent};
 
-use crate::{input::Input, media, theme};
-use super::nav::Nav;
+use crate::{input::Input, markdown, media, theme};
+use super::{
+    content,
+    nav::Nav,
+    reader::{block_item, image_tile, render_block},
+};
 
 actions!(composer, [Publish]);
 
@@ -207,6 +212,13 @@ pub struct Composer {
     /// focus to the new tab's field (the note field's handle dangles when
     /// the poll tab renders, and a dangling focus eats keystrokes).
     focused_tab: Option<Tab>,
+    /// Preview mode (the foot's preview pill): the article tab FLIPS to a
+    /// reader-faithful preview of the draft; the other tabs reveal the
+    /// draft's feed card under the compose box. Esc backs out.
+    previewing: bool,
+    /// Names/avatars for the preview's byline + body mentions (reader.rs
+    /// want_names' shape: pump ensure_profiles, merge on landing).
+    preview_profiles: HashMap<String, Profile>,
     focus: FocusHandle,
 }
 
@@ -231,6 +243,13 @@ impl Composer {
         // view (input.rs reveal_caret).
         let body_scroll = ScrollHandle::new();
         input.update(cx, |i, _| i.set_scroll_reveal(body_scroll.clone()));
+        // The article's structural fields wrap but never break: Enter is
+        // inert (a title is one paragraph; pasted newlines fold flat).
+        let art_title = cx.new(Input::new);
+        let art_summary = cx.new(Input::new);
+        for f in [&art_title, &art_summary] {
+            f.update(cx, |i, _| i.single_paragraph = true);
+        }
         // D17 tripwire: the note field and the alt field are not places a
         // private key belongs — a pasted nsec is intercepted with a strip.
         input.update(cx, |i, _| i.tripwire = true);        // Restored attachments (stash or synced entry) build up here.
@@ -314,8 +333,8 @@ impl Composer {
             poll_question,
             poll_options,
             poll_multi: false,
-            art_title: cx.new(Input::new),
-            art_summary: cx.new(Input::new),
+            art_title,
+            art_summary,
             art_cover: cx.new(Input::new),
             art_cover_busy: false,
             art_topics: cx.new(Input::new),
@@ -338,6 +357,8 @@ impl Composer {
             status: String::new(),
             autofocused: false,
             focused_tab: None,
+            previewing: false,
+            preview_profiles: HashMap::new(),
             focus,
         }
     }
@@ -721,6 +742,9 @@ impl Composer {
             self.tab = tab;
             self.suggest.clear();
             self.mention_token = None;
+            // Each tab's preview is its own draft shape — a switch starts
+            // flat again (the pill is one click to restore).
+            self.previewing = false;
             cx.notify();
         }
     }
@@ -785,11 +809,28 @@ impl Composer {
     }
 
     /// The article fields off the inputs (the body is the note buffer).
+    /// Title/summary fold flat: the single-paragraph fields can't take a
+    /// typed newline, but a paste lands through a path that already folded
+    /// it — this is the last line of defense before the tag rides publish.
     fn article_draft(&self, cx: &Context<Self>) -> satori_core::nip::article::ArticleDraft {
         let cover = self.art_cover.read(cx).content.trim().to_string();
+        let title = self
+            .art_title
+            .read(cx)
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let summary = self
+            .art_summary
+            .read(cx)
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         satori_core::nip::article::ArticleDraft {
-            title: self.art_title.read(cx).content.trim().to_string(),
-            summary: self.art_summary.read(cx).content.trim().to_string(),
+            title,
+            summary,
             image: (!cover.is_empty()).then_some(cover),
             topics: self
                 .art_topics
@@ -1384,8 +1425,6 @@ impl Render for Composer {
             .map(|w| w.0)
             .unwrap_or(false);
         let field_lines = est_lines(input.read(cx).content.as_str(), 72.0);
-        let question_lines =
-            est_lines(&poll_question.read(cx).content, 72.0);
         let quote_snap = media::Snapshot::new(cx);
         // The quote card's avatar comes back if the cache evicted it
         // (fetch is a silent no-op when the cache still holds it).
@@ -1394,6 +1433,15 @@ impl Render for Composer {
         {
             media::fetch(&self.core, picture.clone(), cx.entity_id(), cx);
         }
+        // The cover preview's image: fetched as soon as a URL exists
+        // (pasted, or the upload's write-back), silent no-op while cached.
+        let cover_url = self.art_cover.read(cx).content.trim().to_string();
+        if !cover_url.is_empty() {
+            media::fetch(&self.core, cover_url.clone(), cx.entity_id(), cx);
+        }
+        let previewing = self.previewing;
+        // The article flip: fields AND body box give way to the preview.
+        let art_previewing = previewing && tab == Tab::Article;
 
         div()
             .id("composer")
@@ -1405,6 +1453,19 @@ impl Render for Composer {
             // while the strip is open); stop_propagation keeps the
             // keystroke from going further up.
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                // Esc backs OUT of the preview before it backs out of the
+                // composer (escape-to-back would pop the whole pane — the
+                // preview wants the first dance). The emoji strip's keys
+                // still come first when it's up.
+                if this.previewing
+                    && this.emoji_suggest.is_empty()
+                    && ev.keystroke.key == "escape"
+                {
+                    this.previewing = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 if this.emoji_suggest.is_empty() {
                     return;
                 }
@@ -1512,14 +1573,28 @@ impl Render for Composer {
                         ),
                 )
             })
-            .when(tab == Tab::Article, |d| {
+            .when(tab == Tab::Article && !art_previewing, |d| {
                 // The NIP-23 structural fields; the body rides the note
-                // buffer's box below. Single-line fields wear the poll's
-                // washi row (definite height — the Input fills its parent).
+                // buffer's box below. Title/summary WRAP (single-paragraph
+                // Inputs: Enter inert, pasted newlines fold) — a min keeps
+                // the empty box a line tall and the content-sized Input
+                // grows it; the real wrap count drives the height, so a
+                // long title can't clip the way the old fixed row did.
                 let art_field = |input: Entity<Input>, window: &Window| -> gpui::Div {
                     div()
                         .flex()
                         .h(window.line_height() + px(theme::S5))
+                        .rounded(px(theme::R_EMBED))
+                        .border_1()
+                        .border_color(rgb(theme::hairline()))
+                        .bg(rgb(theme::washi()))
+                        .p_2()
+                        .child(input)
+                };
+                let art_wrap_field = |input: Entity<Input>, window: &Window| -> gpui::Div {
+                    div()
+                        .flex()
+                        .min_h(window.line_height() + px(theme::S5))
                         .rounded(px(theme::R_EMBED))
                         .border_1()
                         .border_color(rgb(theme::hairline()))
@@ -1538,9 +1613,9 @@ impl Render for Composer {
                         .flex_col()
                         .gap_2()
                         .child(poll_label("Title"))
-                        .child(art_field(art_title, window))
+                        .child(art_wrap_field(art_title, window))
                         .child(poll_label("Summary (optional)"))
-                        .child(art_field(art_summary, window))
+                        .child(art_wrap_field(art_summary, window))
                         .child(poll_label("Cover image (optional)"))
                         .child(
                             div().flex().gap_2().child(
@@ -1575,10 +1650,45 @@ impl Render for Composer {
                             ),
                         )
                         .child(poll_label("Topics (optional, comma separated)"))
-                        .child(art_field(art_topics, window)),
+                        .child(art_field(art_topics, window))
+                        // The cover preview: the URL rendered the moment it
+                        // exists, through the same media cache the cards
+                        // read (a broken URL says so instead of staring).
+                        .when(!cover_url.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .w_full()
+                                    .h(px(120.))
+                                    .flex_none()
+                                    .overflow_hidden()
+                                    .rounded(px(theme::R_EMBED))
+                                    .border_1()
+                                    .border_color(rgb(theme::hairline()))
+                                    .bg(rgb(theme::panel()))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(match quote_snap.png(&cover_url) {
+                                        Some(png) => img(png)
+                                            .size_full()
+                                            .into_any_element(),
+                                        None => div()
+                                            .text_size(px(theme::T_SMALL))
+                                            .text_color(rgb(theme::muted()))
+                                            .child(if art_cover_busy {
+                                                "uploading…"
+                                            } else if quote_snap.not_media(&cover_url) {
+                                                "that url didn't come back as an image"
+                                            } else {
+                                                "loading cover…"
+                                            })
+                                            .into_any_element(),
+                                    }),
+                            )
+                        }),
                 )
             })
-            .when(tab != Tab::Poll, |d| {
+            .when(tab != Tab::Poll && !art_previewing, |d| {
                 d.child(
                     div()
                         .id("composer-scroll")
@@ -1627,11 +1737,13 @@ impl Render for Composer {
                         .child(
                             // The question wears the same washi box as the
                             // options — an unboxed bare input reads as blank
-                            // panel until typed. Definite height: the Input
-                            // fills its parent; auto would collapse it.
+                            // panel until typed. The min keeps the empty box
+                            // a line tall; the content-sized Input grows it
+                            // (a long question wraps now instead of clipping
+                            // the est_lines guess).
                             div()
                                 .flex()
-                                .h(window.line_height() * question_lines.max(1.0) + px(theme::S5))
+                                .min_h(window.line_height() + px(theme::S5))
                                 .rounded(px(theme::R_EMBED))
                                 .border_1()
                                 .border_color(rgb(theme::hairline()))
@@ -2068,6 +2180,10 @@ impl Render for Composer {
                     }),
                 ))
             })
+            .when(art_previewing, |d| d.child(self.article_preview(cx)))
+            .when(previewing && tab != Tab::Article, |d| {
+                d.child(self.compose_preview(cx))
+            })
             .child(div()
                     .flex()
                     .items_center()
@@ -2077,6 +2193,38 @@ impl Render for Composer {
                             .flex()
                             .items_center()
                             .gap_3()
+                            .child(
+                                // The preview pill: article flips to the
+                                // reader-faithful preview, the other tabs
+                                // reveal the draft's feed card below.
+                                div()
+                                    .id("preview-toggle")
+                                    .cursor_pointer()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded(px(theme::R_EMBED))
+                                    .border_1()
+                                    .border_color(rgb(if previewing {
+                                        theme::vermilion()
+                                    } else {
+                                        theme::hairline()
+                                    }))
+                                    .text_size(px(theme::T_UI))
+                                    .text_color(rgb(if previewing {
+                                        theme::vermilion()
+                                    } else {
+                                        theme::muted()
+                                    }))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if this.previewing {
+                                            this.previewing = false;
+                                        } else {
+                                            this.show_preview(cx);
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(if previewing { "preview ✓" } else { "preview" }),
+                            )
                             .when(tab != Tab::Article, |d| {
                                 d.child(
                                     div()
@@ -2154,6 +2302,410 @@ impl Render for Composer {
 }
 
 impl Composer {
+    /// A well-formed, UNSIGNED event for the preview renderers. The render
+    /// path never verifies signatures (that's relay ingestion's job), but
+    /// the id must be CONTENT-derived: content::body's parse cache keys on
+    /// the event id, and a constant id would cross-contaminate drafts.
+    fn draft_event(&self, kind: Kind, tags: Vec<Tag>, content: &str) -> Option<Event> {
+        let pk = self.core.me().and_then(|m| m.parse::<PublicKey>().ok())?;
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        u16::from(kind).hash(&mut h);
+        content.hash(&mut h);
+        for t in &tags {
+            for v in t.as_slice() {
+                v.hash(&mut h);
+            }
+        }
+        let a = h.finish();
+        // Stretch the u64s to the 32-byte id (two hashes, different salts).
+        let mut h2 = std::collections::hash_map::DefaultHasher::new();
+        a.hash(&mut h2);
+        u16::from(kind).hash(&mut h2);
+        content.hash(&mut h2);
+        let b = h2.finish();
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&a.to_be_bytes());
+        bytes[8..16].copy_from_slice(&b.to_be_bytes());
+        bytes[16..24].copy_from_slice(&a.to_le_bytes());
+        bytes[24..].copy_from_slice(&b.to_le_bytes());
+        Some(Event::new(
+            EventId::from_slice(&bytes).ok()?,
+            pk,
+            Timestamp::now(),
+            kind,
+            tags,
+            content,
+            Signature::from_byte_array([0u8; 64]),
+        ))
+    }
+
+    /// The preview pill's on-switch: resolve the byline/mention names
+    /// first (reader.rs want_names' shape), then flip.
+    fn show_preview(&mut self, cx: &mut Context<Self>) {
+        self.previewing = true;
+        let mut want: Vec<PublicKey> = Vec::new();
+        if let Ok(pk) = self.core.me().unwrap_or_default().parse::<PublicKey>() {
+            want.push(pk);
+        }
+        // The note tab's mentions ride the buffer (@Name keeps the label;
+        // the p tags resolve to display names in the preview body).
+        want.extend(self.mentions.iter().cloned());
+        let seen = self.preview_profiles.clone();
+        let missing: Vec<PublicKey> = want
+            .into_iter()
+            .filter(|pk| !seen.contains_key(&pk.to_string()))
+            .collect();
+        self.pump_profiles(missing, cx);
+    }
+
+    /// Queue a profile fetch and merge the landings (reader.rs pump).
+    fn pump_profiles(&self, pks: Vec<PublicKey>, cx: &mut Context<Self>) {
+        if pks.is_empty() {
+            return;
+        }
+        let mut rx: FeedRx = self.core.ensure_profiles(pks);
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| {
+                    if let FeedEvent::Profiles(profiles) = ev {
+                        for p in profiles {
+                            this.preview_profiles.insert(p.pubkey.clone(), p);
+                        }
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// The article preview: the flip target. The draft renders through the
+    /// READER's own path — reader.rs render_block over the markdown blocks,
+    /// the same byline/cover/summary head. What you check here is what
+    /// readers get, because it IS the reader's code.
+    fn article_preview(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let snap = media::Snapshot::new(cx);
+        let draft = self.article_draft(cx);
+        let body = self.input.read(cx).content.clone();
+        let title = draft.title.clone();
+        let summary = draft.summary.clone();
+        let cover = draft.image.clone();
+        let minutes = satori_core::nip::article::reading_minutes(&body);
+        let me = self.core.me().and_then(|m| m.parse::<PublicKey>().ok());
+        let prof = me.and_then(|pk| self.preview_profiles.get(&pk.to_string()));
+        let name = prof.map(|p| p.display()).unwrap_or_else(|| "you".into());
+        let pic = prof.map(|p| p.picture.clone()).unwrap_or_default();
+        let empty = body.trim().is_empty();
+
+        // Media the preview needs: the byline avatar, the cover, every
+        // own-line image in the body (reader.rs render's sweep).
+        if !pic.is_empty() {
+            media::fetch(&self.core, pic.clone(), cx.entity_id(), cx);
+        }
+        if let Some(c) = &cover {
+            media::fetch(&self.core, c.clone(), cx.entity_id(), cx);
+        }
+        let blocks: Vec<markdown::Block> = markdown::blocks(&body);
+        for b in &blocks {
+            if let markdown::Block::Image { url } = b {
+                media::fetch(&self.core, url.clone(), cx.entity_id(), cx);
+            }
+        }
+        let profiles = self.preview_profiles.clone();
+        let quotes: content::Quotes = HashMap::new();
+        let body_ctx = content::Body {
+            media: &snap,
+            quotes: &quotes,
+            profiles: &profiles,
+        };
+        let handle = cx.entity();
+
+        div()
+            .id("article-preview")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(content::COL_W))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        // The flip controls: a quiet label left, the way
+                        // back right (the foot's pill toggles too; Esc).
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .pb_2()
+                            .child(
+                                div()
+                                    .text_size(px(theme::T_SMALL))
+                                    .text_color(rgb(theme::muted()))
+                                    .child("preview"),
+                            )
+                            .child(
+                                div()
+                                    .id("preview-edit")
+                                    .cursor_pointer()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded(px(theme::R_EMBED))
+                                    .border_1()
+                                    .border_color(rgb(theme::hairline()))
+                                    .text_size(px(theme::T_UI))
+                                    .text_color(rgb(theme::muted()))
+                                    .hover(|s| s.text_color(rgb(theme::ink())))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.previewing = false;
+                                        cx.notify();
+                                    }))
+                                    .child("✕ back to edit"),
+                            ),
+                    )
+                    .child(block_item(
+                        div()
+                            .font_family(theme::SERIF)
+                            .text_size(px(20.0))
+                            .line_height(relative(1.25))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme::ink()))
+                            .child(title),
+                        theme::S3,
+                    ))
+                    .child(block_item(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(media::avatar(&snap, &pic, &name, 24.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_baseline()
+                                    .gap_2()
+                                    .text_size(px(theme::T_UI))
+                                    .text_color(rgb(theme::muted()))
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(theme::ink()))
+                                            .child(name.clone()),
+                                    )
+                                    .child(format!("· draft · {minutes} min read")),
+                            ),
+                        theme::S5,
+                    ))
+                    .children(cover.map(|c| block_item(image_tile(&c, &snap), theme::S5)))
+                    .when(!summary.is_empty(), |d| {
+                        d.child(block_item(
+                            div()
+                                .font_family(theme::SERIF)
+                                .italic()
+                                .text_size(px(theme::T_READER))
+                                .line_height(relative(1.35))
+                                .text_color(rgb(theme::muted()))
+                                .child(summary),
+                            theme::S4,
+                        ))
+                    })
+                    .when(empty, |d| {
+                        d.child(block_item(
+                            div()
+                                .text_size(px(theme::T_READER))
+                                .text_color(rgb(theme::muted()))
+                                .child("(the body is empty — flip back and write)"),
+                            theme::S4,
+                        ))
+                    })
+                    .when(!empty, |d| {
+                        d.children(
+                            blocks
+                                .iter()
+                                .enumerate()
+                                .map(|(i, b)| render_block(b.clone(), i, &body_ctx, &handle)),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// The under-box preview: the draft as its feed card, through the same
+    /// body pipeline the feed renders with (media folding, mentions, the
+    /// works). Photo shows the gallery + title + caption; poll shows a
+    /// static ballot (nobody can vote on an unpublished poll).
+    fn compose_preview(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(pk) = self.core.me().and_then(|m| m.parse::<PublicKey>().ok()) else {
+            return div()
+                .w_full()
+                .text_size(px(theme::T_SMALL))
+                .text_color(rgb(theme::muted()))
+                .child("sign in to preview");
+        };
+        let snap = media::Snapshot::new(cx);
+        let tab = self.tab;
+        let imetas = self.ready_imetas();
+
+        // The synthetic event, publish-shaped (note_tags/picture_tags are
+        // the publish builders themselves — the preview shows the tags
+        // publish signs, imetas included).
+        let ev = match tab {
+            Tab::Note => {
+                let text = self.input.read(cx).content.clone();
+                let (content, tags) = Core::note_tags(
+                    text,
+                    self.reply_to.clone(),
+                    self.mentions.clone(),
+                    self.quote.clone(),
+                    &imetas,
+                    pk,
+                );
+                self.draft_event(Kind::TextNote, tags, &content)
+            }
+            Tab::Photo => {
+                let title = self.photo_title.read(cx).content.trim().to_string();
+                let caption = self.input.read(cx).content.clone();
+                let tags = Core::picture_tags(&title, &caption, &imetas, None);
+                self.draft_event(Kind::Custom(20), tags, &caption)
+            }
+            Tab::Poll => {
+                let question = self.poll_question.read(cx).content.trim().to_string();
+                let mut tags: Vec<Tag> = self
+                    .poll_options
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, e)| {
+                        let label = e.read(cx).content.trim().to_string();
+                        (!label.is_empty()).then(|| Tag::custom("option", [i.to_string(), label]))
+                    })
+                    .collect();
+                tags.push(Tag::custom(
+                    "polltype",
+                    [if self.poll_multi { "multiplechoice" } else { "singlechoice" }],
+                ));
+                self.draft_event(Kind::Custom(1068), tags, &question)
+            }
+            Tab::Article => None, // unreachable: the flip gates this tab out
+        };
+        let prof = self.preview_profiles.get(&pk.to_string());
+        let name = prof.map(|p| p.display()).unwrap_or_else(|| "you".into());
+        let pic = prof.map(|p| p.picture.clone()).unwrap_or_default();
+        if !pic.is_empty() {
+            media::fetch(&self.core, pic.clone(), cx.entity_id(), cx);
+        }
+
+        let mut card = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded(px(theme::R_EMBED))
+            .border_1()
+            .border_color(rgb(theme::hairline()))
+            .bg(rgb(theme::washi()))
+            .p_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(media::avatar(&snap, &pic, &name, 20.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap_2()
+                            .text_size(px(theme::T_UI))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme::ink()))
+                                    .child(name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(theme::muted()))
+                                    .child("· preview"),
+                            ),
+                    ),
+            );
+        // The photo's header title (the typed one; a blank title derives
+        // from the caption at publish — the preview shows what's typed).
+        if tab == Tab::Photo {
+            let title = self.photo_title.read(cx).content.trim().to_string();
+            if !title.is_empty() {
+                card = card.child(
+                    div()
+                        .text_size(px(theme::T_BODY))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme::ink()))
+                        .child(title),
+                );
+            }
+        }
+        match ev {
+            Some(ev) if tab == Tab::Poll => {
+                // A static ballot: the feed's marks, no vote affordance.
+                if let Some(data) = satori_core::nip::poll::parse(&ev) {
+                    let mut rows = div().w_full().flex().flex_col().gap_1();
+                    for (_, label) in data.options {
+                        rows = rows.child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .size(px(13.))
+                                        .flex_shrink_0()
+                                        .border_1()
+                                        .border_color(rgb(theme::hairline()))
+                                        .when(data.multiple, |d| d.rounded(px(theme::R_EMBED)))
+                                        .when(!data.multiple, |d| d.rounded_full()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(theme::T_BODY))
+                                        .text_color(rgb(theme::ink()))
+                                        .child(label),
+                                ),
+                        );
+                    }
+                    card = card.child(rows);
+                }
+            }
+            Some(ev) if !ev.content.trim().is_empty() => {
+                let quotes: content::Quotes = HashMap::new();
+                let profiles = self.preview_profiles.clone();
+                let body_ctx = content::Body {
+                    media: &snap,
+                    quotes: &quotes,
+                    profiles: &profiles,
+                };
+                card = card.child(content::body(&ev, &body_ctx, cx.entity()));
+            }
+            _ => {}
+        }
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(theme::T_SMALL))
+                    .text_color(rgb(theme::muted()))
+                    .child("as the feed will render it"),
+            )
+            .child(card)
+    }
+
     fn attachment_row(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let tiles = self.attachments.len();
         let alt_edit = self.alt_edit;

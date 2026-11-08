@@ -140,6 +140,10 @@ pub struct Input {
     /// open (it inserts the shortcode); this field must not add a newline
     /// under it. The composer sets it from detect_emoji every frame.
     pub suppress_newline: bool,
+    /// Multi-line wrapping but ONE paragraph: Enter inserts nothing (a
+    /// title/summary never wants a newline; pasted newlines still fold to
+    /// spaces like a single-line field). The article fields' shape.
+    pub single_paragraph: bool,
     /// The remembered x for vertical motion (up/down): the column the
     /// caret returns to across short lines. None until an up/down runs;
     /// every horizontal move or click clears it.
@@ -186,6 +190,7 @@ impl Input {
             caret_on: true,
             tripwire: false,
             suppress_newline: false,
+            single_paragraph: false,
             goal_x: None,
             scroll_reveal: None,
         }
@@ -510,6 +515,7 @@ impl Input {
         }
         if ev.keystroke.key == "enter"
             && self.multiline
+            && !self.single_paragraph
             && !ev.keystroke.modifiers.platform
             && !self.suppress_newline
         {
@@ -783,9 +789,10 @@ impl EntityInputHandler for Input {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Single-line mode strips newlines (IME included).
+        // Single-line mode strips newlines (IME included) — so does a
+        // single-paragraph field (a pasted multi-line title folds flat).
         let owned;
-        let new_text = if self.multiline {
+        let new_text = if self.multiline && !self.single_paragraph {
             new_text
         } else {
             owned = new_text.replace('\n', " ");
@@ -935,6 +942,13 @@ impl Element for InputElement {
         };
         match content_h {
             Some(h) => style.size.height = h.into(),
+            // One definite line: the fallback for auto-height parents (the
+            // composer's title/summary rows) — a relative height collapses
+            // to zero against an auto parent, and it matches an empty
+            // field's real height, so the first frame is already right.
+            None if self.input.read(cx).multiline => {
+                style.size.height = window.line_height().into();
+            }
             None => style.size.height = relative(1.).into(),
         }
         (window.request_layout(style, [], cx), ())

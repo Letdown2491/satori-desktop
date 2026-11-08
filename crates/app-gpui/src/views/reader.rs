@@ -117,7 +117,7 @@ impl ArticleView {
 /// One list item: the reading column's width (content::COL_W — the same
 /// measure every pane reads at; §1.2) + the block's bottom rhythm
 /// (list items carry no gaps of their own; pads are theme::S steps).
-fn block_item(el: Div, pad: f32) -> Div {
+pub(crate) fn block_item(el: Div, pad: f32) -> Div {
     div()
         .w_full()
         .max_w(px(content::COL_W))
@@ -126,12 +126,15 @@ fn block_item(el: Div, pad: f32) -> Div {
 }
 
 /// Render one markdown block (the free fn stands behind the list's item
-/// closure, which rebuilds items from data on each visible row).
-fn render_block(
+/// closure, which rebuilds items from data on each visible row). Generic
+/// over the host view (content::body's shape): the composer's preview
+/// renders its drafts through this same path, Nav emissions riding the
+/// host entity — an image click opens the lightbox over the composer.
+pub(crate) fn render_block<V: EventEmitter<Nav> + 'static>(
     block: markdown::Block,
     idx: usize,
     ctx: &content::Body,
-    handle: &Entity<ArticleView>,
+    handle: &Entity<V>,
 ) -> AnyElement {
     match block {
         markdown::Block::Para(text) => {
@@ -332,13 +335,14 @@ fn render_block(
 /// styling; plain words classify as entities (urls, mentions) exactly like
 /// note bodies. Link spans wrap as one unit — a link is one word to the
 /// reader's eye anyway. (Line height 1.35: long-form serif needs the air —
-/// the note cards' 1.2 is for short bursts.)
-fn md_flow(
+/// the note cards' 1.2 is for short bursts.) Generic over the host view
+/// (render_block's shape) — the composer's preview shares it.
+pub(crate) fn md_flow<V: EventEmitter<Nav> + 'static>(
     para: &str,
     size: f32,
     quiet: bool,
     ctx: &content::Body,
-    handle: &Entity<ArticleView>,
+    handle: &Entity<V>,
 ) -> Div {
     let mut flow = div().w_full().flex().flex_wrap().gap_1();
     for span in markdown::spans(para) {
@@ -407,8 +411,9 @@ fn md_flow(
 }
 
 /// One image tile: the media frame at a fixed reading height — media_tile
-/// semantics, fed by the shared cache.
-fn image_tile(url: &str, snap: &media::Snapshot) -> Div {
+/// semantics, fed by the shared cache. (pub(crate): the composer's article
+/// preview renders its cover with the same tile.)
+pub(crate) fn image_tile(url: &str, snap: &media::Snapshot) -> Div {
     let png = snap.png(url);
     // Aspect-correct once the bytes are in (reading column content::COL_W
     // minus the frame's side padding); a provisional box until then.

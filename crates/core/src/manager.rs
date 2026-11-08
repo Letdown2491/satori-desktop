@@ -4347,7 +4347,9 @@ impl Core {
     /// ride the kind-1 as plain imeta tags — publish.ts signNote's
     /// `for (const m of imeta) tags.push(m)`; an attached image or video
     /// is media IN a note, not a picture event (issue #3 WS1).
-    fn note_tags(
+    /// (pub(crate)-crossing: the composer's preview builds its synthetic
+    /// event from the SAME builder — the preview shows what publish signs.)
+    pub fn note_tags(
         content: String,
         reply_to: Option<Event>,
         mentions: Vec<PublicKey>,
@@ -4763,7 +4765,8 @@ impl Core {
     /// The NIP-68 kind-20 tag build, shared by the instant path
     /// (post_picture_inner) and the scheduled path (schedule_note) so a
     /// scheduled picture's tags are byte-identical to an instant one.
-    fn picture_tags(
+    /// (pub: the composer's preview uses the same builder.)
+    pub fn picture_tags(
         title: &str,
         content: &str,
         imetas: &[Vec<String>],
