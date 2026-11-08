@@ -4456,6 +4456,7 @@ impl Core {
     /// post (store → outbox write-ahead → publish → dequeue). No undo
     /// window on the schedule itself — undoing IS cancelling
     /// (scheduled_cancel). Reports on ScheduleEvent.
+    #[allow(clippy::too_many_arguments)]
     pub fn schedule_note(
         self: &Arc<Self>,
         content: String,

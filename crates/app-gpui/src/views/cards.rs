@@ -6,8 +6,7 @@
 //! media section — a poster until tapped, then the Phase 3 inline player
 //! (video.rs; strict Tor and YouTube degrade to browser links) — and
 //! podcasts (54) wear a "Listen" link — nothing is fetched until the user
-//! asks (media.ts facade).
-//! TODO(port): the article reader page (markdown, crates/app/src/article.rs);
+//! asks (media.ts facade). The article reader lives at views/reader.rs.
 //! wiki body inline.
 
 use std::collections::{HashMap, HashSet};

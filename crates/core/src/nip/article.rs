@@ -38,7 +38,7 @@ pub fn reading_minutes(markdown: &str) -> u64 {
         }
         in_word = !ws;
     }
-    ((words + 219) / 220).max(1)
+    words.div_ceil(220).max(1)
 }
 
 /// The composer's fields (signArticle's ArticleFields).

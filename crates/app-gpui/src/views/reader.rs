@@ -181,27 +181,119 @@ fn render_block(
         markdown::Block::List { items, ordered } => {
             let mut list_el = div().w_full().flex().flex_col().gap_1();
             for (n, li) in items.into_iter().enumerate() {
-                let marker = if ordered {
-                    format!("{}.", n + 1)
+                // A task item's marker is its checkbox: a stroke-drawn
+                // square, the check riding the vermilion when done.
+                let marker = if let Some(checked) = li.task {
+                    div()
+                        .flex_shrink_0()
+                        .child(
+                            div()
+                                .mt(px(2.))
+                                .size(px(13.))
+                                .rounded(px(3.))
+                                .border_1()
+                                .border_color(rgb(theme::hairline()))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(10.))
+                                .text_color(rgb(if checked {
+                                    theme::vermilion()
+                                } else {
+                                    theme::muted()
+                                }))
+                                .child(if checked { "✓" } else { "" }),
+                        )
+                } else if ordered {
+                    div()
+                        .font_family(theme::SERIF)
+                        .text_size(px(theme::T_READER))
+                        .text_color(rgb(theme::muted()))
+                        .child(format!("{}.", n + 1))
                 } else {
-                    "·".to_string()
+                    div()
+                        .font_family(theme::SERIF)
+                        .text_size(px(theme::T_READER))
+                        .text_color(rgb(theme::muted()))
+                        .child("·")
+                };
+                let body = md_flow(&li.text, theme::T_READER, false, ctx, handle);
+                let body = if li.task == Some(true) {
+                    // A checked task reads quiet — it's done.
+                    div().opacity(0.65).child(body)
+                } else {
+                    body
                 };
                 list_el = list_el.child(
                     div()
                         .w_full()
                         .flex()
                         .gap_2()
-                        .child(
-                            div()
-                                .font_family(theme::SERIF)
-                                .text_size(px(theme::T_READER))
-                                .text_color(rgb(theme::muted()))
-                                .child(marker),
-                        )
-                        .child(md_flow(&li, theme::T_READER, false, ctx, handle)),
+                        .child(marker)
+                        .child(body),
                 );
             }
             block_item(list_el, theme::S4).into_any_element()
+        }
+        markdown::Block::Table { head, rows, aligns } => {
+            // The grid: hairline row rules, the header semibold over a
+            // slightly stronger rule; cells flow markdown like paragraphs.
+            let ncol = head.len().max(1);
+            let cell_el = |text: String, col: usize, header: bool| {
+                let justify = match aligns.get(col) {
+                    Some(markdown::Align::Center) => "center",
+                    Some(markdown::Align::Right) => "right",
+                    _ => "left",
+                };
+                let cell = md_flow(&text, theme::T_UI, false, ctx, handle);
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .px_1()
+                    .flex()
+                    .when(justify == "center", |d| d.justify_center())
+                    .when(justify == "right", |d| d.justify_end())
+                    .when(header, |d| d.font_weight(FontWeight::SEMIBOLD))
+                    .child(cell)
+            };
+            let mut table = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .rounded(px(theme::R_EMBED))
+                .border_1()
+                .border_color(rgb(theme::hairline()))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .border_b_1()
+                        .border_color(rgb(theme::hairline()))
+                        .bg(rgb(theme::panel()))
+                        .py_1()
+                        .children(
+                            head.into_iter().enumerate().map(|(c, h)| cell_el(h, c, true)),
+                        ),
+                );
+            for mut row in rows {
+                // Pad the body out to the header's column count (jagged
+                // rows shouldn't shift the grid).
+                row.resize(ncol, String::new());
+                table = table.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .border_b_1()
+                        .border_color(rgb(theme::hairline()))
+                        .py_1()
+                        .children(row.into_iter().enumerate().map(|(c, cell)| {
+                            cell_el(cell, c, false)
+                        })),
+                );
+            }
+            // Pad the body out to the header's column count (jagged rows
+            // shouldn't shift the grid).
+            block_item(table, theme::S4).into_any_element()
         }
         markdown::Block::Code(text) => {
             let code = div()
@@ -270,6 +362,7 @@ fn md_flow(
                 }))
                 .when(span.bold, |d| d.font_weight(FontWeight::BOLD))
                 .when(span.italic, |d| d.italic())
+                .when(span.strike, |d| d.line_through())
                 .when(is_link || span.code, |d| d.underline())
                 .child(text)
         };
