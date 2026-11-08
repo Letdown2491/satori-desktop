@@ -20,10 +20,11 @@
 //! HEADER before any pixel allocation, so a 20MB compressed bomb never
 //! becomes 1.6GB of RGBA.
 //!
-//! TODO(port): remaining SSRF set — DNS-rebinding-safe resolution on direct
-//! paths (the guard checks HOST names; a public name resolving to a private
-//! IP needs resolve-and-pin, M2/M4), Tor transport, NIP-B7 healing (M2/M4).
-//! Per-redirect re-validation LANDED (F5): every hop re-runs the guard.
+//! TODO(port): remaining SSRF set — Tor transport, NIP-B7 healing (M2/M4).
+//! DNS-rebinding-safe resolution LANDED (issue #3 WS4): SafeResolver filters
+//! every connection's address list to global IPs (the guard moved from the
+//! URL string to the resolved addresses). Per-redirect re-validation
+//! LANDED earlier (F5): every hop re-runs the URL guard.
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -121,6 +122,13 @@ fn http() -> &'static reqwest::Client {
             )
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
+            // Issue #3 WS4 (the media.rs TODO): the resolver is the last
+            // guard — reqwest dials WHATEVER it returns, so the address
+            // list is filtered to global IPs (see SafeResolver). Every
+            // connection — first party, every redirect hop, every retry —
+            // re-walks it, so a rebinding rotation between hops re-runs
+            // the check.
+            .dns_resolver(std::sync::Arc::new(SafeResolver))
             // F5 (four-lens review): reqwest's DEFAULT policy follows up to
             // ten redirects with no re-validation — a friendly CDN 302-ing
             // to http://localhost:8080 or https://127.1/ was followed
@@ -470,6 +478,89 @@ fn decode(bytes: &[u8]) -> Result<DecodedImage, MediaError> {
     })
 }
 
+/// The DNS-rebinding-safe resolver (issue #3 WS4, the media.rs TODO).
+/// The URL guard checks HOST STRINGS — `evil.example.com` resolving to
+/// 127.0.0.1 sailed past it. reqwest dials WHATEVER its resolver returns,
+/// so the check moves to the address list: a name that resolves anywhere
+/// non-global yields NO connectable address (fail closed — a public and
+/// private mix fails the whole resolution, so no leg of it leaks onto the
+/// internal network). Every connection this client opens — first party,
+/// every redirect hop, every retry — re-walks here, so a rebinding
+/// rotation between hops re-runs the check. TOCTOU-free by construction:
+/// the addresses that passed the filter are the addresses hyper dials.
+#[derive(Debug)]
+struct SafeResolver;
+
+impl reqwest::dns::Resolve for SafeResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            // Port 0: reqwest replaces it with the scheme's conventional
+            // port (the trait contract).
+            let addrs: Vec<std::net::SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0))
+                    .await
+                    .map_err(std::io::Error::other)?
+                    .filter(|a| is_global_ip(a.ip()))
+                    .collect();
+            if addrs.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("{host} resolved to no public addresses"),
+                )
+                .into());
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// The resolver's address screen: global-reachability, std's `is_global`
+/// being feature-gated. Strict side — a block is asserted only when the
+/// address is demonstrably NOT global-unreachable (private, loopback,
+/// link-local, shared/CGNAT, this-network, benchmark, documentation,
+/// reserved/multicast, unspecified; v6: ULA, link-local, multicast,
+/// everything outside 2000::/3). A v4-mapped v6 screens through the v4
+/// rules (dual-stack dials the embedded v4).
+fn is_global_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || v4.is_documentation()
+                || o[0] == 0 // this-network (0.0.0.0/8)
+                || o[0] == 100 // shared address space (CGNAT, 100.64/10)
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0.0/24
+                || (o[0] == 198 && (o[1] == 18 || o[1] == 19)) // 198.18/15 benchmark
+                || o[0] >= 240) // reserved + broadcast
+        }
+        std::net::IpAddr::V6(v6) => {
+            if v6.is_multicast() || v6.is_loopback() || v6.is_unspecified() {
+                return false;
+            }
+            let s = v6.segments();
+            // ::ffff:0:0/96 (v4-mapped) dials the embedded v4 on a
+            // dual-stack host — screen THAT address.
+            if s[..5] == [0, 0, 0, 0, 0] && s[5] == 0xffff {
+                return is_global_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                    (s[6] >> 8) as u8,
+                    s[6] as u8,
+                    (s[7] >> 8) as u8,
+                    s[7] as u8,
+                )));
+            }
+            // Global unicast lives in 2000::/3; ULA (fc00::/7),
+            // link-local (fe80::/10) and everything experimental dies.
+            (s[0] & 0xe000) == 0x2000 && !(s[0] == 0x2001 && s[1] == 0x0db8)
+        }
+    }
+}
+
 /// SSRF guard, reduced surface: https only; rejects IP literals and
 /// internal/metadata hosts.
 pub fn is_safe_media_url(url: &str) -> bool {
@@ -574,6 +665,44 @@ mod tests {
         assert!(!is_safe_media_url("https://localhost/x.png"));
         assert!(!is_safe_media_url("https://host.internal/x.png"));
         assert!(!is_safe_media_url("not a url"));
+    }
+
+    /// WS4: the resolver's filter — only global addresses survive; every
+    /// loopback/private/link-local/ULA spelling dies. This is the list
+    /// hyper dials, so a rebinding name has nothing left to dial.
+    #[test]
+    fn resolver_filter_keeps_only_global() {
+        let s = |ip: std::net::IpAddr| std::net::SocketAddr::new(ip, 0);
+        let keep = |ips: &[std::net::IpAddr]| -> Vec<_> {
+            ips.iter()
+                .map(|i| s(*i))
+                .filter(|a| is_global_ip(a.ip()))
+                .collect()
+        };
+        let global: std::net::IpAddr = "8.8.8.8".parse().unwrap();
+        let v6: std::net::IpAddr = "2606:4700::1111".parse().unwrap();
+        for hostile in [
+            "127.0.0.1",
+            "10.0.0.5",
+            "192.168.1.1",
+            "172.16.0.9",
+            "169.254.169.254",
+            "0.0.0.0",
+            "100.64.0.1",
+            "198.18.0.9",
+            "240.0.0.1",
+            "::1",
+            "fe80::1",
+            "fc00::5",
+            "2001:db8::9",
+            "::ffff:127.0.0.1",
+        ] {
+            let ip: std::net::IpAddr = hostile.parse().unwrap();
+            assert_eq!(keep(&[ip, global]), vec![s(global)], "{hostile} must drop");
+        }
+        assert_eq!(keep(&[v6]), vec![s(v6)], "a global v6 survives");
+        assert_eq!(keep(&["::ffff:8.8.8.8".parse().unwrap()]), vec![s("::ffff:8.8.8.8".parse().unwrap())], "a mapped GLOBAL v4 survives the v4 screen");
+        assert!(keep(&["127.0.0.1".parse().unwrap()]).is_empty());
     }
 
     /// F5: the guard holds for every IP-literal spelling getaddrinfo
