@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use nostr::prelude::*;
 use nostr_sdk::authenticator::Authenticator;
+use nostr_sdk::client::ReqTarget;
 use nostr_sdk::error::Error as SdkError;
 use nostr_sdk::prelude::*;
 use nostr_sdk::relay::EventSendStatus;
@@ -383,6 +384,11 @@ impl Pool {
             .await
             // Client-level fetch: no single relay to attribute to.
             .map(|events| consume_and_filter(events, ""))
+    }
+
+    /// The session's connected read set (indexers + the NIP-65 reads).
+    pub fn read_relays(&self) -> Vec<String> {
+        self.reads.lock().unwrap().iter().cloned().collect()
     }
 
     /// Own contact list: fresh from relays, cached into the store.

@@ -602,7 +602,8 @@ pub struct Core {
     own_bookmarked: Mutex<HashSet<String>>,
     /// Synced composer drafts (D38): NIP-78 kind 30078 d="satori/drafts",
     /// the array nip44-encrypted — text + reply/quote context (ids; the
-    /// full events live in the store). Attachments are not stashed in v1.
+    /// full events live in the store) + the attachment imetas (v1.4; the
+    /// blobs are on Blossom).
     own_drafts: Mutex<Vec<DraftEntry>>,
     /// Muted authors (pubkey hex) — NIP-51 kind:10000, content encrypted.
     muted: Mutex<HashSet<String>>,
@@ -4015,8 +4016,12 @@ impl Core {
 
     // --- search (NIP-50) ----------------------------------------------------------
 
-    /// Note search across the read set. TODO(port): NIP-11 capability gating
-    /// (only ask relays that say they can search — relay-info.ts:126).
+    /// Note search across the read set, gated by NIP-11 capability
+    /// (relay-info.ts:126's nip50Capable): relays KNOWN to lack NIP-50
+    /// search are never asked (they can't answer a search filter);
+    /// unknown relays stay (absence of evidence isn't refusal); never
+    /// empty — all-known-incapable asks everyone, search degrades
+    /// instead of breaking.
     pub fn search(self: &Arc<Self>, query: String) -> FeedRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
@@ -4027,10 +4032,20 @@ impl Core {
                     .kind(Kind::TextNote)
                     .search(&query)
                     .limit(50);
-                let mut results: Vec<Event> = Vec::new();
-                for ev in active.pool.get(filter).await.unwrap_or_default() {
-                    results.push(ev);
+                let mut relays: Vec<String> = active
+                    .pool
+                    .read_relays()
+                    .into_iter()
+                    .filter(|url| crate::nip11::search(url) != Some(false))
+                    .collect();
+                if relays.is_empty() {
+                    relays = active.pool.read_relays();
                 }
+                // The fan-out path (get_from): per-relay queries with
+                // latency attribution — and the gate above decides WHICH
+                // relays hear the query at all.
+                let mut results: Vec<Event> =
+                    active.pool.get_from(&relays, &filter).await.into_iter().collect();
                 // (no explicit save: the SDK persists what it receives)
                 results.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
                 let profiles = Self::profiles_for(&active, &results).await;
