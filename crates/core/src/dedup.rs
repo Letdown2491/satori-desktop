@@ -234,6 +234,23 @@ pub fn snapshot() -> Vec<SpamRecord> {
     out
 }
 
+/// Is this author currently hidden by the filter? (The read paths'
+/// dedup gate: the chokepoint stops their deliveries, but events the
+/// SDK already persisted still sit in the store — the cached
+/// notification/pane builds must not serve them either. D41's
+/// "unreachable through any read path" made true.)
+pub fn is_hidden(pubkey: &str) -> bool {
+    if !enabled() {
+        return false; // the switch is off: the ledger stops deciding
+    }
+    let f = filter()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    f.spammers
+        .get(pubkey)
+        .is_some_and(|s| s.count >= DUPLICATES_TO_HIDE)
+}
+
 /// The SpammingUsers surface's un-hide affordance: clear one author's
 /// spammer record so their events store again (a fresh streak of
 /// DUPLICATES_TO_HIDE re-hides them). The duplicate-key LRU is NOT

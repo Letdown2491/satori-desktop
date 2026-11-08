@@ -39,6 +39,11 @@ pub const REPLY_VELOCITY_LIMIT: usize = 5;
 /// Authors tracked (D24 ceiling): a plain ring of stamps per author, capped
 /// oldest-inserted-first — far past anything a session touches.
 const AUTHOR_CAP: usize = 1000;
+/// Distinct reply EVENTS counted per session (D24 ceiling): re-deliveries
+/// of an already-counted reply (every pane visit re-runs the relay phase)
+/// must not re-feed the counter — a bot would otherwise trip the flood
+/// gate on the third pane visit instead of being judged on first contact.
+const COUNTED_EVENT_CAP: usize = 10_000;
 
 /// The human receipt reason a velocity-suppressed reply carries (the bell's
 /// "see why" surface renders it as-is).
@@ -55,10 +60,19 @@ struct Rate {
     stamps: HashMap<String, VecDeque<u64>>,
     /// Insertion order of the author keys (the eviction LRU's order).
     order: VecDeque<String>,
+    /// Reply event ids already counted (the re-delivery guard).
+    counted: HashMap<String, ()>,
+    counted_order: VecDeque<String>,
 }
 
-static RATE: LazyLock<Mutex<Rate>> =
-    LazyLock::new(|| Mutex::new(Rate { stamps: HashMap::new(), order: VecDeque::new() }));
+static RATE: LazyLock<Mutex<Rate>> = LazyLock::new(|| {
+    Mutex::new(Rate {
+        stamps: HashMap::new(),
+        order: VecDeque::new(),
+        counted: HashMap::new(),
+        counted_order: VecDeque::new(),
+    })
+});
 
 impl Rate {
     /// Drop stamps older than the window, then drop dead authors.
@@ -112,9 +126,13 @@ pub fn reply_flooded(author: &PublicKey, at: u64) -> bool {
 /// Record one DELIVERED reply (the caller already checked `reply_flooded`
 /// and is delivering — suppressed replies must not land here). Returns
 /// false if the reply is the one that trips the velocity verdict (the
-/// caller suppresses it instead); true if admitted and counted.
-pub fn admit_reply(author: &PublicKey, at: u64) -> bool {
+/// caller suppresses it instead); true if admitted and counted. A
+/// re-delivered event id never counts twice.
+pub fn admit_reply(author: &PublicKey, at: u64, event_id: &str) -> bool {
     let mut r = RATE.lock().unwrap();
+    if r.counted.contains_key(event_id) {
+        return true; // already counted — admission without a second stamp
+    }
     let key = author.to_string();
     r.evict(&key, at);
     {
@@ -124,14 +142,25 @@ pub fn admit_reply(author: &PublicKey, at: u64) -> bool {
         }
         ring.push_back(at);
     }
+    r.counted.insert(event_id.to_string(), ());
+    r.counted_order.push_back(event_id.to_string());
+    while r.counted_order.len() > COUNTED_EVENT_CAP {
+        let old = r.counted_order.pop_front();
+        if let Some(old) = old {
+            r.counted.remove(&old);
+        }
+    }
     true
 }
 
 /// Session teardown: the counter is per-session identity state (D43) —
 /// a different account must never inherit it.
 pub fn clear() {
-    RATE.lock().unwrap().stamps.clear();
-    RATE.lock().unwrap().order.clear();
+    let mut r = RATE.lock().unwrap();
+    r.stamps.clear();
+    r.order.clear();
+    r.counted.clear();
+    r.counted_order.clear();
 }
 
 #[cfg(test)]
@@ -150,12 +179,12 @@ mod tests {
         let bot = Keys::generate();
         for i in 0..4u64 {
             assert!(
-                admit_reply(&bot.public_key(), t() + i * 60),
+                admit_reply(&bot.public_key(), t() + i * 60, &format!("e{i}")),
                 "reply {i} must pass"
             );
         }
         // The 5th reply inside the window trips the verdict…
-        assert!(!admit_reply(&bot.public_key(), t() + 300));
+        assert!(!admit_reply(&bot.public_key(), t() + 300, "e5"));
         // …and every further reply in the window is suppressed too — the
         // counter was NOT fed by the suppressed one, so the ring is still
         // the 4 delivered stamps, each of which again trips.
@@ -163,7 +192,7 @@ mod tests {
         // Window reset: half an hour of silence and the author passes
         // untouched again (1–4 fresh replies start a new window).
         assert!(!reply_flooded(&bot.public_key(), t() + REPLY_WINDOW_SECS + 1));
-        assert!(admit_reply(&bot.public_key(), t() + REPLY_WINDOW_SECS + 2));
+        assert!(admit_reply(&bot.public_key(), t() + REPLY_WINDOW_SECS + 2, "e6"));
         clear();
     }
 
@@ -173,7 +202,7 @@ mod tests {
         clear();
         let bot = Keys::generate();
         for i in 0..4u64 {
-            admit_reply(&bot.public_key(), t() + i);
+            admit_reply(&bot.public_key(), t() + i, &format!("x{i}"));
         }
         // Flood: check-only (the cached phase's gate) must not count —
         // otherwise every phase re-arm shortens the fuse.
@@ -183,8 +212,33 @@ mod tests {
         // admit_reply at the 5th slot returns false (suppressed, uncounted);
         // the ring still holds exactly 4 stamps, so the window-reset test
         // below proves nothing leaked in.
-        assert!(!admit_reply(&bot.public_key(), t() + 20));
+        // Distinct event id (a re-delivery would return true without counting).
+        assert!(!admit_reply(&bot.public_key(), t() + 20, "x5-suppressed"));
         assert!(!reply_flooded(&bot.public_key(), t() + REPLY_WINDOW_SECS + 1));
+        clear();
+    }
+
+    /// A re-delivered reply never counts twice (D47): each pane visit
+    /// re-runs the relay phase over the same bot replies — the counter
+    /// judges first contact, not visit count.
+    #[test]
+    fn redelivered_replies_count_once() {
+        let _env = EnvGuard::new("rate-redeliver");
+        clear();
+        let bot = Keys::generate();
+        // The same five replies re-delivered across four "visits": the
+        // first visit counts them (4 stamps), the repeats are no-ops.
+        for _visit in 0..4u64 {
+            for i in 0..4u64 {
+                assert!(admit_reply(
+                    &bot.public_key(),
+                    t() + i,
+                    &format!("evt-{i}"),
+                ));
+            }
+        }
+        // The 5th DISTINCT reply still trips: the ring holds 4 stamps.
+        assert!(!admit_reply(&bot.public_key(), t() + 60, "evt-4"));
         clear();
     }
 
@@ -195,7 +249,7 @@ mod tests {
         let now = t();
         for _ in 0..(AUTHOR_CAP + 50) {
             let k = Keys::generate();
-            admit_reply(&k.public_key(), now);
+            admit_reply(&k.public_key(), now, &k.public_key().to_string());
         }
         let r = RATE.lock().unwrap();
         assert_eq!(r.stamps.len(), AUTHOR_CAP, "cap holds");

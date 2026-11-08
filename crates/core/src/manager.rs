@@ -168,6 +168,19 @@ fn split_wot_tier(
         let engagement = matches!(kind, 6 | 7);
         let reply = matches!(kind, 1 | 1111)
             && ev.tags.event_ids().any(|id| my_notes.contains(&id));
+        // The store door: the chokepoint stops a hidden spammer's
+        // DELIVERIES, but the SDK already persisted their earlier
+        // events — the cached phase reads those straight back. The
+        // dedup ledger is the truth about who's hidden (D41's
+        // "unreachable through any read path" made true here too).
+        // Suppressed with a receipt, consistent with the tier.
+        if crate::dedup::is_hidden(&ev.pubkey.to_string()) {
+            suppressed.push(SuppressedNotif {
+                reason: "duplicate-content filter".to_string(),
+                event: ev,
+            });
+            continue;
+        }
         if !(tier_on && (engagement || reply)) {
             kept.push(ev);
             continue;
@@ -191,7 +204,11 @@ fn split_wot_tier(
             crate::wot::Verdict::Unknown if reply => {
                 if crate::rate::reply_flooded(&ev.pubkey, ev.created_at.as_secs())
                     || (count_velocity
-                        && !crate::rate::admit_reply(&ev.pubkey, ev.created_at.as_secs()))
+                        && !crate::rate::admit_reply(
+                            &ev.pubkey,
+                            ev.created_at.as_secs(),
+                            &ev.id.to_string(),
+                        ))
                 {
                     suppressed.push(SuppressedNotif {
                         reason: crate::rate::flood_reason(),
