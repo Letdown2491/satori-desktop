@@ -4459,6 +4459,7 @@ impl Core {
     #[allow(clippy::too_many_arguments)]
     pub fn schedule_note(
         self: &Arc<Self>,
+        title: String,
         content: String,
         reply_to: Option<Event>,
         mentions: Vec<PublicKey>,
@@ -4475,11 +4476,13 @@ impl Core {
                 let me = active.me();
                 // The composer's tab decides: a photo post schedules as the
                 // SAME kind-20 picture event an instant post makes
-                // (picture_tags' build); a note with attachments schedules
-                // as kind 1 + imeta (note_tags' build), matching the
-                // instant path's routing (issue #3 WS1).
+                // (picture_tags' build — the composer's title rides, blank
+                // derives from the caption like the instant path); a note
+                // with attachments schedules as kind 1 + imeta (note_tags'
+                // build), matching the instant path's routing (issue #3
+                // WS1).
                 let (kind, content, tags) = if !imetas.is_empty() && photo_post {
-                    let tags = Self::picture_tags("", &content, &imetas, None);
+                    let tags = Self::picture_tags(&title, &content, &imetas, None);
                     (Kind::Custom(20), content, tags)
                 } else {
                     let (content, tags) =

@@ -109,12 +109,14 @@ impl Attachment {
     }
 }
 
-/// The compose tab: a note (kind 1), a poll (NIP-88, kind 1068), or an
-/// article (NIP-23, kind 30023). Replies carry no tabs — they're
-/// notes/comments by nature.
+/// The compose tab: a note (kind 1), a photo (NIP-68, kind 20), a poll
+/// (NIP-88, kind 1068), or an article (NIP-23, kind 30023) — the web
+/// app's Note · Picture · Poll · Article selector. Replies carry no
+/// tabs — they're notes/comments by nature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Note,
+    Photo,
     Poll,
     Article,
 }
@@ -147,6 +149,10 @@ pub struct Composer {
     core: Arc<Core>,
     input: Entity<Input>,
     tab: Tab,
+    /// Photo tab (NIP-68, kind 20): the gallery's title. The CAPTION is
+    /// the main note buffer (like the article's body); the attachments
+    /// strip IS the gallery. Top-level only — replies carry no tabs.
+    photo_title: Entity<Input>,
     /// Poll tab: the question, the options (min two), multiple-choices.
     poll_question: Entity<Input>,
     poll_options: Vec<Entity<Input>>,
@@ -294,6 +300,7 @@ impl Composer {
             core,
             input,
             tab: Tab::Note,
+            photo_title: cx.new(Input::new),
             poll_question,
             poll_options,
             poll_multi: false,
@@ -650,7 +657,7 @@ impl Composer {
         let imetas: Vec<Vec<String>> = self.ready_imetas();
         let core = self.core.clone();
         cx.notify();
-        let mut rx = core.schedule_note(text, reply, mentions, quote, imetas, false, at);
+        let mut rx = core.schedule_note(String::new(), text, reply, mentions, quote, imetas, false, at);
         cx.spawn(async move |this, cx| {
             // Every ScheduleEvent settles the pane (Scheduled pops, Failed
             // stays with a word) — one receipt, no pump.
@@ -889,6 +896,115 @@ impl Composer {
     /// The cover's Blossom upload: pick one image, the blob URL lands in
     /// the cover field when the upload completes (the imeta half is
     /// unused — the article carries the bare `image` tag).
+    /// The photo publish (NIP-68, kind 20): the strip is the gallery, the
+    /// buffer the caption, the title field the `title` tag (blank derives
+    /// from the caption's first line — picture_tags' rule). Top-level only
+    /// (replies carry no tabs). Pump mirrors the article's.
+    fn post_photo(&mut self, cx: &mut Context<Self>) {
+        if self.attachments.is_empty() {
+            self.status = "a photo post needs at least one image".into();
+            cx.notify();
+            return;
+        }
+        if self.attachments.iter().any(|a| a.imeta.is_none()) {
+            self.status = "waiting for the upload to finish…".into();
+            cx.notify();
+            return;
+        }
+        self.posting = true;
+        self.status.clear();
+        cx.notify();
+        let core = self.core.clone();
+        let title = self.photo_title.read(cx).content.trim().to_string();
+        let caption = self.input.read(cx).content.trim().to_string();
+        let imetas = self.ready_imetas();
+        let mut rx = core.post_picture(title, caption, imetas, None);
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    PublishEvent::Held { .. } => {
+                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                        return;
+                    }
+                    PublishEvent::Undone { .. } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.posting = false;
+                            this.status = "undone, nothing was sent".into();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    PublishEvent::Committed { .. } => {
+                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                        return;
+                    }
+                    PublishEvent::Failed { error, .. } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.posting = false;
+                            this.status = format!("couldn't post: {error}");
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The scheduled photo: schedule_note with photo_post=true — core
+    /// signs the SAME kind-20 event an instant post makes, the sweep
+    /// fires it.
+    fn schedule_photo(&mut self, cx: &mut Context<Self>) {
+        if self.posting {
+            return;
+        }
+        if self.attachments.is_empty() {
+            self.status = "a photo post needs at least one image".into();
+            cx.notify();
+            return;
+        }
+        if self.attachments.iter().any(|a| a.imeta.is_none()) {
+            self.status = "waiting for the upload to finish…".into();
+            cx.notify();
+            return;
+        }
+        let when_field = self.sched_at.read(cx).content.clone();
+        let Some(at) = Self::parse_schedule(&when_field) else {
+            self.status =
+                "when? enter a future date and time, YYYY-MM-DD HH:MM, at least a minute ahead"
+                    .into();
+            cx.notify();
+            return;
+        };
+        self.posting = true;
+        self.status.clear();
+        cx.notify();
+        let core = self.core.clone();
+        let title = self.photo_title.read(cx).content.trim().to_string();
+        let caption = self.input.read(cx).content.trim().to_string();
+        let imetas = self.ready_imetas();
+        let mut rx = core.schedule_note(title, caption, None, vec![], None, imetas, true, at);
+        cx.spawn(async move |this, cx| {
+            if let Some(ev) = rx.recv().await {
+                match ev {
+                    satori_core::manager::ScheduleEvent::Scheduled { .. } => {
+                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                    }
+                    satori_core::manager::ScheduleEvent::Failed { error } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.posting = false;
+                            this.status = format!("couldn't schedule: {error}");
+                            cx.notify();
+                        });
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
     fn upload_cover(&mut self, cx: &mut Context<Self>) {
         if self.posting || self.art_cover_busy {
             return;
@@ -972,6 +1088,17 @@ impl Composer {
         // The poll tab publishes a poll, not the note buffer.
         if self.tab == Tab::Poll {
             self.post_poll(cx);
+            return;
+        }
+        // The photo tab publishes a picture (kind 20): the buffer is the
+        // caption, the strip the gallery. The schedule affordance reroutes
+        // it like a note's.
+        if self.tab == Tab::Photo {
+            if self.sched_on {
+                self.schedule_photo(cx);
+            } else {
+                self.post_photo(cx);
+            }
             return;
         }
         // The article tab publishes an article: the buffer IS the
@@ -1106,11 +1233,11 @@ impl Composer {
     /// session stash carries the ready attachment imetas too.
     pub fn draft_candidate(&self, cx: &App) -> Option<SessionDraft> {
         if self.reply_to.is_some() || self.quote.is_some() || self.posting
-            || self.tab == Tab::Article
+            || !matches!(self.tab, Tab::Note)
         {
-            // The article tab keeps no draft (v1, like the poll): its
-            // body is the note buffer, and an article-shaped restore is
-            // not wired.
+            // Polls keep no draft (v1); the article and photo tabs join
+            // them — their buffers are the body/caption, and a
+            // tab-aware restore (title, cover, tab itself) is not wired.
             return None;
         }
         Some(SessionDraft {
@@ -1127,8 +1254,9 @@ impl Composer {
     /// blobs are on Blossom since attach time).
     pub fn draft_sync_candidate(&self, cx: &App) -> Option<DraftCandidate> {
         // Polls don't draft (v1 keeps their surface small — and their
-        // empty note buffer must not wipe the top-level slot); the article
-        // tab joins that exclusion (its buffer IS the note buffer).
+        // empty note buffer must not wipe the top-level slot); the photo
+        // and article tabs join that exclusion (their buffer IS the note
+        // buffer).
         if self.posting || self.tab != Tab::Note {
             return None;
         }
@@ -1176,6 +1304,7 @@ impl Focusable for Composer {
         match self.tab {
             Tab::Poll => self.poll_question.read(cx).focus_handle(cx),
             Tab::Article => self.art_title.read(cx).focus_handle(cx),
+            Tab::Photo => self.photo_title.read(cx).focus_handle(cx),
             Tab::Note => self.focus.clone(),
         }
     }
@@ -1199,6 +1328,8 @@ impl Render for Composer {
                     .focus(&self.poll_question.read(cx).focus_handle(cx), cx),
                 Tab::Article => window
                     .focus(&self.art_title.read(cx).focus_handle(cx), cx),
+                Tab::Photo => window
+                    .focus(&self.photo_title.read(cx).focus_handle(cx), cx),
                 Tab::Note => window.focus(&self.focus, cx),
             }
         }
@@ -1232,6 +1363,7 @@ impl Render for Composer {
         let art_cover = self.art_cover.clone();
         let art_topics = self.art_topics.clone();
         let art_cover_busy = self.art_cover_busy;
+        let photo_title = self.photo_title.clone();
         let emoji_suggest = self.emoji_suggest.clone();
         let emoji_sel = self.emoji_sel;
         let sched_on = self.sched_on;
@@ -1334,6 +1466,39 @@ impl Render for Composer {
                                 .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::muted()))
                                 .child(snippet),
+                        ),
+                )
+            })
+            .when(tab == Tab::Photo, |d| {
+                // The NIP-68 field: the gallery's title. The caption is the
+                // buffer below; the attachments strip is the gallery.
+                d.child(
+                    div()
+                        .rounded(px(theme::R_EMBED))
+                        .border_1()
+                        .border_color(rgb(theme::hairline()))
+                        .bg(rgb(theme::panel()))
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(poll_label("Title (optional)"))
+                        .child(
+                            div()
+                                .flex()
+                                .h(window.line_height() + px(theme::S5))
+                                .rounded(px(theme::R_EMBED))
+                                .border_1()
+                                .border_color(rgb(theme::hairline()))
+                                .bg(rgb(theme::washi()))
+                                .p_2()
+                                .child(photo_title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::T_SMALL))
+                                .text_color(rgb(theme::muted()))
+                                .child("the caption rides the box below"),
                         ),
                 )
             })
@@ -1603,6 +1768,32 @@ impl Render for Composer {
                         )
                         .child(
                             div()
+                                .id("tab-photo")
+                                .cursor_pointer()
+                                .px_3()
+                                .py_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(if tab == Tab::Photo {
+                                    theme::ink()
+                                } else {
+                                    theme::muted()
+                                }))
+                                .when(tab == Tab::Photo, |d| {
+                                    d.font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .bg(rgb(theme::panel()))
+                                        .rounded_t(px(theme::R_EMBED))
+                                        .border_t_1()
+                                        .border_l_1()
+                                        .border_r_1()
+                                        .border_color(rgb(theme::hairline()))
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_tab(Tab::Photo, cx)
+                                }))
+                                .child("Photo"),
+                        )
+                        .child(
+                            div()
                                 .id("tab-poll")
                                 .cursor_pointer()
                                 .px_3()
@@ -1753,7 +1944,9 @@ impl Render for Composer {
                         ),
                 )
             })
-            .when(tab == Tab::Note, |d| d.child(self.attachment_row(cx)))
+            .when(matches!(tab, Tab::Note | Tab::Photo), |d| {
+                d.child(self.attachment_row(cx))
+            })
             .when(tab != Tab::Poll && sched_on, |d| {
                 // The schedule affordance: the when field + the pending
                 // list. Honest validation lives in parse_schedule; the
