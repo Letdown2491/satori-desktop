@@ -271,7 +271,7 @@ impl LibraryView {
         // composer is up either way; this keeps the tab honest).
         let mut rx = match d.id {
             Some(id) => self.core.drop_draft(id),
-            None => self.core.save_draft(reply_id, quote_id, String::new(), Vec::new()),
+            None => self.core.save_draft(reply_id, quote_id, String::new(), Vec::new(), false),
         };
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.recv().await {
@@ -318,7 +318,7 @@ impl LibraryView {
         let quote_id = d.quote.as_ref().and_then(|h| EventId::from_hex(h).ok());
         let mut rx = match d.id.clone() {
             Some(id) => self.core.drop_draft(id),
-            None => self.core.save_draft(reply_id, quote_id, String::new(), Vec::new()),
+            None => self.core.save_draft(reply_id, quote_id, String::new(), Vec::new(), false),
         };
         cx.notify();
         cx.spawn(async move |this, cx| {

@@ -688,7 +688,7 @@ impl Shell {
                 && let Some((reply, quote, text, attachments)) =
                     c.read(cx).draft_sync_candidate(cx)
             {
-                let _ = self.core.save_draft(reply, quote, text, attachments);
+                let _ = self.core.save_draft(reply, quote, text, attachments, false);
             }
             // D38: closing the edit form — a save may have landed a fresh
             // kind 0 while it was up. Refresh the rail's own-profile copy

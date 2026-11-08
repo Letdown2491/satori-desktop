@@ -242,7 +242,7 @@ impl Composer {
                         let _ = core.drop_draft(id);
                     }
                     None => {
-                        let _ = core.save_draft(None, None, String::new(), Vec::new());
+                        let _ = core.save_draft(None, None, String::new(), Vec::new(), false);
                     }
                 }
                 input.update(cx, |i, cx| i.set_text(&d.text, cx));
@@ -633,7 +633,7 @@ impl Composer {
         let imetas: Vec<Vec<String>> = self.ready_imetas();
         let core = self.core.clone();
         cx.notify();
-        let mut rx = core.schedule_note(text, reply, mentions, quote, imetas, at);
+        let mut rx = core.schedule_note(text, reply, mentions, quote, imetas, false, at);
         cx.spawn(async move |this, cx| {
             // Every ScheduleEvent settles the pane (Scheduled pops, Failed
             // stays with a word) — one receipt, no pump.
@@ -805,24 +805,27 @@ impl Composer {
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            // Publish: pictures when there are imetas, notes otherwise.
-            // Reply routing follows Amethyst's migration rule: kind-1 roots
-            // keep kind-1 replies + NIP-10 tags (every client reads those);
-            // every other root (articles, pictures, highlights…) goes out as
-            // a NIP-22 kind-1111 comment with scope tags.
+            // Publish: a note with media IS a note (issue #3 WS1) — kind 1
+            // + imeta via post_note, signNote's semantics; the imetas ride
+            // comments (kind 1111) the same way when the root isn't a
+            // note. kind 20 (post_picture) belongs to the Photo tab (WS2),
+            // never to "a note happened to carry an attachment". Amethyst's
+            // migration rule still routes replies: kind-1 roots keep
+            // kind-1 replies + NIP-10 tags (every client reads those);
+            // every other root (articles, pictures, highlights…) goes out
+            // as a NIP-22 kind-1111 comment with scope tags.
             let mentions = this_mentions;
-            let mut rx = if !imetas.is_empty() {
-                core.post_picture(String::new(), text, imetas, None)
-            } else if reply.as_ref().is_some_and(|r| u16::from(r.kind) != 1) {
-                let r = reply.expect("checked");
+            let mut rx = if reply.as_ref().is_some_and(|r| u16::from(r.kind) != 1) {
+                let r = reply.clone().expect("checked");
                 core.comment(
                     text,
                     satori_core::nip::comment::CommentTarget::for_event(&r),
                     Some(r),
                     mentions,
+                    imetas,
                 )
             } else {
-                core.post_note(text, reply, mentions, quote)
+                core.post_note(text, reply, mentions, quote, imetas)
             };
             while let Some(ev) = rx.recv().await {
                 match ev {
@@ -835,7 +838,7 @@ impl Composer {
                         // D38: the synced slot is spent — the note will go
                         // out unless undone (then the composer stays open
                         // and a close re-saves the draft).
-                        let _ = core.save_draft(draft_key.0, draft_key.1, String::new(), Vec::new());
+                        let _ = core.save_draft(draft_key.0, draft_key.1, String::new(), Vec::new(), false);
                         let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
                         return;
                     }
@@ -851,7 +854,7 @@ impl Composer {
                     }
                     PublishEvent::Committed { .. } => {
                         // D38: the synced draft slot is spent with the send.
-                        let _ = core.save_draft(draft_key.0, draft_key.1, String::new(), Vec::new());
+                        let _ = core.save_draft(draft_key.0, draft_key.1, String::new(), Vec::new(), false);
                         let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
                         return;
                     }

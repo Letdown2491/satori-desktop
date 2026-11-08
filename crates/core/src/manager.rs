@@ -2587,6 +2587,7 @@ impl Core {
                     quote: None,
                     id: Some(d),
                     attachments: Vec::new(),
+                    photo_post: false,
                     at: wrap.created_at.as_secs(),
                 });
             }
@@ -3484,12 +3485,17 @@ impl Core {
     }
 
     /// Publish a comment (top-level when `parent` is None, else a reply).
+    /// `imetas` (the uploaded NIP-92 arrays) ride the kind-1111 when the
+    /// comment carries media — NIP-92 is event-kind agnostic, and dropping
+    /// them here would silently lose an attachment on every reply to a
+    /// non-kind-1 root (issue #3 WS1).
     pub fn comment(
         self: &Arc<Self>,
         content: String,
         target: crate::nip::comment::CommentTarget,
         parent: Option<Event>,
         mentions: Vec<PublicKey>,
+        imetas: Vec<Vec<String>>,
     ) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
@@ -3510,6 +3516,11 @@ impl Core {
                     if hex != active.me().to_string() && !seen_p.contains(&hex) {
                         seen_p.push(hex.clone());
                         tags.push(Tag::public_key(who));
+                    }
+                }
+                for m in &imetas {
+                    if m.len() >= 2 && m[0] == "imeta" {
+                        tags.push(Tag::custom("imeta", m[1..].iter()));
                     }
                 }
                 tags.push(Tag::custom("client", ["satori-desktop"]));
@@ -4299,12 +4310,13 @@ impl Core {
         reply_to: Option<Event>,
         mentions: Vec<PublicKey>,
         quote: Option<Event>,
+        imetas: Vec<Vec<String>>,
     ) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
             let res = this
-                .post_note_inner(&tx, content, reply_to, mentions, quote)
+                .post_note_inner(&tx, content, reply_to, mentions, quote, imetas)
                 .await;
             if let Err(e) = res {
                 let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
@@ -4315,15 +4327,27 @@ impl Core {
 
     /// Tag + content building for a note — shared by the immediate path
     /// (post_note) and the scheduled path (schedule_note), so a scheduled
-    /// note's tags are byte-identical to an instant one.
+    /// note's tags are byte-identical to an instant one. `imetas` (the
+    /// uploaded NIP-92 tag arrays from upload.rs, element 0 = "imeta")
+    /// ride the kind-1 as plain imeta tags — publish.ts signNote's
+    /// `for (const m of imeta) tags.push(m)`; an attached image or video
+    /// is media IN a note, not a picture event (issue #3 WS1).
     fn note_tags(
         content: String,
         reply_to: Option<Event>,
         mentions: Vec<PublicKey>,
         quote: Option<Event>,
+        imetas: &[Vec<String>],
         me: PublicKey,
     ) -> (String, Vec<Tag>) {
         let mut tags: Vec<Tag> = Vec::new();
+        // NIP-92 media metadata rides right after content-warning's slot
+        // in the TS (signNote pushes it before the quote/reference tags).
+        for m in imetas {
+            if m.len() >= 2 && m[0] == "imeta" {
+                tags.push(Tag::custom("imeta", m[1..].iter()));
+            }
+        }
         // The NIP-18 quote rides FIRST: a q tag (id, relay hint, author) and
         // the nostr: reference folded into the text the reader sees.
         let content = if let Some(q) = &quote {
@@ -4394,11 +4418,12 @@ impl Core {
         reply_to: Option<Event>,
         mentions: Vec<PublicKey>,
         quote: Option<Event>,
+        imetas: Vec<Vec<String>>,
     ) -> Result<()> {
         let active = self.active().await?;
         let me = active.me();
         let (content, tags) =
-            Self::note_tags(content, reply_to, mentions, quote, me);
+            Self::note_tags(content, reply_to, mentions, quote, &imetas, me);
         let unsigned = UnsignedEvent::new(
             me,
             Timestamp::now(),
@@ -4438,6 +4463,7 @@ impl Core {
         mentions: Vec<PublicKey>,
         quote: Option<Event>,
         imetas: Vec<Vec<String>>,
+        photo_post: bool,
         scheduled_at: u64,
     ) -> mpsc::UnboundedReceiver<ScheduleEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -4446,43 +4472,18 @@ impl Core {
             let res: Result<String> = async {
                 let active = this.active().await?;
                 let me = active.me();
-                // A gallery schedules as the SAME kind-20 picture event an
-                // instant post makes (post_picture_inner's tag build) — a
-                // scheduled post must not lose its images.
-                let (kind, content, tags) = if imetas.is_empty() {
-                    let (content, tags) = Self::note_tags(content, reply_to, mentions, quote, me);
-                    (Kind::TextNote, content, tags)
-                } else {
-                    let mut tags: Vec<Tag> = vec![Tag::custom(
-                        "title",
-                        [first_caption_line(&content)],
-                    )];
-                    let mut xs: Vec<String> = Vec::new();
-                    let mut mimes: Vec<String> = Vec::new();
-                    for m in &imetas {
-                        if m.len() >= 2 && m[0] == "imeta" {
-                            tags.push(Tag::custom("imeta", m[1..].iter()));
-                        }
-                        for v in m.iter().skip(1) {
-                            if let Some(x) = v.strip_prefix("x ")
-                                && !xs.contains(&x.to_string())
-                            {
-                                xs.push(x.to_string());
-                            }
-                            if let Some(mm) = v.strip_prefix("m ")
-                                && !mimes.contains(&mm.to_string())
-                            {
-                                mimes.push(mm.to_string());
-                            }
-                        }
-                    }
-                    for x in &xs {
-                        tags.push(Tag::custom("x", [x.as_str()]));
-                    }
-                    for m in &mimes {
-                        tags.push(Tag::custom("m", [m.as_str()]));
-                    }
+                // The composer's tab decides: a photo post schedules as the
+                // SAME kind-20 picture event an instant post makes
+                // (picture_tags' build); a note with attachments schedules
+                // as kind 1 + imeta (note_tags' build), matching the
+                // instant path's routing (issue #3 WS1).
+                let (kind, content, tags) = if !imetas.is_empty() && photo_post {
+                    let tags = Self::picture_tags("", &content, &imetas, None);
                     (Kind::Custom(20), content, tags)
+                } else {
+                    let (content, tags) =
+                        Self::note_tags(content, reply_to, mentions, quote, &imetas, me);
+                    (Kind::TextNote, content, tags)
                 };
                 let unsigned = UnsignedEvent::new(
                     me,
@@ -4695,33 +4696,29 @@ impl Core {
         rx
     }
 
-    async fn post_picture_inner(
-        self: &Arc<Self>,
-        tx: &mpsc::UnboundedSender<PublishEvent>,
-        title: String,
-        content: String,
-        imeta: Vec<Vec<String>>,
-        content_warning: Option<String>,
-    ) -> Result<()> {
-        if imeta.is_empty() {
-            return Err(LoginError::Other("a picture needs at least one image".into()));
-        }
-        let active = self.active().await?;
-        let me = active.me();
+    /// The NIP-68 kind-20 tag build, shared by the instant path
+    /// (post_picture_inner) and the scheduled path (schedule_note) so a
+    /// scheduled picture's tags are byte-identical to an instant one.
+    fn picture_tags(
+        title: &str,
+        content: &str,
+        imetas: &[Vec<String>],
+        content_warning: Option<&str>,
+    ) -> Vec<Tag> {
         // NIP-68: a picture event carries a `title` tag (structural). A blank
         // composer title derives one from the caption's first non-empty line.
         let mut tags: Vec<Tag> = vec![Tag::custom(
             "title",
             [if title.trim().is_empty() {
-                first_caption_line(&content)
+                first_caption_line(content)
             } else {
                 title.trim().to_string()
             }],
         )];
-        if let Some(cw) = &content_warning {
-            tags.push(Tag::custom("content-warning", [cw.as_str()]));
+        if let Some(cw) = content_warning {
+            tags.push(Tag::custom("content-warning", [cw]));
         }
-        for m in &imeta {
+        for m in imetas {
             if m.len() >= 2 && m[0] == "imeta" {
                 tags.push(Tag::custom("imeta", m[1..].iter()));
             }
@@ -4730,7 +4727,7 @@ impl Core {
         // tags (relay/client filtering), deduped across the imetas.
         let mut xs: Vec<String> = Vec::new();
         let mut mimes: Vec<String> = Vec::new();
-        for m in &imeta {
+        for m in imetas {
             for v in m.iter().skip(1) {
                 if let Some(x) = v.strip_prefix("x ")
                     && !xs.contains(&x.to_string())
@@ -4750,6 +4747,23 @@ impl Core {
         for m in &mimes {
             tags.push(Tag::custom("m", [m.as_str()]));
         }
+        tags
+    }
+
+    async fn post_picture_inner(
+        self: &Arc<Self>,
+        tx: &mpsc::UnboundedSender<PublishEvent>,
+        title: String,
+        content: String,
+        imeta: Vec<Vec<String>>,
+        content_warning: Option<String>,
+    ) -> Result<()> {
+        if imeta.is_empty() {
+            return Err(LoginError::Other("a picture needs at least one image".into()));
+        }
+        let active = self.active().await?;
+        let me = active.me();
+        let tags = Self::picture_tags(&title, &content, &imeta, content_warning.as_deref());
         // TODO(port): src/nostr/content.ts mention tokenization → p tags (the
         // note path carries the same deferral).
         let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(20), tags, content);
@@ -5316,8 +5330,10 @@ impl Core {
     /// Save a composer draft (D38): replace-or-insert by slot — the
     /// (reply, quote) pair; an empty text DELETES the slot (closing a
     /// compose empty clears a stale draft, the session stash's semantics).
-    /// `attachments` (v1.4) rides the entry: the uploaded imeta arrays,
+    /// `attachments` (v1.4) ride the entry: the uploaded imeta arrays,
     /// verbatim — the blobs are already on Blossom (upload-at-attach).
+    /// `photo_post` (issue #3 WS1) rides too: the composer tab the draft
+    /// was written in decides the publish kind on restore.
     /// The whole array re-encrypts into the one NIP-78 event and rides
     /// commit() (30078 is coordinate-keyed, the outbox retries it).
     /// Optimistic (v1.1): the in-memory array spends immediately so the
@@ -5329,6 +5345,7 @@ impl Core {
         quote: Option<EventId>,
         text: String,
         attachments: Vec<Vec<String>>,
+        photo_post: bool,
     ) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
@@ -5356,6 +5373,7 @@ impl Core {
                     quote: key.1,
                     id: None,
                     attachments,
+                    photo_post,
                     at: Timestamp::now().as_secs(),
                 };
                 spent.push(entry.clone());
@@ -6322,10 +6340,9 @@ async fn sync_app_data(
 }
 
 /// One synced composer draft (D38): the buffer text plus its context —
-/// reply parent / quoted note as IDS (the full events live in the store;
-/// attachments are not stashed in v1). The array rides NIP-78 kind 30078
-/// d="satori/drafts", nip44-encrypted; the (reply, quote) pair is the
-/// composer slot (top-level = both None).
+/// reply parent / quoted note as IDS (the full events live in the store).
+/// The array rides NIP-78 kind 30078 d="satori/drafts", nip44-encrypted;
+/// the (reply, quote) pair is the composer slot (top-level = both None).
 ///
 /// Entries imported from the web app's NIP-37 kind 31234 wraps (v1.1)
 /// carry `id` (the wrap's d) — Satori's own slot entries have none, and
@@ -6347,10 +6364,21 @@ pub struct DraftEntry {
     /// the CDN copy through the media cache.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Vec<String>>,
+    /// The composer tab the draft was written in (issue #3 WS1): true =
+    /// Photo tab, publishes kind 20; false = Note tab, attachments ride
+    /// kind 1 + imeta. Defaults false so legacy entries (and web-app
+    /// imports) restore as notes — the only thing they could ever be.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub photo_post: bool,
     /// Last touch (wrap created_at / save time) — the tab sorts by it,
     /// the composer's restore takes the newest top-level.
     #[serde(default)]
     pub at: u64,
+}
+
+/// serde skip predicate: omit `photo_post` when false (the legacy shape).
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl DraftEntry {
@@ -6681,6 +6709,7 @@ mod tests {
             quote: None,
             id: None,
             attachments: vec![imeta.clone()],
+            photo_post: false,
             at: 42,
         };
         let json = serde_json::to_string(&entry).unwrap();
@@ -6694,7 +6723,59 @@ mod tests {
         )
         .unwrap();
         assert!(legacy.attachments.is_empty());
+        assert!(!legacy.photo_post, "absent = a note draft");
         assert!(legacy.matches(None, None));
+
+        // The photo_post flag (issue #3 WS1): false is omitted (the legacy
+        // shape stays byte-stable), true round-trips.
+        let note_draft = DraftEntry {
+            photo_post: false,
+            ..back
+        };
+        let note_json = serde_json::to_string(&note_draft).unwrap();
+        assert!(!note_json.contains("photo_post"), "false must be skipped");
+        let photo_draft = DraftEntry {
+            photo_post: true,
+            ..note_draft
+        };
+        let photo_json = serde_json::to_string(&photo_draft).unwrap();
+        let back: DraftEntry = serde_json::from_str(&photo_json).unwrap();
+        assert!(back.photo_post, "true must round-trip");
+    }
+
+    /// A note with attachments is a NOTE (issue #3 WS1): note_tags carries
+    /// the NIP-92 imeta arrays as kind-1 tags (signNote's
+    /// `for (const m of imeta) tags.push(m)`), alongside the reply tags —
+    /// the reply-with-attachment case keeps its thread context.
+    #[test]
+    fn note_tags_carry_imeta() {
+        let imeta = vec![
+            "imeta".to_string(),
+            "url https://cdn.example.com/abc.png".to_string(),
+            "m image/png".to_string(),
+            "x deadbeef".to_string(),
+        ];
+        let me = Keys::generate().public_key();
+        let (content, tags) = Core::note_tags(
+            "look at this".into(),
+            None,
+            Vec::new(),
+            None,
+            &[imeta.clone()],
+            me,
+        );
+        assert_eq!(content, "look at this");
+        let imeta_tags: Vec<&Tag> = tags.iter().filter(|t| t.kind() == "imeta").collect();
+        assert_eq!(imeta_tags.len(), 1, "one imeta tag rides the kind-1");
+        let parts = imeta_tags[0].as_slice();
+        assert!(parts.contains(&"url https://cdn.example.com/abc.png".to_string()));
+        assert!(parts.contains(&"x deadbeef".to_string()));
+
+        // A malformed imeta (missing the leading "imeta" marker) is
+        // dropped, not injected as garbage tags.
+        let bad = vec!["url https://cdn.example.com/x.png".to_string()];
+        let (_, tags) = Core::note_tags("x".into(), None, Vec::new(), None, &[bad], me);
+        assert!(tags.iter().all(|t| t.kind() != "imeta"));
     }
 
     /// NIP-92 kind-0 adoption: the banner's blurhash arrives only from an

@@ -59,8 +59,8 @@ pub const FEED_KINDS: [Kind; 14] = [
     Kind::TextNote,       // 1
     Kind::Repost,         // 6
     Kind::Custom(20),     // picture (NIP-68)
-    Kind::Custom(21),     // video (NIP-71)
-    Kind::Custom(22),     // short video
+    Kind::Custom(21),     // short vertical video (NIP-71)
+    Kind::Custom(22),     // video (NIP-71)
     Kind::Custom(54),     // podcast episode (NIP-F4)
     Kind::Custom(1068),   // poll (NIP-88)
     Kind::Custom(30023),  // article (NIP-23)
