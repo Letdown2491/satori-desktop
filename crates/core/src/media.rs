@@ -36,6 +36,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::config;
+use crate::net_guard::SafeResolver;
 
 #[derive(Debug)]
 pub struct DecodedImage {
@@ -482,129 +483,6 @@ fn decode(bytes: &[u8]) -> Result<DecodedImage, MediaError> {
     })
 }
 
-/// The DNS-rebinding-safe resolver (issue #3 WS4, the media.rs TODO).
-/// The URL guard checks HOST STRINGS — `evil.example.com` resolving to
-/// 127.0.0.1 sailed past it. reqwest dials WHATEVER its resolver returns,
-/// so the check moves to the address list: a name that resolves anywhere
-/// non-global yields NO connectable address (fail closed — a public and
-/// private mix fails the whole resolution, so no leg of it leaks onto the
-/// internal network). Every connection this client opens — first party,
-/// every redirect hop, every retry — re-walks here, so a rebinding
-/// rotation between hops re-runs the check. TOCTOU-free by construction:
-/// the addresses that passed the filter are the addresses hyper dials.
-#[derive(Debug)]
-struct SafeResolver;
-
-impl reqwest::dns::Resolve for SafeResolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let host = name.as_str().to_string();
-        Box::pin(async move {
-            // Port 0: reqwest replaces it with the scheme's conventional
-            // port (the trait contract).
-            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
-                .await
-                .map_err(std::io::Error::other)?
-                .filter(|a| is_global_ip(a.ip()))
-                .collect();
-            if addrs.is_empty() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    format!("{host} resolved to no public addresses"),
-                )
-                .into());
-            }
-            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
-        })
-    }
-}
-
-/// The resolver's address screen: global-reachability, std's `is_global`
-/// being feature-gated. Strict side — a block is asserted only when the
-/// address is demonstrably NOT global-unreachable (private, loopback,
-/// link-local, shared/CGNAT, this-network, benchmark, documentation,
-/// reserved/multicast, unspecified; v6: ULA, link-local, multicast,
-/// everything outside 2000::/3). A v4-mapped v6 screens through the v4
-/// rules (dual-stack dials the embedded v4).
-fn is_global_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            let o = v4.octets();
-            !(v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_multicast()
-                || v4.is_unspecified()
-                || v4.is_documentation()
-                || o[0] == 0 // this-network (0.0.0.0/8)
-                || o[0] == 100 // shared address space (CGNAT, 100.64/10)
-                || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0.0/24
-                || (o[0] == 198 && (o[1] == 18 || o[1] == 19)) // 198.18/15 benchmark
-                || o[0] >= 240) // reserved + broadcast
-        }
-        std::net::IpAddr::V6(v6) => {
-            if v6.is_multicast() || v6.is_loopback() || v6.is_unspecified() {
-                return false;
-            }
-            let s = v6.segments();
-            // ::ffff:0:0/96 (v4-mapped) dials the embedded v4 on a
-            // dual-stack host — screen THAT address.
-            if s[..5] == [0, 0, 0, 0, 0] && s[5] == 0xffff {
-                return is_global_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-                    (s[6] >> 8) as u8,
-                    s[6] as u8,
-                    (s[7] >> 8) as u8,
-                    s[7] as u8,
-                )));
-            }
-            // Global unicast lives in 2000::/3; ULA (fc00::/7),
-            // link-local (fe80::/10) and everything experimental dies.
-            // Transition mechanisms embed IPv4 INSIDE (or beside) 2000::/3
-            // — screen the embedded leg too, or a hostile DNS answer rides
-            // a transition gateway onto the internal network (PR #13):
-            // - 64:ff9b::/96 (well-known NAT64): v4 in segments 6+7
-            //   (outside 2000::/3, so previously refused wholesale — now
-            //   the public-embedded case passes, the private one dies)
-            // - 2002::/16 (6to4): v4 in segments 1+2 — INSIDE 2000::/3,
-            //   previously sailed straight through
-            // - 2001:0::/32 (Teredo): server v4 in segments 2+3, client
-            //   v4 XOR-obfuscated in segments 6+7 — screen BOTH legs
-            if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] {
-                return is_global_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-                    (s[6] >> 8) as u8,
-                    s[6] as u8,
-                    (s[7] >> 8) as u8,
-                    s[7] as u8,
-                )));
-            }
-            if s[0] == 0x2002 {
-                return is_global_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-                    (s[1] >> 8) as u8,
-                    s[1] as u8,
-                    (s[2] >> 8) as u8,
-                    s[2] as u8,
-                )));
-            }
-            if s[0] == 0x2001 && s[1] == 0 {
-                let server = is_global_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-                    (s[2] >> 8) as u8,
-                    s[2] as u8,
-                    (s[3] >> 8) as u8,
-                    s[3] as u8,
-                )));
-                let client = is_global_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-                    !(s[6] >> 8) as u8,
-                    !(s[6] as u8),
-                    !(s[7] >> 8) as u8,
-                    !(s[7] as u8),
-                )));
-                return server && client;
-            }
-            (s[0] & 0xe000) == 0x2000 && !(s[0] == 0x2001 && s[1] == 0x0db8)
-        }
-    }
-}
-
 /// SSRF guard, reduced surface: https only; rejects IP literals and
 /// internal/metadata hosts.
 pub fn is_safe_media_url(url: &str) -> bool {
@@ -714,7 +592,7 @@ mod tests {
         assert!(!is_safe_media_url("not a url"));
     }
 
-    /// WS4: the resolver's filter — only global addresses survive; every
+    /// WS4: the resolver's filter — only public-unicast addresses survive; every
     /// loopback/private/link-local/ULA spelling dies. This is the list
     /// hyper dials, so a rebinding name has nothing left to dial.
     #[test]
@@ -723,7 +601,7 @@ mod tests {
         let keep = |ips: &[std::net::IpAddr]| -> Vec<_> {
             ips.iter()
                 .map(|i| s(*i))
-                .filter(|a| is_global_ip(a.ip()))
+                .filter(|a| crate::net_guard::is_public_ip(&a.ip()))
                 .collect()
         };
         let global: std::net::IpAddr = "8.8.8.8".parse().unwrap();
@@ -764,11 +642,11 @@ mod tests {
     fn transition_mechanism_embedded_v4_is_screened() {
         let refused = |bad: &str| {
             let ip: std::net::IpAddr = bad.parse().unwrap();
-            assert!(!is_global_ip(ip), "{bad} must be refused");
+            assert!(!crate::net_guard::is_public_ip(&ip), "{bad} must be refused");
         };
         let passed = |good: &str| {
             let ip: std::net::IpAddr = good.parse().unwrap();
-            assert!(is_global_ip(ip), "{good} must pass");
+            assert!(crate::net_guard::is_public_ip(&ip), "{good} must pass");
         };
         // NAT64 (well-known prefix) with an internal or reserved leg.
         refused("64:ff9b::192.0.2.9"); // → TEST-NET-1
