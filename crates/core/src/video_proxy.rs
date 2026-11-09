@@ -41,6 +41,17 @@ pub const MAX_STREAM_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// generous).
 const MAX_HEAD: usize = 16 * 1024;
 
+/// Constant-time byte equality for the capability token. Length is
+/// public (always 32 hex chars), so the length check leaks nothing;
+/// the fold compares every byte regardless of where a mismatch sits —
+/// no prefix oracle for a local process probing the gate.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 struct State {
     origin: String,
     token: String,
@@ -162,9 +173,15 @@ async fn serve(stream: tokio::net::TcpStream, state: Arc<State>) {
         let _ = simple(&mut wr, 501).await;
         return;
     }
-    // Capability: exactly /<token>/stream. Anything else is a probe.
-    let expected = format!("/{}/stream", state.token);
-    if path != expected {
+    // Capability: /<token>/stream, tolerating a query string (cache-
+    // busters); souphttpsrc sends none today, cost nothing to accept.
+    let path = path.split(['?', ';']).next().unwrap_or(path);
+    let token_ok = path
+        .strip_prefix('/')
+        .and_then(|rest| rest.strip_suffix("/stream"))
+        .map(|t| ct_eq(t.as_bytes(), state.token.as_bytes()))
+        .unwrap_or(false);
+    if !token_ok {
         let _ = simple(&mut wr, 404).await;
         return;
     }
@@ -194,11 +211,15 @@ async fn serve(stream: tokio::net::TcpStream, state: Arc<State>) {
         let _ = simple(&mut wr, res.status().as_u16()).await;
         return;
     }
-    // Demuxer-relevant headers, passed through; the rest is noise.
+    // Demuxer-relevant headers, passed through; the rest is noise. The
+    // STATUS rides verbatim — souphttpsrc MUST see the origin's 206 for
+    // a ranged seek (with its Content-Range), or qtdemux treats the
+    // bytes as file-start and playback stalls or corrupts.
+    let status = res.status().as_u16();
     let head_out = format!(
         "HTTP/1.1 {} {}\r\nConnection: close\r\n{}\r\n",
-        res.status().as_u16(),
-        if res.status() == 200 { "OK" } else { "Partial Content" },
+        status,
+        reason(status),
         [
             ("Accept-Ranges", header(&res, "accept-ranges").unwrap_or_else(|| "bytes".into())),
             ("Content-Length", header(&res, "content-length")),
@@ -239,22 +260,36 @@ fn header(res: &reqwest::Response, name: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Canonical reason phrase for the statuses the proxy can emit or
+/// forward (labeled verbatim-status passthrough: the CODE is what
+/// souphttpsrc reads; the phrase is for humans).
+fn reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        204 => "No Content",
+        206 => "Partial Content",
+        226 => "IM Used",
+        304 => "Not Modified",
+        404 => "Not Found",
+        416 => "Range Not Satisfiable",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        504 => "Gateway Timeout",
+        _ => "Status",
+    }
+}
+
 async fn simple(
     wr: &mut tokio::net::tcp::OwnedWriteHalf,
     status: u16,
 ) -> std::io::Result<()> {
-    let reason = match status {
-        200 => "OK",
-        206 => "Partial Content",
-        404 => "Not Found",
-        501 => "Not Implemented",
-        502 => "Bad Gateway",
-        504 => "Gateway Timeout",
-        _ => "Error",
-    };
     wr.write_all(
-        format!("HTTP/1.1 {status} {reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
-            .as_bytes(),
+        format!(
+            "HTTP/1.1 {} {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            status,
+            reason(status)
+        )
+        .as_bytes(),
     )
     .await?;
     wr.shutdown().await
@@ -269,6 +304,18 @@ mod tests {
     /// security boundary — the origin fetch path is media.rs's, tested
     /// there). Exercises spawn → uri → serve → 404 without any origin
     /// network traffic.
+    /// ct_eq: equal bytes → true; any mismatch → false, regardless of
+    /// position (the property that kills a prefix oracle).
+    #[test]
+    fn ct_eq_holds() {
+        let t = "0123456789abcdef0123456789abcdef";
+        assert!(ct_eq(t.as_bytes(), t.as_bytes()));
+        assert!(!ct_eq(t.as_bytes(), b"1123456789abcdef0123456789abcdef"));
+        assert!(!ct_eq(t.as_bytes(), b"0123456789abcdef0123456789abcdeF"));
+        assert!(!ct_eq(b"short", b"shorter"));
+        assert!(ct_eq(b"", b""));
+    }
+
     #[test]
     fn capability_gate_refuses_wrong_token() {
         let proxy = spawn("https://blossom.example.invalid/x.mp4".into())
@@ -306,8 +353,10 @@ mod tests {
 
             // The RIGHT token reaches the origin path — which fails on
             // the .invalid domain → the honest 502, not a silent win.
+            // A cache-buster query rides along (soup sends none today;
+            // the gate must not care).
             let mut c = tokio::net::TcpStream::connect(proxy.addr()).await.unwrap();
-            c.write_all(format!("GET /{token}/stream HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+            c.write_all(format!("GET /{token}/stream?cb=1 HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
                 .await
                 .unwrap();
             let mut buf = Vec::new();
