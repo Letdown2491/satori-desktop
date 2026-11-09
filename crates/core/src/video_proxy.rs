@@ -221,7 +221,7 @@ async fn serve(stream: tokio::net::TcpStream, state: Arc<State>) {
         status,
         reason(status),
         [
-            ("Accept-Ranges", header(&res, "accept-ranges").unwrap_or_else(|| "bytes".into())),
+            ("Accept-Ranges", Some(header(&res, "accept-ranges").unwrap_or_else(|| "bytes".into()))),
             ("Content-Length", header(&res, "content-length")),
             ("Content-Range", header(&res, "content-range")),
             ("Content-Type", header(&res, "content-type")),
@@ -323,18 +323,22 @@ mod tests {
         let uri = proxy.uri();
         assert!(uri.starts_with("http://127.0.0.1:"), "{uri}");
         assert!(uri.ends_with("/stream"));
-        // The token in the middle is 32 hex chars (128 bits).
-        let token = uri
-            .trim_start_matches("http://127.0.0.1:")
-            .split('/')
-            .find(|s| !s.is_empty())
-            .unwrap();
+        // The token in the middle is 32 hex chars (128 bits): strip
+        // scheme+host, then take the FIRST path segment (trim_start_matches
+        // strips REPEATED prefixes and split().find() would hand back the
+        // port — both wrong-door bugs in the test itself).
+        let rest = uri
+            .trim_start_matches("http://")
+            .split_once('/')
+            .expect("uri has a path")
+            .1;
+        let token = rest.split('/').next().unwrap();
         assert_eq!(token.len(), 32, "{token}");
         assert!(token.bytes().all(|c| c.is_ascii_hexdigit()));
 
         runtime().block_on(async {
             // A probe without the token: /stream, /wrongtoken/stream.
-            let mut c = tokio::net::TcpStream::connect(proxy.addr()).await.unwrap();
+            let mut c = tokio::net::TcpStream::connect(proxy.addr).await.unwrap();
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             c.write_all(b"GET /stream HTTP/1.1\r\nHost: x\r\n\r\n")
                 .await
@@ -355,7 +359,7 @@ mod tests {
             // the .invalid domain → the honest 502, not a silent win.
             // A cache-buster query rides along (soup sends none today;
             // the gate must not care).
-            let mut c = tokio::net::TcpStream::connect(proxy.addr()).await.unwrap();
+            let mut c = tokio::net::TcpStream::connect(proxy.addr).await.unwrap();
             c.write_all(format!("GET /{token}/stream?cb=1 HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
                 .await
                 .unwrap();

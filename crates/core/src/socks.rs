@@ -139,9 +139,13 @@ async fn serve_conn(stream: tokio::net::TcpStream) {
         return;
     }
     let (mut ord, mut owr) = outbound.into_split();
-    let _ = tokio::io::copy_bidirectional(&mut rd, &mut owr).await;
+    // tokio's split halves are unidirectional — no copy_bidirectional;
+    // two opposing copies, joined.
+    let up = tokio::io::copy(&mut rd, &mut owr);
+    let down = tokio::io::copy(&mut ord, &mut wr);
+    let _ = tokio::join!(up, down);
     let _ = owr.shutdown().await;
-    drop(ord); // the read half closes with the socket
+    drop(ord);
 }
 
 #[derive(Debug)]
