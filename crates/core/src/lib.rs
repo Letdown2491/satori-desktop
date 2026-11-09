@@ -27,6 +27,7 @@ pub mod profiles;
 pub mod read_state;
 pub mod secrets;
 pub mod session;
+pub mod socks;
 pub mod signer;
 pub mod undo;
 
