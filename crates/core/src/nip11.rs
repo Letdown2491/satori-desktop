@@ -121,7 +121,13 @@ pub async fn refresh(relay: &str) -> bool {
         return false;
     };
     let url = url.trim_end_matches('/').to_string();
-    let res = match tokio::time::timeout(FETCH_BUDGET, crate::media::client().get(&url).send()).await {
+    // media::client() rides the guarded fetch (SafeResolver, redirect
+    // re-validation). Its longer connect/total timeouts never come into
+    // play: the outer FETCH_BUDGET still bounds the whole request at 8s.
+    let req = crate::media::client()
+        .get(&url)
+        .header("Accept", "application/nostr+json");
+    let res = match tokio::time::timeout(FETCH_BUDGET, req.send()).await {
         Ok(Ok(res)) => res,
         _ => return false,
     };
@@ -129,13 +135,13 @@ pub async fn refresh(relay: &str) -> bool {
         return false;
     }
     // Relay documents are small; refuse to read more than a sane body.
+    // read_capped STREAMS the cap: a declared-length lie dies up-front,
+    // and a chunked (undeclared) response is cut mid-stream instead of
+    // being read whole and measured after.
     const CAP: usize = 256 * 1024;
-    let body = match res.content_length() {
-        Some(n) if n as usize > CAP => return false,
-        _ => match res.bytes().await {
-            Ok(b) if b.len() <= CAP => b.to_vec(),
-            _ => return false,
-        },
+    let body = match crate::media::read_capped(res, CAP).await {
+        Ok(b) => b,
+        Err(_) => return false,
     };
     let doc: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(d) => d,
