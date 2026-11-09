@@ -121,7 +121,7 @@ pub async fn refresh(relay: &str) -> bool {
         return false;
     };
     let url = url.trim_end_matches('/').to_string();
-    let res = match tokio::time::timeout(FETCH_BUDGET, http().get(&url).send()).await {
+    let res = match tokio::time::timeout(FETCH_BUDGET, crate::media::client().get(&url).send()).await {
         Ok(Ok(res)) => res,
         _ => return false,
     };
@@ -150,21 +150,6 @@ pub async fn refresh(relay: &str) -> bool {
     held.insert(key, Entry { search, at: now_secs() });
     write_disk(&held);
     true
-}
-
-/// One shared client (media.rs's three rules apply: a browser UA, connect
-/// + total timeouts; NIP-11 answers from CDNs 403 without a UA).
-fn http() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-                         (KHTML, like Gecko) Chrome/126.0.0.1 Safari/537.36")
-            .connect_timeout(FETCH_BUDGET)
-            .timeout(FETCH_BUDGET)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
-    })
 }
 
 /// TTL-gated sweep over a whole relay set (the read set connects → the
