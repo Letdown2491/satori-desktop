@@ -8,7 +8,9 @@ Satori is built on three commitments:
 - **Your keys stay yours.** The app never sees your master private key:
   you sign in through a remote signer (`bunker://` or `nostrconnect://`,
   NIP-46) and every incoming event is verified locally; relays are
-  treated as untrusted. No telemetry, and Tor routing is built in.
+  treated as untrusted. No telemetry. Privacy modes gate media today;
+  the Tor transport itself is still pending (DESIGN.md M5), so traffic
+  runs direct until it lands.
 - **The event stream is the state.** Everything on screen is a projection
   of your Nostr events. New event kinds are supported through a handler
   registry (`KindHandler`), not hardcoded into the views.
