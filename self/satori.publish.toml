@@ -47,6 +47,8 @@ tree = "tree"
 
 [publish]
 # relay.orchard.rocks is required (see PUBLISHING.md): orchard-publish
-# refuses a manifest publish without it.
-relays = ["wss://relay.orchard.rocks", "wss://relay.primal.net", "wss://nos.lol"]
+# refuses a manifest publish without it. nos.lol was dropped: it stalled
+# through both v0.4.0 publish attempts (no OK within 30s) while
+# primal.net signed every event seconds earlier.
+relays = ["wss://relay.orchard.rocks", "wss://relay.primal.net"]
 tag = "latest"
