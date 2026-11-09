@@ -33,7 +33,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Dial timeout for the screened connect (relay-latency budgets live
 /// one layer up; this only bounds TCP connect + the screens).
@@ -254,7 +254,7 @@ mod tests {
         // ruleset refusal (reply code 0x02) — no byte dials anywhere.
         let server = spawn().await.expect("bind loopback");
         let mut c = tokio::net::TcpStream::connect(server.addr()).await.unwrap();
-        use tokio::io::{AsyncReadExt, Write as _};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         c.write_all(&[5, 1, 0]).await.unwrap(); // VER=5, 1 method, no-auth
         let mut reply = [0u8; 2];
         c.read_exact(&mut reply).await.unwrap();
@@ -277,7 +277,7 @@ mod tests {
         // covered end-to-end by the pool wiring at runtime.
         let server = spawn().await.expect("bind loopback");
         let mut c = tokio::net::TcpStream::connect(server.addr()).await.unwrap();
-        use tokio::io::{AsyncReadExt, Write as _};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         c.write_all(&[5, 1, 0]).await.unwrap();
         let mut reply = [0u8; 2];
         c.read_exact(&mut reply).await.unwrap();

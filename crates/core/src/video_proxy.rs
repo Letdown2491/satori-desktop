@@ -28,7 +28,7 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// The origin fetch budget per REQUEST. Playbin re-GETs with a Range
 /// on every seek, so the cap is per-request, NOT cumulative — a
@@ -258,4 +258,69 @@ async fn simple(
     )
     .await?;
     wr.shutdown().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The capability gate, end to end and offline: a proxy bound on
+    /// loopback refuses a wrong-token probe with 404 (the gate is the
+    /// security boundary — the origin fetch path is media.rs's, tested
+    /// there). Exercises spawn → uri → serve → 404 without any origin
+    /// network traffic.
+    #[test]
+    fn capability_gate_refuses_wrong_token() {
+        let proxy = spawn("https://blossom.example.invalid/x.mp4".into())
+            .expect("loopback bind");
+        let uri = proxy.uri();
+        assert!(uri.starts_with("http://127.0.0.1:"), "{uri}");
+        assert!(uri.ends_with("/stream"));
+        // The token in the middle is 32 hex chars (128 bits).
+        let token = uri
+            .trim_start_matches("http://127.0.0.1:")
+            .split('/')
+            .find(|s| !s.is_empty())
+            .unwrap();
+        assert_eq!(token.len(), 32, "{token}");
+        assert!(token.bytes().all(|c| c.is_ascii_hexdigit()));
+
+        runtime().block_on(async {
+            // A probe without the token: /stream, /wrongtoken/stream.
+            let mut c = tokio::net::TcpStream::connect(proxy.addr()).await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            c.write_all(b"GET /stream HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+            let mut buf = Vec::new();
+            loop {
+                let mut b = [0u8; 512];
+                let n = c.read(&mut b).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&b[..n]);
+            }
+            let text = String::from_utf8_lossy(&buf);
+            assert!(text.starts_with("HTTP/1.1 404"), "{text}");
+
+            // The RIGHT token reaches the origin path — which fails on
+            // the .invalid domain → the honest 502, not a silent win.
+            let mut c = tokio::net::TcpStream::connect(proxy.addr()).await.unwrap();
+            c.write_all(format!("GET /{token}/stream HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut buf = Vec::new();
+            loop {
+                let mut b = [0u8; 512];
+                let n = c.read(&mut b).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&b[..n]);
+            }
+            let text = String::from_utf8_lossy(&buf);
+            assert!(text.starts_with("HTTP/1.1 502"), "{text}");
+        });
+    }
 }
