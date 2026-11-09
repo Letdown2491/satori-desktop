@@ -1959,7 +1959,11 @@ impl Render for Composer {
                         .child(input),
                 )
             })
-            .when(tab == Tab::Article && !body_empty, |d| {
+            // The quiet reading-time line under the body box — EDIT ONLY:
+            // the preview's byline carries it ("· draft · N min read"),
+            // and a leftover form line above the tabs would squat in the
+            // flipped view.
+            .when(tab == Tab::Article && !art_previewing && !body_empty, |d| {
                 d.child(
                     div()
                         .px_1()
