@@ -32,6 +32,7 @@
     <release version="0.4.0" date="2026-11-08">
       <description>
         <p>The media and long-form release: attachments publish right (a note with an image is a kind-1 note with imeta; replies keep their thread), the Photo tab returns as its own picture-post surface, a full article composer (title, summary, cover upload, topics, markdown body) with strikethrough, task lists and tables in the reader, and hardenened media fetching (DNS-rebinding-safe resolution, search only asks search-capable relays).</p>
+        <p>The composer grew a polish pass of its own: previews on every tab (the article flips to the reader-faithful view, the rest show the draft as its feed card), session drafts for every post type with a two-step escape (the first escape saves and stays), a real editor (word motion, word deletion, line-wise home and end, a body that scrolls), fields that wrap and grow instead of clipping, video attachments in notes, a live reading time on the article, the type selector as a segmented control, and one filled action bar where Publish is unmistakable. A tag bug that kept satori's own polls from rendering as ballots is fixed.</p>
       </description>
     </release>
     <release version="0.3.0" date="2026-11-07">
