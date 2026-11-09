@@ -107,6 +107,12 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev \
             libvulkan-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
+      - name: Install the Rust toolchain
+        # The runner's preinstalled rust is whatever the image shipped
+        # that day — pin both arch legs to the same toolchain the x86_64
+        # job builds with.
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
       - name: Build the release binary
         run: cargo build --release --locked -p satori-gpui
 
