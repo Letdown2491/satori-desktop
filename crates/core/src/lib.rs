@@ -33,6 +33,7 @@ pub mod undo;
 
 pub mod dms;
 pub mod engagement;
+pub mod video_proxy;
 pub mod viewport;
 pub mod kinds;
 pub mod media;
