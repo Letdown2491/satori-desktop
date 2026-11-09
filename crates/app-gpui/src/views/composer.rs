@@ -1802,6 +1802,64 @@ impl Render for Composer {
             .text_color(rgb(theme::ink()))
             .gap_2()
             .p_4()
+            // The post-type selector as a segmented control (prototype
+            // variant C): one bounded strip, the active segment wearing
+            // the wash. First thing the eye meets — the form it shapes
+            // follows. Replies carry no tabs.
+            .when(!replying, |d| {
+                let seg = |id: &str, label: &'static str, on: bool| {
+                    div()
+                        .id(SharedString::from(id))
+                        .cursor_pointer()
+                        .px_3()
+                        .py_1()
+                        .text_size(px(theme::T_UI))
+                        .text_color(rgb(if on {
+                            theme::ink()
+                        } else {
+                            theme::muted()
+                        }))
+                        .when(on, |d| {
+                            d.font_weight(gpui::FontWeight::SEMIBOLD)
+                                .bg(rgb(theme::washi()))
+                        })
+                        .child(label)
+                };
+                d.child(
+                    div()
+                        .flex()
+                        .self_start()
+                        .rounded(px(theme::R_EMBED))
+                        .border_1()
+                        .border_color(rgb(theme::hairline()))
+                        .bg(rgb(theme::panel()))
+                        .overflow_hidden()
+                        .child(
+                            seg("tab-note", "Note", tab == Tab::Note)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_tab(Tab::Note, cx)
+                                })),
+                        )
+                        .child(
+                            seg("tab-photo", "Photo", tab == Tab::Photo)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_tab(Tab::Photo, cx)
+                                })),
+                        )
+                        .child(
+                            seg("tab-poll", "Poll", tab == Tab::Poll)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_tab(Tab::Poll, cx)
+                                })),
+                        )
+                        .child(
+                            seg("tab-article", "Article", tab == Tab::Article)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_tab(Tab::Article, cx)
+                                })),
+                        ),
+                )
+            })
             .when_some(quote_prev, |d, (name, snippet, picture)| {
                 // The quoted note as a card: the same frame a quote wears
                 // out in the feed, so the composer answers "quoting WHOM,
@@ -2000,10 +2058,10 @@ impl Render for Composer {
                         .p_2()
                         .flex()
                         .flex_col()
-                        // Tabs on top square the box's shoulders; a reply
-                        // (no tabs) keeps the full rounding.
-                        .when(replying, |d| d.rounded(px(theme::R_EMBED)))
-                        .when(!replying, |d| d.rounded_b(px(theme::R_EMBED)))
+                        // Full rounding: the segmented control stands
+                        // free above — nothing squares this box's
+                        // shoulders anymore.
+                        .rounded(px(theme::R_EMBED))
                         .child(input),
                 )
             })
@@ -2032,7 +2090,7 @@ impl Render for Composer {
                         .max_h_full()
                         .min_h_0()
                         .overflow_y_scroll()
-                        .rounded_b(px(theme::R_EMBED))
+                        .rounded(px(theme::R_EMBED))
                         .border_1()
                         .border_color(rgb(theme::hairline()))
                         .bg(rgb(theme::panel()))
@@ -2171,118 +2229,6 @@ impl Render for Composer {
                                 } else {
                                     "multiple choices"
                                 }),
-                        ),
-                )
-            })
-            // The tabs ride the box's top edge: the active one wears the
-            // panel's wash and frame (no bottom border — the 1px overlap
-            // sands the seam into the field below).
-            .when(!replying, |d| {
-                d.child(
-                    div().flex().gap_1().pl_2().mb(px(-1.))
-                        .child(
-                            div()
-                                .id("tab-note")
-                                .cursor_pointer()
-                                .px_3()
-                                .py_1()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(if tab == Tab::Note {
-                                    theme::ink()
-                                } else {
-                                    theme::muted()
-                                }))
-                                .when(tab == Tab::Note, |d| {
-                                    d.font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .bg(rgb(theme::panel()))
-                                        .rounded_t(px(theme::R_EMBED))
-                                        .border_t_1()
-                                        .border_l_1()
-                                        .border_r_1()
-                                        .border_color(rgb(theme::hairline()))
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.set_tab(Tab::Note, cx)
-                                }))
-                                .child("Note"),
-                        )
-                        .child(
-                            div()
-                                .id("tab-photo")
-                                .cursor_pointer()
-                                .px_3()
-                                .py_1()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(if tab == Tab::Photo {
-                                    theme::ink()
-                                } else {
-                                    theme::muted()
-                                }))
-                                .when(tab == Tab::Photo, |d| {
-                                    d.font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .bg(rgb(theme::panel()))
-                                        .rounded_t(px(theme::R_EMBED))
-                                        .border_t_1()
-                                        .border_l_1()
-                                        .border_r_1()
-                                        .border_color(rgb(theme::hairline()))
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.set_tab(Tab::Photo, cx)
-                                }))
-                                .child("Photo"),
-                        )
-                        .child(
-                            div()
-                                .id("tab-poll")
-                                .cursor_pointer()
-                                .px_3()
-                                .py_1()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(if tab == Tab::Poll {
-                                    theme::ink()
-                                } else {
-                                    theme::muted()
-                                }))
-                                .when(tab == Tab::Poll, |d| {
-                                    d.font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .bg(rgb(theme::panel()))
-                                        .rounded_t(px(theme::R_EMBED))
-                                        .border_t_1()
-                                        .border_l_1()
-                                        .border_r_1()
-                                        .border_color(rgb(theme::hairline()))
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.set_tab(Tab::Poll, cx)
-                                }))
-                                .child("Poll"),
-                        )
-                        .child(
-                            div()
-                                .id("tab-article")
-                                .cursor_pointer()
-                                .px_3()
-                                .py_1()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(if tab == Tab::Article {
-                                    theme::ink()
-                                } else {
-                                    theme::muted()
-                                }))
-                                .when(tab == Tab::Article, |d| {
-                                    d.font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .bg(rgb(theme::panel()))
-                                        .rounded_t(px(theme::R_EMBED))
-                                        .border_t_1()
-                                        .border_l_1()
-                                        .border_r_1()
-                                        .border_color(rgb(theme::hairline()))
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.set_tab(Tab::Article, cx)
-                                }))
-                                .child("Article"),
                         ),
                 )
             })
@@ -2497,93 +2443,99 @@ impl Render for Composer {
             .when(previewing && tab != Tab::Article, |d| {
                 d.child(self.compose_preview(cx))
             })
-            .child(div()
+            // The action bar (prototype variant C): every affordance in
+            // one bounded band — the form's floor, not loose words.
+            // Attach and schedule stand left as quiet toggles; the seal
+            // is the pane's only FILLED element, so the eye lands there
+            // first.
+            .child(
+                div()
+                    .w_full()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            // The preview pill: article flips to the
-                            // reader-faithful preview, the other tabs
-                            // reveal the draft's feed card below. Nothing
-                            // typed anywhere — no preview to show.
-                            .when(self.draft_hash(cx).is_some(), |d| {
-                                d.child(
-                                div()
-                                    .id("preview-toggle")
-                                    .cursor_pointer()
-                                    .px_3()
-                                    .py_1()
-                                    .rounded(px(theme::R_EMBED))
-                                    .border_1()
-                                    .border_color(rgb(if previewing {
-                                        theme::vermilion()
+                    .gap_2()
+                    .rounded(px(theme::R_EMBED))
+                    .border_1()
+                    .border_color(rgb(theme::hairline()))
+                    .bg(rgb(theme::panel()))
+                    .p_2()
+                    .when(tab != Tab::Article, |d| {
+                        d.child(
+                            div()
+                                .id("attach")
+                                .cursor_pointer()
+                                .px_3()
+                                .py_1()
+                                .rounded(px(theme::R_EMBED))
+                                .border_1()
+                                .border_color(rgb(theme::hairline()))
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::muted()))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.pick_attachments(cx);
+                                }))
+                                .child("+ attach media"),
+                        )
+                    })
+                    .when(tab != Tab::Poll, |d| {
+                        d.child(
+                            div()
+                                .id("schedule-toggle")
+                                .cursor_pointer()
+                                .px_3()
+                                .py_1()
+                                .rounded(px(theme::R_EMBED))
+                                .border_1()
+                                .border_color(rgb(if sched_on {
+                                    theme::vermilion()
+                                } else {
+                                    theme::hairline()
+                                }))
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(if sched_on {
+                                    theme::vermilion()
+                                } else {
+                                    theme::muted()
+                                }))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.sched_on = !this.sched_on;
+                                    cx.notify();
+                                }))
+                                .child(if sched_on { "schedule ✓" } else { "schedule" }),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .when(self.draft_hash(cx).is_some(), |d| {
+                        d.child(
+                            div()
+                                .id("preview-toggle")
+                                .cursor_pointer()
+                                .px_3()
+                                .py_1()
+                                .rounded(px(theme::R_EMBED))
+                                .border_1()
+                                .border_color(rgb(if previewing {
+                                    theme::vermilion()
+                                } else {
+                                    theme::hairline()
+                                }))
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(if previewing {
+                                    theme::vermilion()
+                                } else {
+                                    theme::muted()
+                                }))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if this.previewing {
+                                        this.previewing = false;
                                     } else {
-                                        theme::hairline()
-                                    }))
-                                    .text_size(px(theme::T_UI))
-                                    .text_color(rgb(if previewing {
-                                        theme::vermilion()
-                                    } else {
-                                        theme::muted()
-                                    }))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if this.previewing {
-                                            this.previewing = false;
-                                        } else {
-                                            this.show_preview(cx);
-                                        }
-                                        cx.notify();
-                                    }))
-                                    .child(if previewing { "preview ✓" } else { "preview" }),
-                            )
-                            })
-                            .when(tab != Tab::Article, |d| {
-                                d.child(
-                                    div()
-                                        .id("attach")
-                                        .cursor_pointer()
-                                        .px_3()
-                                        .py_1()
-                                        .text_size(px(theme::T_UI))
-                                        .text_color(rgb(theme::muted()))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.pick_attachments(cx);
-                                        }))
-                                        .child("+ attach media"),
-                                )
-                            })
-                            .when(tab != Tab::Poll, |d| {
-                                d.child(
-                                    div()
-                                        .id("schedule-toggle")
-                                        .cursor_pointer()
-                                        .px_3()
-                                        .py_1()
-                                        .rounded(px(theme::R_EMBED))
-                                        .border_1()
-                                        .border_color(rgb(if sched_on {
-                                            theme::vermilion()
-                                        } else {
-                                            theme::hairline()
-                                        }))
-                                        .text_size(px(theme::T_UI))
-                                        .text_color(rgb(if sched_on {
-                                            theme::vermilion()
-                                        } else {
-                                            theme::muted()
-                                        }))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.sched_on = !this.sched_on;
-                                            cx.notify();
-                                        }))
-                                        .child(if sched_on { "schedule ✓" } else { "schedule" }),
-                                )
-                            }),
-                    )
+                                        this.show_preview(cx);
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(if previewing { "preview ✓" } else { "preview" }),
+                        )
+                    })
                     .child(
                         div()
                             .id("send")
@@ -2591,10 +2543,11 @@ impl Render for Composer {
                             .px_4()
                             .py_1()
                             .rounded(px(theme::R_EMBED))
-                            .border_1()
-                            .border_color(rgb(theme::vermilion()))
+                            // Filled: the one solid element in the pane.
+                            .bg(rgb(theme::vermilion()))
                             .text_size(px(theme::T_BODY))
-                            .text_color(rgb(theme::vermilion()))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme::washi()))
                             .on_click(cx.listener(|this, _, _, cx| this.post(cx)))
                             .child(if posting {
                                 "…"
@@ -2605,7 +2558,8 @@ impl Render for Composer {
                             } else {
                                 "Publish"
                             }),
-            ))
+                    ),
+            )
             .when(!status.is_empty(), |d| {
                 d.child(
                     div()
