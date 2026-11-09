@@ -81,6 +81,14 @@ fn draft_take(cx: &mut App) -> Option<SessionDraft> {
     cx.default_global::<Draft>().0.take()
 }
 
+/// A poll option input: one paragraph (Enter inert, pasted breaks fold) —
+/// a choice is a line of text, and its value rides a tag verbatim.
+fn new_poll_option(cx: &mut App) -> Entity<Input> {
+    let e = cx.new(Input::new);
+    e.update(cx, |i, _| i.single_paragraph = true);
+    e
+}
+
 /// The synced-draft candidate: (reply parent, quote id, buffer, the ready
 /// attachment imetas) — save_draft's arguments, basically.
 pub type DraftCandidate = (Option<EventId>, Option<EventId>, String, Vec<Vec<String>>);
@@ -150,6 +158,22 @@ impl Attachment {
             .iter()
             .find(|e| e.starts_with("image "))
             .map(|e| e[6..].to_string())
+    }
+
+    /// The blob's mime, out of the imeta's `m` entry (upload.rs builds it;
+    /// fresh picks and restored tiles read the same way).
+    fn mime(&self) -> Option<&str> {
+        self.imeta
+            .as_ref()?
+            .iter()
+            .find(|e| e.starts_with("m "))
+            .map(|e| e[2..].trim())
+    }
+
+    /// NIP-68 keeps kind 20 for PICTURES: a video in a picture event's
+    /// imeta is off-spec (other clients' galleries won't render it).
+    fn is_video(&self) -> bool {
+        self.mime().is_some_and(|m| m.starts_with("video/"))
     }
 }
 
@@ -288,19 +312,31 @@ impl Composer {
         // view (input.rs reveal_caret).
         let body_scroll = ScrollHandle::new();
         input.update(cx, |i, _| i.set_scroll_reveal(body_scroll.clone()));
-        // The article's structural fields wrap but never break: Enter is
-        // inert (a title is one paragraph; pasted newlines fold flat). The
-        // topics field too — it's a comma list, never a poem.
+        // Every structural field wraps but never breaks: Enter is inert
+        // (a title/URL/question is one paragraph; pasted newlines fold
+        // flat). The photo title and the cover URL had the old fixed-row
+        // spill (a newline rode the title tag; a URL never survived a
+        // paste with a trailing break).
         let art_title = cx.new(Input::new);
         let art_summary = cx.new(Input::new);
         let art_topics = cx.new(Input::new);
-        for f in [&art_title, &art_summary, &art_topics] {
-            f.update(cx, |i, _| i.single_paragraph = true);
-        }
         let art_cover = cx.new(Input::new);
         let photo_title = cx.new(Input::new);
         let poll_question = cx.new(Input::new);
-        let mut poll_options = (0..2).map(|_| cx.new(Input::new)).collect::<Vec<_>>();
+        for f in [
+            &art_title,
+            &art_summary,
+            &art_topics,
+            &art_cover,
+            &photo_title,
+            &poll_question,
+        ] {
+            f.update(cx, |i, _| i.single_paragraph = true);
+        }
+        // Poll options share the shape (a choice is one line of text).
+        let mut poll_options = (0..2)
+            .map(|_| new_poll_option(cx))
+            .collect::<Vec<_>>();
         let mut poll_multi = false;
         // D17 tripwire: the note field and the alt field are not places a
         // private key belongs — a pasted nsec is intercepted with a strip.
@@ -345,7 +381,7 @@ impl Composer {
                         .options
                         .iter()
                         .map(|o| {
-                            let e = cx.new(Input::new);
+                            let e = new_poll_option(cx);
                             e.update(cx, |i, cx| i.set_text(o, cx));
                             e
                         })
@@ -1083,6 +1119,16 @@ impl Composer {
             cx.notify();
             return;
         }
+        // NIP-68 spec guard (the attach strip is shared across tabs, so a
+        // video picked on the note tab rides along): refuse with the way
+        // out. Attachments survive the switch.
+        if self.attachments.iter().any(Attachment::is_video) {
+            self.status =
+                "a photo post takes images; video rides a note (switch tabs to send it)"
+                    .into();
+            cx.notify();
+            return;
+        }
         if self.attachments.iter().any(|a| a.imeta.is_none()) {
             self.status = "waiting for the upload to finish…".into();
             cx.notify();
@@ -1139,6 +1185,14 @@ impl Composer {
         }
         if self.attachments.is_empty() {
             self.status = "a photo post needs at least one image".into();
+            cx.notify();
+            return;
+        }
+        // Same NIP-68 guard as the instant path.
+        if self.attachments.iter().any(Attachment::is_video) {
+            self.status =
+                "a photo post takes images; video rides a note (switch tabs to send it)"
+                    .into();
             cx.notify();
             return;
         }
@@ -1798,9 +1852,12 @@ impl Render for Composer {
                         .gap_2()
                         .child(poll_label("Title (optional)"))
                         .child(
+                            // Wrap-and-grow (single-paragraph input): a
+                            // long title rides its real wrap count, not a
+                            // fixed row.
                             div()
                                 .flex()
-                                .h(window.line_height() + px(theme::S5))
+                                .min_h(window.line_height() + px(theme::S5))
                                 .rounded(px(theme::R_EMBED))
                                 .border_1()
                                 .border_color(rgb(theme::hairline()))
@@ -1823,17 +1880,8 @@ impl Render for Composer {
                 // the empty box a line tall and the content-sized Input
                 // grows it; the real wrap count drives the height, so a
                 // long title can't clip the way the old fixed row did.
-                let art_field = |input: Entity<Input>, window: &Window| -> gpui::Div {
-                    div()
-                        .flex()
-                        .h(window.line_height() + px(theme::S5))
-                        .rounded(px(theme::R_EMBED))
-                        .border_1()
-                        .border_color(rgb(theme::hairline()))
-                        .bg(rgb(theme::washi()))
-                        .p_2()
-                        .child(input)
-                };
+                // (art_wrap_field below: Enter-inert content-sized rows —
+                // the real wrap count drives the height.)
                 let art_wrap_field = |input: Entity<Input>, window: &Window| -> gpui::Div {
                     div()
                         .flex()
@@ -1862,7 +1910,7 @@ impl Render for Composer {
                         .child(poll_label("Cover image (optional)"))
                         .child(
                             div().flex().gap_2().child(
-                                art_field(art_cover, window).flex_1(),
+                                art_wrap_field(art_cover, window).flex_1(),
                             )
                             .child(
                                 div()
@@ -2012,8 +2060,6 @@ impl Render for Composer {
                         )
                         .child(poll_label("Options"))
                         .children(poll_options.iter().enumerate().map(|(i, opt)| {
-                            let opt_lines =
-                                est_lines(&opt.read(cx).content, 60.0).max(1.0);
                             div()
                                 .flex()
                                 .items_center()
@@ -2040,7 +2086,11 @@ impl Render for Composer {
                                     div()
                                         .flex_1()
                                         .flex()
-                                        .h(window.line_height() * (opt_lines + 0.8))
+                                        // Wraps and grows like the question
+                                        // (single-paragraph input) — no
+                                        // est_lines guess to clip a long
+                                        // choice.
+                                        .min_h(window.line_height() + px(theme::S5))
                                         .rounded(px(theme::R_EMBED))
                                         .border_1()
                                         .border_color(rgb(theme::hairline()))
@@ -2081,7 +2131,7 @@ impl Render for Composer {
                                 .text_color(rgb(theme::muted()))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     if !this.posting && this.poll_options.len() < 6 {
-                                        this.poll_options.push(cx.new(Input::new));
+                                        this.poll_options.push(new_poll_option(cx));
                                         cx.notify();
                                     }
                                 }))
@@ -2456,10 +2506,12 @@ impl Render for Composer {
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(
-                                // The preview pill: article flips to the
-                                // reader-faithful preview, the other tabs
-                                // reveal the draft's feed card below.
+                            // The preview pill: article flips to the
+                            // reader-faithful preview, the other tabs
+                            // reveal the draft's feed card below. Nothing
+                            // typed anywhere — no preview to show.
+                            .when(self.draft_hash(cx).is_some(), |d| {
+                                d.child(
                                 div()
                                     .id("preview-toggle")
                                     .cursor_pointer()
@@ -2488,6 +2540,7 @@ impl Render for Composer {
                                     }))
                                     .child(if previewing { "preview ✓" } else { "preview" }),
                             )
+                            })
                             .when(tab != Tab::Article, |d| {
                                 d.child(
                                     div()
@@ -2500,7 +2553,7 @@ impl Render for Composer {
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.pick_attachments(cx);
                                         }))
-                                        .child("+ attach images"),
+                                        .child("+ attach media"),
                                 )
                             })
                             .when(tab != Tab::Poll, |d| {
