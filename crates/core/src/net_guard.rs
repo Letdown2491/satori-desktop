@@ -351,7 +351,10 @@ mod tests {
             "240.0.0.1",       // reserved
             "255.255.255.255", // broadcast
         ] {
-            assert!(!is_public_ip(&bad.parse().unwrap()), "{bad} must be refused");
+            assert!(
+                !is_public_ip(&bad.parse().unwrap()),
+                "{bad} must be refused"
+            );
         }
     }
 
@@ -374,11 +377,16 @@ mod tests {
             "2002:c0a8:101::1",   // 6to4 → 192.168.1.1
             "2001:0:c0a8:101::1", // Teredo server 192.168.1.1
         ] {
-            assert!(!is_public_ip(&bad.parse().unwrap()), "{bad} must be refused");
+            assert!(
+                !is_public_ip(&bad.parse().unwrap()),
+                "{bad} must be refused"
+            );
         }
         // Teredo with an internal CLIENT v4 (obfuscated) also dies —
         // 192.168.1.1 XOR 0xffff = c6:57 → segments 6/7 = 0x39a7,0xfe9f.
-        assert!(!is_public_ip(&"2001:0:6464:6464:0:0:39a7:fe9f".parse().unwrap()));
+        assert!(!is_public_ip(
+            &"2001:0:6464:6464:0:0:39a7:fe9f".parse().unwrap()
+        ));
         // Transition mechanisms with PUBLIC embedded v4 still pass.
         assert!(is_public_ip(&"64:ff9b::8.8.8.8".parse().unwrap()));
         assert!(is_public_ip(&"2002:0808:0808::1".parse().unwrap()));
@@ -405,8 +413,8 @@ mod tests {
             "192.0.2.9",       // TEST-NET-1
             "198.18.0.7",      // benchmark
             "[::1]",
-            "[fd00::1]",           // ULA
-            "[fe80::1]",           // link-local
+            "[fd00::1]",            // ULA
+            "[fe80::1]",            // link-local
             "[64:ff9b::192.0.2.9]", // NAT64 → TEST-NET-1
             "[2002:c0a8:101::1]",   // 6to4 → 192.168.1.1
             "[2001:0:c0a8:101::1]", // Teredo server 192.168.1.1

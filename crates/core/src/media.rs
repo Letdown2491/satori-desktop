@@ -597,6 +597,9 @@ mod tests {
     /// hyper dials, so a rebinding name has nothing left to dial.
     #[test]
     fn resolver_filter_keeps_only_global() {
+        // The rules live in net_guard now (M5); this pins the resolver
+        // contract against the shared authority.
+        use crate::net_guard::is_public_ip as is_global_ip;
         let s = |ip: std::net::IpAddr| std::net::SocketAddr::new(ip, 0);
         let keep = |ips: &[std::net::IpAddr]| -> Vec<_> {
             ips.iter()
@@ -642,7 +645,10 @@ mod tests {
     fn transition_mechanism_embedded_v4_is_screened() {
         let refused = |bad: &str| {
             let ip: std::net::IpAddr = bad.parse().unwrap();
-            assert!(!crate::net_guard::is_public_ip(&ip), "{bad} must be refused");
+            assert!(
+                !crate::net_guard::is_public_ip(&ip),
+                "{bad} must be refused"
+            );
         };
         let passed = |good: &str| {
             let ip: std::net::IpAddr = good.parse().unwrap();
