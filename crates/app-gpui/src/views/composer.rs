@@ -41,12 +41,40 @@ pub fn bind_composer_keys(cx: &mut gpui::App) {
 pub struct Draft(pub Option<SessionDraft>);
 impl Global for Draft {}
 
-/// What a session-stashed draft holds (v1.4): the buffer + the ready
-/// imeta arrays (the blobs are on Blossom; nothing re-uploads).
+/// What a session-stashed draft holds (v1.4: buffer + ready imetas; the
+/// 0.4 pass adds the other tabs' fields — an Esc mid-essay keeps the
+/// essay). One draft at a time: the newest close wins.
 #[derive(Default)]
 pub struct SessionDraft {
     pub text: String,
     pub attachments: Vec<Vec<String>>,
+    /// The tab the draft was typed in — the restore reopens there.
+    pub tab: Tab,
+    /// Photo title, or the article's NIP-23 fields.
+    pub title: String,
+    pub summary: String,
+    pub cover: String,
+    pub topics: String,
+    /// The poll's form.
+    pub question: String,
+    pub options: Vec<String>,
+    pub multi: bool,
+}
+
+impl SessionDraft {
+    /// The restore gate: the stash must hold something typed (the take
+    /// spends it either way — an empty stash IS the clear).
+    fn restorable(self) -> Option<Self> {
+        let nonempty = !self.text.trim().is_empty()
+            || !self.title.trim().is_empty()
+            || !self.summary.trim().is_empty()
+            || !self.cover.trim().is_empty()
+            || !self.topics.trim().is_empty()
+            || !self.question.trim().is_empty()
+            || self.options.iter().any(|o| !o.trim().is_empty())
+            || !self.attachments.is_empty();
+        nonempty.then_some(self)
+    }
 }
 
 fn draft_take(cx: &mut App) -> Option<SessionDraft> {
@@ -112,14 +140,26 @@ impl Attachment {
             .find(|e| e.starts_with("url "))
             .map(|e| e[4..].to_string())
     }
+
+    /// The video poster url (D38's imeta `image` entry) — a video tile
+    /// can't decode its own bytes, so its face is the first frame's blob.
+    /// (The render reads it through the media cache; this is the key.)
+    fn poster(&self) -> Option<String> {
+        self.imeta
+            .as_ref()?
+            .iter()
+            .find(|e| e.starts_with("image "))
+            .map(|e| e[6..].to_string())
+    }
 }
 
 /// The compose tab: a note (kind 1), a photo (NIP-68, kind 20), a poll
 /// (NIP-88, kind 1068), or an article (NIP-23, kind 30023) — the web
 /// app's Note · Picture · Poll · Article selector. Replies carry no
 /// tabs — they're notes/comments by nature.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tab {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) enum Tab {
+    #[default]
     Note,
     Photo,
     Poll,
@@ -219,6 +259,11 @@ pub struct Composer {
     /// Names/avatars for the preview's byline + body mentions (reader.rs
     /// want_names' shape: pump ensure_profiles, merge on landing).
     preview_profiles: HashMap<String, Profile>,
+    /// The two-step Esc: the content fingerprint the first Esc saved.
+    /// A second Esc with the SAME fingerprint passes through to
+    /// escape-to-back; typing changes the fingerprint, so the next Esc
+    /// saves again instead of discarding.
+    esc_arm: Option<u64>,
     focus: FocusHandle,
 }
 
@@ -244,29 +289,71 @@ impl Composer {
         let body_scroll = ScrollHandle::new();
         input.update(cx, |i, _| i.set_scroll_reveal(body_scroll.clone()));
         // The article's structural fields wrap but never break: Enter is
-        // inert (a title is one paragraph; pasted newlines fold flat).
+        // inert (a title is one paragraph; pasted newlines fold flat). The
+        // topics field too — it's a comma list, never a poem.
         let art_title = cx.new(Input::new);
         let art_summary = cx.new(Input::new);
-        for f in [&art_title, &art_summary] {
+        let art_topics = cx.new(Input::new);
+        for f in [&art_title, &art_summary, &art_topics] {
             f.update(cx, |i, _| i.single_paragraph = true);
         }
+        let art_cover = cx.new(Input::new);
+        let photo_title = cx.new(Input::new);
+        let poll_question = cx.new(Input::new);
+        let mut poll_options = (0..2).map(|_| cx.new(Input::new)).collect::<Vec<_>>();
+        let mut poll_multi = false;
         // D17 tripwire: the note field and the alt field are not places a
         // private key belongs — a pasted nsec is intercepted with a strip.
-        input.update(cx, |i, _| i.tripwire = true);        // Restored attachments (stash or synced entry) build up here.
+        input.update(cx, |i, _| i.tripwire = true);
+        // Restored attachments (stash or synced entry) build up here.
         let mut attachments: Vec<Attachment> = Vec::new();
+        let mut restored_tab = Tab::Note;
         // Draft restore: a top-level compose reopens with whatever was typed
         // and closed before (composer.rs:114 — the take spends the stash).
         // A quote compose carries the quote, so it skips the stash too.
+        // Tab-aware (0.4): an article/photo/poll close reopens on its own
+        // tab with its own fields; the note stash's shape is unchanged.
         if reply_to.is_none() && quote.is_none()
             && let Some(stash) = draft_take(cx)
-            && !stash.text.trim().is_empty()
+            && let Some(restorable) = stash.restorable()
         {
-            input.update(cx, |i, cx| i.set_text(&stash.text, cx));
-            attachments = stash
-                .attachments
-                .iter()
-                .filter_map(|m| Attachment::from_imeta(m.clone()))
-                .collect();
+            restored_tab = restorable.tab;
+            // Text + attachments restore for every tab but the poll (its
+            // note buffer is empty by construction — the question is the
+            // text, and it must not wipe a note slot).
+            if restorable.tab != Tab::Poll {
+                input.update(cx, |i, cx| i.set_text(&restorable.text, cx));
+                attachments = restorable
+                    .attachments
+                    .iter()
+                    .filter_map(|m| Attachment::from_imeta(m.clone()))
+                    .collect();
+            }
+            match restorable.tab {
+                Tab::Article => {
+                    art_title.update(cx, |i, cx| i.set_text(&restorable.title, cx));
+                    art_summary.update(cx, |i, cx| i.set_text(&restorable.summary, cx));
+                    art_cover.update(cx, |i, cx| i.set_text(&restorable.cover, cx));
+                    art_topics.update(cx, |i, cx| i.set_text(&restorable.topics, cx));
+                }
+                Tab::Photo => {
+                    photo_title.update(cx, |i, cx| i.set_text(&restorable.title, cx));
+                }
+                Tab::Poll => {
+                    poll_question.update(cx, |i, cx| i.set_text(&restorable.question, cx));
+                    poll_options = restorable
+                        .options
+                        .iter()
+                        .map(|o| {
+                            let e = cx.new(Input::new);
+                            e.update(cx, |i, cx| i.set_text(o, cx));
+                            e
+                        })
+                        .collect();
+                    poll_multi = restorable.multi;
+                }
+                Tab::Note => {}
+            }
         } else if reply_to.is_none() && quote.is_none() {
             // D38: no session stash — the synced one (NIP-78 kind 30078)
             // survives restarts; the take spends it (a close without a send
@@ -302,10 +389,6 @@ impl Composer {
         // @-mention detection: watch the buffer, find an active `@token`.
         cx.observe(&input, |this, _input, cx| this.detect_mention(cx))
             .detach();
-        let poll_question = cx.new(Input::new);
-        let poll_options = (0..2)
-            .map(|_| cx.new(Input::new))
-            .collect();
         // The schedule field and the alt editor are single-line.
         let sched_at = cx.new(|cx| {
             let mut i = Input::new(cx);
@@ -314,7 +397,10 @@ impl Composer {
         });
         let alt_input = cx.new(|cx| {
             let mut i = Input::new(cx);
-            i.multiline = false;
+            // Wrapping but one paragraph: alt text is exactly where people
+            // paste sentences, and a typed newline would corrupt the imeta
+            // `alt` entry (single key=value line per entry).
+            i.single_paragraph = true;
             i.tripwire = true;
             i.placeholder("describe the image, for readers who can't see it")
         });
@@ -328,16 +414,16 @@ impl Composer {
             core,
             input,
             body_scroll,
-            tab: Tab::Note,
-            photo_title: cx.new(Input::new),
+            tab: restored_tab,
+            photo_title,
             poll_question,
             poll_options,
-            poll_multi: false,
+            poll_multi,
             art_title,
             art_summary,
-            art_cover: cx.new(Input::new),
+            art_cover,
             art_cover_busy: false,
-            art_topics: cx.new(Input::new),
+            art_topics,
             mentions: vec![],
             suggest: vec![],
             mention_token: None,
@@ -359,6 +445,7 @@ impl Composer {
             focused_tab: None,
             previewing: false,
             preview_profiles: HashMap::new(),
+            esc_arm: None,
             focus,
         }
     }
@@ -377,6 +464,10 @@ impl Composer {
                 .spawn(async move {
                     rfd::FileDialog::new()
                         .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif"])
+                        // Video rides the note (WS1: media-in-note, D38's
+                        // poster grab already in the chain) — the filter
+                        // was the only thing keeping it out.
+                        .add_filter("Video", &["mp4", "webm", "mov", "mkv", "m4v"])
                         .pick_files()
                 })
                 .await;
@@ -401,17 +492,28 @@ impl Composer {
                         "jpg" | "jpeg" => "image/jpeg",
                         "webp" => "image/webp",
                         "gif" => "image/gif",
+                        "mp4" | "m4v" => "video/mp4",
+                        "webm" => "video/webm",
+                        "mov" => "video/quicktime",
+                        "mkv" => "video/x-matroska",
                         _ => continue,
                     };
                     match std::fs::read(&path) {
                         Ok(bytes) => {
+                            // Video bytes never become a gpui::Image (the
+                            // decoder would reject them): the tile's face
+                            // is the D38 poster once its upload lands.
                             let format = match content_type {
                                 "image/png" => gpui::ImageFormat::Png,
                                 "image/jpeg" => gpui::ImageFormat::Jpeg,
                                 "image/webp" => gpui::ImageFormat::Webp,
                                 _ => gpui::ImageFormat::Gif,
                             };
-                            let image = gpui::Image::from_bytes(format, bytes.clone());
+                            let image = if content_type.starts_with("video/") {
+                                None
+                            } else {
+                                Some(gpui::Image::from_bytes(format, bytes.clone()))
+                            };
                             let id = this.next_att;
                             this.next_att += 1;
                             this.attachments.push(Attachment {
@@ -421,7 +523,7 @@ impl Composer {
                                     .map(|n| n.to_string_lossy().into_owned())
                                     .unwrap_or_default(),
                                 bytes: Some(bytes.clone()),
-                                image: Some(image),
+                                image,
                                 imeta: None,
                                 alt: None,
                             });
@@ -533,12 +635,27 @@ impl Composer {
     }
 
     /// A suggestion was picked: replace the @token in the buffer with the
-    /// chosen name, remember the pubkey for the p tags.
+    /// chosen name, remember the pubkey for the p tags. On the ARTICLE tab
+    /// the insert is the `nostr:` npub URI instead — an article carries no
+    /// p tags, so a bare `@Name` would decorate the text and resolve
+    /// nowhere; the URI is what the reader's classifier (and every other
+    /// client) links on.
     fn pick_mention(&mut self, idx: usize, cx: &mut Context<Self>) {
         let Some(profile) = self.suggest.get(idx).cloned() else {
             return;
         };
+        let article = self.tab == Tab::Article;
         if let Some(q) = self.mention_token.clone() {
+            let insert = if article {
+                // The resolvable form; the display name stays for note
+                // bodies, where the p tag carries the identity.
+                match PublicKey::from_hex(&profile.pubkey) {
+                    Ok(pk) => format!("nostr:{} ", pk.to_bech32().unwrap_or_default()),
+                    Err(_) => format!("@{} ", profile.display()),
+                }
+            } else {
+                format!("@{} ", profile.display())
+            };
             let i = self.input.read(cx);
             let text = i.content.clone();
             let cursor = i.cursor_offset().min(text.len());
@@ -546,7 +663,7 @@ impl Composer {
             let at = text[..cursor].rfind(&needle).unwrap_or(cursor);
             let mut next = String::with_capacity(text.len());
             next.push_str(&text[..at]);
-            next.push_str(&format!("@{} ", profile.display()));
+            next.push_str(&insert);
             next.push_str(&text[cursor..]);
             self.input.update(cx, |i, cx| i.set_text(&next, cx));
         }
@@ -586,6 +703,12 @@ impl Composer {
             Some(t) => {
                 self.emoji_suggest = crate::emoji::candidates(t);
                 self.emoji_token = Some(t.clone());
+                // Emoji wins the buffer tail: both typeaheads watch the
+                // same text, and a strip showing @names over a `:token`
+                // would insert the wrong thing on Enter. Last detected
+                // owns the keys.
+                self.suggest.clear();
+                self.mention_token = None;
             }
             None => {
                 self.emoji_suggest.clear();
@@ -719,8 +842,11 @@ impl Composer {
     /// Write an attachment's alt into its imeta (NIP-68): one `alt` entry,
     /// replaced on edit, dropped when emptied. The imeta stays the single
     /// source of truth — publish, drafts and the reader-side badge read it.
+    /// Whitespace folds flat: an imeta entry is one `key value` line, so a
+    /// stray newline (paste paths that bypass the field's fold) would
+    /// corrupt the tag.
     fn save_alt(&mut self, id: u64, cx: &mut Context<Self>) {
-        let text = self.alt_input.read(cx).content.trim().to_string();
+        let text = self.alt_input.read(cx).content.split_whitespace().collect::<Vec<_>>().join(" ");
         if let Some(a) = self.attachments.iter_mut().find(|a| a.id == id) {
             if let Some(imeta) = a.imeta.as_mut() {
                 imeta.retain(|e| !e.starts_with("alt "));
@@ -1277,24 +1403,110 @@ impl Composer {
         .detach();
     }
 
+    /// The composer's typed-content fingerprint — the two-step Esc's
+    /// "did you type since I saved" check. None when nothing is typed
+    /// anywhere: an empty form's Esc pops at once, as it always did.
+    fn draft_hash(&self, cx: &App) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.tab.hash(&mut h);
+        for src in [
+            &self.input,
+            &self.photo_title,
+            &self.art_title,
+            &self.art_summary,
+            &self.art_cover,
+            &self.art_topics,
+            &self.poll_question,
+        ] {
+            src.read(cx).content.hash(&mut h);
+        }
+        for o in &self.poll_options {
+            o.read(cx).content.hash(&mut h);
+        }
+        self.poll_multi.hash(&mut h);
+        for a in &self.attachments {
+            a.name.hash(&mut h);
+            if let Some(m) = &a.imeta {
+                for e in m {
+                    e.hash(&mut h);
+                }
+            }
+        }
+        // The toggle alone isn't "typed": an untouched form with the
+        // multi box flipped still pops on the first Esc.
+        let typed = !self.input.read(cx).content.trim().is_empty()
+            || !self.photo_title.read(cx).content.trim().is_empty()
+            || !self.art_title.read(cx).content.trim().is_empty()
+            || !self.art_summary.read(cx).content.trim().is_empty()
+            || !self.art_cover.read(cx).content.trim().is_empty()
+            || !self.art_topics.read(cx).content.trim().is_empty()
+            || !self.poll_question.read(cx).content.trim().is_empty()
+            || self
+                .poll_options
+                .iter()
+                .any(|o| !o.read(cx).content.trim().is_empty())
+            || !self.attachments.is_empty();
+        typed.then(|| h.finish())
+    }
+
+    /// The two-step Esc's first press: save exactly what a close would
+    /// (the session stash AND the synced slot — the close path repeats
+    /// both, idempotent), then say so and hold the pane.
+    fn stash_now(&mut self, cx: &mut Context<Self>) {
+        if let Some(stash) = self.draft_candidate(cx) {
+            cx.default_global::<Draft>().0 = Some(stash);
+        }
+        if let Some((reply, quote, text, imetas)) = self.draft_sync_candidate(cx) {
+            let _ = self.core.save_draft(reply, quote, text, imetas, false);
+        }
+        self.status = "draft saved · esc again to close".into();
+    }
+
     /// Stash candidate, GTK close-handler semantics (composer.rs:509): the
-    /// whole buffer of a top-level compose that never sent — possibly empty,
-    /// so closing empty clears a stale draft. None = don't touch the draft
-    /// (replies, a send in flight, an undo window pending). v1.4: the
-    /// session stash carries the ready attachment imetas too.
+    /// whole form of a top-level compose that never sent — every tab now
+    /// (the two-step Esc: the first save is this). None = don't touch the
+    /// draft (replies, a send in flight, a completely empty form). v1.4:
+    /// the session stash carries the ready attachment imetas too.
     pub fn draft_candidate(&self, cx: &App) -> Option<SessionDraft> {
-        if self.reply_to.is_some() || self.quote.is_some() || self.posting
-            || !matches!(self.tab, Tab::Note)
-        {
-            // Polls keep no draft (v1); the article and photo tabs join
-            // them — their buffers are the body/caption, and a
-            // tab-aware restore (title, cover, tab itself) is not wired.
+        if self.reply_to.is_some() || self.quote.is_some() || self.posting {
             return None;
         }
-        Some(SessionDraft {
-            text: self.input.read(cx).content.trim().to_string(),
+        let stash = SessionDraft {
+            tab: self.tab,
+            text: self.input.read(cx).content.clone(),
             attachments: self.ready_imetas(),
-        })
+            title: match self.tab {
+                Tab::Photo => self.photo_title.read(cx).content.clone(),
+                Tab::Article => self.art_title.read(cx).content.clone(),
+                _ => String::new(),
+            },
+            summary: self.art_summary.read(cx).content.clone(),
+            cover: self.art_cover.read(cx).content.clone(),
+            topics: self.art_topics.read(cx).content.clone(),
+            question: self.poll_question.read(cx).content.clone(),
+            options: self
+                .poll_options
+                .iter()
+                .map(|e| e.read(cx).content.clone())
+                .collect(),
+            multi: self.poll_multi,
+        };
+        // An entirely empty form keeps nothing: the note slot's
+        // close-empty-clears semantics need an empty stash to exist, but
+        // the other tabs have nothing to clear — None is honest.
+        let empty = stash.text.trim().is_empty()
+            && stash.title.trim().is_empty()
+            && stash.summary.trim().is_empty()
+            && stash.cover.trim().is_empty()
+            && stash.topics.trim().is_empty()
+            && stash.question.trim().is_empty()
+            && stash.options.iter().all(|o| o.trim().is_empty())
+            && stash.attachments.is_empty();
+        if empty && self.tab != Tab::Note {
+            return None;
+        }
+        Some(stash)
     }
 
     /// The SYNCED draft candidate (D38): (reply parent, quote, buffer,
@@ -1425,6 +1637,11 @@ impl Render for Composer {
             .map(|w| w.0)
             .unwrap_or(false);
         let field_lines = est_lines(input.read(cx).content.as_str(), 72.0);
+        // D9's quiet companion: live reading time under the article body —
+        // the preview computes it, the form whispers it while you write.
+        let body_text = input.read(cx).content.clone();
+        let read_minutes = satori_core::nip::article::reading_minutes(&body_text);
+        let body_empty = body_text.trim().is_empty();
         let quote_snap = media::Snapshot::new(cx);
         // The quote card's avatar comes back if the cache evicted it
         // (fetch is a silent no-op when the cache still holds it).
@@ -1466,6 +1683,27 @@ impl Render for Composer {
                     cx.notify();
                     return;
                 }
+                // The two-step Esc (B3): a typed-but-unsent form's first
+                // Esc saves exactly what a close would and HOLDS the pane;
+                // the second passes through to escape-to-back. Typing
+                // changes the fingerprint, so a save is never stale. An
+                // untouched form pops on the first Esc, as it always did.
+                if ev.keystroke.key == "escape"
+                    && !this.posting
+                    && this.emoji_suggest.is_empty()
+                    && let Some(h) = this.draft_hash(cx)
+                {
+                    if this.esc_arm == Some(h) {
+                        this.esc_arm = None;
+                    // fall through: the shell's escape-to-back pops
+                    } else {
+                        this.esc_arm = Some(h);
+                        this.stash_now(cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+                }
                 if this.emoji_suggest.is_empty() {
                     return;
                 }
@@ -1498,7 +1736,12 @@ impl Render for Composer {
             // from the poll's question and options.)
             .flex_1()
             .min_h_0()
-            .overflow_hidden()
+            // The ROOT scrolls: stacked strips (quote card, attachments,
+            // alt editor, schedule, the emoji strip) can't push the Publish
+            // button off a short window anymore. The body box keeps its own
+            // internal scroller (nested scroll is fine — the inner only
+            // overflows when the essay does).
+            .overflow_y_scroll()
             .flex()
             .flex_col()
             .font_family(theme::SANS)
@@ -1650,7 +1893,7 @@ impl Render for Composer {
                             ),
                         )
                         .child(poll_label("Topics (optional, comma separated)"))
-                        .child(art_field(art_topics, window))
+                        .child(art_wrap_field(art_topics, window))
                         // The cover preview: the URL rendered the moment it
                         // exists, through the same media cache the cards
                         // read (a broken URL says so instead of staring).
@@ -1714,6 +1957,18 @@ impl Render for Composer {
                         .when(replying, |d| d.rounded(px(theme::R_EMBED)))
                         .when(!replying, |d| d.rounded_b(px(theme::R_EMBED)))
                         .child(input),
+                )
+            })
+            .when(tab == Tab::Article && !body_empty, |d| {
+                d.child(
+                    div()
+                        .px_1()
+                        .text_size(px(theme::T_SMALL))
+                        .text_color(rgb(theme::muted()))
+                        .child(format!(
+                            "{} min read",
+                            read_minutes
+                        )),
                 )
             })
             .when(tab == Tab::Poll, |d| {
@@ -1789,7 +2044,11 @@ impl Render for Composer {
                                         .p_2()
                                         .child(opt.clone()),
                                 )
-                                .when(i >= 2, |d| {
+                                // × on EVERY option while there's a spare
+                                // (len > 2): with three options you could
+                                // once only delete the third — retyping to
+                                // fix a typo in option one was the old way.
+                                .when(poll_options.len() > 2, |d| {
                                     d.child(
                                         div()
                                             .id(SharedString::from(format!("rm-opt-{i}")))
@@ -2348,9 +2607,11 @@ impl Composer {
         if let Ok(pk) = self.core.me().unwrap_or_default().parse::<PublicKey>() {
             want.push(pk);
         }
-        // The note tab's mentions ride the buffer (@Name keeps the label;
-        // the p tags resolve to display names in the preview body).
+        // The note tab's mentions ride the p tags; the body's own tokens
+        // (article @-inserts are nostr: URIs, note bodies can carry them
+        // too) resolve through the same sweep the reader uses.
         want.extend(self.mentions.iter().cloned());
+        want.extend(content::mention_pks(&self.input.read(cx).content));
         let seen = self.preview_profiles.clone();
         let missing: Vec<PublicKey> = want
             .into_iter()
@@ -2649,7 +2910,20 @@ impl Composer {
         }
         match ev {
             Some(ev) if tab == Tab::Poll => {
-                // A static ballot: the feed's marks, no vote affordance.
+                // The question FIRST (it's the event content — the ballot
+                // rows mean nothing without it), then the static marks: the
+                // feed's ballot, no vote affordance.
+                let question = ev.content.trim().to_string();
+                if !question.is_empty() {
+                    card = card.child(
+                        div()
+                            .w_full()
+                            .text_size(px(theme::T_BODY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme::ink()))
+                            .child(question),
+                    );
+                }
                 if let Some(data) = satori_core::nip::poll::parse(&ev) {
                     let mut rows = div().w_full().flex().flex_col().gap_1();
                     for (_, label) in data.options {
@@ -2714,8 +2988,11 @@ impl Composer {
         // card's pattern; fetch is a silent no-op while it's cached).
         let snap = media::Snapshot::new(cx);
         for a in &self.attachments {
-            if a.bytes.is_none()
-                && let Some(url) = a.url()
+            // The preview source: restored tiles (no bytes) show the CDN
+            // copy; video tiles (no decodable image) show the D38 poster.
+            // Fetch is a silent no-op while the cache still holds it.
+            if a.image.is_none()
+                && let Some(url) = a.poster().or_else(|| a.url())
             {
                 media::fetch(&self.core, url, cx.entity_id(), cx);
             }
@@ -2767,9 +3044,11 @@ impl Composer {
                                     .size_full()
                                     .object_fit(gpui::ObjectFit::Cover)
                                     .into_any_element(),
-                                // The restored tile: the CDN copy when it
-                                // has landed, a quiet placeholder before.
-                                None => match a.url().and_then(|u| snap.png(&u)) {
+                                // No gpui image: the poster (video) or the
+                                // CDN copy (restored) through the cache; a
+                                // still-uploading tile says so instead of
+                                // staring at an ellipsis.
+                                None => match a.poster().or_else(|| a.url()).and_then(|u| snap.png(&u)) {
                                     Some(png) => img(png)
                                         .size_full()
                                         .object_fit(gpui::ObjectFit::Cover)
@@ -2777,7 +3056,11 @@ impl Composer {
                                     None => div()
                                         .text_size(px(theme::T_SMALL))
                                         .text_color(rgb(theme::muted()))
-                                        .child("…")
+                                        .child(if a.bytes.is_some() && a.imeta.is_none() {
+                                            "uploading…"
+                                        } else {
+                                            "…"
+                                        })
                                         .into_any_element(),
                                 },
                             }),
@@ -2828,17 +3111,19 @@ impl Composer {
                 div()
                     .w_full()
                     .flex()
-                    .items_center()
+                    .items_start()
                     .gap_2()
                     .child(
                         div()
                             .id("alt-field")
                             .flex_1()
                             .min_w_0()
-                            .overflow_hidden()
-                            .h(px(34.))
+                            // Wraps and grows (single-paragraph input):
+                            // pasted alt text rides the real wrap count,
+                            // not a 34px window onto its middle.
+                            .min_h(px(34.))
                             .px_2()
-                            .pt_1()
+                            .py_1()
                             .rounded(px(theme::R_EMBED))
                             .bg(rgb(theme::washi()))
                             .border_1()
