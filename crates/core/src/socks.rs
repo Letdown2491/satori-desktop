@@ -68,19 +68,14 @@ pub async fn spawn() -> std::io::Result<ScreeningSocks> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
     let addr = listener.local_addr()?;
     let task = tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, peer)) => {
-                    // Only the process itself may use the guard: a
-                    // loopback listener is reachable by every local
-                    // user, and this server dials ARBITRARY hosts.
-                    if !peer.ip().is_loopback() {
-                        continue;
-                    }
-                    tokio::spawn(serve_conn(stream));
-                }
-                Err(_) => break,
+        while let Ok((stream, peer)) = listener.accept().await {
+            // Only the process itself may use the guard: a
+            // loopback listener is reachable by every local
+            // user, and this server dials ARBITRARY hosts.
+            if !peer.ip().is_loopback() {
+                continue;
             }
+            tokio::spawn(serve_conn(stream));
         }
     });
     Ok(ScreeningSocks { addr, task })

@@ -116,19 +116,14 @@ pub fn spawn(origin: String) -> Result<RangeProxy, std::io::Error> {
             }
         };
         let _ = tx.send(Ok(addr));
-        loop {
-            match listener.accept().await {
-                Ok((stream, peer)) => {
-                    // Only the process itself may use the door: this
-                    // server fetches ARBITRARY origins.
-                    if !peer.ip().is_loopback() {
-                        continue;
-                    }
-                    let state = Arc::clone(&state);
-                    tokio::spawn(serve(stream, state));
-                }
-                Err(_) => break,
+        while let Ok((stream, peer)) = listener.accept().await {
+            // Only the process itself may use the door: this
+            // server fetches ARBITRARY origins.
+            if !peer.ip().is_loopback() {
+                continue;
             }
+            let state = Arc::clone(&state);
+            tokio::spawn(serve(stream, state));
         }
     });
     let addr = rx
