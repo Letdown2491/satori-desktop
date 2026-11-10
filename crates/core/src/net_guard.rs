@@ -70,6 +70,44 @@ pub fn is_public_unicast_ip(ip: IpAddr) -> bool {
             }
             // Global unicast lives in 2000::/3; ULA (fc00::/7),
             // link-local (fe80::/10) and everything experimental dies.
+            // Transition mechanisms embed IPv4 INSIDE 2000::/3 — screen
+            // the embedded leg too, or 64:ff9b::192.0.2.9-style answers
+            // ride a NAT64 gateway onto the internal network:
+            // - 64:ff9b::/96 (well-known NAT64): v4 in segments 6+7
+            // - 2002::/16 (6to4): v4 in segment 1 (hi) + 2 (lo)
+            // - 2001::/32 (Teredo): server v4 in segments 2+3, client
+            //   v4 obfuscated (XOR 0xffff) in segments 6+7 — screen BOTH
+            if s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 {
+                return is_public_unicast_ip(IpAddr::V4(std::net::Ipv4Addr::new(
+                    (s[6] >> 8) as u8,
+                    s[6] as u8,
+                    (s[7] >> 8) as u8,
+                    s[7] as u8,
+                )));
+            }
+            if s[0] == 0x2002 {
+                return is_public_unicast_ip(IpAddr::V4(std::net::Ipv4Addr::new(
+                    (s[1] >> 8) as u8,
+                    s[1] as u8,
+                    (s[2] >> 8) as u8,
+                    s[2] as u8,
+                )));
+            }
+            if s[0] == 0x2001 && s[1] == 0 {
+                let server = is_public_unicast_ip(IpAddr::V4(std::net::Ipv4Addr::new(
+                    (s[2] >> 8) as u8,
+                    s[2] as u8,
+                    (s[3] >> 8) as u8,
+                    s[3] as u8,
+                )));
+                let client = is_public_unicast_ip(IpAddr::V4(std::net::Ipv4Addr::new(
+                    !(s[6] >> 8) as u8,
+                    !(s[6] as u8),
+                    !(s[7] >> 8) as u8,
+                    !(s[7] as u8),
+                )));
+                return server && client;
+            }
             (s[0] & 0xe000) == 0x2000 && !(s[0] == 0x2001 && s[1] == 0x0db8)
         }
     }
@@ -240,12 +278,26 @@ mod tests {
             "ff02::1",                      // multicast
             "::ffff:127.0.0.1",             // v4-mapped loopback
             "2001:db8::1",                  // documentation
+            // Transition mechanisms with embedded INTERNAL v4:
+            "64:ff9b::192.0.2.9",           // NAT64 → TEST-NET-1
+            "64:ff9b::127.0.0.1",           // NAT64 → loopback
+            "2002:7f00:1::1",               // 6to4 → loopback
+            "2002:c0a8:101::1",             // 6to4 → 192.168.1.1
+            "2001:0:c0a8:101::1",           // Teredo server 192.168.1.1
         ] {
             assert!(
                 !is_public_unicast_ip(bad.parse().unwrap()),
                 "{bad} must be refused"
             );
         }
+        // Teredo with an internal CLIENT v4 (obfuscated) also dies —
+        // 192.168.1.1 XOR 0xffff = c6:57 → segments 6/7 = 0x39a7,0xfe9f.
+        assert!(!is_public_unicast_ip(
+            "2001:0:6464:6464:0:0:39a7:fe9f".parse().unwrap()
+        ));
+        // Transition mechanisms with PUBLIC embedded v4 still pass.
+        assert!(is_public_unicast_ip("64:ff9b::8.8.8.8".parse().unwrap()));
+        assert!(is_public_unicast_ip("2002:0808:0808::1".parse().unwrap()));
     }
 
     #[test]
