@@ -16,7 +16,7 @@ use gpui::{
     ScrollHandle, SharedString, Window, actions, div, img, prelude::*, px, relative, rgb,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, FeedRx, Profile, PublishEvent};
+use satori_core::manager::{Core, FeedEvent, FeedRx, PostKind, Profile, PublishEvent, PublishRx};
 
 use super::{
     content,
@@ -848,36 +848,18 @@ impl Composer {
         let imetas: Vec<Vec<String>> = self.ready_imetas();
         let core = self.core.clone();
         cx.notify();
-        let mut rx = core.schedule_note(
+        let rx = core.schedule_note(
             String::new(),
             text,
             reply,
             mentions,
             quote,
             imetas,
-            false,
-            false,
+            PostKind::Note,
             at,
         );
-        cx.spawn(async move |this, cx| {
-            // Every ScheduleEvent settles the pane (Scheduled pops, Failed
-            // stays with a word) — one receipt, no pump.
-            if let Some(ev) = rx.recv().await {
-                match ev {
-                    satori_core::manager::ScheduleEvent::Scheduled { .. } => {
-                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
-                    }
-                    satori_core::manager::ScheduleEvent::Failed { error } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.posting = false;
-                            this.status = format!("couldn't schedule: {error}");
-                            cx.notify();
-                        });
-                    }
-                }
-            }
-        })
-        .detach();
+        cx.spawn(async move |this, cx| Self::pump_schedule(this, rx, cx).await)
+            .detach();
     }
 
     /// The pending scheduled notes (soonest first), the "Scheduled"
@@ -928,6 +910,77 @@ impl Composer {
         }
     }
 
+    /// The publish pump every instant tab shares (poll, article, photo,
+    /// video): Held pops the pane NOW (publish.ts: the composer closes
+    /// and a toast floats the countdown over the feed; the pump dies with
+    /// the pane and core finishes the window regardless — the shell's
+    /// subscribe_hold toast carries Undo and the outcome), Undone/Failed
+    /// settle back into the pane with a word, Committed pops. The note
+    /// tab keeps its hand-rolled pump — its Held/Committed arms spend the
+    /// D38 synced draft slot before popping, so it can't share this
+    /// shape. `fail_word` is the pane's verdict prefix (the poll's
+    /// "failed", the rest's "couldn't post").
+    async fn pump_publish(
+        this: gpui::WeakEntity<Self>,
+        mut rx: PublishRx,
+        cx: &mut gpui::AsyncApp,
+        fail_word: &'static str,
+    ) {
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                PublishEvent::Held { .. } => {
+                    let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                    return;
+                }
+                PublishEvent::Undone { .. } => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.posting = false;
+                        this.status = "undone, nothing was sent".into();
+                        cx.notify();
+                    });
+                    return;
+                }
+                PublishEvent::Committed { .. } => {
+                    let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                    return;
+                }
+                PublishEvent::Failed { error, .. } => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.posting = false;
+                        this.status = format!("{fail_word}: {error}");
+                        cx.notify();
+                    });
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The schedule pump every scheduled tab shares (note, article,
+    /// photo, video): one receipt — Scheduled pops the pane (the sweep
+    /// owns the event from here), Failed settles back with a word.
+    async fn pump_schedule(
+        this: gpui::WeakEntity<Self>,
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<satori_core::manager::ScheduleEvent>,
+        cx: &mut gpui::AsyncApp,
+    ) {
+        if let Some(ev) = rx.recv().await {
+            match ev {
+                satori_core::manager::ScheduleEvent::Scheduled { .. } => {
+                    let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                }
+                satori_core::manager::ScheduleEvent::Failed { error } => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.posting = false;
+                        this.status = format!("couldn't schedule: {error}");
+                        cx.notify();
+                    });
+                }
+            }
+        }
+    }
+
     /// The poll publish: question + at least two options (NIP-88).
     /// No attachments, no mentions, no draft — v1 keeps the surface small.
     fn post_poll(&mut self, cx: &mut Context<Self>) {
@@ -947,44 +1000,9 @@ impl Composer {
         self.status.clear();
         cx.notify();
         let core = self.core.clone();
-        let mut rx = core.post_poll(question, options, self.poll_multi, None);
-        cx.spawn(async move |this, cx| {
-            while let Some(ev) = rx.recv().await {
-                match ev {
-                    // Held → the pane pops NOW (publish.ts: the composer
-                    // closes and a toast floats the countdown over the
-                    // feed). The pump dies with the pane; core finishes the
-                    // window regardless — the shell's subscribe_hold toast
-                    // carries Undo and the outcome.
-                    PublishEvent::Held { .. } => {
-                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
-                        return;
-                    }
-                    PublishEvent::Undone { .. } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.posting = false;
-                            this.status = "undone, nothing was sent".into();
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    PublishEvent::Committed { .. } => {
-                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
-                        return;
-                    }
-                    PublishEvent::Failed { error, .. } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.posting = false;
-                            this.status = format!("failed: {error}");
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .detach();
+        let rx = core.post_poll(question, options, self.poll_multi, None);
+        cx.spawn(async move |this, cx| Self::pump_publish(this, rx, cx, "failed").await)
+            .detach();
     }
 
     /// The article fields off the inputs (the body is the note buffer).
@@ -1046,39 +1064,9 @@ impl Composer {
         cx.notify();
         let core = self.core.clone();
         let draft = self.article_draft(cx);
-        let mut rx = core.post_article(draft);
-        cx.spawn(async move |this, cx| {
-            while let Some(ev) = rx.recv().await {
-                match ev {
-                    PublishEvent::Held { .. } => {
-                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
-                        return;
-                    }
-                    PublishEvent::Undone { .. } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.posting = false;
-                            this.status = "undone, nothing was sent".into();
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    PublishEvent::Committed { .. } => {
-                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
-                        return;
-                    }
-                    PublishEvent::Failed { error, .. } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.posting = false;
-                            this.status = format!("couldn't post: {error}");
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .detach();
+        let rx = core.post_article(draft);
+        cx.spawn(async move |this, cx| Self::pump_publish(this, rx, cx, "couldn't post").await)
+            .detach();
     }
 
     /// The scheduled article: sign-at-compose (core schedule_article), the
@@ -1103,24 +1091,9 @@ impl Composer {
         cx.notify();
         let draft = self.article_draft(cx);
         let core = self.core.clone();
-        let mut rx = core.schedule_article(draft, at);
-        cx.spawn(async move |this, cx| {
-            if let Some(ev) = rx.recv().await {
-                match ev {
-                    satori_core::manager::ScheduleEvent::Scheduled { .. } => {
-                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
-                    }
-                    satori_core::manager::ScheduleEvent::Failed { error } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.posting = false;
-                            this.status = format!("couldn't schedule: {error}");
-                            cx.notify();
-                        });
-                    }
-                }
-            }
-        })
-        .detach();
+        let rx = core.schedule_article(draft, at);
+        cx.spawn(async move |this, cx| Self::pump_schedule(this, rx, cx).await)
+            .detach();
     }
 
     /// The cover's Blossom upload: pick one image, the blob URL lands in
@@ -1157,39 +1130,9 @@ impl Composer {
         let title = self.photo_title.read(cx).content.trim().to_string();
         let caption = self.input.read(cx).content.trim().to_string();
         let imetas = self.ready_imetas();
-        let mut rx = core.post_picture(title, caption, imetas, None);
-        cx.spawn(async move |this, cx| {
-            while let Some(ev) = rx.recv().await {
-                match ev {
-                    PublishEvent::Held { .. } => {
-                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
-                        return;
-                    }
-                    PublishEvent::Undone { .. } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.posting = false;
-                            this.status = "undone, nothing was sent".into();
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    PublishEvent::Committed { .. } => {
-                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
-                        return;
-                    }
-                    PublishEvent::Failed { error, .. } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.posting = false;
-                            this.status = format!("couldn't post: {error}");
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .detach();
+        let rx = core.post_picture(title, caption, imetas, None);
+        cx.spawn(async move |this, cx| Self::pump_publish(this, rx, cx, "couldn't post").await)
+            .detach();
     }
 
     /// The scheduled photo: schedule_note with photo_post=true — core
@@ -1231,25 +1174,18 @@ impl Composer {
         let title = self.photo_title.read(cx).content.trim().to_string();
         let caption = self.input.read(cx).content.trim().to_string();
         let imetas = self.ready_imetas();
-        let mut rx =
-            core.schedule_note(title, caption, None, vec![], None, imetas, true, false, at);
-        cx.spawn(async move |this, cx| {
-            if let Some(ev) = rx.recv().await {
-                match ev {
-                    satori_core::manager::ScheduleEvent::Scheduled { .. } => {
-                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
-                    }
-                    satori_core::manager::ScheduleEvent::Failed { error } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.posting = false;
-                            this.status = format!("couldn't schedule: {error}");
-                            cx.notify();
-                        });
-                    }
-                }
-            }
-        })
-        .detach();
+        let rx = core.schedule_note(
+            title,
+            caption,
+            None,
+            vec![],
+            None,
+            imetas,
+            PostKind::Photo,
+            at,
+        );
+        cx.spawn(async move |this, cx| Self::pump_schedule(this, rx, cx).await)
+            .detach();
     }
 
     /// The video publish (NIP-71 kind 22, issue #18): the strip is the
@@ -1284,39 +1220,9 @@ impl Composer {
         let title = self.photo_title.read(cx).content.trim().to_string();
         let caption = self.input.read(cx).content.trim().to_string();
         let imetas = self.ready_imetas();
-        let mut rx = core.post_video(title, caption, imetas, None);
-        cx.spawn(async move |this, cx| {
-            while let Some(ev) = rx.recv().await {
-                match ev {
-                    PublishEvent::Held { .. } => {
-                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
-                        return;
-                    }
-                    PublishEvent::Undone { .. } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.posting = false;
-                            this.status = "undone, nothing was sent".into();
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    PublishEvent::Committed { .. } => {
-                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
-                        return;
-                    }
-                    PublishEvent::Failed { error, .. } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.posting = false;
-                            this.status = format!("couldn't post: {error}");
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .detach();
+        let rx = core.post_video(title, caption, imetas, None);
+        cx.spawn(async move |this, cx| Self::pump_publish(this, rx, cx, "couldn't post").await)
+            .detach();
     }
 
     /// The scheduled video: schedule_note with video_post=true — core
@@ -1359,25 +1265,18 @@ impl Composer {
         let title = self.photo_title.read(cx).content.trim().to_string();
         let caption = self.input.read(cx).content.trim().to_string();
         let imetas = self.ready_imetas();
-        let mut rx =
-            core.schedule_note(title, caption, None, vec![], None, imetas, false, true, at);
-        cx.spawn(async move |this, cx| {
-            if let Some(ev) = rx.recv().await {
-                match ev {
-                    satori_core::manager::ScheduleEvent::Scheduled { .. } => {
-                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
-                    }
-                    satori_core::manager::ScheduleEvent::Failed { error } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.posting = false;
-                            this.status = format!("couldn't schedule: {error}");
-                            cx.notify();
-                        });
-                    }
-                }
-            }
-        })
-        .detach();
+        let rx = core.schedule_note(
+            title,
+            caption,
+            None,
+            vec![],
+            None,
+            imetas,
+            PostKind::Video,
+            at,
+        );
+        cx.spawn(async move |this, cx| Self::pump_schedule(this, rx, cx).await)
+            .detach();
     }
 
     fn upload_cover(&mut self, cx: &mut Context<Self>) {

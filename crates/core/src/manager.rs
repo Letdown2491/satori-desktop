@@ -421,6 +421,19 @@ pub struct FeedPage {
     pub profiles: Vec<Profile>,
 }
 
+/// The composer tab a scheduled post rides as — the D49 routing as a
+/// type (a photo post schedules the SAME kind-20 event an instant post
+/// makes; a video post kind 22; a note kind 1 + imeta when it carries
+/// any). Replaced the (photo_post, video_post) bool pair: call sites
+/// read `false, false, at` with nothing labeling which flag meant which
+/// tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostKind {
+    Note,
+    Photo,
+    Video,
+}
+
 /// A push signal off the live subscription (one persistent sub per session,
 /// three filters). Live signaling, not the live timeline — nothing renders
 /// until a view asks. Also carries a few out-of-band manager signals (the
@@ -4615,8 +4628,7 @@ impl Core {
         mentions: Vec<PublicKey>,
         quote: Option<Event>,
         imetas: Vec<Vec<String>>,
-        photo_post: bool,
-        video_post: bool,
+        post: PostKind,
         scheduled_at: u64,
     ) -> mpsc::UnboundedReceiver<ScheduleEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -4633,16 +4645,20 @@ impl Core {
                 // #18); a note with attachments schedules as kind 1 + imeta
                 // (note_tags' build), matching the instant path's routing
                 // (issue #3 WS1).
-                let (kind, content, tags) = if !imetas.is_empty() && photo_post {
-                    let tags = Self::picture_tags(&title, &content, &imetas, None);
-                    (Kind::Custom(20), content, tags)
-                } else if !imetas.is_empty() && video_post {
-                    let tags = Self::video_tags(&title, &content, &imetas, None);
-                    (Kind::Custom(22), content, tags)
-                } else {
-                    let (content, tags) =
-                        Self::note_tags(content, reply_to, mentions, quote, &imetas, me);
-                    (Kind::TextNote, content, tags)
+                let (kind, content, tags) = match post {
+                    PostKind::Photo if !imetas.is_empty() => {
+                        let tags = Self::picture_tags(&title, &content, &imetas, None);
+                        (Kind::Custom(20), content, tags)
+                    }
+                    PostKind::Video if !imetas.is_empty() => {
+                        let tags = Self::video_tags(&title, &content, &imetas, None);
+                        (Kind::Custom(22), content, tags)
+                    }
+                    _ => {
+                        let (content, tags) =
+                            Self::note_tags(content, reply_to, mentions, quote, &imetas, me);
+                        (Kind::TextNote, content, tags)
+                    }
                 };
                 let unsigned = UnsignedEvent::new(
                     me,

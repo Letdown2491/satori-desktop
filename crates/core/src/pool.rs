@@ -756,7 +756,7 @@ impl Pool {
         };
         // WS2 (issue #4): the publish chokepoint — the one door every
         // outgoing event walks through, the mirror of consume_and_filter.
-        if let Some(report) = publish_gate(event, &targets) {
+        if let Some(report) = gate_publish_and_tombstone(event, &targets) {
             return report;
         }
         // D36: WRITE relays join at publish time — this was the documented
@@ -856,7 +856,10 @@ impl PublishReport {
 /// records its tombstone HERE, pinned (we signed it), so every delete
 /// path gets the gate for free (manager.rs's own pin stays: idempotent).
 /// None = the event may fan out.
-pub(crate) fn publish_gate(event: &Event, targets: &[String]) -> Option<PublishReport> {
+pub(crate) fn gate_publish_and_tombstone(
+    event: &Event,
+    targets: &[String],
+) -> Option<PublishReport> {
     if nip40::is_expired(event) {
         return Some(PublishReport {
             ok: Vec::new(),
@@ -889,7 +892,7 @@ mod tests {
     /// every target (the outbox must not queue a corpse); a live one
     /// fans out; a kind:5 records its pinned tombstone at the door.
     #[test]
-    fn publish_gate_refuses_expired_and_records_own_deletions() {
+    fn gate_publish_and_tombstone_refuses_expired_and_records_own_deletions() {
         let keys = Keys::generate();
         let targets = vec!["wss://relay.example".to_string()];
 
@@ -897,7 +900,7 @@ mod tests {
         let note = EventBuilder::new(Kind::TextNote, "still fresh")
             .finalize(&keys)
             .unwrap();
-        assert!(publish_gate(&note, &targets).is_none());
+        assert!(gate_publish_and_tombstone(&note, &targets).is_none());
 
         // An expired event is refused on every target.
         let past = std::time::SystemTime::now()
@@ -909,7 +912,7 @@ mod tests {
             .tags([Tag::custom("expiration", [past.to_string()])])
             .finalize(&keys)
             .unwrap();
-        let report = publish_gate(&expired, &targets).unwrap();
+        let report = gate_publish_and_tombstone(&expired, &targets).unwrap();
         assert!(!report.accepted());
         assert_eq!(report.failed.len(), targets.len());
 
@@ -923,7 +926,7 @@ mod tests {
             .tags([Tag::event(target.id)])
             .finalize(&keys)
             .unwrap();
-        assert!(publish_gate(&del, &targets).is_none());
+        assert!(gate_publish_and_tombstone(&del, &targets).is_none());
         assert!(deletions::is_deleted(&target));
     }
 

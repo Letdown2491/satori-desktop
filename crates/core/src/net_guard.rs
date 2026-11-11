@@ -84,6 +84,12 @@ pub fn routable_relay(url: &str) -> bool {
     }
 }
 
+/// The refusal verdict a screened-out URI's relay gets: names the relay
+/// so the dialog shows WHAT was refused, not just that something was.
+fn relay_refused(url: &str) -> String {
+    format!("the URI's relay {url} is not connectable: private addresses are refused")
+}
+
 /// Paste-time screen for a `nostr+walletconnect://` URI (issue #11): every
 /// relay it asks the wallet transport to dial must pass the same
 /// `routable_relay` screen the pool's routing uses. Err carries the
@@ -94,9 +100,7 @@ pub fn screen_nwc_uri(uri: &str) -> Result<(), String> {
     for relay in &parsed.relays {
         let url = relay.as_str();
         if !routable_relay(url) {
-            return Err(format!(
-                "the URI's relay is not connectable: {url} — private addresses are refused"
-            ));
+            return Err(relay_refused(url));
         }
     }
     Ok(())
@@ -114,9 +118,7 @@ pub fn screen_bunker_uri(uri: &str) -> Result<(), String> {
     for relay in relays {
         let url = relay.as_str();
         if !routable_relay(url) {
-            return Err(format!(
-                "the URI's relay is not connectable: {url} — private addresses are refused"
-            ));
+            return Err(relay_refused(url));
         }
     }
     Ok(())

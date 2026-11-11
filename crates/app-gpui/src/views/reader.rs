@@ -511,7 +511,8 @@ impl Render for ArticleView {
             {
                 painted.push(url.clone());
             }
-        }        media::unpin(&self.pinned, cx);
+        }
+        media::unpin(&self.pinned, cx);
         self.pinned = painted;
         for url in &self.pinned {
             media::pin(url, cx);

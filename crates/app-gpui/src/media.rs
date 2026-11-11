@@ -929,7 +929,13 @@ mod tests {
         let cache = Cache::default();
         // The cover the reader is looking at, last touched by a render
         // two minutes ago; the feed pins what it paints.
-        insert(&cache, "cover", 3000, 3000, EVICT_GRACE + Duration::from_secs(1));
+        insert(
+            &cache,
+            "cover",
+            3000,
+            3000,
+            EVICT_GRACE + Duration::from_secs(1),
+        );
         cache.pinned.borrow_mut().insert("cover".to_string());
         // Foreign landings: a burst of fresh bigs over the budget.
         for i in 0..5 {
