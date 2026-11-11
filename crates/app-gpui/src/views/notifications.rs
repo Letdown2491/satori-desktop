@@ -13,11 +13,12 @@ use gpui::{
     ListState, Render, SharedString, Window, div, list, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile};
+use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile, PublishEvent};
 use satori_core::nip::{comment, nip10};
 use satori_core::notifications::parse_zap_receipt;
+use satori_core::wallet::{Status, WalletEvent};
 
-use super::{content, nav::Nav, states};
+use super::{actions, content, nav::Nav, states};
 use crate::{media, theme};
 
 /// What the event did to you (notifications.ts `add`): a comment is always
@@ -98,6 +99,17 @@ pub struct NotificationsView {
     /// WS4 receipts: the bell's audit trail open? (the "N hidden, see
     /// why" strip at the pane's bottom, a silent void is a bug).
     receipts_open: bool,
+    /// The action-row mirrors (feed.rs's, thread.rs's shape): optimistic
+    /// glyph states, reconciled by the wallet broadcast and the publish
+    /// pumps. The rows ARE notes (replies + mentions) — #16's one-row
+    /// rule: the notifications page carries the timeline's affordances.
+    liked: HashSet<String>,
+    reposted: HashSet<String>,
+    bookmarked: HashSet<String>,
+    zapped: HashSet<String>,
+    /// Session zap-in-flight set; the wallet broadcast clears it.
+    zap_pending: HashSet<String>,
+    wallet_ready: bool,
     list: ListState,
 }
 
@@ -113,6 +125,11 @@ impl NotificationsView {
         crate::video::watch(cx); // repaint on player open/toggle/close
         let prev = satori_core::read_state::load().notif;
         core.mark_notifications_seen();
+        let liked = core.liked_set();
+        let reposted = core.reposted_set();
+        let bookmarked = core.bookmarked_set();
+        let zapped = core.zapped_set();
+        let wallet_ready = core.wallet().is_ready();
         let view = Self {
             core,
             rows: vec![],
@@ -126,6 +143,12 @@ impl NotificationsView {
             prev,
             deep: false,
             receipts_open: false,
+            liked,
+            reposted,
+            bookmarked,
+            zapped,
+            zap_pending: HashSet::new(),
+            wallet_ready,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
         };
         view.pump_at(prev, cx);
@@ -144,6 +167,23 @@ impl NotificationsView {
                     }
                 });
             });
+        // The wallet broadcast (D20): the rows' bolts follow every zap,
+        // theirs or the sheet's, wherever it started (thread.rs's
+        // subscription, verbatim shape).
+        let this = cx.entity().downgrade();
+        let mut wallet_rx = view.core.subscribe_wallet();
+        cx.spawn(async move |_, cx| {
+            loop {
+                match wallet_rx.recv().await {
+                    Ok(ev) => {
+                        let _ = this.update(cx, |view, cx| view.on_wallet(ev, cx));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(_) => continue, // lagged: the next event re-syncs
+                }
+            }
+        })
+        .detach();
         view
     }
 
@@ -293,6 +333,33 @@ impl NotificationsView {
         .detach();
     }
 
+    /// The wallet broadcast → glyph states + the quiet status whisper
+    /// (feed.rs's on_wallet, verbatim — the fields are the same mirrors).
+    fn on_wallet(&mut self, ev: WalletEvent, cx: &mut Context<Self>) {
+        match ev {
+            WalletEvent::Status(s) => {
+                self.wallet_ready = matches!(s, Status::Ready(_));
+            }
+            WalletEvent::ZapPaid { note, .. } => {
+                self.zap_pending.remove(&note);
+                self.zapped.insert(note);
+            }
+            WalletEvent::ZapUncertain { note, .. } => {
+                self.zap_pending.remove(&note);
+                self.status = "zap state unknown, check your wallet before retrying".into();
+            }
+            WalletEvent::ZapFailed { note, reason } => {
+                self.zap_pending.remove(&note);
+                self.status = format!("zap didn't go through: {reason}");
+            }
+            WalletEvent::ZapReceipt { note, .. } => {
+                self.zapped.insert(note);
+            }
+            WalletEvent::ConnectFailed(_) => {} // the wallet pane's concern
+        }
+        cx.notify();
+    }
+
     fn want_quotes(&mut self, note: &Event, cx: &mut Context<Self>) {
         for bech in content::note_refs(note) {
             if self.quotes.contains_key(&bech) {
@@ -324,6 +391,101 @@ fn notif_parent_id(ev: &Event) -> Option<String> {
             .find(|t| t.as_slice().first().map(String::as_str) == Some("e"))
             .and_then(|t| t.as_slice().get(1).cloned()),
         _ => None,
+    }
+}
+
+/// The row's toggles (actions.rs's state-blind contract; thread.rs's impl
+/// is the template — optimistic mirrors, publish pumps, funnel through
+/// core). The failure whispers land in the pane's status line.
+impl actions::ActionHost for NotificationsView {
+    /// Optimistic like: mutate state first, reconcile against core's publish
+    /// events later (§1.2).
+    fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        let id = ev.id.to_string();
+        if !self.liked.insert(id) {
+            return;
+        }
+        let mut rx = self.core.react(ev);
+        cx.spawn(async move |_, _| while rx.recv().await.is_some() {})
+            .detach();
+        cx.notify();
+    }
+
+    /// Optimistic repost (NIP-18 kind 6): the glyph flips vermilion now; a
+    /// failure — or an undo — rolls it back.
+    fn toggle_repost(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        let id = ev.id.to_string();
+        if !self.reposted.insert(id.clone()) {
+            return;
+        }
+        let mut rx = self.core.repost(ev);
+        cx.spawn(async move |this, cx| {
+            while let Some(pv) = rx.recv().await {
+                match pv {
+                    PublishEvent::Failed { .. } | PublishEvent::Undone { .. } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.reposted.remove(&id);
+                            this.status = "repost didn't go through, try again".into();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Bookmark toggle (D38): the star fills for either list (private 10003 /
+    /// public 30001 — the settings pref picks which one a star WRITES); a
+    /// second click unbookmarks through the RMW that clears both.
+    fn toggle_bookmark(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        let id = ev.id.to_string();
+        let ev_id = ev.id;
+        let adding = self.bookmarked.insert(id.clone());
+        if !adding {
+            self.bookmarked.remove(&id);
+        }
+        // The scope read rides the click (feed.rs's comment stands: a
+        // mid-session pref flip applies to the NEXT star).
+        let public = crate::prefs::get_bool("bookmarkPublic");
+        let mut rx = if adding {
+            self.core.bookmark(ev, public)
+        } else {
+            self.core.unbookmark(ev_id)
+        };
+        cx.spawn(async move |this, cx| {
+            while let Some(pv) = rx.recv().await {
+                if let PublishEvent::Failed { .. } = pv {
+                    let _ = this.update(cx, |this, cx| {
+                        if adding {
+                            this.bookmarked.remove(&id);
+                        } else {
+                            this.bookmarked.insert(id.clone());
+                        }
+                        this.status = "bookmark didn't go through, try again".into();
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// One zap in flight per note (the Feather rule; core enforces too).
+    fn zap_tap(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        if !self.wallet_ready {
+            cx.emit(Nav::OpenWallet);
+            return;
+        }
+        if !self.zap_pending.insert(ev.id.to_string()) {
+            return;
+        }
+        self.core.zap(ev.clone(), super::zap::TAP_SATS * 1000);
+        cx.notify();
     }
 }
 
@@ -401,6 +563,7 @@ fn notif_card(
     idx: usize,
     ev: &Event,
     t: NotifType,
+    st: actions::ActionState,
     profiles: &HashMap<String, Profile>,
     parents: &HashMap<String, ParentNote>,
     media: &media::Snapshot,
@@ -485,6 +648,7 @@ fn notif_card(
         .text_color(rgb(theme::muted()))
         .child(action_word(t, ev));
     let handle_body = handle.clone();
+    let handle_actions = handle.clone();
     let open_block = match open {
         Some(target) => div()
             .id(SharedString::from(format!("notif-open-{idx}")))
@@ -501,7 +665,23 @@ fn notif_card(
             .child(content::body(ev, &ctx, handle_body.clone()))
             .into_any_element(),
     };
-    row.child(open_block).into_any_element()
+    // The one-row rule (#16): reply and mention rows ARE notes — they
+    // wear the timeline's full action row, so the most common response
+    // to a notification (a like, a zap) doesn't demand opening the
+    // thread. Receipt rows (reactions, zaps, poll votes) aren't notes;
+    // no row for them.
+    if !matches!(t, NotifType::Reply | NotifType::Mention) {
+        return row.child(open_block).into_any_element();
+    }
+    let ev_arc = Arc::new(ev.clone());
+    row.child(open_block)
+        .child(actions::action_row(
+            &ev.id.to_string(),
+            &ev_arc,
+            st,
+            handle_actions,
+        ))
+        .into_any_element()
 }
 
 /// New / Earlier section labels at the high-water boundary
@@ -560,6 +740,15 @@ impl Render for NotificationsView {
         let quotes = self.quotes.clone();
         let parents = self.parents.clone();
         let me = self.me.clone();
+        // The action row's glyph states, snapshotted per render (feed.rs's
+        // FeedSnap discipline, inline — the page is bounded content).
+        let liked = self.liked.clone();
+        let reposted = self.reposted.clone();
+        let bookmarked = self.bookmarked.clone();
+        let zapped = self.zapped.clone();
+        let zap_pending = self.zap_pending.clone();
+        let wallet_ready = self.wallet_ready;
+        let reduced_motion = crate::desktop::Desktop::get(cx).reduced_motion;
         let empty = rows.is_empty();
         // WS4 receipts: the suppressed page (core's last notifications
         // build) — the pane's bottom strip lists each hidden item (author,
@@ -649,10 +838,21 @@ impl Render for NotificationsView {
                                     let secs = ev.created_at.as_secs();
                                     let time = crate::timefmt::stamp(secs, cx);
                                     crate::timefmt::ensure(secs, cx);
+                                    let id_hex = ev.id.to_string();
+                                    let st = actions::ActionState {
+                                        liked: liked.contains(&id_hex),
+                                        reposted: reposted.contains(&id_hex),
+                                        bookmarked: bookmarked.contains(&id_hex),
+                                        zapped: zapped.contains(&id_hex),
+                                        zapping: zap_pending.contains(&id_hex),
+                                        wallet_ready,
+                                        reduced_motion,
+                                    };
                                     notif_card(
                                         idx,
                                         ev,
                                         *t,
+                                        st,
                                         &profiles,
                                         &parents,
                                         &media,
