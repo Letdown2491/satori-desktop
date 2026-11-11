@@ -1299,7 +1299,12 @@ fn carousel<V: EventEmitter<Nav> + 'static>(
             .text_size(px(theme::T_UI))
             .text_color(rgb(theme::muted()))
             .hover(|s| s.text_color(rgb(theme::ink())))
-            .on_click(move |_, _, cx| carousel_step(&key, n, delta, &handle, cx))
+            .on_click(move |_, _, cx| {
+                // The feed wraps the whole note body in click-to-open-thread;
+                // the arrows are their own affordance (media_tile's discipline).
+                cx.stop_propagation();
+                carousel_step(&key, n, delta, &handle, cx)
+            })
             .child(label)
     };
     div()
@@ -1344,6 +1349,7 @@ fn carousel<V: EventEmitter<Nav> + 'static>(
                                     theme::hairline()
                                 }))
                                 .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
                                     carousel_step(&key, n, i as i64 - idx as i64, &handle, cx)
                                 })
                         })),
