@@ -420,6 +420,13 @@ impl Wallet {
     /// the secret store, persist the secret-free record, probe the wallet.
     /// Status events stream on the channel (Connecting → Ready | failed).
     pub async fn connect(&self, uri: String) {
+        // Paste-time transport screen (issue #11): the URI's relays are the
+        // wallet transport's dials, outside the pool's screens — the same
+        // ruleset screens them here, before anything connects.
+        if let Err(e) = crate::net_guard::screen_nwc_uri(&uri) {
+            let _ = self.events.send(WalletEvent::ConnectFailed(e));
+            return;
+        }
         let parsed = match NostrWalletConnectUri::parse(uri.trim()) {
             Ok(u) => u,
             Err(e) => {

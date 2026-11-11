@@ -19,6 +19,7 @@ pub mod diag;
 pub mod error;
 pub mod hints;
 pub mod manager;
+pub mod net_guard;
 pub mod nip11;
 pub mod nip40;
 pub mod privacy;

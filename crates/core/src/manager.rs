@@ -1693,6 +1693,12 @@ impl Core {
     }
 
     async fn connect_bunker_inner(&self, uri: &str, seq: u64) -> Result<PublicKey> {
+        // Paste-time transport screen (issue #11): the URI's relays are the
+        // bunker transport's dials, outside the pool's screens — the same
+        // ruleset screens them before the nostrconnect client is built.
+        crate::net_guard::screen_bunker_uri(uri)
+            .map_err(|e| LoginError::InvalidBunkerUri(e))?;
+
         let parsed = NostrConnectUri::parse(uri.trim())
             .map_err(|e| LoginError::InvalidBunkerUri(e.to_string()))?;
 

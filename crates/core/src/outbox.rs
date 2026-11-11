@@ -79,91 +79,10 @@ pub fn parse_relay_list(ev: &nostr::prelude::Event) -> RelayList {
     }
 }
 
-/// Routing-grade relay screening. A follow's kind:10002 is relay-controlled
-/// data: without a screen, a malicious list makes the client dial
-/// `ws://127.0.0.1:<port>`, link-local or RFC1918 hosts (the SSRF chain),
-/// and plain `ws://` relays would take this client's AUTH responses and
-/// subscriptions in cleartext. Relays the user entered themselves
-/// (Settings, the session's own NIP-65 via connect_reads) never pass
-/// through here — the user chose those.
-///
-/// The structural checks mirror the SDK's own RelayUrl::parse (nostr
-/// types/url.rs): a second "://" anywhere is rejected, then the url-crate
-/// parse must succeed. Hand-splitting the prefix let
-/// `wss://wss://relay.example` through as host "wss" — and the SDK
-/// rejected the WHOLE routed fan-out at subscribe time on that one url,
-/// dropping the live bell to indexers-only. The url crate also canonicalizes
-/// sneaky IPv4 hosts (decimal `2130706433`, hex `0x7f.0.0.1`, short
-/// `127.1`) before the literal check, so they cannot pose as names.
-///
-/// Names (non-IP hosts) pass for now; pinning resolved IPs per hop is the
-/// SSRF-guard M5 item (same gap as the media guard).
-pub fn routable_relay(url: &str) -> bool {
-    // RelayUrl::parse check 1: at most one "://".
-    if url.matches("://").count() > 1 {
-        return false;
-    }
-    // Check 2: a real url-crate parse (schemes, brackets, ports, IPv4 forms).
-    let Ok(parsed) = url::Url::parse(url) else {
-        return false;
-    };
-    // Check 3: the scheme (RelayUrlScheme accepts ws/wss; routed relays are
-    // wss-only).
-    if parsed.scheme() != "wss" {
-        return false;
-    }
-    // Check 4: a host is present ("wss://" is Malformed there).
-    let Some(host) = parsed.host() else {
-        return false;
-    };
-    // Screen 5 (ours): IP literals must be public unicast. host() is the
-    // typed form (host_str brackets IPv6, which then fails IpAddr::from_str
-    // and would pose as a name), and the url crate already canonicalized
-    // decimal/hex/short IPv4 into it.
-    match host {
-        url::Host::Ipv4(v4) => is_public_ip(&std::net::IpAddr::V4(v4)),
-        url::Host::Ipv6(v6) => is_public_ip(&std::net::IpAddr::V6(v6)),
-        // Domains (incl. IDN) pass for now; resolved-IP pinning is M5.
-        url::Host::Domain(_) => true,
-    }
-}
-
-/// Public unicast only: rejects this-network, RFC1918, loopback, link-local
-/// (incl. the 169.254.169.254 metadata endpoint), CGNAT, multicast and
-/// reserved ranges; IPv6 additionally unique-local/link-local/multicast,
-/// with v4-mapped addresses judged by their embedded v4.
-fn is_public_ip(ip: &std::net::IpAddr) -> bool {
-    match *ip {
-        std::net::IpAddr::V4(v4) => {
-            let [a, b, _, _] = v4.octets();
-            !(a == 0
-                || a == 10
-                || a == 127
-                || (a == 169 && b == 254)
-                || (a == 172 && (b & 0xf0) == 16)
-                || (a == 192 && b == 168)
-                || (a == 100 && (b & 0xc0) == 64)
-                || a >= 224)
-        }
-        std::net::IpAddr::V6(v6) => {
-            let seg = v6.segments();
-            if seg[..5] == [0, 0, 0, 0, 0] && seg[5] == 0xffff {
-                let v4 = std::net::Ipv4Addr::new(
-                    (seg[6] >> 8) as u8,
-                    seg[6] as u8,
-                    (seg[7] >> 8) as u8,
-                    seg[7] as u8,
-                );
-                return is_public_ip(&std::net::IpAddr::V4(v4));
-            }
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || (seg[0] & 0xffc0) == 0xfe80
-                || (seg[0] & 0xfe00) == 0xfc00
-                || (seg[0] & 0xff00) == 0xff00)
-        }
-    }
-}
+/// Routing-grade relay screening: the ONE ruleset lives in net_guard.rs
+/// (issue #11 lifted it here so the nwc + bunker paste-time screens reuse
+/// it). Re-exported for the pool/seen/hints callers.
+pub use crate::net_guard::{is_public_ip, routable_relay};
 
 // Caps (nip65.ts): 3 write relays per author considered; the greedy set-cover
 // stops at 70 relays; redundancy routes each author to up to
