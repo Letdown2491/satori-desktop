@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{div, img, prelude::*, px, rgb, AnyElement, EntityId, Image, ImageFormat, ImageSource};
+use gpui::{AnyElement, EntityId, Image, ImageFormat, ImageSource, div, img, prelude::*, px, rgb};
 use satori_core::manager::Core;
 use satori_core::media::{DecodedImage, MediaError};
 
@@ -120,7 +120,10 @@ enum Entry {
     NotMedia,
     /// A transient failure (timeout, 429, 5xx — core retried already). The
     /// retry goes out after `backoff`, doubling per consecutive failure.
-    Failed { at: Instant, backoff: Duration },
+    Failed {
+        at: Instant,
+        backoff: Duration,
+    },
 }
 
 impl Entry {
@@ -562,8 +565,11 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                 let st = match kind {
                     Kind::Plain => {
                         let rx = core2.fetch_image(url.clone());
-                        let outcome = { let mut rx = rx; rx.recv().await }
-                            .unwrap_or(Err(MediaError::Transient));
+                        let outcome = {
+                            let mut rx = rx;
+                            rx.recv().await
+                        }
+                        .unwrap_or(Err(MediaError::Transient));
                         landing_state(outcome, next_backoff)
                     }
                     // A blurhash is decoded LOCALLY — no network at all.
@@ -598,8 +604,11 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                                     crate::poster::POSTER_HEAD_BYTES,
                                     crate::poster::sniff_png,
                                 );
-                                { let mut rx = rx; rx.recv().await }
-                                    .unwrap_or(Err(MediaError::Transient))
+                                {
+                                    let mut rx = rx;
+                                    rx.recv().await
+                                }
+                                .unwrap_or(Err(MediaError::Transient))
                             }
                         };
                         landing_state(outcome, next_backoff)
@@ -666,8 +675,8 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                                 drop(order);
                                 cache.touched.borrow_mut().insert(tk, Instant::now());
                                 cache.bytes.set(
-                                    cache.bytes.get() + THUMB_DIMS.0 as u64 * THUMB_DIMS.1 as u64
-                                        * 4
+                                    cache.bytes.get()
+                                        + THUMB_DIMS.0 as u64 * THUMB_DIMS.1 as u64 * 4
                                         - old_bytes,
                                 );
                             }
@@ -716,7 +725,10 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
 /// A job's outcome as the entry to land: validated decodes go Ready,
 /// verified not-an-image (or an unsafe/over-cap URL) is NotMedia, and a
 /// transient failure cools off with the caller's backoff.
-fn landing_state(outcome: Result<satori_core::media::DecodedImage, MediaError>, backoff: Duration) -> Entry {
+fn landing_state(
+    outcome: Result<satori_core::media::DecodedImage, MediaError>,
+    backoff: Duration,
+) -> Entry {
     match outcome {
         Ok(d) => ready_or_not(Some(d)),
         Err(MediaError::NotMedia) => Entry::NotMedia,
@@ -750,7 +762,9 @@ pub fn avatar(snap: &Snapshot, url: &str, name: &str, size_px: f32) -> AnyElemen
     match snap.thumb(url).filter(|_| !url.is_empty()) {
         // The img paints its own quad — the disc's rounding doesn't clip it,
         // so the photo wears the same circle itself.
-        Some(png) => disc.child(img(png).size_full().rounded_full()).into_any_element(),
+        Some(png) => disc
+            .child(img(png).size_full().rounded_full())
+            .into_any_element(),
         None => {
             let initial = name
                 .chars()
@@ -873,10 +887,7 @@ mod tests {
         for i in 0..6 {
             insert(&cache, &format!("e{i}"), 3000, 3000, Duration::from_secs(1));
         } // 216MB = over the 192MB desperation line
-        cache
-            .pinned
-            .borrow_mut()
-            .insert("e0".to_string());
+        cache.pinned.borrow_mut().insert("e0".to_string());
         let dropped = cache.evict();
         assert!(!dropped.is_empty(), "desperation must still evict");
         assert!(cache.map.borrow().contains_key("e0"), "pinned survives");
@@ -911,10 +922,22 @@ mod tests {
     fn photo_pressure_never_evicts_avatars() {
         let cache = Cache::default();
         for i in 0..30 {
-            insert(&cache, &format!("av{i}"), 128, 128, Duration::from_secs(3600));
+            insert(
+                &cache,
+                &format!("av{i}"),
+                128,
+                128,
+                Duration::from_secs(3600),
+            );
         }
         for i in 0..4 {
-            insert(&cache, &format!("ph{i}"), 3000, 3000, Duration::from_secs(3600));
+            insert(
+                &cache,
+                &format!("ph{i}"),
+                3000,
+                3000,
+                Duration::from_secs(3600),
+            );
         } // 144MB of bigs — over budget, all past grace
         let dropped = cache.evict();
         assert!(!dropped.is_empty(), "stale bigs must go");
@@ -933,12 +956,21 @@ mod tests {
     fn small_cap_evicts_stale_avatars_first() {
         let cache = Cache::default();
         for i in 0..SMALL_MAX_ENTRIES {
-            insert(&cache, &format!("a{i}"), 128, 128, Duration::from_secs(3600));
+            insert(
+                &cache,
+                &format!("a{i}"),
+                128,
+                128,
+                Duration::from_secs(3600),
+            );
         }
         insert(&cache, "fresh", 128, 128, Duration::from_secs(1));
         let dropped = cache.evict();
         assert_eq!(dropped.len(), 1, "only the overflow avatar goes");
-        assert!(!cache.map.borrow().contains_key("a0"), "LRU small goes first");
+        assert!(
+            !cache.map.borrow().contains_key("a0"),
+            "LRU small goes first"
+        );
         assert!(cache.map.borrow().contains_key("fresh"));
     }
 
@@ -952,19 +984,26 @@ mod tests {
         // The avatar's landing: a big full entry plus its own thumb entry.
         // The helper builds thumb: None — the painted Arc is constructed
         // inline; eviction math only reads `size` anyway.
-        let thumb_arc: Png = Arc::new(Image::from_bytes(
-            ImageFormat::Png,
-            b"thumb-bytes".to_vec(),
-        ));
+        let thumb_arc: Png = Arc::new(Image::from_bytes(ImageFormat::Png, b"thumb-bytes".to_vec()));
         insert(&cache, "me", 1000, 1000, Duration::from_secs(3600)); // 4MB — BIG
         cache.map.borrow_mut().insert(
             thumb_key("me"),
-            Entry::Ready(CachedImage { png: thumb_arc.clone(), thumb: None, size: THUMB_DIMS }),
+            Entry::Ready(CachedImage {
+                png: thumb_arc.clone(),
+                thumb: None,
+                size: THUMB_DIMS,
+            }),
         );
         cache.order.borrow_mut().push_back(thumb_key("me"));
         // Photo burst: bigs over budget, all stale.
         for i in 0..4 {
-            insert(&cache, &format!("ph{i}"), 3000, 3000, Duration::from_secs(3600));
+            insert(
+                &cache,
+                &format!("ph{i}"),
+                3000,
+                3000,
+                Duration::from_secs(3600),
+            );
         } // 144MB + 4MB
         let dropped = cache.evict();
         assert!(!dropped.is_empty(), "stale bigs must go");
@@ -985,14 +1024,8 @@ mod tests {
     #[test]
     fn snapshot_thumb_prefers_the_thumb_entry() {
         let cache = Cache::default();
-        let field_arc: Png = Arc::new(Image::from_bytes(
-            ImageFormat::Png,
-            b"field-thumb".to_vec(),
-        ));
-        let entry_arc: Png = Arc::new(Image::from_bytes(
-            ImageFormat::Png,
-            b"entry-thumb".to_vec(),
-        ));
+        let field_arc: Png = Arc::new(Image::from_bytes(ImageFormat::Png, b"field-thumb".to_vec()));
+        let entry_arc: Png = Arc::new(Image::from_bytes(ImageFormat::Png, b"entry-thumb".to_vec()));
         cache.map.borrow_mut().insert(
             "me".into(),
             Entry::Ready(CachedImage {
@@ -1011,6 +1044,9 @@ mod tests {
         );
         let snap = Snapshot::from_cache(&cache);
         let served = snap.thumb("me").expect("thumb served");
-        assert!(Arc::ptr_eq(&served, &entry_arc), "the thumb entry's Arc is served");
+        assert!(
+            Arc::ptr_eq(&served, &entry_arc),
+            "the thumb entry's Arc is served"
+        );
     }
 }

@@ -10,16 +10,14 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use gpui::{
-    ClickEvent, Div, EventEmitter,
-    div, img, prelude::*, px, rgb, App, Context, Entity, FocusHandle, Focusable, KeyDownEvent,
-    AnyView, ObjectFit, Render, SharedString, Stateful, Window,
+    AnyView, App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    KeyDownEvent, ObjectFit, Render, SharedString, Stateful, Window, div, img, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, Profile, PublishEvent};
 
-use crate::{icons, media, theme};
 use super::{
-    composer::{Draft, Composer},
+    composer::{Composer, Draft},
     content,
     edit_profile::EditProfileView,
     feed::Feed,
@@ -35,6 +33,7 @@ use super::{
     wallet::WalletView,
     zap::ZapSheet,
 };
+use crate::{icons, media, theme};
 
 #[derive(Clone)]
 pub enum Pane {
@@ -126,15 +125,13 @@ impl Shell {
             Nav::OpenEditProfile(me) => this.open_edit_profile(*me, cx),
             Nav::OpenHashtag(tag) => this.open_hashtag(tag.clone(), cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), None, cx),
-            Nav::OpenDraft(text, attachments, reply, quote) => {
-                this.open_draft(
-                    text,
-                    attachments.clone(),
-                    reply.as_deref().cloned(),
-                    quote.as_deref().cloned(),
-                    cx,
-                )
-            }
+            Nav::OpenDraft(text, attachments, reply, quote) => this.open_draft(
+                text,
+                attachments.clone(),
+                reply.as_deref().cloned(),
+                quote.as_deref().cloned(),
+                cx,
+            ),
             Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
@@ -177,7 +174,9 @@ impl Shell {
         // in the pool broadcasts "all sockets died", so we re-ask.
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(30))
+                    .await;
                 let _ = this.update(cx, |shell, cx| {
                     let live = Core::pool_connected();
                     if live != shell.pool_live {
@@ -201,9 +200,7 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             for _ in 0..15 {
                 let mut rx = this
-                    .update(cx, |shell, _| {
-                        shell.core.clone().ensure_profiles(vec![me])
-                    })
+                    .update(cx, |shell, _| shell.core.clone().ensure_profiles(vec![me]))
                     .expect("shell alive");
                 // One resolution per ask (the debouncer drops the waiter
                 // after its single send); a miss waits out the 2s, retries.
@@ -224,22 +221,24 @@ impl Shell {
         .detach();
     }
 
-    fn subscribe_nav<V: EventEmitter<Nav> + 'static>(&self, view: &Entity<V>, cx: &mut Context<Self>) {
+    fn subscribe_nav<V: EventEmitter<Nav> + 'static>(
+        &self,
+        view: &Entity<V>,
+        cx: &mut Context<Self>,
+    ) {
         cx.subscribe(view, |this, _view, ev: &Nav, cx| match ev {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenEditProfile(me) => this.open_edit_profile(*me, cx),
             Nav::OpenHashtag(tag) => this.open_hashtag(tag.clone(), cx),
             Nav::OpenComposer(reply) => this.open_composer(reply.clone(), None, cx),
-            Nav::OpenDraft(text, attachments, reply, quote) => {
-                this.open_draft(
-                    text,
-                    attachments.clone(),
-                    reply.as_deref().cloned(),
-                    quote.as_deref().cloned(),
-                    cx,
-                )
-            }
+            Nav::OpenDraft(text, attachments, reply, quote) => this.open_draft(
+                text,
+                attachments.clone(),
+                reply.as_deref().cloned(),
+                quote.as_deref().cloned(),
+                cx,
+            ),
             Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
             Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
@@ -266,7 +265,8 @@ impl Shell {
         cx.notify();
         // NIP-78: sync the theme slot (Phase 2 §4.1) — fire and forget.
         if changed {
-            self.core.publish_app_data("dark", serde_json::Value::Bool(dark));
+            self.core
+                .publish_app_data("dark", serde_json::Value::Bool(dark));
         }
     }
 
@@ -478,7 +478,9 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             loop {
                 match hold_rx.recv().await {
-                    Ok(PublishEvent::Held { token, hold_secs, .. }) => {
+                    Ok(PublishEvent::Held {
+                        token, hold_secs, ..
+                    }) => {
                         let _ = this.update(cx, |shell, cx| {
                             shell.hold = Some(HoldToast {
                                 token,
@@ -650,7 +652,9 @@ impl Shell {
     /// inline-able (video.rs gates strict Tor/YouTube), else the browser
     /// link — the honest pre-Phase-3 behavior.
     fn open_video(&mut self, url: String, mime: Option<String>, cx: &mut Context<Self>) {
-        if !crate::views::content::web_url(&url) || !crate::video::inline_able(&url, mime.as_deref()) {
+        if !crate::views::content::web_url(&url)
+            || !crate::video::inline_able(&url, mime.as_deref())
+        {
             if crate::views::content::web_url(&url) {
                 cx.open_url(&url);
             }
@@ -685,8 +689,7 @@ impl Shell {
             // the publish, a failed save leaves the slot intact, and the
             // session global above still covers the instant reopen.
             if let Some(Pane::Composer(c)) = self.stack.last()
-                && let Some((reply, quote, text, attachments)) =
-                    c.read(cx).draft_sync_candidate(cx)
+                && let Some((reply, quote, text, attachments)) = c.read(cx).draft_sync_candidate(cx)
             {
                 let _ = self.core.save_draft(reply, quote, text, attachments, false);
             }
@@ -704,9 +707,7 @@ impl Shell {
                     if let Some(Some(p)) = rx.recv().await {
                         let _ = this.update(cx, |shell, cx| {
                             if let Some(target) = &target {
-                                target.update(cx, |pane, cx| {
-                                    pane.refresh_profile(p.clone(), cx)
-                                });
+                                target.update(cx, |pane, cx| pane.refresh_profile(p.clone(), cx));
                             }
                             shell.me_profile = Some(p);
                             cx.notify();
@@ -740,7 +741,6 @@ impl Shell {
             None => "Satori".into(),
         }
     }
-
 }
 
 /// A rail tooltip: ink chip, washi text, nothing more. gpui paints these
@@ -868,8 +868,7 @@ impl Shell {
             media::fetch(&self.core, me_pic.clone(), cx.entity_id(), cx);
             media::pin(&me_pic, cx);
         }
-        let me_avatar =
-            media::avatar(rail_snap.as_ref(), &me_pic, &me_name, 26.0);
+        let me_avatar = media::avatar(rail_snap.as_ref(), &me_pic, &me_name, 26.0);
 
         div()
             .flex_none()
@@ -946,32 +945,34 @@ impl Shell {
                     }
                 }),
             ))
-            .child(self.rail_button(
-                "rail-notifications",
-                "Notifications",
-                div()
-                    .relative()
-                    .child(icons::bell_icon(ink(active == Some(Spot::Notif))))
-                    .when(self.notif_unread, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .top(px(-1.))
-                                .right(px(-1.))
-                                .size(px(6.))
-                                .rounded_full()
-                                .bg(rgb(theme::vermilion())),
-                        )
+            .child(
+                self.rail_button(
+                    "rail-notifications",
+                    "Notifications",
+                    div()
+                        .relative()
+                        .child(icons::bell_icon(ink(active == Some(Spot::Notif))))
+                        .when(self.notif_unread, |d| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .top(px(-1.))
+                                    .right(px(-1.))
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(rgb(theme::vermilion())),
+                            )
+                        }),
+                    active == Some(Spot::Notif),
+                    cx.listener(move |shell, _, _, cx| {
+                        if shell.active_spot(cx) != Some(Spot::Notif) {
+                            shell.open_notifications(cx);
+                        }
                     }),
-                active == Some(Spot::Notif),
-                cx.listener(move |shell, _, _, cx| {
-                    if shell.active_spot(cx) != Some(Spot::Notif) {
-                        shell.open_notifications(cx);
-                    }
-                }),
-            ))
+                ),
+            )
             // Compose speaks (it broadcasts) — the pen wears vermilion.
-                        .child(self.rail_button(
+            .child(self.rail_button(
                 "rail-settings",
                 "Settings",
                 icons::gear_icon(ink(active == Some(Spot::Settings))),
@@ -1003,7 +1004,11 @@ impl Shell {
                     .mb(px(12.0))
                     .size(px(5.0))
                     .rounded_full()
-                    .bg(rgb(if self.pool_live { theme::ink() } else { theme::muted() })),
+                    .bg(rgb(if self.pool_live {
+                        theme::ink()
+                    } else {
+                        theme::muted()
+                    })),
             )
     }
 

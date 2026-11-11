@@ -11,9 +11,8 @@ use std::{
 };
 
 use gpui::{
-    div, list, prelude::*, px, relative, rgb, Context, Entity, EventEmitter,
-    FontWeight, ListAlignment, ListOffset, ListScrollEvent, ListState, Render, SharedString,
-    Window, Div,
+    Context, Div, Entity, EventEmitter, FontWeight, ListAlignment, ListOffset, ListScrollEvent,
+    ListState, Render, SharedString, Window, div, list, prelude::*, px, relative, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Live, ParentNote, Profile, PublishEvent};
@@ -22,8 +21,8 @@ use satori_core::wallet::{Status, WalletEvent};
 
 use crate::prefs;
 
+use super::{actions, cards, content, nav::Nav, states};
 use crate::{media, theme};
-use super::{actions, content, nav::Nav, cards, states};
 
 /// Which surface a feed pane carries: the timeline (the visible catalog),
 /// the articles shelf (kind 30023 from the same follows), or a hashtag
@@ -213,30 +212,31 @@ impl Feed {
         // (the GTK app prefetched at 70% scroll — same idea). The handler
         // runs on &mut App; WeakEntity::update accepts that.
         let this = cx.entity().downgrade();
-        feed.list.set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
-            let _ = this.update(cx, |feed, cx| {
-                feed.last_visible_end = ev.visible_range.end;
-                // j/k's cursor rides the scroll stream: keys move it one
-                // row, the wheel re-anchors it to the top visible row.
-                feed.cursor = ev.visible_range.start;
-                // Deep-scroll whisper: the shell floats a back-to-top button
-                // once the reader is a few items down — a dozen was too
-                // deep (the owner kept scrolling before thinking "where is
-                // it"). Emit on change only.
-                let deep = ev.visible_range.start >= 3;
-                if feed.deep != deep {
-                    feed.deep = deep;
-                    cx.emit(Nav::PaneDeep);
-                }
-                feed.maybe_older(feed.last_visible_end, cx);
-                // The trim can only fire once the reader is back above the
-                // trim line — the scroll stream is where that happens.
-                feed.trim_window(cx);
-                // WS2: the visible window moved — re-scope the engagement
-                // subscription (debounced in viewport_pulse).
-                feed.viewport_pulse(cx);
+        feed.list
+            .set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
+                let _ = this.update(cx, |feed, cx| {
+                    feed.last_visible_end = ev.visible_range.end;
+                    // j/k's cursor rides the scroll stream: keys move it one
+                    // row, the wheel re-anchors it to the top visible row.
+                    feed.cursor = ev.visible_range.start;
+                    // Deep-scroll whisper: the shell floats a back-to-top button
+                    // once the reader is a few items down — a dozen was too
+                    // deep (the owner kept scrolling before thinking "where is
+                    // it"). Emit on change only.
+                    let deep = ev.visible_range.start >= 3;
+                    if feed.deep != deep {
+                        feed.deep = deep;
+                        cx.emit(Nav::PaneDeep);
+                    }
+                    feed.maybe_older(feed.last_visible_end, cx);
+                    // The trim can only fire once the reader is back above the
+                    // trim line — the scroll stream is where that happens.
+                    feed.trim_window(cx);
+                    // WS2: the visible window moved — re-scope the engagement
+                    // subscription (debounced in viewport_pulse).
+                    feed.viewport_pulse(cx);
+                });
             });
-        });
         // Live push: fresh follow posts bump the new-notes pill (the list
         // itself never moves on its own — the reader clicks when ready).
         let this = cx.entity().downgrade();
@@ -254,9 +254,7 @@ impl Feed {
                             // post is not a new bookmark.
                             if matches!(
                                 feed.mode,
-                                FeedMode::Hashtag(_)
-                                    | FeedMode::Profile(_)
-                                    | FeedMode::Bookmarks
+                                FeedMode::Hashtag(_) | FeedMode::Profile(_) | FeedMode::Bookmarks
                             ) {
                                 return;
                             }
@@ -568,12 +566,7 @@ impl Feed {
         cx.notify();
     }
 
-    fn absorb(
-        &mut self,
-        notes: Vec<Event>,
-        profiles: Vec<Profile>,
-        cx: &mut Context<Self>,
-    ) {
+    fn absorb(&mut self, notes: Vec<Event>, profiles: Vec<Profile>, cx: &mut Context<Self>) {
         self.absorb_profiles(profiles, cx);
         // Mention candidates from the notes actually INSERTED (the loop
         // dedups): re-scanning the whole window re-classified every token
@@ -696,8 +689,13 @@ impl Feed {
                             .map(|p| p.display())
                             .or_else(|| this.profiles.get(&key).map(|p| p.display()))
                             .unwrap_or_else(|| format!("{}…", &key[..8]));
-                        this.quotes
-                            .insert(bech.clone(), Some(content::Embed { event: target, name }));
+                        this.quotes.insert(
+                            bech.clone(),
+                            Some(content::Embed {
+                                event: target,
+                                name,
+                            }),
+                        );
                         cx.notify();
                     });
                 }
@@ -745,7 +743,13 @@ impl Feed {
 
     /// Ballot selection (cards.rs poll_card): replace for single-choice,
     /// toggle for multiple.
-    pub(crate) fn toggle_poll_sel(&mut self, ev: &Event, opt: String, multiple: bool, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_poll_sel(
+        &mut self,
+        ev: &Event,
+        opt: String,
+        multiple: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.touch();
         let sel = self.poll_sel.entry(ev.id).or_default();
         if sel.contains(&opt) {
@@ -937,10 +941,8 @@ impl Feed {
         }
         self.touch();
         let mut rx = self.core.react(ev);
-        cx.spawn(async move |_, _| {
-            while rx.recv().await.is_some() {}
-        })
-        .detach();
+        cx.spawn(async move |_, _| while rx.recv().await.is_some() {})
+            .detach();
     }
 
     /// Optimistic repost (NIP-18 kind 6): the glyph flips vermilion now, the
@@ -1195,7 +1197,11 @@ fn note_card(
                 })
                 .child(cards::row_body(
                     &ev,
-                    &content::Body { media, quotes, profiles },
+                    &content::Body {
+                        media,
+                        quotes,
+                        profiles,
+                    },
                     &handle,
                     cards,
                 )),
@@ -1309,39 +1315,35 @@ impl Render for Feed {
                 let n = self.live_new;
                 let handle = handle.clone();
                 d.child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .justify_center()
-                        .child(
-                            div()
-                                .id("new-posts-pill")
-                                .cursor_pointer()
-                                .flex_none()
-                                .mb_1()
-                                .px_4()
-                                .py_1p5()
-                                .rounded_full()
-                                .border_1()
-                                .border_color(rgb(theme::hairline()))
-                                .text_size(px(theme::T_SMALL))
-                                .text_color(rgb(theme::vermilion()))
-                                .hover(|s| {
-                                    s.border_color(rgb(theme::vermilion()))
-                                        .text_color(rgb(theme::ink()))
-                                })
-                                .tooltip(super::shell::tip("Load new notes"))
-                                .on_click(move |_, _, cx| {
-                                    handle.update(cx, |feed, cx| {
-                                        feed.live_new = 0;
-                                        feed.scroll_top();
-                                        let rx = feed.core.refresh(feed.mode.kinds());
-                                        feed.pump(rx, cx);
-                                        cx.notify();
-                                    });
-                                })
-                                .child(new_notes_label(n)),
-                        ),
+                    div().w_full().flex().justify_center().child(
+                        div()
+                            .id("new-posts-pill")
+                            .cursor_pointer()
+                            .flex_none()
+                            .mb_1()
+                            .px_4()
+                            .py_1p5()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgb(theme::hairline()))
+                            .text_size(px(theme::T_SMALL))
+                            .text_color(rgb(theme::vermilion()))
+                            .hover(|s| {
+                                s.border_color(rgb(theme::vermilion()))
+                                    .text_color(rgb(theme::ink()))
+                            })
+                            .tooltip(super::shell::tip("Load new notes"))
+                            .on_click(move |_, _, cx| {
+                                handle.update(cx, |feed, cx| {
+                                    feed.live_new = 0;
+                                    feed.scroll_top();
+                                    let rx = feed.core.refresh(feed.mode.kinds());
+                                    feed.pump(rx, cx);
+                                    cx.notify();
+                                });
+                            })
+                            .child(new_notes_label(n)),
+                    ),
                 )
             })
             .child(
@@ -1405,8 +1407,13 @@ impl Render for Feed {
                                     let time = crate::timefmt::stamp(secs, cx);
                                     crate::timefmt::ensure(secs, cx);
                                     repost_card(
-                                        ev, &profiles, &media, &quotes, &cards,
-                                        time, handle.clone(),
+                                        ev,
+                                        &profiles,
+                                        &media,
+                                        &quotes,
+                                        &cards,
+                                        time,
+                                        handle.clone(),
                                     )
                                     .into_any_element()
                                 }
@@ -1415,10 +1422,22 @@ impl Render for Feed {
                                     let time = crate::timefmt::stamp(secs, cx);
                                     crate::timefmt::ensure(secs, cx);
                                     note_card(
-                                        idx, ev, &profiles, &parents, &liked, &bookmarked,
-                                        &reposted, &zapped, &zap_pending, wallet_ready,
-                                        reduced_motion, &media,
-                                        &quotes, &cards, time, handle.clone(),
+                                        idx,
+                                        ev,
+                                        &profiles,
+                                        &parents,
+                                        &liked,
+                                        &bookmarked,
+                                        &reposted,
+                                        &zapped,
+                                        &zap_pending,
+                                        wallet_ready,
+                                        reduced_motion,
+                                        &media,
+                                        &quotes,
+                                        &cards,
+                                        time,
+                                        handle.clone(),
                                     )
                                     .into_any_element()
                                 }
@@ -1519,18 +1538,18 @@ fn repost_card(
                         .items_center()
                         .gap_2()
                         .child(media::avatar(media, &picture, &name, 28.0))
-                .child(
-                    // The timestamp is the third mode toggle (timefmt.rs):
-                    // tap cycles relative → date → block height.
-                    div()
-                        .id(SharedString::from(format!("boost-time-{}", ev.id)))
-                        .cursor_pointer()
-                        .text_size(px(theme::T_SMALL))
-                        .text_color(rgb(theme::muted()))
-                        .hover(|s| s.text_color(rgb(theme::ink())))
-                        .on_click(|_, _, cx| crate::timefmt::cycle(cx))
-                        .child(format!("{name} boosted · {time}")),
-                ),
+                        .child(
+                            // The timestamp is the third mode toggle (timefmt.rs):
+                            // tap cycles relative → date → block height.
+                            div()
+                                .id(SharedString::from(format!("boost-time-{}", ev.id)))
+                                .cursor_pointer()
+                                .text_size(px(theme::T_SMALL))
+                                .text_color(rgb(theme::muted()))
+                                .hover(|s| s.text_color(rgb(theme::ink())))
+                                .on_click(|_, _, cx| crate::timefmt::cycle(cx))
+                                .child(format!("{name} boosted · {time}")),
+                        ),
                 )
                 .child(
                     div()
@@ -1673,7 +1692,12 @@ fn end_cap(paging: bool, more: bool) -> Div {
         .gap_2();
     if !words.is_empty() {
         cap = cap
-            .child(div().w(px(48.)).border_t_1().border_color(rgb(theme::hairline())))
+            .child(
+                div()
+                    .w(px(48.))
+                    .border_t_1()
+                    .border_color(rgb(theme::hairline())),
+            )
             .child(
                 div()
                     .font_family(theme::SERIF)

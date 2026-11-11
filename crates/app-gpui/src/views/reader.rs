@@ -11,15 +11,15 @@
 use std::{collections::HashMap, sync::Arc};
 
 use gpui::{
-    div, img, list, prelude::*, px, relative, rgb, AnyElement, Context, Div, Entity,
-    EventEmitter, FontWeight, ListAlignment, ListState, Render, SharedString, Window,
+    AnyElement, Context, Div, Entity, EventEmitter, FontWeight, ListAlignment, ListState, Render,
+    SharedString, Window, div, img, list, prelude::*, px, relative, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
 use satori_core::nip::article;
 
-use crate::{markdown, media, theme};
 use super::{content, nav::Nav};
+use crate::{markdown, media, theme};
 
 pub struct ArticleView {
     core: Arc<Core>,
@@ -65,7 +65,9 @@ impl ArticleView {
         let mut seen = std::collections::HashSet::new();
         let missing: Vec<PublicKey> = want
             .into_iter()
-            .filter(|pk| !self.profiles.contains_key(&pk.to_string()) && seen.insert(pk.to_string()))
+            .filter(|pk| {
+                !self.profiles.contains_key(&pk.to_string()) && seen.insert(pk.to_string())
+            })
             .collect();
         if !missing.is_empty() {
             self.pump(self.core.ensure_profiles(missing), cx);
@@ -74,7 +76,10 @@ impl ArticleView {
 
     /// Queue fetches for the cover + every own-line image in the body.
     fn want_media(&self, cx: &mut Context<Self>) {
-        let mut urls = content::media_urls_cached(&self.ev).iter().cloned().collect::<Vec<_>>();
+        let mut urls = content::media_urls_cached(&self.ev)
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         if let Some(image) = &self.data.image {
             urls.push(image.clone());
         }
@@ -137,13 +142,11 @@ pub(crate) fn render_block<V: EventEmitter<Nav> + 'static>(
     handle: &Entity<V>,
 ) -> AnyElement {
     match block {
-        markdown::Block::Para(text) => {
-            block_item(
-                md_flow(&text, theme::T_READER, false, ctx, handle),
-                theme::S4,
-            )
-            .into_any_element()
-        }
+        markdown::Block::Para(text) => block_item(
+            md_flow(&text, theme::T_READER, false, ctx, handle),
+            theme::S4,
+        )
+        .into_any_element(),
         markdown::Block::Heading(level, text) => {
             // The ladder sits UNDER the title (H1 just below it, deeper
             // levels stepping down to T_READER then T_BODY — no 14.5/14.0
@@ -158,8 +161,14 @@ pub(crate) fn render_block<V: EventEmitter<Nav> + 'static>(
                 theme::T_BODY,
                 theme::T_BODY,
             ][(level - 1).clamp(0, 5)];
-            let top = [theme::S3, theme::S3, theme::S2, theme::S2, theme::S1, theme::S0]
-                [(level - 1).clamp(0, 5)];
+            let top = [
+                theme::S3,
+                theme::S3,
+                theme::S2,
+                theme::S2,
+                theme::S1,
+                theme::S0,
+            ][(level - 1).clamp(0, 5)];
             let head = div()
                 .w_full()
                 .pt(px(top))
@@ -187,26 +196,24 @@ pub(crate) fn render_block<V: EventEmitter<Nav> + 'static>(
                 // A task item's marker is its checkbox: a stroke-drawn
                 // square, the check riding the vermilion when done.
                 let marker = if let Some(checked) = li.task {
-                    div()
-                        .flex_shrink_0()
-                        .child(
-                            div()
-                                .mt(px(2.))
-                                .size(px(13.))
-                                .rounded(px(3.))
-                                .border_1()
-                                .border_color(rgb(theme::hairline()))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(px(10.))
-                                .text_color(rgb(if checked {
-                                    theme::vermilion()
-                                } else {
-                                    theme::muted()
-                                }))
-                                .child(if checked { "✓" } else { "" }),
-                        )
+                    div().flex_shrink_0().child(
+                        div()
+                            .mt(px(2.))
+                            .size(px(13.))
+                            .rounded(px(3.))
+                            .border_1()
+                            .border_color(rgb(theme::hairline()))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(10.))
+                            .text_color(rgb(if checked {
+                                theme::vermilion()
+                            } else {
+                                theme::muted()
+                            }))
+                            .child(if checked { "✓" } else { "" }),
+                    )
                 } else if ordered {
                     div()
                         .font_family(theme::SERIF)
@@ -227,14 +234,7 @@ pub(crate) fn render_block<V: EventEmitter<Nav> + 'static>(
                 } else {
                     body
                 };
-                list_el = list_el.child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .gap_2()
-                        .child(marker)
-                        .child(body),
-                );
+                list_el = list_el.child(div().w_full().flex().gap_2().child(marker).child(body));
             }
             block_item(list_el, theme::S4).into_any_element()
         }
@@ -275,7 +275,9 @@ pub(crate) fn render_block<V: EventEmitter<Nav> + 'static>(
                         .bg(rgb(theme::panel()))
                         .py_1()
                         .children(
-                            head.into_iter().enumerate().map(|(c, h)| cell_el(h, c, true)),
+                            head.into_iter()
+                                .enumerate()
+                                .map(|(c, h)| cell_el(h, c, true)),
                         ),
                 );
             for mut row in rows {
@@ -289,9 +291,11 @@ pub(crate) fn render_block<V: EventEmitter<Nav> + 'static>(
                         .border_b_1()
                         .border_color(rgb(theme::hairline()))
                         .py_1()
-                        .children(row.into_iter().enumerate().map(|(c, cell)| {
-                            cell_el(cell, c, false)
-                        })),
+                        .children(
+                            row.into_iter()
+                                .enumerate()
+                                .map(|(c, cell)| cell_el(cell, c, false)),
+                        ),
                 );
             }
             // Pad the body out to the header's column count (jagged rows
@@ -374,16 +378,13 @@ pub(crate) fn md_flow<V: EventEmitter<Nav> + 'static>(
             Some(url) => {
                 let id = SharedString::from(format!("mdlink-{label}-{url}"));
                 let openable = crate::views::content::web_url(&url);
-                flow = flow.child(
-                    styled(label)
-                        .id(id)
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| {
-                            if openable {
-                                cx.open_url(&url);
-                            }
-                        }),
-                );
+                flow = flow.child(styled(label).id(id).cursor_pointer().on_click(
+                    move |_, _, cx| {
+                        if openable {
+                            cx.open_url(&url);
+                        }
+                    },
+                ));
             }
             None => {
                 // Plain words ride the entity classifier: bare urls and
@@ -506,97 +507,83 @@ impl Render for ArticleView {
             .flex()
             .flex_col()
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .justify_center()
-                    .child(
-                        // list() has no intrinsic height — it must be told to
-                        // fill its container or it lays out at 0px and paints
-                        // nothing (the feed carries the same comment).
-                        list(self.list.clone(), move |idx, _w, _cx| {
-                            let body_ctx = content::Body {
-                                media: &media,
-                                quotes: &quotes,
-                                profiles: &profiles,
-                            };
-                            match idx {
-                                0 => block_item(
-                                    div()
-                                        .w_full()
-                                        .font_family(theme::SERIF)
-                                        // Display serif for the h1 (spec
-                                        // §1.3: 17–20; top of the ladder).
-                                        .text_size(px(20.0))
-                                        .line_height(relative(1.25))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(theme::ink()))
-                                        .child(title.clone()),
-                                    theme::S3,
-                                )
-                                .into_any_element(),
-                                1 => block_item(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(media::avatar(
-                                            &media,
-                                            &author_pic,
-                                            &author,
-                                            24.0,
-                                        ))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_baseline()
-                                                .gap_2()
-                                                .text_size(px(theme::T_UI))
-                                                .text_color(rgb(theme::muted()))
-                                                .child(
-                                                    div()
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .text_color(rgb(theme::ink()))
-                                                        .child(author.clone()),
-                                                )
-                                                .children(
-                                                    published.clone().map(|t| {
-                                                        // The timestamp is
-                                                        // the third mode
-                                                        // toggle (timefmt.rs):
-                                                        // tap cycles.
-                                                        div()
-                                                            .id("reader-published")
-                                                            .cursor_pointer()
-                                                            .on_click(|_, _, cx| {
-                                                                crate::timefmt::cycle(cx)
-                                                            })
-                                                            .child(format!("· {t}"))
-                                                    }),
-                                                )
-                                                .child(format!("· {minutes} min read")),
-                                        ),
-                                    theme::S5,
-                                )
-                                .into_any_element(),
-                                2 if cover.is_some() => block_item(
-                                    image_tile(cover.as_deref().unwrap_or(""), &media),
-                                    theme::S5,
-                                )
-                                .into_any_element(),
-                                i => render_block(
-                                    blocks[i - head_count].clone(),
-                                    i - head_count,
-                                    &body_ctx,
-                                    &handle,
-                                ),
-                            }
-                        })
-                        .w_full()
-                        .max_w(px(content::COL_W))
-                        .h_full(),
-                    ),
+                div().flex_1().min_h_0().flex().justify_center().child(
+                    // list() has no intrinsic height — it must be told to
+                    // fill its container or it lays out at 0px and paints
+                    // nothing (the feed carries the same comment).
+                    list(self.list.clone(), move |idx, _w, _cx| {
+                        let body_ctx = content::Body {
+                            media: &media,
+                            quotes: &quotes,
+                            profiles: &profiles,
+                        };
+                        match idx {
+                            0 => block_item(
+                                div()
+                                    .w_full()
+                                    .font_family(theme::SERIF)
+                                    // Display serif for the h1 (spec
+                                    // §1.3: 17–20; top of the ladder).
+                                    .text_size(px(20.0))
+                                    .line_height(relative(1.25))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme::ink()))
+                                    .child(title.clone()),
+                                theme::S3,
+                            )
+                            .into_any_element(),
+                            1 => block_item(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(media::avatar(&media, &author_pic, &author, 24.0))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_baseline()
+                                            .gap_2()
+                                            .text_size(px(theme::T_UI))
+                                            .text_color(rgb(theme::muted()))
+                                            .child(
+                                                div()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(theme::ink()))
+                                                    .child(author.clone()),
+                                            )
+                                            .children(published.clone().map(|t| {
+                                                // The timestamp is
+                                                // the third mode
+                                                // toggle (timefmt.rs):
+                                                // tap cycles.
+                                                div()
+                                                    .id("reader-published")
+                                                    .cursor_pointer()
+                                                    .on_click(|_, _, cx| crate::timefmt::cycle(cx))
+                                                    .child(format!("· {t}"))
+                                            }))
+                                            .child(format!("· {minutes} min read")),
+                                    ),
+                                theme::S5,
+                            )
+                            .into_any_element(),
+                            2 if cover.is_some() => block_item(
+                                image_tile(cover.as_deref().unwrap_or(""), &media),
+                                theme::S5,
+                            )
+                            .into_any_element(),
+                            i => render_block(
+                                blocks[i - head_count].clone(),
+                                i - head_count,
+                                &body_ctx,
+                                &handle,
+                            ),
+                        }
+                    })
+                    .w_full()
+                    .max_w(px(content::COL_W))
+                    .h_full(),
+                ),
             )
     }
 }

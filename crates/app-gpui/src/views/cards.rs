@@ -12,15 +12,17 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    div, prelude::*, px, relative, rgb, ClipboardItem, Div, Entity, FontWeight, SharedString,
+    ClipboardItem, Div, Entity, FontWeight, SharedString, div, prelude::*, px, relative, rgb,
 };
 use nostr::prelude::*;
-use satori_core::nip::{article, calendar, classified, highlight, imeta, poll, repo, wiki, podcast};
+use satori_core::nip::{
+    article, calendar, classified, highlight, imeta, podcast, poll, repo, wiki,
+};
 
-use crate::{markdown, theme};
 use super::content::{self, Body};
 use super::feed::Feed;
 use super::nav::Nav;
+use crate::{markdown, theme};
 
 /// Read-only card state, cloned out of the feed each frame (the list closure
 /// outlives the &self borrow).
@@ -132,13 +134,7 @@ fn video_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
     // The body already carries the media section for video URLs (poster →
     // the Phase 3 inline player on tap); the card adds the kicker and the
     // serif title.
-    let title = ev
-        .content
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let title = ev.content.lines().next().unwrap_or("").trim().to_string();
     let mut card = div().w_full().flex().flex_col().gap_2();
     card = card.child(kicker("▶ Video"));
     if !title.is_empty() {
@@ -227,86 +223,84 @@ fn poll_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> Div
             });
         }
         // Bar behind, label in front (poll.ts poll-bar-fill).
-        card = card.child(row.child(
-            div()
-                .relative()
-                .h(px(24.))
-                .w_full()
-                .rounded(px(theme::R_EMBED))
-                .overflow_hidden()
-                .bg(rgb(theme::washi()))
-                .when(!ballot && total > 0 && pct > 0.0, |d| {
-                    d.child(
+        card = card.child(
+            row.child(
+                div()
+                    .relative()
+                    .h(px(24.))
+                    .w_full()
+                    .rounded(px(theme::R_EMBED))
+                    .overflow_hidden()
+                    .bg(rgb(theme::washi()))
+                    .when(!ballot && total > 0 && pct > 0.0, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left_0()
+                                .w(relative(pct))
+                                .bg(rgb(theme::hairline())),
+                        )
+                    })
+                    .child(
                         div()
                             .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .left_0()
-                            .w(relative(pct))
-                            .bg(rgb(theme::hairline())),
-                    )
-                })
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_2()
-                        .child(
-                            div()
-                                .size(px(8.))
-                                .rounded_full()
-                                .border_1()
-                                .border_color(rgb(if picked {
-                                    theme::vermilion()
-                                } else {
-                                    theme::muted()
-                                }))
-                                .bg(rgb(if picked {
-                                    theme::vermilion()
-                                } else {
-                                    theme::washi()
-                                })),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::ink()))
-                                .child(label.clone()),
-                        )
-                        .when(!ballot && total > 0, |d| {
-                            d.child(
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .child(
                                 div()
-                                    .flex_1()
-                                    .flex()
-                                    .justify_end()
-                                    .text_size(px(theme::T_SMALL))
-                                    .text_color(rgb(theme::muted()))
-                                    .child(format!("{count}")),
+                                    .size(px(8.))
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(rgb(if picked {
+                                        theme::vermilion()
+                                    } else {
+                                        theme::muted()
+                                    }))
+                                    .bg(rgb(if picked {
+                                        theme::vermilion()
+                                    } else {
+                                        theme::washi()
+                                    })),
                             )
-                        }),
-                ),
-        ));
+                            .child(
+                                div()
+                                    .text_size(px(theme::T_UI))
+                                    .text_color(rgb(theme::ink()))
+                                    .child(label.clone()),
+                            )
+                            .when(!ballot && total > 0, |d| {
+                                d.child(
+                                    div()
+                                        .flex_1()
+                                        .flex()
+                                        .justify_end()
+                                        .text_size(px(theme::T_SMALL))
+                                        .text_color(rgb(theme::muted()))
+                                        .child(format!("{count}")),
+                                )
+                            }),
+                    ),
+            ),
+        );
     }
 
     if ballot && !selected.is_empty() {
         let ev_for_vote = ev.clone();
         let feed_for_vote = feed.clone();
-        card = card.child(
-            div()
-                .w_full()
-                .flex()
-                .justify_end()
-                .child(seal(format!("vote-{}", ev.id), "Vote", theme::vermilion(), false).on_click(
-                    move |_, _, cx| {
-                        cx.stop_propagation();
-                        let ev = ev_for_vote.clone();
-                        feed_for_vote.update(cx, |f, cx| f.cast_vote(&ev, cx));
-                    },
-                )),
-        );
+        card = card.child(div().w_full().flex().justify_end().child(
+            seal(format!("vote-{}", ev.id), "Vote", theme::vermilion(), false).on_click(
+                move |_, _, cx| {
+                    cx.stop_propagation();
+                    let ev = ev_for_vote.clone();
+                    feed_for_vote.update(cx, |f, cx| f.cast_vote(&ev, cx));
+                },
+            ),
+        ));
     }
     if voted {
         card = card.child(meta_line("Your ballot is in, thanks for the ink."));
@@ -428,9 +422,7 @@ fn classified_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState)
             .into_iter()
             .filter_map(|m| m.alt.map(|a| (m.url, a)))
             .collect();
-        if let Some(gallery) =
-            content::media_section(&assets, &dims, &gallery_alts, ctx, feed)
-        {
+        if let Some(gallery) = content::media_section(&assets, &dims, &gallery_alts, ctx, feed) {
             card = card.child(gallery);
         }
     }
@@ -476,12 +468,16 @@ fn repo_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
                         .child(url.clone()),
                 )
                 .child(
-                    seal(format!("copy-{}-{url}", ev.id), "Copy", theme::muted(), false).on_click(
-                        move |_, _, cx| {
-                            cx.stop_propagation();
-                            cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
-                        },
-                    ),
+                    seal(
+                        format!("copy-{}-{url}", ev.id),
+                        "Copy",
+                        theme::muted(),
+                        false,
+                    )
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+                    }),
                 ),
         );
     }
@@ -489,7 +485,10 @@ fn repo_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
         card = card.child(content::link_row(web));
     }
     if !data.maintainers.is_empty() {
-        card = card.child(meta_line(format!("{} maintainer(s)", data.maintainers.len())));
+        card = card.child(meta_line(format!(
+            "{} maintainer(s)",
+            data.maintainers.len()
+        )));
     }
     card
 }
@@ -754,10 +753,7 @@ fn highlight_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) 
 /// slice at 8 mid-character on multi-byte names — a panic that took the
 /// whole window down on render.
 fn short(key: &str) -> String {
-    let cut = key
-        .char_indices()
-        .nth(8)
-        .map_or(key.len(), |(i, _)| i);
+    let cut = key.char_indices().nth(8).map_or(key.len(), |(i, _)| i);
     format!("{}…", &key[..cut])
 }
 

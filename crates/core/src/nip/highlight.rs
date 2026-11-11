@@ -127,26 +127,23 @@ mod tests {
             ("r", vec!["https://b/exact", "source"]),
         ]);
         let d = parse(&e);
-        assert_eq!(
-            d.source,
-            Some(Source::Url("https://b/exact".to_string()))
-        );
+        assert_eq!(d.source, Some(Source::Url("https://b/exact".to_string())));
         // No marked r: the bare r cites; the mention r still never does.
         let e = ev(vec![
             ("r", vec!["https://b/track", "mention"]),
             ("r", vec!["https://b/page"]),
         ]);
-        assert_eq!(parse(&e).source, Some(Source::Url("https://b/page".to_string())));
+        assert_eq!(
+            parse(&e).source,
+            Some(Source::Url("https://b/page".to_string()))
+        );
         let e = ev(vec![("r", vec!["https://b/track", "mention"])]);
         assert_eq!(parse(&e).source, None);
     }
 
     #[test]
     fn nostr_refs_fallback_in_order_a_then_e() {
-        let e = ev(vec![
-            ("e", vec!["abc123"]),
-            ("a", vec!["30023:abc:def"]),
-        ]);
+        let e = ev(vec![("e", vec!["abc123"]), ("a", vec!["30023:abc:def"])]);
         let d = parse(&e);
         assert_eq!(d.source, Some(Source::Nostr("30023:abc:def".to_string())));
         let e = ev(vec![("e", vec!["abc123"])]);
@@ -156,11 +153,42 @@ mod tests {
     #[test]
     fn p_tags_drop_mention_and_editor_roles() {
         let e = ev(vec![
-            ("p", vec!["460c25e682fda7832b52d1f22d3d22b3176d972f60dcdc3212ed8c92ef85065c"]),
-            ("p", vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", "mention"]),
-            ("p", vec!["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "", "author"]),
-            ("p", vec!["460c25e682fda7832b52d1f22d3d22b3176d972f60dcdc3212ed8c92ef85065c", "", "author"]),
-            ("p", vec!["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "", "editor"]),
+            (
+                "p",
+                vec!["460c25e682fda7832b52d1f22d3d22b3176d972f60dcdc3212ed8c92ef85065c"],
+            ),
+            (
+                "p",
+                vec![
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "",
+                    "mention",
+                ],
+            ),
+            (
+                "p",
+                vec![
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "",
+                    "author",
+                ],
+            ),
+            (
+                "p",
+                vec![
+                    "460c25e682fda7832b52d1f22d3d22b3176d972f60dcdc3212ed8c92ef85065c",
+                    "",
+                    "author",
+                ],
+            ),
+            (
+                "p",
+                vec![
+                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "",
+                    "editor",
+                ],
+            ),
         ]);
         let d = parse(&e);
         assert_eq!(
@@ -189,6 +217,9 @@ mod tests {
     #[test]
     fn context_tag_keeps_inner_spaces() {
         let e = ev(vec![("context", vec!["she wrote, and then", "some"])]);
-        assert_eq!(parse(&e).context.as_deref(), Some("she wrote, and then some"));
+        assert_eq!(
+            parse(&e).context.as_deref(),
+            Some("she wrote, and then some")
+        );
     }
 }

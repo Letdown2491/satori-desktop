@@ -6,7 +6,7 @@
 //! `PathBuilder` ops, stroked at paint time and crisp at every scale. Same
 //! iconography, zero asset toolchain.
 
-use gpui::{canvas, prelude::*, px, rgb, IntoElement, PathBuilder, Pixels, Point};
+use gpui::{IntoElement, PathBuilder, Pixels, Point, canvas, prelude::*, px, rgb};
 
 /// Maps 24-unit glyph coordinates onto the element's pixel bounds.
 pub(crate) struct Grid {

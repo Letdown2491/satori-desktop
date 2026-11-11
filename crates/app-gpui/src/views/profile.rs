@@ -11,16 +11,15 @@
 use std::{collections::HashMap, collections::HashSet, sync::Arc, time::Duration};
 
 use gpui::{
-    div, img, list, prelude::*, px, rgb, AnyElement, Context, Div, Entity, EventEmitter,
-    FontWeight, ListAlignment, ListScrollEvent, ListState, ObjectFit, Render, SharedString,
-    Window,
+    AnyElement, Context, Div, Entity, EventEmitter, FontWeight, ListAlignment, ListScrollEvent,
+    ListState, ObjectFit, Render, SharedString, Window, div, img, list, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
 
+use super::{content, feed::Feed, nav::Nav, states};
 use crate::{icons, media, theme};
 use satori_core::wot::Verdict;
-use super::{content, feed::Feed, nav::Nav, states};
 
 /// Which profile surface is up: the notes body or the media strips
 /// (Phase 2 §4.3 — Photos/Videos, three-column thumbnails).
@@ -135,17 +134,18 @@ impl ProfileView {
         // on &mut App; WeakEntity::update accepts that. (The Notes tab's
         // list belongs to the child feed — its own handler pages there.)
         let this = cx.entity().downgrade();
-        view.list.set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
-            let _ = this.update(cx, |this, cx| {
-                this.last_visible_end = ev.visible_range.end;
-                let deep = ev.visible_range.start >= 3;
-                if this.deep != deep {
-                    this.deep = deep;
-                    cx.emit(Nav::PaneDeep);
-                }
-                this.maybe_older(this.last_visible_end, cx);
+        view.list
+            .set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.last_visible_end = ev.visible_range.end;
+                    let deep = ev.visible_range.start >= 3;
+                    if this.deep != deep {
+                        this.deep = deep;
+                        cx.emit(Nav::PaneDeep);
+                    }
+                    this.maybe_older(this.last_visible_end, cx);
+                });
             });
-        });
         let rx = view.core.profile(view.who);
         view.pump(rx, cx);
         view
@@ -263,12 +263,17 @@ impl ProfileView {
             .iter()
             .filter(|n| matches!(u16::from(n.kind), 1 | 21 | 22))
             .flat_map(|n| {
-                content::media_assets(n).into_iter().filter_map(|a| match a {
-                    content::MediaAsset::Video { url, poster, blurhash, mime } => {
-                        Some((url, poster, blurhash, mime))
-                    }
-                    _ => None,
-                })
+                content::media_assets(n)
+                    .into_iter()
+                    .filter_map(|a| match a {
+                        content::MediaAsset::Video {
+                            url,
+                            poster,
+                            blurhash,
+                            mime,
+                        } => Some((url, poster, blurhash, mime)),
+                        _ => None,
+                    })
             })
             .collect()
     }
@@ -332,10 +337,16 @@ impl ProfileView {
             return; // in flight or answered for this address
         }
         self.nip05_memo = Some((p.nip05.clone(), None));
-        let rx = self.core.verify_nip05(p.nip05.clone(), self.who.to_string());
+        let rx = self
+            .core
+            .verify_nip05(p.nip05.clone(), self.who.to_string());
         let h = cx.entity().downgrade();
         cx.spawn(async move |_this, cx| {
-            let verdict = { let mut rx = rx; rx.recv().await }.flatten();
+            let verdict = {
+                let mut rx = rx;
+                rx.recv().await
+            }
+            .flatten();
             let _ = h.update(cx, |this, cx| {
                 if let Some(memo) = &mut this.nip05_memo {
                     memo.1 = verdict;
@@ -407,20 +418,40 @@ impl Render for ProfileView {
             .as_ref()
             .map(|p| p.display())
             .unwrap_or_else(|| format!("{}…", &who_hex[..8]));
-        let about = self.profile.as_ref().map(|p| p.about.clone()).unwrap_or_default();
-        let picture = self.profile.as_ref().map(|p| p.picture.clone()).unwrap_or_default();
-        let banner = self.profile.as_ref().map(|p| p.banner.clone()).unwrap_or_default();
-        let banner_blurhash =
-            self.profile.as_ref().and_then(|p| p.banner_blurhash.clone());
-        let nip05 = self.profile.as_ref().map(|p| p.nip05.clone()).unwrap_or_default();
-        let lud = self.profile.as_ref().map(|p| p.lud.clone()).unwrap_or_default();
+        let about = self
+            .profile
+            .as_ref()
+            .map(|p| p.about.clone())
+            .unwrap_or_default();
+        let picture = self
+            .profile
+            .as_ref()
+            .map(|p| p.picture.clone())
+            .unwrap_or_default();
+        let banner = self
+            .profile
+            .as_ref()
+            .map(|p| p.banner.clone())
+            .unwrap_or_default();
+        let banner_blurhash = self
+            .profile
+            .as_ref()
+            .and_then(|p| p.banner_blurhash.clone());
+        let nip05 = self
+            .profile
+            .as_ref()
+            .map(|p| p.nip05.clone())
+            .unwrap_or_default();
+        let lud = self
+            .profile
+            .as_ref()
+            .map(|p| p.lud.clone())
+            .unwrap_or_default();
         // The share payload: the profile as a NIP-21 URI (npub form — D27's
         // scheme; settings.rs uses the same bech32 encoding).
         let npub_uri = format!(
             "nostr:{}",
-            self.who
-                .to_bech32()
-                .unwrap_or_else(|_| who_hex.clone())
+            self.who.to_bech32().unwrap_or_else(|_| who_hex.clone())
         );
         // Brief display form (login.rs's uri_brief shape): scheme stripped,
         // leading chars + ellipsis. The full URI still rides the clipboard.
@@ -508,13 +539,13 @@ impl Render for ProfileView {
         // stays a seal: the pill is washi + muted, never tinted.
         let badge = crate::prefs::get_bool_or("profile_badge", true)
             .then(|| {
-                let (v, shared) =
-                    self.core.verdict(&self.who).with_count(self.core.shared_follows(&self.who));
+                let (v, shared) = self
+                    .core
+                    .verdict(&self.who)
+                    .with_count(self.core.shared_follows(&self.who));
                 match v {
                     Verdict::Follow => Some("You follow".to_string()),
-                    Verdict::Trusted => {
-                        Some(format!("In your network · {shared} shared follows"))
-                    }
+                    Verdict::Trusted => Some(format!("In your network · {shared} shared follows")),
                     Verdict::NotInNetwork => Some("Outside your network".to_string()),
                     _ => None,
                 }
@@ -653,9 +684,9 @@ impl Render for ProfileView {
                                                             .text_size(px(theme::T_SMALL))
                                                             .text_color(rgb(theme::muted()))
                                                             .hover(|s| {
-                                                                s.text_color(rgb(
-                                                                    theme::vermilion(),
-                                                                ))
+                                                                s.text_color(
+                                                                    rgb(theme::vermilion()),
+                                                                )
                                                             })
                                                             .on_click(cx.listener(
                                                                 move |this, _, _, cx| {
@@ -669,7 +700,9 @@ impl Render for ProfileView {
                                                             .child(if link_flash {
                                                                 format!("{npub_brief} · copied")
                                                             } else {
-                                                                format!("{npub_brief} · click to copy")
+                                                                format!(
+                                                                    "{npub_brief} · click to copy"
+                                                                )
                                                             })
                                                             // The trust badge: a washi pill under the
                                                             // name (WS3). Unknown renders nothing —
@@ -681,7 +714,9 @@ impl Render for ProfileView {
                                                                     .py_0p5()
                                                                     .rounded_full()
                                                                     .border_1()
-                                                                    .border_color(rgb(theme::hairline()))
+                                                                    .border_color(rgb(
+                                                                        theme::hairline(),
+                                                                    ))
                                                                     .bg(rgb(theme::washi()))
                                                                     .text_size(px(theme::T_SMALL))
                                                                     .text_color(rgb(theme::muted()))
@@ -705,9 +740,7 @@ impl Render for ProfileView {
                                                 .rounded(px(theme::R_EMBED))
                                                 .border_1()
                                                 .border_color(rgb(theme::hairline()))
-                                                .hover(|s| {
-                                                    s.border_color(rgb(theme::muted()))
-                                                })
+                                                .hover(|s| s.border_color(rgb(theme::muted())))
                                                 .text_size(px(theme::T_SMALL))
                                                 .on_click(move |_, _, cx| {
                                                     let h = follow_handle.clone();
@@ -789,8 +822,7 @@ impl Render for ProfileView {
                                                     });
                                                 })
                                                 .when(muted, |d| {
-                                                    d.text_color(rgb(theme::muted()))
-                                                        .child("Muted")
+                                                    d.text_color(rgb(theme::muted())).child("Muted")
                                                 })
                                                 .when(!muted, |d| {
                                                     d.text_color(rgb(theme::vermilion()))
@@ -909,62 +941,64 @@ impl Render for ProfileView {
                             .into_any_element()
                     } else {
                         list(self.list.clone(), move |idx, _w, _cx| {
-                    match rows.get(idx) {
-                        Some(Row::Pics(tiles)) => {
-                            let mut grid = div()
-                                .w_full()
-                                .flex()
-                                .gap_1()
-                                .px_4()
-                                .py_1()
-                                .border_b_1()
-                                .border_color(rgb(theme::hairline()));
-                            for (url, gix) in tiles {
-                                grid = grid.child(thumb_tile(
-                                    &media,
-                                    SharedString::from(format!("pic-{gix}")),
-                                    url,
-                                    None,
-                                    Some((&pics_all, *gix)),
-                                    None,
-                                    None,
-                                    handle.clone(),
-                                ));
+                            match rows.get(idx) {
+                                Some(Row::Pics(tiles)) => {
+                                    let mut grid = div()
+                                        .w_full()
+                                        .flex()
+                                        .gap_1()
+                                        .px_4()
+                                        .py_1()
+                                        .border_b_1()
+                                        .border_color(rgb(theme::hairline()));
+                                    for (url, gix) in tiles {
+                                        grid = grid.child(thumb_tile(
+                                            &media,
+                                            SharedString::from(format!("pic-{gix}")),
+                                            url,
+                                            None,
+                                            Some((&pics_all, *gix)),
+                                            None,
+                                            None,
+                                            handle.clone(),
+                                        ));
+                                    }
+                                    grid.into_any_element()
+                                }
+                                Some(Row::Vids(tiles)) => {
+                                    let mut grid = div()
+                                        .w_full()
+                                        .flex()
+                                        .gap_1()
+                                        .px_4()
+                                        .py_1()
+                                        .border_b_1()
+                                        .border_color(rgb(theme::hairline()));
+                                    // One tile per video, the poster thumb when the
+                                    // bytes landed, the quiet play frame otherwise.
+                                    for (i, (url, poster, blurhash, mime)) in
+                                        tiles.iter().enumerate()
+                                    {
+                                        grid = grid.child(thumb_tile(
+                                            &media,
+                                            SharedString::from(format!("vid-{idx}-{i}")),
+                                            poster.as_deref().unwrap_or(""),
+                                            blurhash.as_deref(),
+                                            None,
+                                            Some(url.as_str()),
+                                            mime.as_deref(),
+                                            handle.clone(),
+                                        ));
+                                    }
+                                    grid.into_any_element()
+                                }
+                                None => div().into_any_element(),
                             }
-                            grid.into_any_element()
-                        }
-                        Some(Row::Vids(tiles)) => {
-                            let mut grid = div()
-                                .w_full()
-                                .flex()
-                                .gap_1()
-                                .px_4()
-                                .py_1()
-                                .border_b_1()
-                                .border_color(rgb(theme::hairline()));
-                            // One tile per video, the poster thumb when the
-                            // bytes landed, the quiet play frame otherwise.
-                            for (i, (url, poster, blurhash, mime)) in tiles.iter().enumerate() {
-                                grid = grid.child(thumb_tile(
-                                    &media,
-                                    SharedString::from(format!("vid-{idx}-{i}")),
-                                    poster.as_deref().unwrap_or(""),
-                                    blurhash.as_deref(),
-                                    None,
-                                    Some(url.as_str()),
-                                    mime.as_deref(),
-                                    handle.clone(),
-                                ));
-                            }
-                            grid.into_any_element()
-                        }
-                        None => div().into_any_element(),
-                    }
-                })
-                .w_full()
-                .max_w(px(content::COL_W))
-                .h_full()
-                .into_any_element()
+                        })
+                        .w_full()
+                        .max_w(px(content::COL_W))
+                        .h_full()
+                        .into_any_element()
                     })
                     .into_any_element(),
             })

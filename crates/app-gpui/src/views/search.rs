@@ -11,14 +11,14 @@
 use std::{collections::HashMap, sync::Arc};
 
 use gpui::{
-    div, list, prelude::*, px, rgb, AnyElement, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, KeyDownEvent, ListAlignment, ListState, Render, SharedString, Window,
+    AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent, ListAlignment,
+    ListState, Render, SharedString, Window, div, list, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, Profile};
 
-use crate::{input::Input, media, theme, uris};
 use super::{content, nav::Nav, states};
+use crate::{input::Input, media, theme, uris};
 
 /// The results pane's tab.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -102,7 +102,11 @@ impl SearchView {
         match target {
             uris::UriTarget::Profile(who) => cx.emit(Nav::OpenProfile(who)),
             uris::UriTarget::Thread(id) => cx.emit(Nav::OpenThread(id)),
-            uris::UriTarget::Article { kind, author, identifier } => {
+            uris::UriTarget::Article {
+                kind,
+                author,
+                identifier,
+            } => {
                 let generation = self.generation;
                 self.status = "Opening…".into();
                 let mut rx = self.core.event_by_address(kind, author, identifier);
@@ -126,7 +130,8 @@ impl SearchView {
         cx.notify();
     }
 
-    fn run(&mut self, cx: &mut Context<Self>) {        let q = self.input.read(cx).content.trim().to_string();
+    fn run(&mut self, cx: &mut Context<Self>) {
+        let q = self.input.read(cx).content.trim().to_string();
         if q.is_empty() {
             return;
         }
@@ -169,12 +174,7 @@ impl SearchView {
 
     /// One search tab: a quiet label, the active one ink + underlined
     /// (profile.rs's tab pattern).
-    fn tab_btn(
-        &self,
-        which: SearchTab,
-        label: &'static str,
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    fn tab_btn(&self, which: SearchTab, label: &'static str, cx: &Context<Self>) -> AnyElement {
         let on = self.tab == which;
         div()
             .id(SharedString::from(format!("tab-{label}")))
@@ -229,7 +229,12 @@ impl SearchView {
         cx.notify();
     }
 
-    fn pump_quote(&self, bech: String, mut rx: satori_core::manager::FeedRx, cx: &mut Context<Self>) {
+    fn pump_quote(
+        &self,
+        bech: String,
+        mut rx: satori_core::manager::FeedRx,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.recv().await {
                 if let FeedEvent::One(Some(target), prof) = ev {
@@ -240,8 +245,13 @@ impl SearchView {
                             .map(|p| p.display())
                             .or_else(|| this.profiles.get(&key).map(|p| p.display()))
                             .unwrap_or_else(|| format!("{}…", &key[..8]));
-                        this.quotes
-                            .insert(bech.clone(), Some(content::Embed { event: target, name }));
+                        this.quotes.insert(
+                            bech.clone(),
+                            Some(content::Embed {
+                                event: target,
+                                name,
+                            }),
+                        );
                         cx.notify();
                     });
                 }
@@ -352,30 +362,26 @@ impl Render for SearchView {
                     uris::UriTarget::Article { .. } => "Open article",
                 };
                 d.child(
-                    div()
-                        .px_4()
-                        .pb_1()
-                        .flex()
-                        .child(
-                            div()
-                                .id("open-target")
-                                .cursor_pointer()
-                                .px_2()
-                                .py_1()
-                                .rounded(px(theme::R_EMBED))
-                                .border_1()
-                                .border_color(rgb(theme::hairline()))
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::ink()))
-                                .hover(|s| {
-                                    s.border_color(rgb(theme::vermilion()))
-                                        .text_color(rgb(theme::vermilion()))
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.open_target(target.clone(), cx);
-                                }))
-                                .child(label),
-                        ),
+                    div().px_4().pb_1().flex().child(
+                        div()
+                            .id("open-target")
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(theme::R_EMBED))
+                            .border_1()
+                            .border_color(rgb(theme::hairline()))
+                            .text_size(px(theme::T_UI))
+                            .text_color(rgb(theme::ink()))
+                            .hover(|s| {
+                                s.border_color(rgb(theme::vermilion()))
+                                    .text_color(rgb(theme::vermilion()))
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_target(target.clone(), cx);
+                            }))
+                            .child(label),
+                    ),
                 )
             })
             .when(self.generation > 0, |d| {
@@ -411,19 +417,14 @@ impl Render for SearchView {
             })
             // §4.3: the kinded error strip — Retry re-runs the question.
             .when_some(self.error.clone(), |d, err| {
-                d.child(
-                    div()
-                        .px_4()
-                        .pt_2()
-                        .child(states::error_strip(
-                            &err,
-                            cx.listener(move |this, _, _, cx| this.run(cx)),
-                            cx.listener(move |this, _, _, cx| {
-                                this.error = None;
-                                cx.notify();
-                            }),
-                        )),
-                )
+                d.child(div().px_4().pt_2().child(states::error_strip(
+                    &err,
+                    cx.listener(move |this, _, _, cx| this.run(cx)),
+                    cx.listener(move |this, _, _, cx| {
+                        this.error = None;
+                        cx.notify();
+                    }),
+                )))
             })
             .child(if self.generation == 0 {
                 // The virgin state: what this pane is and what relays can
@@ -447,9 +448,7 @@ impl Render for SearchView {
                         div()
                             .text_size(px(theme::T_SMALL))
                             .text_color(rgb(theme::muted()))
-                            .child(
-                                "Operators some relays honor: by: p: t: has: since: site:",
-                            ),
+                            .child("Operators some relays honor: by: p: t: has: since: site:"),
                     )
                     .into_any_element()
             } else if self.tab == SearchTab::People {
@@ -511,7 +510,11 @@ impl Render for SearchView {
                                     .child(media::avatar(
                                         &media,
                                         &p.picture,
-                                        if p.name.is_empty() { &p.pubkey } else { &p.name },
+                                        if p.name.is_empty() {
+                                            &p.pubkey
+                                        } else {
+                                            &p.name
+                                        },
                                         26.0,
                                     ))
                                     .child(
@@ -554,8 +557,14 @@ impl Render for SearchView {
                                     let time = crate::timefmt::stamp(secs, cx);
                                     crate::timefmt::ensure(secs, cx);
                                     content::compact_card(
-                                        idx, "search", ev, &profiles, &media, &quotes,
-                                        time, handle.clone(),
+                                        idx,
+                                        "search",
+                                        ev,
+                                        &profiles,
+                                        &media,
+                                        &quotes,
+                                        time,
+                                        handle.clone(),
                                     )
                                 }
                                 None => div().into_any_element(),
@@ -614,8 +623,10 @@ impl Render for SearchView {
 /// memory (nip11.rs) doesn't know enough to say. Capability urls are
 /// keyed by the same normalization the pool uses (outbox::relay_key).
 fn nip50_verdict(core: &Core) -> Option<bool> {
-    let mut urls: Vec<String> =
-        satori_core::pool::INDEXERS.iter().map(|s| s.to_string()).collect();
+    let mut urls: Vec<String> = satori_core::pool::INDEXERS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     urls.extend(core.current_relays().0);
     let caps = Core::relay_capabilities();
     let mut any_capable = false;

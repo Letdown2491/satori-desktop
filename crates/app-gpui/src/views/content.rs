@@ -8,16 +8,22 @@
 //! URLs included — core sniffs bytes, not extensions) folds out into a
 //! gallery section under the text; videos render as play-card links.
 
-use std::{collections::HashMap, hash::{Hash, Hasher}};
+use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
+};
 
-use gpui::{div, img, prelude::*, px, relative, rgb, AnimationExt, AnyElement, Div, Entity, EventEmitter, FontWeight, ObjectFit, SharedString};
+use gpui::{
+    AnimationExt, AnyElement, Div, Entity, EventEmitter, FontWeight, ObjectFit, SharedString, div,
+    img, prelude::*, px, relative, rgb,
+};
 use nostr::prelude::*;
 use satori_core::manager::Profile;
 use satori_core::nip::article;
 use satori_core::nip::imeta;
 
-use crate::{media, theme};
 use super::nav::Nav;
+use crate::{media, theme};
 
 /// Timeline column width. Deliberately 640 — the webapp's was 720
 /// (styles.css:100 `#app { max-width: 720px }`); at 12–14px desktop type,
@@ -102,13 +108,19 @@ fn path_ext(url: &str) -> Option<String> {
 /// Image URL by extension (content.rs is_image_url) — plus the byte-sniffing
 /// fallback in core.fetch_image for extension-less blossom URLs.
 fn is_image_url(url: &str) -> bool {
-    matches!(path_ext(url).as_deref(), Some("png" | "jpg" | "jpeg" | "webp" | "gif"))
+    matches!(
+        path_ext(url).as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp" | "gif")
+    )
 }
 
 /// Video by extension — never fetched until asked; rendered as a play-card
 /// (inline player since Phase 3 — video.rs).
 pub(crate) fn is_video_url(url: &str) -> bool {
-    matches!(path_ext(url).as_deref(), Some("mp4" | "webm" | "mov" | "mkv" | "m4v"))
+    matches!(
+        path_ext(url).as_deref(),
+        Some("mp4" | "webm" | "mov" | "mkv" | "m4v")
+    )
 }
 
 /// One entry of the media section, in reading order: a picture (lightbox
@@ -116,8 +128,15 @@ pub(crate) fn is_video_url(url: &str) -> bool {
 /// imeta mime tells an extension-less blossom URL from a picture).
 #[derive(Clone)]
 pub enum MediaAsset {
-    Picture { url: String },
-    Video { url: String, poster: Option<String>, blurhash: Option<String>, mime: Option<String> },
+    Picture {
+        url: String,
+    },
+    Video {
+        url: String,
+        poster: Option<String>,
+        blurhash: Option<String>,
+        mime: Option<String>,
+    },
 }
 impl MediaAsset {
     fn url(&self) -> &str {
@@ -156,8 +175,8 @@ pub fn media_assets(ev: &Event) -> Vec<MediaAsset> {
         if m.url.is_empty() {
             continue;
         }
-        let video = m.mime.as_deref().is_some_and(|m| m.starts_with("video/"))
-            || is_video_url(&m.url);
+        let video =
+            m.mime.as_deref().is_some_and(|m| m.starts_with("video/")) || is_video_url(&m.url);
         out.push(if video {
             MediaAsset::Video {
                 url: m.url,
@@ -179,7 +198,12 @@ pub fn media_assets(ev: &Event) -> Vec<MediaAsset> {
                     mime: None,
                 }
             } else if is_video_url(&url) {
-                MediaAsset::Video { url: url.clone(), poster: None, blurhash: None, mime: None }
+                MediaAsset::Video {
+                    url: url.clone(),
+                    poster: None,
+                    blurhash: None,
+                    mime: None,
+                }
             } else if is_image_url(&url) || path_ext(&url).is_none() {
                 MediaAsset::Picture { url: url.clone() }
             } else {
@@ -205,7 +229,12 @@ pub fn media_urls(ev: &Event) -> Vec<String> {
         .into_iter()
         .flat_map(|a| match a {
             MediaAsset::Picture { url } => vec![url],
-            MediaAsset::Video { url, poster, blurhash, mime } => match poster {
+            MediaAsset::Video {
+                url,
+                poster,
+                blurhash,
+                mime,
+            } => match poster {
                 Some(p) => vec![p],
                 None => match blurhash {
                     Some(h) => vec![crate::poster::blurhash_key(&h)],
@@ -376,9 +405,10 @@ pub(crate) fn classify_token(core: &str) -> Tok {
     }
     // #tag — the note's t tags mirror these (Phase 2 §4.2). Alphanumerics
     // and underscore, at least one; `##` or a bare `#` stays a word.
-    if let Some(tag) = core.strip_prefix('#').filter(|t| {
-        !t.is_empty() && t.chars().all(|c| c.is_alphanumeric() || c == '_')
-    }) {
+    if let Some(tag) = core
+        .strip_prefix('#')
+        .filter(|t| !t.is_empty() && t.chars().all(|c| c.is_alphanumeric() || c == '_'))
+    {
         return Tok::Hashtag(tag.to_string());
     }
     Tok::Word(core.to_string())
@@ -433,7 +463,12 @@ pub(crate) fn token_el<V: EventEmitter<Nav> + 'static>(
             .hover(|s| s.text_color(rgb(theme::vermilion())))
     };
     match tok {
-        Tok::Word(w) => word(if punct.is_empty() { w } else { format!("{w}{punct}") }).into_any_element(),
+        Tok::Word(w) => word(if punct.is_empty() {
+            w
+        } else {
+            format!("{w}{punct}")
+        })
+        .into_any_element(),
         Tok::Url(url) => {
             let label = display_url(&url);
             let openable = web_url(&url);
@@ -618,11 +653,7 @@ fn body_parse_cached(ev: &Event) -> std::sync::Arc<BodyParse> {
 /// Render a note body: word-flow paragraphs, media gallery section, quote
 /// embeds. Media fetches ride the shared cache (`media::Snapshot`); the view
 /// queues them via `content::media_urls` + `media::fetch`.
-pub fn body<V: EventEmitter<Nav> + 'static>(
-    ev: &Event,
-    ctx: &Body,
-    handle: Entity<V>,
-) -> Div {
+pub fn body<V: EventEmitter<Nav> + 'static>(ev: &Event, ctx: &Body, handle: Entity<V>) -> Div {
     let mut body = div().w_full().flex().flex_col().gap_2();
 
     let parsed = body_parse_cached(ev);
@@ -664,7 +695,9 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
                 if is_video_url(&url) || youtube_thumb(&url).is_some() {
                     // The gallery section below renders the video tile
                     // (poster + play overlay, opens the browser).
-                } else if ctx.media.not_media(&url) || !(is_image_url(&url) || path_ext(&url).is_none()) {
+                } else if ctx.media.not_media(&url)
+                    || !(is_image_url(&url) || path_ext(&url).is_none())
+                {
                     body = push_block(body, &mut run).child(link_row(&url));
                 }
                 // else: a media URL — the gallery section below renders it.
@@ -709,12 +742,14 @@ pub fn body<V: EventEmitter<Nav> + 'static>(
     for bech in note_refs(ev) {
         match ctx.quotes.get(&bech) {
             Some(Some(e)) => body = body.child(embed_card(&bech, e, handle.clone())),
-            _ => body = body.child(
-                div()
-                    .text_size(px(theme::T_SMALL))
-                    .text_color(rgb(theme::muted()))
-                    .child("…"),
-            ),
+            _ => {
+                body = body.child(
+                    div()
+                        .text_size(px(theme::T_SMALL))
+                        .text_color(rgb(theme::muted()))
+                        .child("…"),
+                )
+            }
         }
     }
 
@@ -779,7 +814,11 @@ fn video_tile(
     if let Some(v) = crate::video::active(url) {
         let max_w = w.unwrap_or(COL_W - 32.0);
         let ar = v.aspect_ratio();
-        let box_h = if ar > 0.0 { (max_w / ar).clamp(80.0, 560.0) } else { h };
+        let box_h = if ar > 0.0 {
+            (max_w / ar).clamp(80.0, 560.0)
+        } else {
+            h
+        };
         let paused_now = v.paused();
         let browser_target = url.to_string();
         return div()
@@ -1019,7 +1058,12 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
                 handle,
             )
             .into_any_element(),
-            MediaAsset::Video { url, poster, blurhash, mime } => video_tile(
+            MediaAsset::Video {
+                url,
+                poster,
+                blurhash,
+                mime,
+            } => video_tile(
                 url,
                 poster.as_deref(),
                 blurhash.as_deref(),
@@ -1039,7 +1083,9 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
     // is honored by construction, there is nothing to reduce. Keyboard:
     // a click/Enter on the image opens the lightbox, whose arrow keys
     // walk the same set.
-    let pictures_only = visible.iter().all(|a| matches!(a, MediaAsset::Picture { .. }));
+    let pictures_only = visible
+        .iter()
+        .all(|a| matches!(a, MediaAsset::Picture { .. }));
     if pictures_only && visible.len() > 1 {
         let urls: Vec<String> = visible
             .iter()
@@ -1053,7 +1099,11 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
 
     let id = seg_id(
         "strip",
-        &visible.iter().map(|a| a.url()).collect::<Vec<_>>().join("|"),
+        &visible
+            .iter()
+            .map(|a| a.url())
+            .collect::<Vec<_>>()
+            .join("|"),
     );
     let mut strip = div().id(id).w_full().overflow_x_scroll().flex().gap_2();
     let mut pic_idx = 0;
@@ -1069,11 +1119,23 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
                     }
                 });
                 strip = strip.child(media_tile(
-                    &url, Some(560.0), height, pictures.clone(), pic_idx, alts.get(&url).map(|s| s.as_str()), ctx, handle,
+                    &url,
+                    Some(560.0),
+                    height,
+                    pictures.clone(),
+                    pic_idx,
+                    alts.get(&url).map(|s| s.as_str()),
+                    ctx,
+                    handle,
                 ));
                 pic_idx += 1;
             }
-            MediaAsset::Video { url, poster, blurhash, mime } => {
+            MediaAsset::Video {
+                url,
+                poster,
+                blurhash,
+                mime,
+            } => {
                 // The imeta dim describes the video itself; the poster
                 // (when there is one) shares its aspect, as does the
                 // sniffed frame.
@@ -1108,11 +1170,7 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
 
 /// The frame aspect for a media url: the author's imeta dim first, the
 /// decoded size once the bytes land, else nothing yet.
-fn dim_or(
-    media: &media::Snapshot,
-    url: &str,
-    dim: Option<(u32, u32)>,
-) -> Option<(u32, u32)> {
+fn dim_or(media: &media::Snapshot, url: &str, dim: Option<(u32, u32)>) -> Option<(u32, u32)> {
     match dim {
         Some(d) if d.0 > 0 => Some(d),
         _ => media.size(url).filter(|d| d.0 > 0),
@@ -1152,13 +1210,14 @@ fn media_tile<V: EventEmitter<Nav> + 'static>(
         .h(px(h))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
-            handle.update(cx, |_, cx| cx.emit(Nav::OpenLightbox(lightbox.clone(), idx)));
+            handle.update(cx, |_, cx| {
+                cx.emit(Nav::OpenLightbox(lightbox.clone(), idx))
+            });
         });
     let frame = match ctx.media.png(url) {
         // Contain, not Cover: the whole picture shows (the quiet panel frame
         // letterboxes); full size is the lightbox's job.
-        Some(png) => frame
-            .child(img(png).w_full().h_full().object_fit(ObjectFit::Contain)),
+        Some(png) => frame.child(img(png).w_full().h_full().object_fit(ObjectFit::Contain)),
         None => frame.child(
             div()
                 .size_full()
@@ -1406,9 +1465,7 @@ fn embed_card<V: EventEmitter<Nav> + 'static>(
                         // Mode-aware without a cx (no bridge on embed
                         // paths): date mode shows dates, block keeps
                         // relative.
-                        .child(crate::timefmt::stamp_text(
-                            e.event.created_at.as_secs(),
-                        )),
+                        .child(crate::timefmt::stamp_text(e.event.created_at.as_secs())),
                 ),
         )
         .child(
@@ -1449,7 +1506,11 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
     let ev_for_profile = ev.clone();
     let handle_open = handle.clone();
     let handle_profile = handle.clone();
-    let ctx = Body { media, quotes, profiles };
+    let ctx = Body {
+        media,
+        quotes,
+        profiles,
+    };
 
     div()
         .w_full()
@@ -1536,7 +1597,12 @@ mod tests {
         let ev = keys.sign_event(unsigned).unwrap();
         let assets = media_assets(&ev);
         let urls: Vec<&str> = assets.iter().map(|a| a.url()).collect();
-        assert_eq!(urls, vec!["https://logen.btcforplebs.com/584dbd0e64cf17d19e4838c10ec22482495e61b52705029a263b8f85168f9048"]);
+        assert_eq!(
+            urls,
+            vec![
+                "https://logen.btcforplebs.com/584dbd0e64cf17d19e4838c10ec22482495e61b52705029a263b8f85168f9048"
+            ]
+        );
         assert!(matches!(assets[0], MediaAsset::Picture { .. }));
     }
 }

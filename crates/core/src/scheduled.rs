@@ -91,7 +91,9 @@ fn book() -> &'static Mutex<Book> {
             eprintln!("[core] scheduled: loaded {} pending post(s)", items.len());
         }
         spawn_flusher();
-        Mutex::new(Book { map: items.into_iter().map(|p| (p.token.clone(), p)).collect() })
+        Mutex::new(Book {
+            map: items.into_iter().map(|p| (p.token.clone(), p)).collect(),
+        })
     })
 }
 
@@ -128,7 +130,11 @@ pub(crate) fn now_secs() -> u64 {
 /// write-ahead durability point.
 pub fn hold(me: &PublicKey, event: Event, scheduled_at: u64) -> Option<String> {
     let mut held = book().lock().unwrap();
-    let mine = held.map.values().filter(|p| p.pubkey == me.to_string()).count();
+    let mine = held
+        .map
+        .values()
+        .filter(|p| p.pubkey == me.to_string())
+        .count();
     if mine >= MAX_PER_USER {
         return None;
     }
@@ -140,7 +146,12 @@ pub fn hold(me: &PublicKey, event: Event, scheduled_at: u64) -> Option<String> {
     let token = format!("s{nanos:08x}{n:04x}");
     held.map.insert(
         token.clone(),
-        ScheduledPost { token: token.clone(), pubkey: me.to_string(), event, scheduled_at },
+        ScheduledPost {
+            token: token.clone(),
+            pubkey: me.to_string(),
+            event,
+            scheduled_at,
+        },
     );
     drop(held);
     write_disk();
@@ -166,7 +177,11 @@ pub fn list(me: &PublicKey) -> Vec<ScheduledPost> {
 /// after a restart.
 pub fn cancel(me: &PublicKey, token: &str) -> bool {
     let mut held = book().lock().unwrap();
-    let gone = if held.map.get(token).is_some_and(|p| p.pubkey == me.to_string()) {
+    let gone = if held
+        .map
+        .get(token)
+        .is_some_and(|p| p.pubkey == me.to_string())
+    {
         held.map.remove(token).is_some()
     } else {
         false
@@ -181,7 +196,14 @@ pub fn cancel(me: &PublicKey, token: &str) -> bool {
 /// Due entries whose stored pubkey matches the signed event (the corrupt-
 /// store screen); due = scheduled_at <= now.
 fn due(now: u64) -> Vec<ScheduledPost> {
-    book().lock().unwrap().map.values().filter(|p| p.scheduled_at <= now && p.event.pubkey.to_string() == p.pubkey).cloned().collect()
+    book()
+        .lock()
+        .unwrap()
+        .map
+        .values()
+        .filter(|p| p.scheduled_at <= now && p.event.pubkey.to_string() == p.pubkey)
+        .cloned()
+        .collect()
 }
 
 /// Remove published / given-up tokens in ONE read+write for the whole
@@ -292,10 +314,12 @@ fn write_disk() {
 fn spawn_flusher() {
     std::thread::Builder::new()
         .name("scheduled-flush".into())
-        .spawn(|| loop {
-            std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
-            if DIRTY.swap(false, Ordering::Relaxed) {
-                write_disk();
+        .spawn(|| {
+            loop {
+                std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
+                if DIRTY.swap(false, Ordering::Relaxed) {
+                    write_disk();
+                }
             }
         })
         .ok();
@@ -376,26 +400,33 @@ mod tests {
         assert_eq!(n, 1);
         assert_eq!(*published.lock().unwrap(), vec!["past".to_string()]);
         let rest = list(&a.public_key());
-        assert_eq!(rest.iter().map(|p| p.token.as_str()).collect::<Vec<_>>(), vec![future]);
+        assert_eq!(
+            rest.iter().map(|p| p.token.as_str()).collect::<Vec<_>>(),
+            vec![future]
+        );
         assert!(rest.iter().all(|p| p.token != past));
         // The corrupt-store screen: a pubkey/event mismatch never publishes.
         // Re-sign as someone else, store under a's pubkey: the signed
         // event self-authenticates, so the entry is skipped, not crashed on.
         let other = Keys::generate();
-        let bad = other.sign_event(UnsignedEvent::new(
-            other.public_key(),
-            Timestamp::from_secs(now - 20),
-            Kind::TextNote,
-            vec![],
-            "mismatch",
-        ))
-        .unwrap();
-        book().lock().unwrap().map.insert("corrupt".into(), ScheduledPost {
-            token: "corrupt".into(),
-            pubkey: a.public_key().to_string(),
-            event: bad,
-            scheduled_at: now - 20,
-        });
+        let bad = other
+            .sign_event(UnsignedEvent::new(
+                other.public_key(),
+                Timestamp::from_secs(now - 20),
+                Kind::TextNote,
+                vec![],
+                "mismatch",
+            ))
+            .unwrap();
+        book().lock().unwrap().map.insert(
+            "corrupt".into(),
+            ScheduledPost {
+                token: "corrupt".into(),
+                pubkey: a.public_key().to_string(),
+                event: bad,
+                scheduled_at: now - 20,
+            },
+        );
         assert_eq!(sweep(now, |_| true), 0);
     }
 
@@ -417,7 +448,12 @@ mod tests {
         assert_eq!(sweep(now + 60, |_| true), 1);
         assert!(list(&a.public_key()).is_empty());
         // Past the give-up horizon, a persistently failing entry is dropped.
-        let old = hold(&a.public_key(), note(&a, "dead", now - GIVE_UP_SECS - 1), now - GIVE_UP_SECS - 1).unwrap();
+        let old = hold(
+            &a.public_key(),
+            note(&a, "dead", now - GIVE_UP_SECS - 1),
+            now - GIVE_UP_SECS - 1,
+        )
+        .unwrap();
         assert_eq!(sweep(now, |_| false), 0);
         assert!(list(&a.public_key()).iter().all(|p| p.token != old));
     }

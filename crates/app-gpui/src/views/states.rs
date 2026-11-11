@@ -4,7 +4,7 @@
 //! ellipsis is enough; the ensō is the only animation). No new color, no
 //! new motion — the strip is a state, it does not travel.
 
-use gpui::{div, prelude::*, px, rgb, AnyElement, ClickEvent, FontWeight, Window};
+use gpui::{AnyElement, ClickEvent, FontWeight, Window, div, prelude::*, px, rgb};
 
 use crate::theme;
 
@@ -32,11 +32,7 @@ pub fn empty(line: &str, whisper: Option<&str>) -> AnyElement {
         .w_full()
         .p_8()
         .text_color(rgb(theme::muted()))
-        .child(
-            div()
-                .text_size(px(theme::T_UI))
-                .child(line.to_string()),
-        )
+        .child(div().text_size(px(theme::T_UI)).child(line.to_string()))
         .children(whisper.map(|w| {
             div()
                 .font_family(theme::SERIF)

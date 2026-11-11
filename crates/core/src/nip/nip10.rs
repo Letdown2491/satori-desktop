@@ -78,9 +78,10 @@ pub fn reply_root(ev: &Event) -> Option<(String, Vec<String>)> {
         for tag in ev.tags.iter() {
             let parts = tag.as_slice();
             if parts.first().map(String::as_str) == Some("E")
-                && let Some(id) = parts.get(1).filter(|v| !v.is_empty()) {
-                    return Some((id.clone(), relay_hint(parts)));
-                }
+                && let Some(id) = parts.get(1).filter(|v| !v.is_empty())
+            {
+                return Some((id.clone(), relay_hint(parts)));
+            }
         }
         return None;
     }

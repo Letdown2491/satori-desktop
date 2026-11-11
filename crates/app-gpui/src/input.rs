@@ -13,11 +13,11 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, div, fill, hsla, prelude::*, px, relative, rgb, size, App, Bounds, ClipboardItem,
-    Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    FocusHandle, Focusable, Global, GlobalElementId, KeyBinding, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point as GpPoint, Render,
-    SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, WrappedLine,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, FocusHandle, Focusable, Global, GlobalElementId, KeyBinding,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels,
+    Point as GpPoint, Render, SharedString, Style, TextAlign, TextRun, UTF16Selection, Window,
+    WrappedLine, actions, div, fill, hsla, prelude::*, px, relative, rgb, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -26,13 +26,35 @@ use crate::theme;
 actions!(
     input,
     [
-        Backspace, Delete, Left, Right, SelectLeft, SelectRight, SelectAll, Paste, Copy, Cut,
+        Backspace,
+        Delete,
+        Left,
+        Right,
+        SelectLeft,
+        SelectRight,
+        SelectAll,
+        Paste,
+        Copy,
+        Cut,
         // Vertical motion (the article body's need): goal-column moves.
-        Up, Down, SelectUp, SelectDown,
+        Up,
+        Down,
+        SelectUp,
+        SelectDown,
         // Line-wise home/end + the doc-absolute extremes (ctrl variants).
-        LineStart, LineEnd, SelectLineStart, SelectLineEnd, DocStart, DocEnd,
+        LineStart,
+        LineEnd,
+        SelectLineStart,
+        SelectLineEnd,
+        DocStart,
+        DocEnd,
         // Word-wise motion (ctrl+arrows) + word deletion (ctrl+backspace/delete).
-        WordLeft, WordRight, SelectWordLeft, SelectWordRight, DeleteWordLeft, DeleteWordRight,
+        WordLeft,
+        WordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        DeleteWordLeft,
+        DeleteWordRight,
     ]
 );
 
@@ -263,7 +285,9 @@ impl Input {
     /// The caret's visual (para, byte-col) position against the last
     /// layout — the precondition for every line/vertical motion.
     fn caret_layout(&self) -> Option<(usize, usize)> {
-        self.last_layout.as_ref().map(|l| l.locate(self.cursor_offset()))
+        self.last_layout
+            .as_ref()
+            .map(|l| l.locate(self.cursor_offset()))
     }
 
     fn line_start(&mut self, _: &LineStart, _: &mut Window, cx: &mut Context<Self>) {
@@ -311,7 +335,10 @@ impl Input {
     fn previous_word(&self, off: usize) -> usize {
         let chars: Vec<(usize, char)> = self.content.char_indices().collect();
         let mut skipped_word = 0;
-        for (idx, c) in chars[..chars.partition_point(|(i, _)| *i < off)].iter().rev() {
+        for (idx, c) in chars[..chars.partition_point(|(i, _)| *i < off)]
+            .iter()
+            .rev()
+        {
             if c.is_whitespace() {
                 if skipped_word > 0 {
                     return idx + c.len_utf8();
@@ -355,7 +382,12 @@ impl Input {
         self.select_to(self.next_word(self.cursor_offset()), cx);
     }
 
-    fn delete_word_left(&mut self, _: &DeleteWordLeft, window: &mut Window, cx: &mut Context<Self>) {
+    fn delete_word_left(
+        &mut self,
+        _: &DeleteWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.selected_range.is_empty() {
             let target = self.previous_word(self.cursor_offset());
             if target < self.cursor_offset() {
@@ -365,7 +397,12 @@ impl Input {
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn delete_word_right(&mut self, _: &DeleteWordRight, window: &mut Window, cx: &mut Context<Self>) {
+    fn delete_word_right(
+        &mut self,
+        _: &DeleteWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.selected_range.is_empty() {
             let target = self.next_word(self.cursor_offset());
             if target > self.cursor_offset() {
@@ -397,15 +434,11 @@ impl Input {
         let cursor = self.cursor_offset();
         let (pix, pcol) = layout.locate(cursor);
         let para = &layout.paras[pix];
-        let pos = para
-            .line
-            .position_for_index(pcol, lh)
-            .unwrap_or_default();
+        let pos = para.line.position_for_index(pcol, lh).unwrap_or_default();
         let goal = self.goal_x.unwrap_or(pos.x);
         let row = (pos.y / lh).round() as i32;
-        let rows_in = |p: &Para, lh: Pixels| -> i32 {
-            ((p.line.size(lh).height / lh).round() as i32).max(1)
-        };
+        let rows_in =
+            |p: &Para, lh: Pixels| -> i32 { ((p.line.size(lh).height / lh).round() as i32).max(1) };
 
         // The target row: same paragraph one row over, else across the
         // paragraph boundary (last row of the previous / first row of the
@@ -486,7 +519,11 @@ impl Input {
                 cx.notify();
                 return;
             }
-            let text = if self.multiline { text } else { text.replace('\n', " ") };
+            let text = if self.multiline {
+                text
+            } else {
+                text.replace('\n', " ")
+            };
             self.replace_text_in_range(None, &text, window, cx);
         }
     }
@@ -541,7 +578,12 @@ impl Input {
         cx.notify();
     }
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Clicking a field hands IT the caret — every input (note, question,
         // options) needs no parent to do this for it.
         window.focus(&self.focus_handle, cx);
@@ -608,7 +650,9 @@ impl Input {
             new_offset = -(caret_y - margin).max(px(0.));
         } else if caret_y + lh > -offset + viewport_h - margin {
             let max_scroll = (self.content_height().unwrap_or(px(0.)) - viewport_h).max(px(0.));
-            new_offset = -(caret_y + lh + margin - viewport_h).min(max_scroll).max(px(0.));
+            new_offset = -(caret_y + lh + margin - viewport_h)
+                .min(max_scroll)
+                .max(px(0.));
         }
         if new_offset != offset {
             handle.set_offset(GpPoint::new(px(0.), new_offset));
@@ -667,13 +711,10 @@ impl Input {
         let scroll_x = self.scroll_x;
         for para in &layout.paras {
             let para_bottom = para.y + para.line.size(layout.line_height).height;
-            let is_last = para.start + para.len >= self.content.len()
-                && !self.content.ends_with('\n');
+            let is_last =
+                para.start + para.len >= self.content.len() && !self.content.ends_with('\n');
             if local_y <= para_bottom || is_last {
-                let local = GpPoint::new(
-                    position.x - bounds.left() + scroll_x,
-                    local_y - para.y,
-                );
+                let local = GpPoint::new(position.x - bounds.left() + scroll_x, local_y - para.y);
                 let col = para
                     .line
                     .closest_index_for_position(local, layout.line_height)
@@ -774,7 +815,11 @@ impl EntityInputHandler for Input {
         })
     }
 
-    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
         self.marked_range.as_ref().map(|r| self.range_to_utf16(r))
     }
 
@@ -1017,13 +1062,22 @@ impl Element for InputElement {
                     font_size,
                     std::slice::from_ref(&run),
                     // Single-line never wraps — it scrolls horizontally.
-                    if multiline { Some(bounds.size.width) } else { None },
+                    if multiline {
+                        Some(bounds.size.width)
+                    } else {
+                        None
+                    },
                     None,
                 )
                 .ok()
                 .and_then(|mut lines| lines.pop());
             if let Some(line) = shaped {
-                paras.push(Para { line: std::sync::Arc::new(line), start: byte_start, len: seg.len(), y });
+                paras.push(Para {
+                    line: std::sync::Arc::new(line),
+                    start: byte_start,
+                    len: seg.len(),
+                    y,
+                });
                 y += paras.last().unwrap().line.size(line_height).height;
             }
             byte_start += seg.len() + 1;
@@ -1076,10 +1130,7 @@ impl Element for InputElement {
                     let row_y = para.y + p1.y;
                     selection.push(fill(
                         Bounds::from_corners(
-                            GpPoint::new(
-                                bounds.left() - scroll_x + p1.x,
-                                bounds.top() + row_y,
-                            ),
+                            GpPoint::new(bounds.left() - scroll_x + p1.x, bounds.top() + row_y),
                             GpPoint::new(
                                 bounds.left() - scroll_x + p2.x.max(p1.x),
                                 bounds.top() + row_y + lh,
@@ -1100,9 +1151,7 @@ impl Element for InputElement {
             for para in &paras {
                 if cursor >= para.start && cursor <= para.start + para.len {
                     let lh = line_height;
-                    if let Some(pos) =
-                        para.line.position_for_index(cursor - para.start, lh)
-                    {
+                    if let Some(pos) = para.line.position_for_index(cursor - para.start, lh) {
                         cursor_quad = Some(fill(
                             Bounds::new(
                                 GpPoint::new(
@@ -1119,7 +1168,12 @@ impl Element for InputElement {
             }
         }
 
-        PrepaintState { paras, line_height, selection, cursor: cursor_quad }
+        PrepaintState {
+            paras,
+            line_height,
+            selection,
+            cursor: cursor_quad,
+        }
     }
 
     fn paint(

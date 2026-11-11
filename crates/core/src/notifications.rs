@@ -36,7 +36,9 @@ fn tag_value(ev: &Event, name: &str) -> Option<String> {
 /// Also the receipt-side amount authority for the wallet's LNURL check (D20).
 pub(crate) fn msats_from_bolt11(invoice: &str) -> u64 {
     let s = invoice.to_lowercase();
-    let Some(rest) = s.strip_prefix("lnbc") else { return 0 };
+    let Some(rest) = s.strip_prefix("lnbc") else {
+        return 0;
+    };
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
         return 0;
@@ -77,23 +79,24 @@ pub fn parse_zap_receipt(ev: &Event) -> ZapInfo {
     let desc = tag_value(ev, "description");
     let mut info = ZapInfo::default();
     if let Some(desc) = desc
-        && let Ok(req) = serde_json::from_str::<Event>(&desc) {
-            let matches = |name: &str| match tag_value(ev, name) {
-                Some(on) => tag_value(&req, name).as_deref() == Some(on.as_str()),
-                None => true,
-            };
-            if u16::from(req.kind) == 9734
-                && req.verify().is_ok()
-                && matches("p")
-                && matches("e")
-                && matches("a")
-            {
-                info.sender = Some(req.pubkey);
-                info.sats = tag_value(&req, "amount")
-                    .and_then(|a| a.parse::<u64>().ok())
-                    .unwrap_or(0);
-            }
+        && let Ok(req) = serde_json::from_str::<Event>(&desc)
+    {
+        let matches = |name: &str| match tag_value(ev, name) {
+            Some(on) => tag_value(&req, name).as_deref() == Some(on.as_str()),
+            None => true,
+        };
+        if u16::from(req.kind) == 9734
+            && req.verify().is_ok()
+            && matches("p")
+            && matches("e")
+            && matches("a")
+        {
+            info.sender = Some(req.pubkey);
+            info.sats = tag_value(&req, "amount")
+                .and_then(|a| a.parse::<u64>().ok())
+                .unwrap_or(0);
         }
+    }
     if paid > 0 {
         info.sats = paid / 1000;
     } else {
@@ -132,7 +135,9 @@ mod tests {
                 Tag::custom("p", [keys.public_key().to_string()]),
                 Tag::custom(
                     "description",
-                    [r#"{"kind":9734,"sig":"junk","pubkey":"0000000000000000000000000000000000000000000000000000000000000000","tags":[["amount","2100"]]}"#],
+                    [
+                        r#"{"kind":9734,"sig":"junk","pubkey":"0000000000000000000000000000000000000000000000000000000000000000","tags":[["amount","2100"]]}"#,
+                    ],
                 ),
             ],
             "",

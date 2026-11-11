@@ -164,7 +164,11 @@ impl ProfileService {
     }
 
     pub fn get(&self, pk: &PublicKey) -> Option<Profile> {
-        self.cache.lock().unwrap().get(&pk.to_string()).map(|e| e.profile.clone())
+        self.cache
+            .lock()
+            .unwrap()
+            .get(&pk.to_string())
+            .map(|e| e.profile.clone())
     }
 
     /// Absorb a fetched profile into the cache (+ persist soon).
@@ -185,7 +189,13 @@ impl ProfileService {
                 cache.remove(&old);
             }
         }
-        cache.insert(pk, Entry { profile, at: now_secs() });
+        cache.insert(
+            pk,
+            Entry {
+                profile,
+                at: now_secs(),
+            },
+        );
         self.dirty.store(true, Ordering::Relaxed);
     }
 
@@ -298,8 +308,7 @@ impl ProfileService {
                 // `dirty` on every landing batch).
                 let now = now_secs();
                 if service.dirty.load(Ordering::Relaxed)
-                    && now.saturating_sub(service.last_flush.load(Ordering::Relaxed))
-                        > FLUSH_EVERY
+                    && now.saturating_sub(service.last_flush.load(Ordering::Relaxed)) > FLUSH_EVERY
                 {
                     service.last_flush.store(now, Ordering::Relaxed);
                     let cache = service.cache.lock().unwrap().clone();
@@ -337,11 +346,8 @@ impl ProfileService {
                         std::mem::take(&mut *w)
                     };
                     for w in waiters {
-                        let results: Vec<Profile> = w
-                            .wants
-                            .iter()
-                            .filter_map(|pk| service.get(pk))
-                            .collect();
+                        let results: Vec<Profile> =
+                            w.wants.iter().filter_map(|pk| service.get(pk)).collect();
                         let _ = w.tx.send(results);
                     }
                 }

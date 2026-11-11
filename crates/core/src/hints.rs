@@ -50,13 +50,21 @@ static DIRTY: AtomicBool = AtomicBool::new(false);
 
 fn hints() -> &'static Mutex<Hints> {
     HINTS.get_or_init(|| {
-        let mut h = Hints { map: HashMap::new(), order: VecDeque::new() };
+        let mut h = Hints {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        };
         let disk = read_disk();
         // Hydrate honoring the per-author cap (newest tail wins), then the
         // global LRU cap: drop OLDEST authors first.
         for (pk, relays) in disk {
-            let tail: Vec<String> =
-                relays.iter().rev().take(MAX_HINTS_PER_AUTHOR).rev().cloned().collect();
+            let tail: Vec<String> = relays
+                .iter()
+                .rev()
+                .take(MAX_HINTS_PER_AUTHOR)
+                .rev()
+                .cloned()
+                .collect();
             if !tail.is_empty() {
                 h.map.insert(pk.clone(), tail);
                 h.order.push_back(pk);
@@ -129,10 +137,12 @@ fn write_disk() {
 fn spawn_flusher() {
     std::thread::Builder::new()
         .name("hints-flush".into())
-        .spawn(|| loop {
-            std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
-            if DIRTY.swap(false, Ordering::Relaxed) {
-                write_disk();
+        .spawn(|| {
+            loop {
+                std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
+                if DIRTY.swap(false, Ordering::Relaxed) {
+                    write_disk();
+                }
             }
         })
         .ok();
@@ -169,7 +179,9 @@ fn add(pk: &str, url: &str) {
 }
 
 fn indexer(key: &str) -> bool {
-    crate::pool::INDEXERS.iter().any(|i| outbox::relay_key(i) == key)
+    crate::pool::INDEXERS
+        .iter()
+        .any(|i| outbox::relay_key(i) == key)
 }
 
 /// Provenance (RelayHintStore.kt addAuthorRelay): `relay_url` delivered an
@@ -275,12 +287,32 @@ mod tests {
         let e = ev(
             &author,
             vec![
-                vec!["e".into(), "abc123".into(), "wss://carries-the-note.example".into()],
-                vec!["p".into(), target.to_string(), "wss://their-home.example/".into()],
-                vec!["p".into(), target.to_string(), "wss://relay.primal.net/".into()], // indexer: skip
-                vec!["p".into(), "not-a-pubkey".into(), "wss://junk.example".into()], // junk key: skip
+                vec![
+                    "e".into(),
+                    "abc123".into(),
+                    "wss://carries-the-note.example".into(),
+                ],
+                vec![
+                    "p".into(),
+                    target.to_string(),
+                    "wss://their-home.example/".into(),
+                ],
+                vec![
+                    "p".into(),
+                    target.to_string(),
+                    "wss://relay.primal.net/".into(),
+                ], // indexer: skip
+                vec![
+                    "p".into(),
+                    "not-a-pubkey".into(),
+                    "wss://junk.example".into(),
+                ], // junk key: skip
                 vec!["p".into(), target.to_string()], // no url: skip
-                vec!["t".into(), "hashtag".into(), "wss://not-a-hint.example".into()],
+                vec![
+                    "t".into(),
+                    "hashtag".into(),
+                    "wss://not-a-hint.example".into(),
+                ],
             ],
         );
         record_tag_hints(&e);
@@ -298,13 +330,11 @@ mod tests {
         let other = pk();
         let e = ev(
             &keys,
-            vec![
-                vec![
-                    "p".into(),
-                    other.to_string(),
-                    "wss://other.example".into(),
-                ],
-            ],
+            vec![vec![
+                "p".into(),
+                other.to_string(),
+                "wss://other.example".into(),
+            ]],
         );
         observe(&e, "wss://delivered-here.example");
         assert_eq!(for_pubkey(&p), vec!["wss://delivered-here.example"]);

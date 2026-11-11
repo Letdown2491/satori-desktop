@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    div, prelude::*, px, rgb, AnyElement, App, Context, Div, Entity, FocusHandle, Focusable,
-    KeyDownEvent, Render, SharedString, Stateful, Window,
+    AnyElement, App, Context, Div, Entity, FocusHandle, Focusable, KeyDownEvent, Render,
+    SharedString, Stateful, Window, div, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, PublishEvent};
@@ -169,7 +169,9 @@ impl SettingsView {
         // profiles update as queries run, and this pane is the only reader.
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_secs(30)).await;
+                cx.background_executor()
+                    .timer(Duration::from_secs(30))
+                    .await;
                 let _ = this.update(cx, |_this, cx| cx.notify());
             }
         })
@@ -229,8 +231,8 @@ impl SettingsView {
     /// though this pane opens long after connect, so it usually lands
     /// first try.
     fn pump_me(&self, cx: &mut Context<Self>) {
-        let Some(me) = satori_core::session::load()
-            .and_then(|s| PublicKey::from_str(&s.pubkey).ok())
+        let Some(me) =
+            satori_core::session::load().and_then(|s| PublicKey::from_str(&s.pubkey).ok())
         else {
             return;
         };
@@ -238,9 +240,7 @@ impl SettingsView {
         cx.spawn(async move |this, cx| {
             for _ in 0..5 {
                 let mut rx = this
-                    .update(cx, |this, _| {
-                        this.core.clone().ensure_profiles(vec![me])
-                    })
+                    .update(cx, |this, _| this.core.clone().ensure_profiles(vec![me]))
                     .expect("settings alive");
                 // One event per ask (the debouncer resolves once); any
                 // miss waits out the 2s and retries — never a busy loop.
@@ -249,8 +249,7 @@ impl SettingsView {
                 {
                     let _ = this.update(cx, |this, cx| {
                         let name = p.display();
-                        this.me_name =
-                            (!name.is_empty() && name != me_hex).then_some(name);
+                        this.me_name = (!name.is_empty() && name != me_hex).then_some(name);
                         cx.notify();
                     });
                     return;
@@ -282,9 +281,7 @@ impl SettingsView {
             // §4.3: kinded copy, not a raw "… {e}" dump — the relays didn't
             // answer. Settings is a form pane, so the strip rides the pane's
             // existing err-styled status line (set_status(_, true)).
-            FeedEvent::Failed(e) => {
-                self.set_status(format!("The relays didn't answer, {e}"), true)
-            }
+            FeedEvent::Failed(e) => self.set_status(format!("The relays didn't answer, {e}"), true),
             _ => {}
         }
         cx.notify();
@@ -326,11 +323,7 @@ impl SettingsView {
     fn me_npub_short() -> String {
         satori_core::session::load()
             .and_then(|s| PublicKey::from_str(&s.pubkey).ok())
-            .and_then(|pk| {
-                pk.to_bech32()
-                    .ok()
-                    .map(|full| format!("{}…", &full[..12]))
-            })
+            .and_then(|pk| pk.to_bech32().ok().map(|full| format!("{}…", &full[..12])))
             .unwrap_or_else(|| "unknown key".to_string())
     }
 
@@ -525,197 +518,188 @@ impl SettingsView {
         cx.notify();
     }
 
-/// The WoT settings group (WS4): the three honest switches plus the
-/// graph's own status — size, qualified set, last rebuild, staleness.
-/// Feature-off is a first-class state: every switch explains what its off
-/// position means.
-fn wot_settings_group(&self, cx: &mut Context<Self>) -> Div {
-    use satori_core::wot::{self, WotStatus};
-    let tier_on = prefs::get_bool_or("notif_wot_tier", true);
-    let collapse_on = prefs::get_bool_or("thread_collapse", true);
-    let badge_on = prefs::get_bool_or("profile_badge", true);
-    let dedup_on = prefs::get_bool_or("dedup_enabled", true);
-    let status_line = match self.core.wot_status() {
-        WotStatus::SignedOut => "Signed out, every verdict reads unknown.".to_string(),
-        WotStatus::OverCap => format!(
-            "Over the {}-follow cap, the graph is off, every verdict reads unknown.",
-            wot::MAX_FOLLOWS
-        ),
-        WotStatus::Live(follows, qualified, rebuilt) => {
-            let mut line = format!("{follows} follows · {qualified} qualified");
-            match rebuilt {
-                Some(at) => {
-                    line.push_str(&format!(" · rebuilt {}", ago(at)));
-                    if std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs().saturating_sub(at) > wot::STALE_SECS)
-                        .unwrap_or(false)
-                    {
-                        line.push_str(" · stale, waiting for fresh contact lists");
+    /// The WoT settings group (WS4): the three honest switches plus the
+    /// graph's own status — size, qualified set, last rebuild, staleness.
+    /// Feature-off is a first-class state: every switch explains what its off
+    /// position means.
+    fn wot_settings_group(&self, cx: &mut Context<Self>) -> Div {
+        use satori_core::wot::{self, WotStatus};
+        let tier_on = prefs::get_bool_or("notif_wot_tier", true);
+        let collapse_on = prefs::get_bool_or("thread_collapse", true);
+        let badge_on = prefs::get_bool_or("profile_badge", true);
+        let dedup_on = prefs::get_bool_or("dedup_enabled", true);
+        let status_line = match self.core.wot_status() {
+            WotStatus::SignedOut => "Signed out, every verdict reads unknown.".to_string(),
+            WotStatus::OverCap => format!(
+                "Over the {}-follow cap, the graph is off, every verdict reads unknown.",
+                wot::MAX_FOLLOWS
+            ),
+            WotStatus::Live(follows, qualified, rebuilt) => {
+                let mut line = format!("{follows} follows · {qualified} qualified");
+                match rebuilt {
+                    Some(at) => {
+                        line.push_str(&format!(" · rebuilt {}", ago(at)));
+                        if std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs().saturating_sub(at) > wot::STALE_SECS)
+                            .unwrap_or(false)
+                        {
+                            line.push_str(" · stale, waiting for fresh contact lists");
+                        }
                     }
+                    None => line.push_str(" · rebuilding from your follows…"),
                 }
-                None => line.push_str(" · rebuilding from your follows…"),
+                line
             }
-            line
-        }
-    };
-    group(
-        "Trust (web of trust)",
-        "Who the graph knows: ten or more of your follows following someone \
+        };
+        group(
+            "Trust (web of trust)",
+            "Who the graph knows: ten or more of your follows following someone \
          qualifies them. Unknown is never treated as outside — and the feed \
          is never filtered, only annotated.",
-    )
-    .child(
-        div()
-            .text_size(px(theme::T_SMALL))
-            .text_color(rgb(theme::muted()))
-            .child(status_line),
-    )
-    .child(
-        wot_row(
-            "notif-tier",
-            "Gate out-of-network reactions in notifications",
-            "Reactions and reposts from authors outside your network stay out of \
-             the bell — listed as receipts at the bottom of the pane. Replies, \
-             mentions and zaps always come through.",
-            tier_on,
         )
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.toggle_wot_pref("notif_wot_tier", cx)
-        })),
-    )
-    .child(
-        wot_row(
-            "thread-collapse",
-            "Collapse out-of-network thread replies",
-            "Replies from authors outside your network start collapsed with a \
-             count; one click expands them. Nothing is ever deleted.",
-            collapse_on,
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.toggle_wot_pref("thread_collapse", cx)
-        })),
-    )
-    .child(
-        wot_row(
-            "profile-badge",
-            "Show the profile trust badge",
-            "A quiet pill under the name: You follow / In your network / Outside \
-             your network. Unknown shows nothing.",
-            badge_on,
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.toggle_wot_pref("profile_badge", cx)
-        })),
-    )
-    .child(
-        wot_row(
-            "dedup",
-            "Duplicate-content filter",
-            "Identical content re-delivered five times stops being stored, per \
-             relay-attributed receipts below. Objective and bounded.",
-            dedup_on,
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.toggle_wot_pref("dedup_enabled", cx)
-        })),
-    )
-}
-
-/// The SpammingUsers group (WS2's surface, Amethyst SpammingUsersScreen
-/// shape): caught spammers as data — author, duplicate count, per-relay
-/// attribution, last seen — each with an un-hide. Receipts, never labels.
-fn spam_group(&self, cx: &mut Context<Self>) -> Div {
-    let report = self.core.spam_report();
-    let rows: Vec<AnyElement> = report
-        .iter()
-        .map(|rec| {
-            let relays = rec
-                .relays
-                .iter()
-                .map(|(url, n)| format!("{url} ×{n}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let hex = rec.pubkey.clone();
-            div()
-                .w_full()
-                .flex()
-                .items_start()
-                .gap_2()
-                .py_1()
-                .border_t_1()
-                .border_color(rgb(theme::hairline()))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .child(
-                            div()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::ink()))
-                                .child(format!(
-                                    "{}, {} duplicate(s) · last {}",
-                                    short_author(&rec.pubkey),
-                                    rec.count,
-                                    ago(rec.last_seen)
-                                )),
-                        )
-                        .child(muted(match relays.is_empty() {
-                            true => "no per-relay attribution".to_string(),
-                            false => relays,
-                        })),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("unhide-{hex}")))
-                        .cursor_pointer()
-                        .text_size(px(theme::T_UI))
-                        .child(theme::pressable(div().child("un-hide")))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.unhide_spammer(&hex, cx);
-                        })),
-                )
-                .into_any_element()
-        })
-        .collect();
-    let (title, desc) = (
-        "Spam receipts",
-        "Authors whose duplicate content the filter caught, with per-relay \
-         attribution and un-hide on every row.",
-    );
-    // Collapsible independently of the dedup toggle (the ledger outlives
-    // the filter being switched off: switching dedup off stops catching,
-    // it doesn't burn the receipts). Collapsed to a count by default.
-    let toggle_label = if self.show_spam {
-        "hide".to_string()
-    } else {
-        format!("show ({})", report.len())
-    };
-    let show = self.show_spam;
-    group(title, desc)
         .child(
             div()
-                .id("spam-receipts-toggle")
-                .cursor_pointer()
                 .text_size(px(theme::T_SMALL))
                 .text_color(rgb(theme::muted()))
-                .child(theme::pressable(div().child(toggle_label)))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.show_spam = !this.show_spam;
-                    cx.notify();
-                })),
+                .child(status_line),
         )
-        .when(show, |g| {
-            g.when(rows.is_empty(), |g| {
-                g.child(muted("No one caught this session."))
-            })
-            .child(div().w_full().flex().flex_col().children(rows))
-        })
-}
+        .child(
+            wot_row(
+                "notif-tier",
+                "Gate out-of-network reactions in notifications",
+                "Reactions and reposts from authors outside your network stay out of \
+             the bell — listed as receipts at the bottom of the pane. Replies, \
+             mentions and zaps always come through.",
+                tier_on,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_wot_pref("notif_wot_tier", cx))),
+        )
+        .child(
+            wot_row(
+                "thread-collapse",
+                "Collapse out-of-network thread replies",
+                "Replies from authors outside your network start collapsed with a \
+             count; one click expands them. Nothing is ever deleted.",
+                collapse_on,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_wot_pref("thread_collapse", cx))),
+        )
+        .child(
+            wot_row(
+                "profile-badge",
+                "Show the profile trust badge",
+                "A quiet pill under the name: You follow / In your network / Outside \
+             your network. Unknown shows nothing.",
+                badge_on,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_wot_pref("profile_badge", cx))),
+        )
+        .child(
+            wot_row(
+                "dedup",
+                "Duplicate-content filter",
+                "Identical content re-delivered five times stops being stored, per \
+             relay-attributed receipts below. Objective and bounded.",
+                dedup_on,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_wot_pref("dedup_enabled", cx))),
+        )
+    }
 
+    /// The SpammingUsers group (WS2's surface, Amethyst SpammingUsersScreen
+    /// shape): caught spammers as data — author, duplicate count, per-relay
+    /// attribution, last seen — each with an un-hide. Receipts, never labels.
+    fn spam_group(&self, cx: &mut Context<Self>) -> Div {
+        let report = self.core.spam_report();
+        let rows: Vec<AnyElement> = report
+            .iter()
+            .map(|rec| {
+                let relays = rec
+                    .relays
+                    .iter()
+                    .map(|(url, n)| format!("{url} ×{n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let hex = rec.pubkey.clone();
+                div()
+                    .w_full()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(rgb(theme::hairline()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_size(px(theme::T_UI))
+                                    .text_color(rgb(theme::ink()))
+                                    .child(format!(
+                                        "{}, {} duplicate(s) · last {}",
+                                        short_author(&rec.pubkey),
+                                        rec.count,
+                                        ago(rec.last_seen)
+                                    )),
+                            )
+                            .child(muted(match relays.is_empty() {
+                                true => "no per-relay attribution".to_string(),
+                                false => relays,
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("unhide-{hex}")))
+                            .cursor_pointer()
+                            .text_size(px(theme::T_UI))
+                            .child(theme::pressable(div().child("un-hide")))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.unhide_spammer(&hex, cx);
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let (title, desc) = (
+            "Spam receipts",
+            "Authors whose duplicate content the filter caught, with per-relay \
+         attribution and un-hide on every row.",
+        );
+        // Collapsible independently of the dedup toggle (the ledger outlives
+        // the filter being switched off: switching dedup off stops catching,
+        // it doesn't burn the receipts). Collapsed to a count by default.
+        let toggle_label = if self.show_spam {
+            "hide".to_string()
+        } else {
+            format!("show ({})", report.len())
+        };
+        let show = self.show_spam;
+        group(title, desc)
+            .child(
+                div()
+                    .id("spam-receipts-toggle")
+                    .cursor_pointer()
+                    .text_size(px(theme::T_SMALL))
+                    .text_color(rgb(theme::muted()))
+                    .child(theme::pressable(div().child(toggle_label)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_spam = !this.show_spam;
+                        cx.notify();
+                    })),
+            )
+            .when(show, |g| {
+                g.when(rows.is_empty(), |g| {
+                    g.child(muted("No one caught this session."))
+                })
+                .child(div().w_full().flex().flex_col().children(rows))
+            })
+    }
 
     // --- Backup: the signed list events, out and back -------------------------
 
@@ -1088,51 +1072,69 @@ fn spam_group(&self, cx: &mut Context<Self>) -> Div {
                     "Where your events go and come from, published as your NIP-65 list. \
                      Five indexers always serve reads.",
                 )
-                .child(div().w_full().flex().flex_col().gap_0p5().children(
-                    relays.iter().map(|relay| {
-                        let url_t = relay.url.clone();
-                        let url_w = relay.url.clone();
-                        let url_for_x = relay.url.clone();
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .py_0p5()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(theme::T_UI))
-                                    .text_color(rgb(theme::ink()))
-                                    .child(relay.url.clone()),
-                            )
-                            .child(
-                                toggle(SharedString::from(format!("relay-r-{}", relay.url)), relay.read)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.toggle_relay(&url_t, true, cx);
-                                    })),
-                            )
-                            .child(
-                                toggle(SharedString::from(format!("relay-w-{}", relay.url)), relay.write)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.toggle_relay(&url_w, false, cx);
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("relay-remove-{}", relay.url)))
-                                    .cursor_pointer()
-                                    .px_1()
-                                    .text_size(px(theme::T_UI))
-                                    .text_color(rgb(theme::muted()))
-                                    .child("×")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.remove_relay(&url_for_x, cx);
-                                    })),
-                            )
-                    }),
-                ))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .children(relays.iter().map(|relay| {
+                            let url_t = relay.url.clone();
+                            let url_w = relay.url.clone();
+                            let url_for_x = relay.url.clone();
+                            div()
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .py_0p5()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(px(theme::T_UI))
+                                        .text_color(rgb(theme::ink()))
+                                        .child(relay.url.clone()),
+                                )
+                                .child(
+                                    toggle(
+                                        SharedString::from(format!("relay-r-{}", relay.url)),
+                                        relay.read,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.toggle_relay(&url_t, true, cx);
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    toggle(
+                                        SharedString::from(format!("relay-w-{}", relay.url)),
+                                        relay.write,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.toggle_relay(&url_w, false, cx);
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "relay-remove-{}",
+                                            relay.url
+                                        )))
+                                        .cursor_pointer()
+                                        .px_1()
+                                        .text_size(px(theme::T_UI))
+                                        .text_color(rgb(theme::muted()))
+                                        .child("×")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.remove_relay(&url_for_x, cx);
+                                        })),
+                                )
+                        })),
+                )
                 .child(
                     div()
                         .w_full()
@@ -1141,39 +1143,33 @@ fn spam_group(&self, cx: &mut Context<Self>) -> Div {
                         .gap_2()
                         .pt_1()
                         .child(field(add_relay, "add-relay-field"))
-                        .child(
-                            toggle("relay-add-read", relay_read)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.relay_read = !this.relay_read;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            toggle("relay-add-write", relay_write)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.relay_write = !this.relay_write;
-                                    cx.notify();
-                                })),
-                        )
+                        .child(toggle("relay-add-read", relay_read).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.relay_read = !this.relay_read;
+                                cx.notify();
+                            },
+                        )))
+                        .child(toggle("relay-add-write", relay_write).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.relay_write = !this.relay_write;
+                                cx.notify();
+                            },
+                        )))
                         .child(
                             seal("add-relay", "Add", theme::vermilion())
                                 .on_click(cx.listener(|this, _, _, cx| this.add_relay(cx))),
                         ),
                 )
-                .child(muted("the two toggles set read / write for the relay you add"))
-                .child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .justify_end()
-                        .pt_1()
-                        .child(
-                            seal("publish-relays", "Publish relay list", theme::vermilion())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.publish_relays(cx);
-                                })),
-                        ),
-                ),
+                .child(muted(
+                    "the two toggles set read / write for the relay you add",
+                ))
+                .child(div().w_full().flex().justify_end().pt_1().child(
+                    seal("publish-relays", "Publish relay list", theme::vermilion()).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.publish_relays(cx);
+                        }),
+                    ),
+                )),
             )
             // --- Relay health (D33/D36 learned state, WS1's last item) ------
             .child(self.relay_health_group(cx))
@@ -1424,8 +1420,7 @@ impl SettingsView {
     fn relay_health_group(&self, cx: &mut Context<Self>) -> Div {
         use satori_core::relay_latency::RelayHealth;
         let health: Vec<RelayHealth> = satori_core::manager::Core::relay_health();
-        let lookup =
-            |url: &str| health.iter().find(|h| h.url == url).cloned();
+        let lookup = |url: &str| health.iter().find(|h| h.url == url).cloned();
         // Configured relays first, in list order; profiled-but-dropped ones
         // (the LRU still remembers them) append, alphabetically for stable order.
         let mut extras: Vec<RelayHealth> = health
@@ -1511,20 +1506,14 @@ impl SettingsView {
         };
 
         let row_el = |(url, h): &(String, Option<RelayHealth>)| {
-            let mut row = div()
-                .w_full()
-                .flex()
-                .items_center()
-                .gap_2()
-                .py_0p5()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(theme::T_UI))
-                        .text_color(rgb(theme::ink()))
-                        .child(url.clone()),
-                );
+            let mut row = div().w_full().flex().items_center().gap_2().py_0p5().child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(theme::T_UI))
+                    .text_color(rgb(theme::ink()))
+                    .child(url.clone()),
+            );
             if let Some(h) = h {
                 if h.read_dead {
                     row = row.child(
@@ -1562,11 +1551,9 @@ impl SettingsView {
         } else {
             pane = pane
                 .when(degraded, |d| {
-                    d.child(
-                        div().py_1().child(states::offline_pill(
-                            "the relays didn't answer, reading is degraded",
-                        )),
-                    )
+                    d.child(div().py_1().child(states::offline_pill(
+                        "the relays didn't answer, reading is degraded",
+                    )))
                 })
                 // Only the flagged rows render inline, in table order.
                 .child(
@@ -1610,8 +1597,6 @@ impl SettingsView {
     }
 }
 
-
-
 fn relay_rows((read, write): (Vec<String>, Vec<String>)) -> Vec<RelayEntry> {
     let mut rows: Vec<RelayEntry> = read
         .iter()
@@ -1648,19 +1633,22 @@ fn toggle(id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
         .h(px(16.))
         .rounded_full()
         .border_1()
-        .border_color(rgb(if on { theme::vermilion() } else { theme::muted() }))
+        .border_color(rgb(if on {
+            theme::vermilion()
+        } else {
+            theme::muted()
+        }))
         .bg(rgb(theme::washi()))
         .flex()
         .items_center()
         .when(on, |d| d.justify_end())
         .when(!on, |d| d.justify_start())
         .p(px(2.))
-        .child(
-            div()
-                .size(px(10.))
-                .rounded_full()
-                .bg(rgb(if on { theme::vermilion() } else { theme::muted() })),
-        )
+        .child(div().size(px(10.)).rounded_full().bg(rgb(if on {
+            theme::vermilion()
+        } else {
+            theme::muted()
+        })))
 }
 
 /// A settings group: title + description + rows chained as children.
@@ -1785,7 +1773,6 @@ fn wot_row(id: &str, label: &str, sub: &str, on: bool) -> gpui::Stateful<Div> {
         )
         .child(toggle(SharedString::from(format!("wot-toggle-{id}")), on))
 }
-
 
 impl EventEmitter<Nav> for SettingsView {}
 

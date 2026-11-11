@@ -36,14 +36,17 @@ pub fn parse(ev: &Event) -> Option<PollData> {
             _ => {}
         }
     }
-    (!options.is_empty()).then_some(PollData { options, multiple, ends_at })
+    (!options.is_empty()).then_some(PollData {
+        options,
+        multiple,
+        ends_at,
+    })
 }
 
 /// Tally kind:1018 votes: (response option id) → count, over one voter's
 /// latest ballot (re-votes replace — last event per voter wins).
 pub fn tally(votes: &[Event]) -> Vec<(String, u32)> {
-    let mut latest: std::collections::HashMap<String, &Event> =
-        std::collections::HashMap::new();
+    let mut latest: std::collections::HashMap<String, &Event> = std::collections::HashMap::new();
     for ev in votes {
         latest.insert(ev.pubkey.to_string(), ev);
     }
@@ -52,9 +55,10 @@ pub fn tally(votes: &[Event]) -> Vec<(String, u32)> {
         for tag in ev.tags.clone().to_vec() {
             let parts = tag.as_slice();
             if parts.first().map(String::as_str) == Some("response")
-                && let Some(id) = parts.get(1) {
-                    *counts.entry(id.clone()).or_insert(0) += 1;
-                }
+                && let Some(id) = parts.get(1)
+            {
+                *counts.entry(id.clone()).or_insert(0) += 1;
+            }
         }
     }
     let mut out: Vec<(String, u32)> = counts.into_iter().collect();
@@ -79,7 +83,12 @@ mod tests {
                 Tag::custom("option", ["opte4f5g6h".to_string(), "no".to_string()]),
                 Tag::custom(
                     "polltype",
-                    [if multi { "multiplechoice" } else { "singlechoice" }.to_string()],
+                    [if multi {
+                        "multiplechoice"
+                    } else {
+                        "singlechoice"
+                    }
+                    .to_string()],
                 ),
                 Tag::custom("endsAt", ["1770000000".to_string()]),
             ],

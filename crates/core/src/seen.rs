@@ -41,11 +41,20 @@ static DIRTY: AtomicBool = AtomicBool::new(false);
 
 fn seen() -> &'static Mutex<Seen> {
     SEEN.get_or_init(|| {
-        let mut s = Seen { map: HashMap::new(), order: VecDeque::new() };
+        let mut s = Seen {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        };
         for (pk, relays) in read_disk() {
             // Hydrate honoring the per-author cap (seen-relays.ts:
             // slice(-MAX_PER_AUTHOR) keeps the newest tail).
-            let tail: Vec<String> = relays.iter().rev().take(MAX_PER_AUTHOR).rev().cloned().collect();
+            let tail: Vec<String> = relays
+                .iter()
+                .rev()
+                .take(MAX_PER_AUTHOR)
+                .rev()
+                .cloned()
+                .collect();
             if !tail.is_empty() {
                 s.map.insert(pk.clone(), tail);
                 s.order.push_back(pk);
@@ -115,10 +124,12 @@ fn write_disk() {
 fn spawn_flusher() {
     std::thread::Builder::new()
         .name("seen-flush".into())
-        .spawn(|| loop {
-            std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
-            if DIRTY.swap(false, Ordering::Relaxed) {
-                write_disk();
+        .spawn(|| {
+            loop {
+                std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
+                if DIRTY.swap(false, Ordering::Relaxed) {
+                    write_disk();
+                }
             }
         })
         .ok();
@@ -166,7 +177,9 @@ pub fn record(pk: &PublicKey, relay_urls: &[&str]) {
 }
 
 fn indexer(key: &str) -> bool {
-    crate::pool::INDEXERS.iter().any(|i| outbox::relay_key(i) == key)
+    crate::pool::INDEXERS
+        .iter()
+        .any(|i| outbox::relay_key(i) == key)
 }
 
 /// The relays we've empirically seen this author on (seen-relays.ts
@@ -181,7 +194,9 @@ pub fn for_pubkey(pk: &PublicKey) -> Vec<String> {
 /// seenRelaysFor(author)[0] — the LAST element of our recency-ordered vec).
 pub fn first(pk: &PublicKey) -> Option<String> {
     let held = seen().lock().unwrap();
-    held.map.get(&pk.to_string()).and_then(|v| v.last().cloned())
+    held.map
+        .get(&pk.to_string())
+        .and_then(|v| v.last().cloned())
 }
 
 /// An `e` tag carrying the author hint plus our most-recent seen relay as
@@ -228,10 +243,17 @@ mod tests {
         // Non-indexers record; indexers and non-routable urls never do.
         record_str(
             &p,
-            &["wss://nos.lol/", "wss://relay.nos.social/", "ws://127.0.0.1:8080"],
+            &[
+                "wss://nos.lol/",
+                "wss://relay.nos.social/",
+                "ws://127.0.0.1:8080",
+            ],
         );
         let relays = for_pubkey(&p);
-        assert_eq!(relays, vec!["wss://b.example", "wss://a.example", "wss://nos.lol"]);
+        assert_eq!(
+            relays,
+            vec!["wss://b.example", "wss://a.example", "wss://nos.lol"]
+        );
     }
 
     /// MAX_PER_AUTHOR: the 7th distinct relay evicts the oldest.

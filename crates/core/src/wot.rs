@@ -218,10 +218,12 @@ fn wot_dirty() {
     FLUSHER.get_or_init(|| {
         std::thread::Builder::new()
             .name("wot-flush".into())
-            .spawn(|| loop {
-                std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
-                if DIRTY.swap(false, Ordering::Relaxed) {
-                    write_disk();
+            .spawn(|| {
+                loop {
+                    std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
+                    if DIRTY.swap(false, Ordering::Relaxed) {
+                        write_disk();
+                    }
                 }
             })
             .ok();
@@ -265,7 +267,9 @@ fn write_disk() {
     else {
         return;
     };
-    if f.write_all(serde_json::Value::Array(arr).to_string().as_bytes()).is_ok() {
+    if f.write_all(serde_json::Value::Array(arr).to_string().as_bytes())
+        .is_ok()
+    {
         drop(f);
         let _ = std::fs::rename(&tmp, &path);
     } else {
@@ -276,9 +280,9 @@ fn write_disk() {
 /// Disk sources: (pubkey as stored, created_at, follows). The manager
 /// feeds these back through [`apply_persisted`] before the store rebuild.
 pub fn load_disk() -> Vec<(String, u64, Vec<PublicKey>)> {
-    let Ok(raw) = std::fs::read_to_string(crate::config::state_file(
-        crate::config::files::WOT_SOURCES,
-    )) else {
+    let Ok(raw) =
+        std::fs::read_to_string(crate::config::state_file(crate::config::files::WOT_SOURCES))
+    else {
         return Vec::new();
     };
     let Ok(arr) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -349,7 +353,8 @@ pub fn clear_identity() {
     *g = Graph {
         me: None,
         follows: HashSet::new(),
-        over_cap: false, sources: HashMap::new(),
+        over_cap: false,
+        sources: HashMap::new(),
         scores: HashMap::new(),
         target_order: VecDeque::new(),
         in_order: HashSet::new(),
@@ -894,7 +899,11 @@ mod tests {
         let _s = Session::new(&follows);
         // Not a follow: refused.
         let stranger = Keys::generate();
-        apply_persisted(&stranger.public_key().to_string(), now(), &[target.public_key()]);
+        apply_persisted(
+            &stranger.public_key().to_string(),
+            now(),
+            &[target.public_key()],
+        );
         assert_eq!(shared_follows(&target.public_key()), 0);
         // A follow: applied.
         apply_persisted(
@@ -910,20 +919,18 @@ mod tests {
         let follows = ids(4);
         let cached = vec![
             kind3(&follows[0], &[&Keys::generate()], now()), // fresh — skip
-            kind3(
-                &follows[1],
-                &[&Keys::generate()],
-                now() - STALE_SECS - 60,
-            ), // stale — fetch
+            kind3(&follows[1], &[&Keys::generate()], now() - STALE_SECS - 60), // stale — fetch
             // follows[2] has NO cached list — fetch.
-            kind3(
-                &follows[3],
-                &[&Keys::generate()],
-                now() - STALE_SECS,
-            ), // exactly 24h is still fresh (fresh(): <= STALE_SECS)
+            kind3(&follows[3], &[&Keys::generate()], now() - STALE_SECS), // exactly 24h is still fresh (fresh(): <= STALE_SECS)
         ];
         let pks = |v: &[Keys]| -> Vec<PublicKey> { v.iter().map(|k| k.public_key()).collect() };
-        let want = fetch_targets(&pks(&follows), &cached, now(), MAX_FETCH_TARGETS, &HashMap::new());
+        let want = fetch_targets(
+            &pks(&follows),
+            &cached,
+            now(),
+            MAX_FETCH_TARGETS,
+            &HashMap::new(),
+        );
         assert_eq!(want, vec![follows[1].public_key(), follows[2].public_key()]);
         // Cap: 10 follows, cap 3 — the FIRST three in follows order.
         let many = ids(10);
@@ -932,7 +939,10 @@ mod tests {
         assert_eq!(got, pks(&many[..3]));
         // Non-kind-3 events in the cache never count as a source.
         let one = ids(1);
-        assert_eq!(fetch_targets(&pks(&one), &[], now(), MAX_FETCH_TARGETS, &HashMap::new()).len(), 1);
+        assert_eq!(
+            fetch_targets(&pks(&one), &[], now(), MAX_FETCH_TARGETS, &HashMap::new()).len(),
+            1
+        );
         // The ceiling composes with the outbox author ceiling (D39):
         // a full pass is at most two shards, never an unsplit mega-REQ.
         let shards = crate::outbox::chunk(
@@ -942,7 +952,11 @@ mod tests {
             crate::outbox::MAX_AUTHORS_PER_FILTER,
         );
         assert_eq!(shards.len(), 2);
-        assert!(shards.iter().all(|s| s.len() <= crate::outbox::MAX_AUTHORS_PER_FILTER));
+        assert!(
+            shards
+                .iter()
+                .all(|s| s.len() <= crate::outbox::MAX_AUTHORS_PER_FILTER)
+        );
     }
 
     /// Non-follows' contact lists never feed the graph (Amethyst

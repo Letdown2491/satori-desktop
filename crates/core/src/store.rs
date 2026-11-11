@@ -9,8 +9,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use nostr_database::error::Error as DbError;
 use nostr::prelude::*;
+use nostr_database::error::Error as DbError;
 use nostr_lmdb::prelude::*;
 
 use crate::config;
@@ -36,16 +36,15 @@ pub const CATALOG: [(&str, &[u16]); 12] = [
 
 /// The kinds currently visible (prefs.json `content_hidden: [kind]`).
 pub fn visible_kinds() -> Vec<Kind> {
-    let hidden: Vec<u16> = std::fs::read_to_string(super::config::state_file(
-        super::config::files::PREFS,
-    ))
-    .ok()
-    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-    .and_then(|v| {
-        v.get("content_hidden")
-            .and_then(|h| serde_json::from_value(h.clone()).ok())
-    })
-    .unwrap_or_default();
+    let hidden: Vec<u16> =
+        std::fs::read_to_string(super::config::state_file(super::config::files::PREFS))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|v| {
+                v.get("content_hidden")
+                    .and_then(|h| serde_json::from_value(h.clone()).ok())
+            })
+            .unwrap_or_default();
     FEED_KINDS
         .iter()
         .filter(|k| !hidden.contains(&u16::from(**k)))
@@ -56,20 +55,20 @@ pub fn visible_kinds() -> Vec<Kind> {
 /// The content kinds the following feed carries (content-prefs.ts catalog's
 /// default surface).
 pub const FEED_KINDS: [Kind; 14] = [
-    Kind::TextNote,       // 1
-    Kind::Repost,         // 6
-    Kind::Custom(20),     // picture (NIP-68)
-    Kind::Custom(21),     // short vertical video (NIP-71)
-    Kind::Custom(22),     // video (NIP-71)
-    Kind::Custom(54),     // podcast episode (NIP-F4)
-    Kind::Custom(1068),   // poll (NIP-88)
-    Kind::Custom(30023),  // article (NIP-23)
-    Kind::Custom(30402),  // classified (NIP-99)
-    Kind::Custom(30617),  // repo (NIP-34)
-    Kind::Custom(30818),  // wiki (NIP-54)
-    Kind::Custom(31922),  // calendar date (NIP-52)
-    Kind::Custom(31923),  // calendar time
-    Kind::Custom(9802),   // highlight (NIP-84)
+    Kind::TextNote,      // 1
+    Kind::Repost,        // 6
+    Kind::Custom(20),    // picture (NIP-68)
+    Kind::Custom(21),    // short vertical video (NIP-71)
+    Kind::Custom(22),    // video (NIP-71)
+    Kind::Custom(54),    // podcast episode (NIP-F4)
+    Kind::Custom(1068),  // poll (NIP-88)
+    Kind::Custom(30023), // article (NIP-23)
+    Kind::Custom(30402), // classified (NIP-99)
+    Kind::Custom(30617), // repo (NIP-34)
+    Kind::Custom(30818), // wiki (NIP-54)
+    Kind::Custom(31922), // calendar date (NIP-52)
+    Kind::Custom(31923), // calendar time
+    Kind::Custom(9802),  // highlight (NIP-84)
 ];
 
 pub struct Store {
@@ -78,8 +77,7 @@ pub struct Store {
 
 impl Store {
     pub async fn open() -> NostrResult<Self> {
-        std::fs::create_dir_all(config::events_dir())
-            .map_err(|e| DbError::other(e.to_string()))?;
+        std::fs::create_dir_all(config::events_dir()).map_err(|e| DbError::other(e.to_string()))?;
         let db = NostrLmdb::open(config::events_dir()).await?;
         Ok(Self { db: Arc::new(db) })
     }
@@ -334,10 +332,7 @@ impl Store {
         let cutoff = Timestamp::from_secs(now.saturating_sub(PRUNE_DAYS * 86400));
         for kind in FEED_KINDS.iter().chain(std::iter::once(&Kind::Reaction)) {
             loop {
-                let filter = Filter::new()
-                    .kind(*kind)
-                    .until(cutoff)
-                    .limit(PRUNE_BATCH);
+                let filter = Filter::new().kind(*kind).until(cutoff).limit(PRUNE_BATCH);
                 let batch = self.query(filter).await?;
                 if batch.is_empty() {
                     break;
@@ -385,7 +380,10 @@ impl Store {
 
     /// The user's own reactions (engagement set source).
     pub async fn own_reactions(&self, author: PublicKey) -> NostrResult<Vec<Event>> {
-        let filter = Filter::new().kind(Kind::Reaction).author(author).limit(5000);
+        let filter = Filter::new()
+            .kind(Kind::Reaction)
+            .author(author)
+            .limit(5000);
         Ok(self.query(filter).await?.into_iter().collect())
     }
 

@@ -45,7 +45,11 @@ pub fn log(args: std::fmt::Arguments) {
     {
         let _ = std::fs::remove_file(path());
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path()) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path())
+    {
         let _ = writeln!(f, "{secs} {args}");
     }
 }

@@ -108,7 +108,13 @@ fn hint_seeded_lists(
         if lists.get(&key).is_none_or(RelayList::is_empty) {
             let seeded = hints::for_pubkey(pk);
             if !seeded.is_empty() {
-                lists.insert(key, RelayList { write: seeded, read: Vec::new() });
+                lists.insert(
+                    key,
+                    RelayList {
+                        write: seeded,
+                        read: Vec::new(),
+                    },
+                );
             }
         }
     }
@@ -132,12 +138,13 @@ fn extended_cover_seeded(
     }
     for pk in authors {
         let key = pk.to_string();
-        if lists.get(&key).is_none_or(RelayList::is_empty)
-            && crate::wot::is_qualified(pk)
-        {
+        if lists.get(&key).is_none_or(RelayList::is_empty) && crate::wot::is_qualified(pk) {
             lists.insert(
                 key,
-                RelayList { write: cover.clone(), read: Vec::new() },
+                RelayList {
+                    write: cover.clone(),
+                    read: Vec::new(),
+                },
             );
         }
     }
@@ -200,9 +207,7 @@ impl Authenticator for PoolAuthenticator {
     ) -> Pin<Box<dyn Future<Output = Result<Event, SdkError>> + Send + 'a>> {
         Box::pin(async move {
             let Some(signer) = self.0.get() else {
-                return Err(SdkError::other(
-                    "no session; not answering AUTH challenge",
-                ));
+                return Err(SdkError::other("no session; not answering AUTH challenge"));
             };
             // NIP-42: kind 22242, ["relay", url], ["challenge", challenge],
             // empty content, signed by the session key. A bunker signer
@@ -212,8 +217,8 @@ impl Authenticator for PoolAuthenticator {
                 .public_key()
                 .await
                 .map_err(|e| SdkError::other(e.to_string()))?;
-            let unsigned = ClientAuthentication::new(challenge, relay_url.clone())
-                .finalize_unsigned(pk);
+            let unsigned =
+                ClientAuthentication::new(challenge, relay_url.clone()).finalize_unsigned(pk);
             signer
                 .sign_event(unsigned)
                 .await
@@ -400,7 +405,9 @@ impl Pool {
             .get(Filter::new().kind(Kind::ContactList).author(me).limit(1))
             .await?;
         let cached = self.store.latest_by_kind(me, Kind::ContactList).await?;
-        Ok(cached.map(|ev| ev.tags.public_keys().collect()).unwrap_or_default())
+        Ok(cached
+            .map(|ev| ev.tags.public_keys().collect())
+            .unwrap_or_default())
     }
 
     /// Own NIP-65 relay list, split into (read, write) — the shared parser.
@@ -511,7 +518,8 @@ impl Pool {
             // knobs are pool.ts's caps): a profiled-empty relay bails fast
             // (floor), a rich-but-truncating one earns rope toward the
             // ceiling, unknown relays get the default.
-            let budget = relay_latency::budget(url.as_str(), PAGE_BUDGET, READ_BUDGET, CEILING_BUDGET);
+            let budget =
+                relay_latency::budget(url.as_str(), PAGE_BUDGET, READ_BUDGET, CEILING_BUDGET);
             let authors: Vec<String> = author_set.iter().cloned().collect();
             for shard in outbox::chunk(&authors, outbox::MAX_AUTHORS_PER_FILTER) {
                 let pks: Vec<PublicKey> = shard
@@ -541,10 +549,7 @@ impl Pool {
                 queries.push(async move {
                     let started = std::time::Instant::now();
                     let res = client
-                        .fetch_events(ReqTarget::manual(vec![(
-                            shard_url.as_str(),
-                            vec![filter],
-                        )]))
+                        .fetch_events(ReqTarget::manual(vec![(shard_url.as_str(), vec![filter])]))
                         .timeout(budget)
                         .into_future()
                         .await;
@@ -647,7 +652,10 @@ impl Pool {
             return Default::default();
         }
         let keys: Vec<String> = authors.iter().map(|p| p.to_string()).collect();
-        let lists = extended_cover_seeded(hint_seeded_lists(self.relay_lists(authors).await, authors), authors);
+        let lists = extended_cover_seeded(
+            hint_seeded_lists(self.relay_lists(authors).await, authors),
+            authors,
+        );
         let fallback: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
         // relay_score = the learned quality profile (relay-latency.ts
         // relayQuality): known-empty relays deprioritized (0.15), never
@@ -671,7 +679,10 @@ impl Pool {
             return Err(SdkError::other("no authors to subscribe"));
         }
         let keys: Vec<String> = authors.iter().map(|p| p.to_string()).collect();
-        let lists = extended_cover_seeded(hint_seeded_lists(self.relay_lists(authors).await, authors), authors);
+        let lists = extended_cover_seeded(
+            hint_seeded_lists(self.relay_lists(authors).await, authors),
+            authors,
+        );
         let fallback: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
         // Same learned quality as get_routed.
         let route = outbox::route(&lists, &keys, &fallback, relay_latency::quality);
@@ -681,8 +692,7 @@ impl Pool {
             // Same screen as fetch_route (defense in depth); the
             // mid-session shard skip drops read-dead relays here too —
             // the live bell stops paying for dead sockets (feeds.ts).
-            if !outbox::routable_relay(url.as_str()) || relay_latency::is_read_dead(url.as_str())
-            {
+            if !outbox::routable_relay(url.as_str()) || relay_latency::is_read_dead(url.as_str()) {
                 continue;
             }
             self.add_routed(url.as_str()).await;
@@ -985,7 +995,10 @@ mod tests {
             .latest_by_kind(ev.pubkey, Kind::RelayList)
             .await
             .unwrap();
-        assert!(cached.is_some(), "latest_by_kind lost the stored relay list");
+        assert!(
+            cached.is_some(),
+            "latest_by_kind lost the stored relay list"
+        );
 
         let (read, write) = pool.nip65(ev.pubkey).await.unwrap();
         println!("nip65 split: {} read, {} write", read.len(), write.len());

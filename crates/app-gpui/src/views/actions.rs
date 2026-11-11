@@ -14,12 +14,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{div, prelude::*, AnimationExt, Context, Div, Entity, EventEmitter, SharedString};
+use gpui::{AnimationExt, Context, Div, Entity, EventEmitter, SharedString, div, prelude::*};
 use nostr::prelude::*;
 
+use super::nav::Nav;
 use crate::desktop;
 use crate::{icons, theme};
-use super::nav::Nav;
 
 /// Hold (~500ms) or right-click = the amount sheet; tap = 21 sats.
 const ZAP_HOLD: Duration = Duration::from_millis(500);
@@ -116,9 +116,7 @@ pub(crate) fn action_row<H: ActionHost>(
             } else {
                 theme::muted()
             };
-            let start = std::rc::Rc::new(std::cell::Cell::new(Option::<
-                std::time::Instant,
-            >::None));
+            let start = std::rc::Rc::new(std::cell::Cell::new(Option::<std::time::Instant>::None));
             let bolt = div()
                 .id(SharedString::from(format!("zap-{key}")))
                 .cursor_pointer()

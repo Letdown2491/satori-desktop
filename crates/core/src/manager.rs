@@ -15,16 +15,16 @@ use nostr_sdk::client::Output;
 use tokio::sync::mpsc;
 
 use crate::blocktime::Blocktime;
-use crate::error::{LoginError, Result};
-use crate::nip::nip78;
 use crate::deletions;
+use crate::error::{LoginError, Result};
 use crate::hints;
+use crate::nip::nip78;
 use crate::nip40;
 use crate::outbox;
-use crate::pool::{Pool, INDEXERS};
+use crate::pool::{INDEXERS, Pool};
 use crate::relay_latency;
-use crate::seen;
 use crate::secrets;
+use crate::seen;
 use crate::session::{self, Session, SessionMode};
 use crate::signer::{self, Signer};
 use crate::wallet::{self, Wallet, WalletEvent};
@@ -39,8 +39,6 @@ const PAGE: usize = 40;
 /// trip should feed several pages before the next one).
 const TOPUP_DEPTH: usize = 200;
 const BOOTSTRAP_DEPTH: usize = 200;
-
-
 
 /// Progress events streamed back to the login UI.
 #[derive(Debug, Clone)]
@@ -138,20 +136,21 @@ const SUPPRESSED_CAP: usize = 200;
 const SUPPRESSED_FLUSH_SECS: u64 = 10;
 static SUPPRESSED_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SUPPRESSED_FLUSHER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-static SUPPRESSED_LOADED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static SUPPRESSED_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn suppressed_dirty() {
     SUPPRESSED_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
     SUPPRESSED_FLUSHER.get_or_init(|| {
         std::thread::Builder::new()
             .name("suppressed-flush".into())
-            .spawn(|| loop {
-                std::thread::park_timeout(std::time::Duration::from_secs(
-                    SUPPRESSED_FLUSH_SECS,
-                ));
-                if SUPPRESSED_DIRTY.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    write_suppressed_disk();
+            .spawn(|| {
+                loop {
+                    std::thread::park_timeout(std::time::Duration::from_secs(
+                        SUPPRESSED_FLUSH_SECS,
+                    ));
+                    if SUPPRESSED_DIRTY.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        write_suppressed_disk();
+                    }
                 }
             })
             .ok();
@@ -278,8 +277,8 @@ fn split_wot_tier(
     for ev in notifs {
         let kind = u16::from(ev.kind);
         let engagement = matches!(kind, 6 | 7);
-        let reply = matches!(kind, 1 | 1111)
-            && ev.tags.event_ids().any(|id| my_notes.contains(&id));
+        let reply =
+            matches!(kind, 1 | 1111) && ev.tags.event_ids().any(|id| my_notes.contains(&id));
         // Show-anyway first: the conscious per-session act outranks
         // every auto-gate — including the dedup store door below
         // (otherwise the receipts strip's button lied for
@@ -353,16 +352,30 @@ fn split_wot_tier(
 #[derive(Debug, Clone)]
 pub enum PublishEvent {
     /// The signed event is held for the undo window; countdown starts.
-    Held { token: u64, event: Event, hold_secs: u64 },
+    Held {
+        token: u64,
+        event: Event,
+        hold_secs: u64,
+    },
     /// The hold was undone; nothing was published.
-    Undone { token: u64 },
+    Undone {
+        token: u64,
+    },
     /// Published (or hold expired — the backstop committed).
-    Committed { token: u64 },
+    Committed {
+        token: u64,
+    },
     /// A Blossom upload finished (upload.rs): blob URL + the NIP-92 imeta tag.
-    Uploaded { url: String, imeta: Vec<String> },
+    Uploaded {
+        url: String,
+        imeta: Vec<String>,
+    },
     /// A restore finished: n events re-signed + published.
     Restored(u32),
-    Failed { token: u64, error: String },
+    Failed {
+        token: u64,
+        error: String,
+    },
 }
 
 pub type PublishRx = mpsc::UnboundedReceiver<PublishEvent>;
@@ -678,7 +691,9 @@ impl Core {
         // One-time media-cache migration: the pre-polish cache could hold
         // poisoned files (bytes written before decode validated them); the
         // versioned dir starts clean, the legacy dir goes (media.rs).
-        rt.spawn(async { crate::media::purge_legacy_cache(); });
+        rt.spawn(async {
+            crate::media::purge_legacy_cache();
+        });
         let blocktime = Arc::new(Blocktime::new(rt.handle().clone()));
         // The viewport channel: the receiver half rides the viewport task
         // (subscribe() below); this seed receiver keeps send() honest
@@ -697,7 +712,7 @@ impl Core {
             own_liked: Mutex::new(HashSet::new()),
             own_reposted: Mutex::new(HashSet::new()),
             own_bookmarked: Mutex::new(HashSet::new()),
-        own_drafts: Mutex::new(Vec::new()),
+            own_drafts: Mutex::new(Vec::new()),
             muted: Mutex::new(HashSet::new()),
             own_zapped: Mutex::new(HashSet::new()),
             tombstones_hydrated: std::sync::atomic::AtomicBool::new(false),
@@ -801,8 +816,10 @@ impl Core {
                     continue;
                 }
                 eprintln!("[core] list refresher: {} stale list(s)", stale.len());
-                let fallback: Vec<String> =
-                    crate::pool::INDEXERS.iter().map(|s| s.to_string()).collect();
+                let fallback: Vec<String> = crate::pool::INDEXERS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
                 for chunk in crate::outbox::chunk(
                     &stale.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
                     200,
@@ -815,10 +832,7 @@ impl Core {
                         continue;
                     }
                     let n = pks.len();
-                    let filter = Filter::new()
-                        .kind(Kind::RelayList)
-                        .authors(pks)
-                        .limit(n);
+                    let filter = Filter::new().kind(Kind::RelayList).authors(pks).limit(n);
                     // The SDK persists what it receives; the store's
                     // per-author newest-list read warms by itself.
                     let got = pool.get_from(&fallback, &filter).await;
@@ -886,11 +900,12 @@ impl Core {
     fn teardown_session(&self) {
         let old = self.active.lock().unwrap().take();
         if let Some(a) = old
-            && let Signer::Bunker(connect) = &a.signer {
-                let connect = Arc::clone(connect);
-                self.rt
-                    .spawn(async move { Arc::unwrap_or_clone(connect).shutdown().await });
-            }
+            && let Signer::Bunker(connect) = &a.signer
+        {
+            let connect = Arc::clone(connect);
+            self.rt
+                .spawn(async move { Arc::unwrap_or_clone(connect).shutdown().await });
+        }
         // The pool answered NIP-42 AUTH challenges as this session's
         // identity (pool.rs): drop it now, before the bunker transport
         // finishes dying and before session::clear drops the session
@@ -971,18 +986,22 @@ impl Core {
                         session::clear();
                         (
                             None,
-                            Some("Couldn't unlock your saved session, sign in again \
+                            Some(
+                                "Couldn't unlock your saved session, sign in again \
                                   below. Your keys stay with your signer."
-                                .into()),
+                                    .into(),
+                            ),
                         )
                     }
                     // Transient (relay down at launch, store timeout): keep
                     // the session — the next launch retries the resume.
                     _ => (
                         None,
-                        Some("Couldn't reach your signer just now, Satori retries \
+                        Some(
+                            "Couldn't reach your signer just now, Satori retries \
                               on next launch, or sign in below."
-                            .into()),
+                                .into(),
+                        ),
                     ),
                 }
             }
@@ -1057,8 +1076,7 @@ impl Core {
                     parsed.insert(ev.pubkey.to_string(), urls);
                 }
             }
-            let authors: Vec<String> =
-                qualified.iter().map(|p| p.to_string()).collect();
+            let authors: Vec<String> = qualified.iter().map(|p| p.to_string()).collect();
             crate::wot::relay_cover(
                 &parsed,
                 &authors,
@@ -1178,10 +1196,7 @@ impl Core {
     /// teardown clears the set). The caller re-opens the notifications
     /// stream; the exempted items then pass the gate.
     pub fn show_suppressed_author(&self, pubkey_hex: &str) {
-        NOTIF_EXEMPT
-            .lock()
-            .unwrap()
-            .insert(pubkey_hex.to_string());
+        NOTIF_EXEMPT.lock().unwrap().insert(pubkey_hex.to_string());
     }
 
     /// Caught spammers with per-relay attribution (issue #2 WS2
@@ -1204,7 +1219,10 @@ impl Core {
     /// Engagement lookups for card rendering (pure set membership, render is a
     /// projection — DESIGN.md §1.2).
     pub fn is_liked(&self, event_id: &EventId) -> bool {
-        self.own_liked.lock().unwrap().contains(&event_id.to_string())
+        self.own_liked
+            .lock()
+            .unwrap()
+            .contains(&event_id.to_string())
     }
 
     /// The engagement sets, for a view's session snapshot (feed.rs seeds its
@@ -1223,7 +1241,10 @@ impl Core {
     }
 
     pub fn is_bookmarked(&self, event_id: &EventId) -> bool {
-        self.own_bookmarked.lock().unwrap().contains(&event_id.to_string())
+        self.own_bookmarked
+            .lock()
+            .unwrap()
+            .contains(&event_id.to_string())
     }
 
     /// Fetch a JSON document (oEmbed previews) through the guarded pipeline.
@@ -1353,7 +1374,10 @@ impl Core {
         // wallet; Pending/Uncertain still owe the wallet an answer.
         let mut zapped = self.own_zapped.lock().unwrap();
         for z in wallet::ledger_history() {
-            if matches!(z.state, wallet::ZapState::Paid | wallet::ZapState::Confirmed) {
+            if matches!(
+                z.state,
+                wallet::ZapState::Paid | wallet::ZapState::Confirmed
+            ) {
                 zapped.insert(z.note);
             }
         }
@@ -1412,7 +1436,10 @@ impl Core {
         tx: &mpsc::UnboundedSender<WalletEvent>,
     ) -> ZapFlow {
         let Some(record) = wallet::ledger_for_note(&note).filter(|z| {
-            matches!(z.state, wallet::ZapState::Pending | wallet::ZapState::Uncertain)
+            matches!(
+                z.state,
+                wallet::ZapState::Pending | wallet::ZapState::Uncertain
+            )
         }) else {
             return Err(WalletEvent::ZapFailed {
                 note,
@@ -1421,12 +1448,11 @@ impl Core {
         };
         // The stored request replays as-is — re-signing would mint a new
         // event id and risk a duplicate zap event (the Feather rule).
-        let signed = serde_json::from_str::<Event>(&record.event).map_err(|_| {
-            WalletEvent::ZapFailed {
+        let signed =
+            serde_json::from_str::<Event>(&record.event).map_err(|_| WalletEvent::ZapFailed {
                 note: note.clone(),
                 reason: "stored zap request is corrupt".into(),
-            }
-        })?;
+            })?;
         // One in-flight payment per note — the retry reclaims the slot.
         if !self.wallet.claim_flight(&note) {
             return Err(WalletEvent::ZapFailed {
@@ -1499,14 +1525,15 @@ impl Core {
             &lnurl,
             active.write_relays.clone(),
         );
-        let signed = active
-            .signer
-            .sign_event(unsigned)
-            .await
-            .map_err(|e| WalletEvent::ZapFailed {
-                note: note_hex.clone(),
-                reason: e.to_string(),
-            })?;
+        let signed =
+            active
+                .signer
+                .sign_event(unsigned)
+                .await
+                .map_err(|e| WalletEvent::ZapFailed {
+                    note: note_hex.clone(),
+                    reason: e.to_string(),
+                })?;
         let record = wallet::ZapRecord {
             req: signed.id.to_string(),
             note: note_hex.clone(),
@@ -1545,11 +1572,10 @@ impl Core {
                 note: note.clone(),
                 reason: "zap request has no lnurl tag".into(),
             })?;
-        let endpoint =
-            wallet::lnurlp_url(&lnurl_tag).map_err(|e| WalletEvent::ZapFailed {
-                note: note.clone(),
-                reason: e,
-            })?;
+        let endpoint = wallet::lnurlp_url(&lnurl_tag).map_err(|e| WalletEvent::ZapFailed {
+            note: note.clone(),
+            reason: e,
+        })?;
         // No invoice yet → nothing CAN have been paid: a definite LNURL
         // error erases the record, the user just taps again.
         let callback = match wallet::fetch_lnurlp(&endpoint).await {
@@ -1624,9 +1650,13 @@ impl Core {
         let req = req.to_string();
         let tx = tx.clone(); // the spawned task outlives the borrow
         self.rt.spawn(async move {
-            let Ok(active) = this.active().await else { return };
+            let Ok(active) = this.active().await else {
+                return;
+            };
             let me = active.me();
-            let Ok(note_id) = EventId::from_hex(&note) else { return };
+            let Ok(note_id) = EventId::from_hex(&note) else {
+                return;
+            };
             for _ in 0..6 {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 let events = match active
@@ -1696,18 +1726,22 @@ impl Core {
         // Paste-time transport screen (issue #11): the URI's relays are the
         // bunker transport's dials, outside the pool's screens — the same
         // ruleset screens them before the nostrconnect client is built.
-        crate::net_guard::screen_bunker_uri(uri)
-            .map_err(LoginError::InvalidBunkerUri)?;
+        crate::net_guard::screen_bunker_uri(uri).map_err(LoginError::InvalidBunkerUri)?;
 
         let parsed = NostrConnectUri::parse(uri.trim())
             .map_err(|e| LoginError::InvalidBunkerUri(e.to_string()))?;
 
         // bunker://<remote>?relay=... (client:// initiation is out of scope).
         let remote = match &parsed {
-            NostrConnectUri::Bunker { remote_signer_public_key, .. } => {
-                remote_signer_public_key.to_string()
+            NostrConnectUri::Bunker {
+                remote_signer_public_key,
+                ..
+            } => remote_signer_public_key.to_string(),
+            _ => {
+                return Err(LoginError::InvalidBunkerUri(
+                    "expected bunker:// URI".into(),
+                ));
             }
-            _ => return Err(LoginError::InvalidBunkerUri("expected bunker:// URI".into())),
         };
         crate::dlog!("bunker: parsed, remote signer {remote}");
 
@@ -1717,7 +1751,10 @@ impl Core {
                 .map_err(|e| LoginError::Connect(e.to_string()))?,
         );
         let relays: Vec<String> = connect.relays().iter().map(|r| r.to_string()).collect();
-        crate::dlog!("bunker: client built over {} relay(s); awaiting approval", relays.len());
+        crate::dlog!(
+            "bunker: client built over {} relay(s); awaiting approval",
+            relays.len()
+        );
         *self.pending.lock().unwrap() = Some(Arc::clone(&connect));
 
         let pk = match connect.get_public_key_async().await {
@@ -1825,8 +1862,7 @@ impl Core {
         // unset until the app has hosted art — both optional per NIP-46.
         let mut uri = NostrConnectUri::client(
             client_keys.public_key(),
-            [RelayUrl::parse(relay)
-                .map_err(|e| LoginError::InvalidBunkerUri(e.to_string()))?],
+            [RelayUrl::parse(relay).map_err(|e| LoginError::InvalidBunkerUri(e.to_string()))?],
             "Satori",
         );
         if let NostrConnectUri::Client { metadata, .. } = &mut uri {
@@ -1888,9 +1924,10 @@ impl Core {
             .await
             .map_err(|e| LoginError::Connect(e.to_string()))?
         {
-            NostrConnectUri::Bunker { remote_signer_public_key, .. } => {
-                remote_signer_public_key.to_string()
-            }
+            NostrConnectUri::Bunker {
+                remote_signer_public_key,
+                ..
+            } => remote_signer_public_key.to_string(),
             _ => unreachable!("bunker_uri returns the Bunker variant"),
         };
         let relays: Vec<String> = connect.relays().iter().map(|r| r.to_string()).collect();
@@ -1920,7 +1957,11 @@ impl Core {
     /// key's response kind. Every signer response it sees is logged with
     /// its decrypt outcome — "the relay delivered it and the SDK pump
     /// missed it" becomes provable from the log instead of a guess.
-    async fn nostrconnect_probe(client_keys: Keys, relay: String, done: tokio::sync::oneshot::Receiver<()>) {
+    async fn nostrconnect_probe(
+        client_keys: Keys,
+        relay: String,
+        done: tokio::sync::oneshot::Receiver<()>,
+    ) {
         use futures_util::StreamExt as _;
         let probe = nostr_sdk::client::ClientBuilder::new().build();
         if let Err(e) = probe.add_relay(&relay).await {
@@ -1996,8 +2037,6 @@ impl Core {
         }
     }
 
-
-
     // --- resume machinery ------------------------------------------------------
 
     async fn build_signer(&self, session: &Session) -> Result<Signer> {
@@ -2013,8 +2052,8 @@ impl Core {
                     uri.push_str("?relay=");
                     uri.push_str(&relays.join("&relay="));
                 }
-                let parsed = NostrConnectUri::parse(&uri)
-                    .map_err(|e| LoginError::Resume(e.to_string()))?;
+                let parsed =
+                    NostrConnectUri::parse(&uri).map_err(|e| LoginError::Resume(e.to_string()))?;
                 let connect = NostrConnect::new(parsed, client_keys, LOGIN_TIMEOUT, None)
                     .map_err(|e| LoginError::Resume(e.to_string()))?;
                 Ok(Signer::Bunker(Arc::new(connect)))
@@ -2033,7 +2072,11 @@ impl Core {
         if let Some(p) = self.pool.lock().unwrap().as_ref() {
             return Ok(Arc::clone(p));
         }
-        let p = Arc::new(Pool::open().await.map_err(|e| LoginError::Resume(e.to_string()))?);
+        let p = Arc::new(
+            Pool::open()
+                .await
+                .map_err(|e| LoginError::Resume(e.to_string()))?,
+        );
         *self.pool.lock().unwrap() = Some(Arc::clone(&p));
         Ok(p)
     }
@@ -2054,17 +2097,17 @@ impl Core {
         // Undo-window prefs live in prefs.json (theme.ts semantics); core
         // reads its slice at session build — TODO(M1): cleaner pref split.
         let mut undo = crate::undo::UndoWindow::default();
-        if let Ok(raw) = std::fs::read_to_string(crate::config::state_file(
-            crate::config::files::PREFS,
-        ))
-            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if let Some(b) = v.get("undo_enabled").and_then(|b| b.as_bool()) {
-                    undo.enabled = b;
-                }
-                if let Some(sec) = v.get("undo_seconds").and_then(|s| s.as_u64()) {
-                    undo.set_seconds(sec as u32);
-                }
+        if let Ok(raw) =
+            std::fs::read_to_string(crate::config::state_file(crate::config::files::PREFS))
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
+        {
+            if let Some(b) = v.get("undo_enabled").and_then(|b| b.as_bool()) {
+                undo.enabled = b;
             }
+            if let Some(sec) = v.get("undo_seconds").and_then(|s| s.as_u64()) {
+                undo.set_seconds(sec as u32);
+            }
+        }
         // NIP-78 app-data sync (Phase 2 §4.1): our kind-30078 slots →
         // prefs.json. Remote wins at login (Feather's semantics): every
         // local change publishes forward, so only offline edits lose.
@@ -2120,7 +2163,10 @@ impl Core {
             let res: Result<()> = async {
                 let active = this.active().await?;
                 let me = active.me();
-                let content = active.signer.nip44_encrypt_self(&me, &value.to_string()).await?;
+                let content = active
+                    .signer
+                    .nip44_encrypt_self(&me, &value.to_string())
+                    .await?;
                 let unsigned = UnsignedEvent::new(
                     me,
                     Timestamp::now(),
@@ -2134,7 +2180,10 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -2208,14 +2257,10 @@ impl Core {
                 .is_some_and(|t| *t > now_secs().saturating_sub(3600));
             if !ran {
                 active.pool.connect_reads(Vec::new()).await.ok();
-                let (read, write) = active
-                    .pool
-                    .nip65(me)
-                    .await
-                    .unwrap_or_else(|_| {
-                        eprintln!("[core] nip65 fetch failed or timed out");
-                        (Vec::new(), Vec::new())
-                    });
+                let (read, write) = active.pool.nip65(me).await.unwrap_or_else(|_| {
+                    eprintln!("[core] nip65 fetch failed or timed out");
+                    (Vec::new(), Vec::new())
+                });
                 eprintln!(
                     "[core] bootstrap: {} read relay(s), {} write relay(s)",
                     read.len(),
@@ -2258,8 +2303,7 @@ impl Core {
                     .latest_by_kind(me, Kind::ContactList)
                     .await
                 {
-                    let local_follows: Vec<PublicKey> =
-                        own.tags.public_keys().collect();
+                    let local_follows: Vec<PublicKey> = own.tags.public_keys().collect();
                     crate::wot::set_identity(me, &local_follows);
                     crate::wot::set_muted(self.muted.lock().unwrap().clone());
                     crate::dedup::set_exemptions(me, &local_follows);
@@ -2292,7 +2336,10 @@ impl Core {
                     .flatten()
                     .map(|ev| {
                         let lists = outbox::parse_relay_list(&ev);
-                        (lists.read.into_iter().collect(), lists.write.into_iter().collect())
+                        (
+                            lists.read.into_iter().collect(),
+                            lists.write.into_iter().collect(),
+                        )
                     })
                     .unwrap_or_default();
                 if !read.is_empty() {
@@ -2316,7 +2363,10 @@ impl Core {
                 // exactly this reason). Same staleness contract as the
                 // read half: the store copy until a full phase refreshes.
                 if !write.is_empty() {
-                    eprintln!("[core] bootstrap: write set from store: {} relay(s)", write.len());
+                    eprintln!(
+                        "[core] bootstrap: write set from store: {} relay(s)",
+                        write.len()
+                    );
                     active.write_relays = write.clone();
                     if let Some(a) = self.active.lock().unwrap().as_mut() {
                         a.write_relays = write;
@@ -2324,8 +2374,11 @@ impl Core {
                 }
                 // The phase already landed the fresh contact list; pick it
                 // up (a store read).
-                if let Ok(Some(ev)) =
-                    active.pool.store.latest_by_kind(me, Kind::ContactList).await
+                if let Ok(Some(ev)) = active
+                    .pool
+                    .store
+                    .latest_by_kind(me, Kind::ContactList)
+                    .await
                 {
                     let follows: Vec<PublicKey> = ev.tags.public_keys().collect();
                     active.follows = follows.clone();
@@ -2359,7 +2412,10 @@ impl Core {
             let mut ks: Vec<u16> = kinds.iter().map(|k| u16::from(*k)).collect();
             ks.sort();
             ks.dedup();
-            ks.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(",")
+            ks.iter()
+                .map(|k| k.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         };
         let warm = crate::read_state::load()
             .warm_at
@@ -2445,8 +2501,6 @@ impl Core {
         Ok(())
     }
 
-
-
     async fn load_own_sets(&self, active: &Active) {
         let me = active.me();
         if let Ok(reactions) = active.pool.store.own_reactions(me).await {
@@ -2478,12 +2532,16 @@ impl Core {
             .await
         {
             if !ev.content.is_empty()
-                && let Ok(plain) = active.signer.nip44_decrypt_self(&me, ev.content.as_str()).await {
-                    let mut b = self.own_bookmarked.lock().unwrap();
-                    for id in parse_list_event(&plain) {
-                        b.insert(id);
-                    }
+                && let Ok(plain) = active
+                    .signer
+                    .nip44_decrypt_self(&me, ev.content.as_str())
+                    .await
+            {
+                let mut b = self.own_bookmarked.lock().unwrap();
+                for id in parse_list_event(&plain) {
+                    b.insert(id);
                 }
+            }
             // Public tags still count (merge public+private — list semantics).
             let mut b = self.own_bookmarked.lock().unwrap();
             for id in ev.tags.clone().event_ids() {
@@ -2513,12 +2571,7 @@ impl Core {
         // logins); the Library shows them and opening/deleting one
         // republishes the wrap empty (NIP-37's delete) — the moment the
         // text becomes a Satori slot draft.
-        if let Ok(wraps) = active
-            .pool
-            .store
-            .all_by_kind(me, Kind::Custom(31234))
-            .await
-        {
+        if let Ok(wraps) = active.pool.store.all_by_kind(me, Kind::Custom(31234)).await {
             // Parameterized replaceable: the newest wrap per d wins.
             let mut newest: HashMap<String, Event> = HashMap::new();
             for wrap in wraps {
@@ -2565,16 +2618,19 @@ impl Core {
                     .and_then(|c| c.as_str())
                     .unwrap_or("")
                     .to_string();
-                let title = inner.get("tags").and_then(|t| t.as_array()).and_then(|tags| {
-                    tags.iter().find_map(|t| {
-                        let arr = t.as_array()?;
-                        if arr.first()?.as_str()? == "title" {
-                            arr.get(1)?.as_str().map(str::to_string)
-                        } else {
-                            None
-                        }
-                    })
-                });
+                let title = inner
+                    .get("tags")
+                    .and_then(|t| t.as_array())
+                    .and_then(|tags| {
+                        tags.iter().find_map(|t| {
+                            let arr = t.as_array()?;
+                            if arr.first()?.as_str()? == "title" {
+                                arr.get(1)?.as_str().map(str::to_string)
+                            } else {
+                                None
+                            }
+                        })
+                    });
                 // A note draft keeps its text; an article's body rides its
                 // title; a poll's question is the text.
                 let text = match kind {
@@ -2655,7 +2711,10 @@ impl Core {
         // full routed fan-outs. A click while one runs drops the new tx —
         // the caller's pump sees the closed channel and exits quietly;
         // the running refresh lands its Loaded anyway.
-        if self.refreshing.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if self
+            .refreshing
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
             return rx;
         }
         let this = Arc::clone(self);
@@ -2697,7 +2756,13 @@ impl Core {
         // call's own guard makes the empty case a no-op regardless.
         let fetched = active
             .pool
-            .get_routed(kinds.clone(), &follows, Some(Timestamp::from(since)), None, 100)
+            .get_routed(
+                kinds.clone(),
+                &follows,
+                Some(Timestamp::from(since)),
+                None,
+                100,
+            )
             .await;
         if fetched.is_empty() {
             // Relays unreachable (post-suspend, offline): this used to end
@@ -2814,7 +2879,11 @@ impl Core {
     /// Display resolution for inline mentions (content.ts: @names from the
     /// profile cache; misses render as short npubs).
     pub fn profile_of(&self, pk: &PublicKey) -> Option<Profile> {
-        self.profiles_mem.lock().unwrap().get(&pk.to_string()).cloned()
+        self.profiles_mem
+            .lock()
+            .unwrap()
+            .get(&pk.to_string())
+            .cloned()
     }
 
     /// @-mention candidates for the composer: the people you follow whose
@@ -2882,7 +2951,8 @@ impl Core {
         hits
     }
 
-    fn active_pubkey(&self) -> String {        self.active
+    fn active_pubkey(&self) -> String {
+        self.active
             .lock()
             .unwrap()
             .as_ref()
@@ -2986,10 +3056,7 @@ impl Core {
             .profiles(&authors)
             .await
             .unwrap_or_default();
-        let mut profiles: Vec<Profile> = cached
-            .iter()
-            .filter_map(Profile::from_event)
-            .collect();
+        let mut profiles: Vec<Profile> = cached.iter().filter_map(Profile::from_event).collect();
         // Fresh metadata for authors missing from the cache.
         let mut seen = std::collections::HashSet::new();
         let missing: Vec<PublicKey> = authors
@@ -2999,7 +3066,10 @@ impl Core {
             .cloned()
             .collect();
         if !missing.is_empty() {
-            let filter = Filter::new().kind(Kind::Metadata).authors(missing.clone()).limit(500);
+            let filter = Filter::new()
+                .kind(Kind::Metadata)
+                .authors(missing.clone())
+                .limit(500);
             // The SDK saves what it receives; `fresh` reads the store.
             let _ = active.pool.get(filter).await;
             let fresh = active
@@ -3083,8 +3153,7 @@ impl Core {
                 // a stranger's thumbs-down the relay phase would have
                 // dropped, and reactions when the pref was off).
                 cached.retain(|ev| {
-                    !(u16::from(ev.kind) == 7
-                        && (!reaction_notifs || ev.content.trim() == "-"))
+                    !(u16::from(ev.kind) == 7 && (!reaction_notifs || ev.content.trim() == "-"))
                 });
                 // The chokepoint gates too: the union keeps cached rows in
                 // the final page, so a deleted (NIP-09) or expired
@@ -3100,8 +3169,7 @@ impl Core {
                 // above). The final union re-splits; the receipts store
                 // holds the union.
                 let my_note_ids: HashSet<EventId> = ids.iter().copied().collect();
-                let (kept, mut cached_suppressed) =
-                    split_wot_tier(cached, &my_note_ids, false);
+                let (kept, mut cached_suppressed) = split_wot_tier(cached, &my_note_ids, false);
                 cached = kept;
                 {
                     let authors: Vec<PublicKey> = cached.iter().map(|e| e.pubkey).collect();
@@ -3129,27 +3197,32 @@ impl Core {
                 // Mentions (#p=me) and replies (#e=my notes): PARALLEL.
                 // (The pref was already read for the cached phase — no
                 // second disk read here.)
-                let mut mention_kinds = vec![Kind::TextNote, Kind::Custom(1111), Kind::Custom(9735)];
+                let mut mention_kinds =
+                    vec![Kind::TextNote, Kind::Custom(1111), Kind::Custom(9735)];
                 if reaction_notifs {
                     mention_kinds.push(Kind::Reaction);
                 }
-                let mention_q = Box::pin(active.pool.get(
-                    Filter::new()
-                        .kinds(mention_kinds)
-                        .pubkeys([me])
-                        .since(Timestamp::from(since))
-                        .limit(200),
-                ));
+                let mention_q = Box::pin(
+                    active.pool.get(
+                        Filter::new()
+                            .kinds(mention_kinds)
+                            .pubkeys([me])
+                            .since(Timestamp::from(since))
+                            .limit(200),
+                    ),
+                );
                 let reply_q = if ids.is_empty() {
                     None
                 } else {
-                    Some(Box::pin(active.pool.get(
-                        Filter::new()
-                            .kinds([Kind::TextNote, Kind::Custom(1111)])
-                            .events(ids)
-                            .since(Timestamp::from(since))
-                            .limit(200),
-                    )))
+                    Some(Box::pin(
+                        active.pool.get(
+                            Filter::new()
+                                .kinds([Kind::TextNote, Kind::Custom(1111)])
+                                .events(ids)
+                                .since(Timestamp::from(since))
+                                .limit(200),
+                        ),
+                    ))
                 };
                 let poll_ids: Vec<EventId> = my_notes
                     .iter()
@@ -3169,12 +3242,16 @@ impl Core {
                     }
                     active.pool.get(f).await.unwrap_or_default()
                 });
-                let (mentions_res, replies_res, votes_res) = tokio::join!(mention_q, async {
-                    match reply_q {
-                        Some(q) => q.await.unwrap_or_default(),
-                        None => Default::default(),
-                    }
-                }, vote_q);
+                let (mentions_res, replies_res, votes_res) = tokio::join!(
+                    mention_q,
+                    async {
+                        match reply_q {
+                            Some(q) => q.await.unwrap_or_default(),
+                            None => Default::default(),
+                        }
+                    },
+                    vote_q
+                );
                 let mine_events: Vec<Event> = mentions_res
                     .into_iter()
                     .flat_map(|set| set.into_iter())
@@ -3395,8 +3472,7 @@ impl Core {
                     by_kind.insert(u16::from(ev.kind), ev);
                 }
                 let events: Vec<&Event> = by_kind.values().collect();
-                serde_json::to_string_pretty(&events)
-                    .map_err(|e| LoginError::Resume(e.to_string()))
+                serde_json::to_string_pretty(&events).map_err(|e| LoginError::Resume(e.to_string()))
             }
             .await;
             match res {
@@ -3446,7 +3522,10 @@ impl Core {
                     let _ = tx.send(PublishEvent::Restored(n));
                 }
                 Err(e) => {
-                    let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                    let _ = tx.send(PublishEvent::Failed {
+                        token: 0,
+                        error: e.to_string(),
+                    });
                 }
             }
         });
@@ -3531,8 +3610,13 @@ impl Core {
                     }
                 }
                 tags.push(Tag::custom("client", ["satori-desktop"]));
-                let unsigned =
-                    UnsignedEvent::new(active.me(), Timestamp::now(), Kind::Custom(1111), tags, content);
+                let unsigned = UnsignedEvent::new(
+                    active.me(),
+                    Timestamp::now(),
+                    Kind::Custom(1111),
+                    tags,
+                    content,
+                );
                 let signed = active.signer.sign_event(unsigned).await?;
                 // Same undo window as notes (the reply toast is the note
                 // toast — one seam, hold_and_commit).
@@ -3561,7 +3645,10 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -3611,8 +3698,10 @@ impl Core {
                 // The vote's e tag hints the poll author's most-recent
                 // seen relay (actions.ts:118) so clients that never saw
                 // the poll can still ask where it lives.
-                let mut tags =
-                    vec![seen::hint_tag(poll.id, &poll.pubkey), Tag::public_key(poll.pubkey)];
+                let mut tags = vec![
+                    seen::hint_tag(poll.id, &poll.pubkey),
+                    Tag::public_key(poll.pubkey),
+                ];
                 for opt in option_ids {
                     tags.push(Tag::custom("response", [opt]));
                 }
@@ -3624,7 +3713,10 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -3662,7 +3754,10 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -3722,7 +3817,10 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             }
         });
         rx
@@ -3793,8 +3891,11 @@ impl Core {
                     }
                 }
                 let have: HashSet<EventId> = events.iter().map(|e| e.id).collect();
-                let missing: Vec<EventId> =
-                    want.iter().filter(|id| !have.contains(id)).cloned().collect();
+                let missing: Vec<EventId> = want
+                    .iter()
+                    .filter(|id| !have.contains(id))
+                    .cloned()
+                    .collect();
                 if !missing.is_empty() {
                     // feeds.ts fetchEventsByIds: a TARGETED query on the
                     // indexers (parents' authors are unknown until they
@@ -3802,8 +3903,7 @@ impl Core {
                     // the REQ ceiling (WS1: OutboxRouter.kt
                     // MAX_ETAGS_PER_FILTER — big relays reject oversized
                     // filters).
-                    let fallback: Vec<String> =
-                        INDEXERS.iter().map(|s| s.to_string()).collect();
+                    let fallback: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
                     for id_shard in outbox::chunk(&missing, outbox::MAX_ETAGS_PER_FILTER) {
                         let n = id_shard.len();
                         let filter = Filter::new().ids(id_shard).limit(n);
@@ -3821,7 +3921,10 @@ impl Core {
                     let snippet = plain_snippet(&ev.content, 140);
                     resolved.insert(
                         ev.id.to_string(),
-                        ParentNote { author: ev.pubkey.to_string(), snippet },
+                        ParentNote {
+                            author: ev.pubkey.to_string(),
+                            snippet,
+                        },
                     );
                 }
                 Ok(())
@@ -3921,7 +4024,12 @@ impl Core {
                 let profile = match &ev {
                     Some(ev) => {
                         let authors = [ev.pubkey];
-                        let cached = active.pool.store.profiles(&authors).await.unwrap_or_default();
+                        let cached = active
+                            .pool
+                            .store
+                            .profiles(&authors)
+                            .await
+                            .unwrap_or_default();
                         let mut p: Option<Profile> =
                             cached.iter().filter_map(Profile::from_event).next();
                         if p.is_none() {
@@ -4034,10 +4142,7 @@ impl Core {
         self.rt.spawn(async move {
             let res: Result<FeedPage> = async {
                 let active = this.active().await?;
-                let filter = Filter::new()
-                    .kind(Kind::TextNote)
-                    .search(&query)
-                    .limit(50);
+                let filter = Filter::new().kind(Kind::TextNote).search(&query).limit(50);
                 let mut relays: Vec<String> = active
                     .pool
                     .read_relays()
@@ -4050,12 +4155,19 @@ impl Core {
                 // The fan-out path (get_from): per-relay queries with
                 // latency attribution — and the gate above decides WHICH
                 // relays hear the query at all.
-                let mut results: Vec<Event> =
-                    active.pool.get_from(&relays, &filter).await.into_iter().collect();
+                let mut results: Vec<Event> = active
+                    .pool
+                    .get_from(&relays, &filter)
+                    .await
+                    .into_iter()
+                    .collect();
                 // (no explicit save: the SDK persists what it receives)
                 results.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
                 let profiles = Self::profiles_for(&active, &results).await;
-                Ok(FeedPage { notes: results, profiles })
+                Ok(FeedPage {
+                    notes: results,
+                    profiles,
+                })
             }
             .await;
             match res {
@@ -4089,8 +4201,13 @@ impl Core {
                     .kinds(crate::store::visible_kinds())
                     .custom_tag(SingleLetterTag::LOWERCASE_T, tag.to_lowercase())
                     .limit(PAGE + 1);
-                let mut notes: Vec<Event> =
-                    active.pool.get(filter).await.unwrap_or_default().into_iter().collect();
+                let mut notes: Vec<Event> = active
+                    .pool
+                    .get(filter)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
                 // (no explicit save: the SDK persists what it receives)
                 {
                     let muted = this.muted.lock().unwrap();
@@ -4129,8 +4246,13 @@ impl Core {
                     .custom_tag(SingleLetterTag::LOWERCASE_T, tag.to_lowercase())
                     .until(Timestamp::from(until))
                     .limit(PAGE + 1);
-                let mut notes: Vec<Event> =
-                    active.pool.get(filter).await.unwrap_or_default().into_iter().collect();
+                let mut notes: Vec<Event> = active
+                    .pool
+                    .get(filter)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
                 // (no explicit save: the SDK persists what it receives)
                 {
                     let muted = this.muted.lock().unwrap();
@@ -4340,7 +4462,10 @@ impl Core {
                 .post_note_inner(&tx, content, reply_to, mentions, quote, imetas)
                 .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             }
         });
         rx
@@ -4385,7 +4510,11 @@ impl Core {
                     q.pubkey.to_string(),
                 ],
             ));
-            format!("{}\n\nnostr:{}", content, q.id.to_bech32().unwrap_or_default())
+            format!(
+                "{}\n\nnostr:{}",
+                content,
+                q.id.to_bech32().unwrap_or_default()
+            )
         } else {
             content
         };
@@ -4409,7 +4538,11 @@ impl Core {
             ));
             tags.push(Tag::custom(
                 "e",
-                [parent.id.to_string(), empty.to_string(), "reply".to_string()],
+                [
+                    parent.id.to_string(),
+                    empty.to_string(),
+                    "reply".to_string(),
+                ],
             ));
             tags.push(Tag::public_key(parent.pubkey));
             if root != parent.id {
@@ -4445,15 +4578,8 @@ impl Core {
     ) -> Result<()> {
         let active = self.active().await?;
         let me = active.me();
-        let (content, tags) =
-            Self::note_tags(content, reply_to, mentions, quote, &imetas, me);
-        let unsigned = UnsignedEvent::new(
-            me,
-            Timestamp::now(),
-            Kind::TextNote,
-            tags,
-            content,
-        );
+        let (content, tags) = Self::note_tags(content, reply_to, mentions, quote, &imetas, me);
+        let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::TextNote, tags, content);
         let signed = active.signer.sign_event(unsigned).await?;
 
         match active.undo.hold_duration() {
@@ -4464,7 +4590,8 @@ impl Core {
                     event: signed.clone(),
                     hold_secs: hold.as_secs(),
                 });
-                self.hold_and_commit(Arc::new(active.clone()), token, signed, hold, tx.clone()).await;
+                self.hold_and_commit(Arc::new(active.clone()), token, signed, hold, tx.clone())
+                    .await;
             }
             None => Self::commit(&active, &signed, tx).await?,
         }
@@ -4602,7 +4729,9 @@ impl Core {
     /// cancelScheduled): only the author's own token goes, synchronously
     /// flushed so a confirmed cancel can't resurrect after a restart.
     pub fn scheduled_cancel(&self, token: &str) -> bool {
-        let Some(me) = self.active_pubkey_opt() else { return false };
+        let Some(me) = self.active_pubkey_opt() else {
+            return false;
+        };
         crate::scheduled::cancel(&me, token)
     }
 
@@ -4710,7 +4839,11 @@ impl Core {
                 }
                 tag_list.push(Tag::custom(
                     "polltype",
-                    [if multi { "multiplechoice" } else { "singlechoice" }],
+                    [if multi {
+                        "multiplechoice"
+                    } else {
+                        "singlechoice"
+                    }],
                 ));
                 if let Some(secs) = ends_in_secs {
                     let ends_at = Timestamp::now().as_secs() + secs;
@@ -4735,8 +4868,14 @@ impl Core {
                             event: signed.clone(),
                             hold_secs: hold.as_secs(),
                         });
-                        this.hold_and_commit(Arc::new(active.clone()), token, signed, hold, tx.clone())
-                            .await;
+                        this.hold_and_commit(
+                            Arc::new(active.clone()),
+                            token,
+                            signed,
+                            hold,
+                            tx.clone(),
+                        )
+                        .await;
                     }
                     None => Self::commit(&active, &signed, &tx).await?,
                 }
@@ -4744,7 +4883,10 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -4765,9 +4907,14 @@ impl Core {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
-            let res = this.post_picture_inner(&tx, title, content, imeta, content_warning).await;
+            let res = this
+                .post_picture_inner(&tx, title, content, imeta, content_warning)
+                .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             }
         });
         rx
@@ -4789,9 +4936,14 @@ impl Core {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
-            let res = this.post_video_inner(&tx, title, content, imeta, content_warning).await;
+            let res = this
+                .post_video_inner(&tx, title, content, imeta, content_warning)
+                .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             }
         });
         rx
@@ -4837,7 +4989,9 @@ impl Core {
         content_warning: Option<String>,
     ) -> Result<()> {
         if imeta.is_empty() {
-            return Err(LoginError::Other("a video post needs at least one video".into()));
+            return Err(LoginError::Other(
+                "a video post needs at least one video".into(),
+            ));
         }
         let active = self.active().await?;
         let me = active.me();
@@ -4853,7 +5007,8 @@ impl Core {
                     event: signed.clone(),
                     hold_secs: hold.as_secs(),
                 });
-                self.hold_and_commit(Arc::new(active.clone()), token, signed, hold, tx.clone()).await;
+                self.hold_and_commit(Arc::new(active.clone()), token, signed, hold, tx.clone())
+                    .await;
             }
             None => Self::commit(&active, &signed, tx).await?,
         }
@@ -4924,7 +5079,9 @@ impl Core {
         content_warning: Option<String>,
     ) -> Result<()> {
         if imeta.is_empty() {
-            return Err(LoginError::Other("a picture needs at least one image".into()));
+            return Err(LoginError::Other(
+                "a picture needs at least one image".into(),
+            ));
         }
         let active = self.active().await?;
         let me = active.me();
@@ -4942,7 +5099,8 @@ impl Core {
                     event: signed.clone(),
                     hold_secs: hold.as_secs(),
                 });
-                self.hold_and_commit(Arc::new(active.clone()), token, signed, hold, tx.clone()).await;
+                self.hold_and_commit(Arc::new(active.clone()), token, signed, hold, tx.clone())
+                    .await;
             }
             None => Self::commit(&active, &signed, tx).await?,
         }
@@ -4954,10 +5112,7 @@ impl Core {
     /// reply/quote; the reader's comments are NIP-22 kind-1111s). The
     /// `d` identifier is random when the draft doesn't carry one. Same
     /// undo window as notes/pictures.
-    pub fn post_article(
-        self: &Arc<Self>,
-        draft: crate::nip::article::ArticleDraft,
-    ) -> PublishRx {
+    pub fn post_article(self: &Arc<Self>, draft: crate::nip::article::ArticleDraft) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
@@ -4988,8 +5143,14 @@ impl Core {
                             event: signed.clone(),
                             hold_secs: hold.as_secs(),
                         });
-                        this.hold_and_commit(Arc::new(active.clone()), token, signed, hold, tx.clone())
-                            .await;
+                        this.hold_and_commit(
+                            Arc::new(active.clone()),
+                            token,
+                            signed,
+                            hold,
+                            tx.clone(),
+                        )
+                        .await;
                     }
                     None => Self::commit(&active, &signed, &tx).await?,
                 }
@@ -4997,7 +5158,10 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -5039,7 +5203,9 @@ impl Core {
                             .and_then(|ev| {
                                 ev.tags
                                     .iter()
-                                    .find(|t| t.as_slice().first().map(String::as_str) == Some("server"))
+                                    .find(|t| {
+                                        t.as_slice().first().map(String::as_str) == Some("server")
+                                    })
                                     .and_then(|t| t.as_slice().get(1).cloned())
                             })
                     })
@@ -5051,7 +5217,8 @@ impl Core {
                     .signer
                     .sign_event(unsigned)
                     .await
-                    .map_err(|e| e.to_string())?;                let up = crate::upload::blossom_upload_all(
+                    .map_err(|e| e.to_string())?;
+                let up = crate::upload::blossom_upload_all(
                     &servers,
                     bytes,
                     &content_type,
@@ -5059,7 +5226,10 @@ impl Core {
                     &signed,
                 )
                 .await?;
-                let _ = tx.send(PublishEvent::Uploaded { url: up.url, imeta: up.imeta });
+                let _ = tx.send(PublishEvent::Uploaded {
+                    url: up.url,
+                    imeta: up.imeta,
+                });
                 Ok(())
             }
             .await;
@@ -5088,11 +5258,7 @@ impl Core {
                     .get(filter)
                     .await
                     .ok()
-                    .and_then(|events| {
-                        events
-                            .into_iter()
-                            .max_by_key(|ev| ev.created_at.as_secs())
-                    })
+                    .and_then(|events| events.into_iter().max_by_key(|ev| ev.created_at.as_secs()))
                     .map(|ev| server_tags(&ev))
                     .unwrap_or_default();
                 Ok(list)
@@ -5136,7 +5302,10 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -5156,7 +5325,11 @@ impl Core {
     ) {
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
         self.holds.lock().unwrap().insert(token, cancel_tx);
-        self.mirror_hold(&PublishEvent::Held { token, event: event.clone(), hold_secs: hold.as_secs() });
+        self.mirror_hold(&PublishEvent::Held {
+            token,
+            event: event.clone(),
+            hold_secs: hold.as_secs(),
+        });
         tokio::spawn({
             let core = Arc::clone(self);
             async move {
@@ -5200,7 +5373,11 @@ impl Core {
     ///    the item STAYS queued and Err flows to the UI as Failed. The
     ///    composer shows Committed only on first acceptance; a later
     ///    outbox success is logged, not re-toasted (D36).
-    async fn commit(active: &Active, event: &Event, _tx: &mpsc::UnboundedSender<PublishEvent>) -> Result<()> {
+    async fn commit(
+        active: &Active,
+        event: &Event,
+        _tx: &mpsc::UnboundedSender<PublishEvent>,
+    ) -> Result<()> {
         let _ = active.pool.store.save(event).await;
         crate::outbox_queue::enqueue(event);
         let targets = crate::outbox_queue::targets(&active.write_relays);
@@ -5238,7 +5415,8 @@ impl Core {
         self.rt.spawn(async move {
             loop {
                 let Some(core) = weak.upgrade() else { break }; // app closing
-                let Some(item) = crate::outbox_queue::next_due(crate::outbox_queue::now_secs()) else {
+                let Some(item) = crate::outbox_queue::next_due(crate::outbox_queue::now_secs())
+                else {
                     drop(core);
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     continue;
@@ -5284,7 +5462,10 @@ impl Core {
                     active.me(),
                     Timestamp::now(),
                     Kind::Reaction,
-                    [seen::hint_tag(target.id, &target.pubkey), Tag::public_key(target.pubkey)],
+                    [
+                        seen::hint_tag(target.id, &target.pubkey),
+                        Tag::public_key(target.pubkey),
+                    ],
                     "+",
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
@@ -5294,7 +5475,10 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -5325,8 +5509,13 @@ impl Core {
                         .await
                         .ok()
                         .flatten();
-                    let mut ids: Vec<String> =
-                        this.own_bookmarked.lock().unwrap().clone().into_iter().collect();
+                    let mut ids: Vec<String> = this
+                        .own_bookmarked
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .into_iter()
+                        .collect();
                     ids.push(target.id.to_string());
                     let plain = list_json(&ids, "e");
                     let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
@@ -5334,7 +5523,9 @@ impl Core {
                         me,
                         Timestamp::now(),
                         Kind::Custom(10003),
-                        stored.map(|ev| ev.tags.clone().to_vec()).unwrap_or_default(),
+                        stored
+                            .map(|ev| ev.tags.clone().to_vec())
+                            .unwrap_or_default(),
                         content,
                     );
                     let signed = active.signer.sign_event(unsigned).await?;
@@ -5351,7 +5542,9 @@ impl Core {
                         .await
                         .ok()
                         .flatten();
-                    let mut raw: Vec<Tag> = stored.map(|ev| ev.tags.clone().to_vec()).unwrap_or_default();
+                    let mut raw: Vec<Tag> = stored
+                        .map(|ev| ev.tags.clone().to_vec())
+                        .unwrap_or_default();
                     let hex = target.id.to_string();
                     let present = raw
                         .iter()
@@ -5364,12 +5557,18 @@ impl Core {
                     let signed = active.signer.sign_event(unsigned).await?;
                     Self::commit(&active, &signed, &tx).await?;
                 }
-                this.own_bookmarked.lock().unwrap().insert(target.id.to_string());
+                this.own_bookmarked
+                    .lock()
+                    .unwrap()
+                    .insert(target.id.to_string());
                 Ok(())
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -5416,8 +5615,7 @@ impl Core {
                         .iter()
                         .any(|t| t.kind() == "e" && t.content() == Some(hex.as_str()));
                     if in_content || in_tags {
-                        let ids: Vec<String> =
-                            ids.into_iter().filter(|s| s != &hex).collect();
+                        let ids: Vec<String> = ids.into_iter().filter(|s| s != &hex).collect();
                         let plain = list_json(&ids, "e");
                         let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
                         // The stored event's non-removed tags ride along
@@ -5449,13 +5647,8 @@ impl Core {
                     let before = raw.len();
                     raw.retain(|t| !(t.kind() == "e" && t.content() == Some(hex.as_str())));
                     if raw.len() < before {
-                        let unsigned = UnsignedEvent::new(
-                            me,
-                            Timestamp::now(),
-                            Kind::Custom(30001),
-                            raw,
-                            "",
-                        );
+                        let unsigned =
+                            UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(30001), raw, "");
                         let signed = active.signer.sign_event(unsigned).await?;
                         Self::commit(&active, &signed, &tx).await?;
                     }
@@ -5465,7 +5658,10 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -5502,16 +5698,18 @@ impl Core {
                     }
                 }
                 let have: HashSet<EventId> = events.iter().map(|e| e.id).collect();
-                let missing: Vec<EventId> =
-                    want.iter().filter(|id| !have.contains(id)).cloned().collect();
+                let missing: Vec<EventId> = want
+                    .iter()
+                    .filter(|id| !have.contains(id))
+                    .cloned()
+                    .collect();
                 if !missing.is_empty() {
                     // feeds.ts fetchEventsByIds: a TARGETED query on the
                     // indexers (a bookmarked note's author may be outside
                     // the follows — seen-on can't narrow this one). Split
                     // at the REQ ceiling (WS1: OutboxRouter.kt
                     // MAX_ETAGS_PER_FILTER).
-                    let fallback: Vec<String> =
-                        INDEXERS.iter().map(|s| s.to_string()).collect();
+                    let fallback: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
                     for id_shard in outbox::chunk(&missing, outbox::MAX_ETAGS_PER_FILTER) {
                         let n = id_shard.len();
                         let filter = Filter::new().ids(id_shard).limit(n);
@@ -5527,13 +5725,15 @@ impl Core {
                         for ev in &fetched {
                             let _ = active.pool.store.save(ev).await;
                         }
-                        events
-                            .extend(fetched.into_iter().filter(|ev| !deletions::is_deleted(ev)));
+                        events.extend(fetched.into_iter().filter(|ev| !deletions::is_deleted(ev)));
                     }
                 }
                 events.sort_by_key(|e| std::cmp::Reverse(e.created_at));
                 let profiles = Self::profiles_for(&active, &events).await;
-                Ok(FeedEvent::Loaded(FeedPage { notes: events, profiles }))
+                Ok(FeedEvent::Loaded(FeedPage {
+                    notes: events,
+                    profiles,
+                }))
             }
             .await;
             match res {
@@ -5575,7 +5775,10 @@ impl Core {
         // publish rides behind; a failed publish RESTORES the spent
         // entries (D38's "failed save leaves the slot intact", just
         // without the wait).
-        let key = (reply_to.map(|e| e.to_string()), quote.map(|e| e.to_string()));
+        let key = (
+            reply_to.map(|e| e.to_string()),
+            quote.map(|e| e.to_string()),
+        );
         let (plain, spent) = {
             let mut drafts = this.own_drafts.lock().unwrap().clone();
             // Satori's own slot entries replace by (reply, quote);
@@ -5604,7 +5807,8 @@ impl Core {
             *this.own_drafts.lock().unwrap() = drafts;
             (plain, spent)
         };
-        self.rt.spawn(async move {            let res: Result<()> = async {
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
                 let active = this.active().await?;
                 let me = active.me();
                 let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
@@ -5630,7 +5834,10 @@ impl Core {
                     }
                 }
                 *this.own_drafts.lock().unwrap() = drafts;
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -5704,7 +5911,10 @@ impl Core {
                     }
                 }
                 *this.own_drafts.lock().unwrap() = drafts;
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -5722,7 +5932,10 @@ impl Core {
     /// context): the store first, then a targeted ids query on the
     /// indexers — the ParentNote resolution's pattern, with the same
     /// NIP-40/NIP-09 gates. None when nowhere.
-    pub fn note_by_id(self: &Arc<Self>, id: EventId) -> tokio::sync::mpsc::UnboundedReceiver<Option<Event>> {
+    pub fn note_by_id(
+        self: &Arc<Self>,
+        id: EventId,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<Option<Event>> {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
@@ -5730,11 +5943,7 @@ impl Core {
                 let active = this.active().await?;
                 let stored = active.pool.store.event_by_id(id).await.ok().flatten();
                 let ev = match stored {
-                    Some(ev)
-                        if !nip40::is_expired(&ev) && !deletions::is_deleted(&ev) =>
-                    {
-                        Some(ev)
-                    }
+                    Some(ev) if !nip40::is_expired(&ev) && !deletions::is_deleted(&ev) => Some(ev),
                     _ => {
                         let filter = Filter::new().ids(vec![id]).limit(1);
                         let fallback: Vec<String> =
@@ -5793,7 +6002,10 @@ impl Core {
     /// TTL-gated (7d), background, fire-and-forget — capabilities are
     /// whispers, not routing. Spawned wherever the read set joins the pool.
     fn spawn_relay_info(&self, reads: &[String]) {
-        let mut urls: Vec<String> = crate::pool::INDEXERS.iter().map(|s| s.to_string()).collect();
+        let mut urls: Vec<String> = crate::pool::INDEXERS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         urls.extend(reads.iter().cloned());
         urls.sort();
         urls.dedup();
@@ -5819,7 +6031,11 @@ impl Core {
                 let me = active.me();
                 let mut tags: Vec<Tag> = Vec::new();
                 for url in &read {
-                    let marker = if write.contains(url) { None } else { Some("read") };
+                    let marker = if write.contains(url) {
+                        None
+                    } else {
+                        Some("read")
+                    };
                     tags.push(relay_tag(url, marker));
                 }
                 for url in &write {
@@ -5828,8 +6044,7 @@ impl Core {
                     }
                     tags.push(relay_tag(url, Some("write")));
                 }
-                let unsigned =
-                    UnsignedEvent::new(me, Timestamp::now(), Kind::RelayList, tags, "");
+                let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::RelayList, tags, "");
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;
                 {
@@ -5847,7 +6062,10 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -5872,7 +6090,8 @@ impl Core {
                     follows.retain(|f| f != &who);
                 }
                 let tags: Vec<Tag> = follows.iter().map(|pk| Tag::public_key(*pk)).collect();
-                let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::ContactList, tags, "");
+                let unsigned =
+                    UnsignedEvent::new(me, Timestamp::now(), Kind::ContactList, tags, "");
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;
                 {
@@ -5885,7 +6104,10 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -5910,7 +6132,8 @@ impl Core {
                 }
                 let plain = list_json(&mutes.into_iter().collect::<Vec<_>>(), "p");
                 let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
-                let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(10000), [], content);
+                let unsigned =
+                    UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(10000), [], content);
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;
                 // Keep the WoT qualification's mute screen in step.
@@ -5919,7 +6142,10 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -5967,14 +6193,16 @@ impl Core {
             let p = async {
                 let active = this.active().await?;
                 let me = active.me();
-                Ok::<Option<Profile>, LoginError>(active
-                    .pool
-                    .store
-                    .latest_by_kind(me, Kind::Metadata)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|e| Profile::from_event(&e)))
+                Ok::<Option<Profile>, LoginError>(
+                    active
+                        .pool
+                        .store
+                        .latest_by_kind(me, Kind::Metadata)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|e| Profile::from_event(&e)),
+                )
             }
             .await;
             let _ = tx.send(p.unwrap_or(None));
@@ -6005,14 +6233,18 @@ impl Core {
                     stored.as_ref().map(|e| e.content.as_str()).unwrap_or(""),
                     &patch,
                 );
-                let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::Metadata, [], content);
+                let unsigned =
+                    UnsignedEvent::new(me, Timestamp::now(), Kind::Metadata, [], content);
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;
                 Ok(())
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -6048,7 +6280,10 @@ impl Core {
             }
             .await;
             if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
             }
@@ -6240,7 +6475,9 @@ impl Core {
         use futures_util::StreamExt as _;
         // Resolve the session BEFORE arming the flag: a failed resolve must
         // not wedge live_on true (it used to — the sub could never re-arm).
-        let Ok(active) = self.active().await else { return };
+        let Ok(active) = self.active().await else {
+            return;
+        };
         if self.live_on.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
@@ -6257,10 +6494,12 @@ impl Core {
             let now = Timestamp::now();
             // NIP-01: an empty list can never match — the follows-scoped
             // filters join only when there are follows to scope by.
-            let mut filters = vec![Filter::new()
-                .kinds([Kind::TextNote, Kind::Custom(1111), Kind::Custom(9735)])
-                .pubkey(me)
-                .since(now)];
+            let mut filters = vec![
+                Filter::new()
+                    .kinds([Kind::TextNote, Kind::Custom(1111), Kind::Custom(9735)])
+                    .pubkey(me)
+                    .since(now),
+            ];
             if !follows.is_empty() {
                 filters.push(
                     Filter::new()
@@ -6317,12 +6556,11 @@ impl Core {
                         subscription_id,
                         event,
                         ..
-                    }
-                        if output.id() == &subscription_id
-                            || routed
-                                .as_ref()
-                                .map(|r| r.id() == &subscription_id)
-                                .unwrap_or(false) =>
+                    } if output.id() == &subscription_id
+                        || routed
+                            .as_ref()
+                            .map(|r| r.id() == &subscription_id)
+                            .unwrap_or(false) =>
                     {
                         (relay_url, *event)
                     }
@@ -6451,7 +6689,9 @@ async fn verify_nip05_inner(nip05: &str, pubkey: &str) -> Option<bool> {
     }
     let url = format!("https://{domain}/.well-known/nostr.json?name={name}");
     let v = crate::media::fetch_json(&url).await.ok()?;
-    v.get("names")?.get(name)?.as_str()
+    v.get("names")?
+        .get(name)?
+        .as_str()
         .map(|mapped| mapped.eq_ignore_ascii_case(pubkey))
 }
 
@@ -6488,14 +6728,19 @@ fn relay_tag(url: &str, marker: Option<&str>) -> Tag {
 
 /// NIP-51 encrypted list content: [["p", hex], ...] / [["e", hex], ...].
 fn list_json(items: &[String], letter: &str) -> String {
-    let arr: Vec<[String; 2]> = items.iter().map(|i| [letter.to_string(), i.clone()]).collect();
+    let arr: Vec<[String; 2]> = items
+        .iter()
+        .map(|i| [letter.to_string(), i.clone()])
+        .collect();
     serde_json::to_string(&arr).unwrap_or_default()
 }
 
 /// Parse an encrypted list's plaintext back into item ids.
 fn parse_list_event(plain: &str) -> Vec<String> {
     let arr: Vec<[String; 2]> = serde_json::from_str(plain).unwrap_or_default();
-    arr.into_iter().filter_map(|pair| pair.get(1).cloned()).collect()
+    arr.into_iter()
+        .filter_map(|pair| pair.get(1).cloned())
+        .collect()
 }
 
 /// Read-modify-write prefs.json (0600): overlay `pairs` onto the existing
@@ -6546,11 +6791,12 @@ async fn sync_app_data(
         if !nip78::synced_key(&slot.key) || slot.content.is_empty() {
             continue;
         }
-        let Ok(plain) = signer.nip44_decrypt_self(me, slot.content.as_str()).await
-        else {
+        let Ok(plain) = signer.nip44_decrypt_self(me, slot.content.as_str()).await else {
             continue;
         };
-        let Some(value) = nip78::parse_payload(&plain) else { continue };
+        let Some(value) = nip78::parse_payload(&plain) else {
+            continue;
+        };
         pairs.push((slot.key, value));
     }
     if pairs.is_empty() {
@@ -6715,7 +6961,10 @@ impl Core {
             if let Ok(active) = this.active().await {
                 let me = active.me();
                 let snapshot = Self::lists_from_store(&active, me).await;
-                eprintln!("[core] own_lists: store snapshot: {} list(s)", snapshot.len());
+                eprintln!(
+                    "[core] own_lists: store snapshot: {} list(s)",
+                    snapshot.len()
+                );
                 let _ = tx.send(snapshot);
             }
             // Snapshot 2: after the relay round + explicit saves.
@@ -6723,10 +6972,7 @@ impl Core {
                 let active = this.active().await?;
                 let me = active.me();
                 for kind in [30000u16, 30001] {
-                    let filter = Filter::new()
-                        .author(me)
-                        .kind(Kind::Custom(kind))
-                        .limit(200);
+                    let filter = Filter::new().author(me).kind(Kind::Custom(kind)).limit(200);
                     let fetched = active.pool.get(filter).await.unwrap_or_default();
                     eprintln!(
                         "[core] own_lists: kind {kind}: {} event(s) fetched",
@@ -6828,8 +7074,7 @@ impl Core {
                 if let Ok(tags) = serde_json::from_str::<Vec<Vec<String>>>(&plain) {
                     for tag in tags {
                         if tag.first().map(String::as_str) == Some("p")
-                            && let Some(pk) =
-                                tag.get(1).and_then(|c| c.parse::<PublicKey>().ok())
+                            && let Some(pk) = tag.get(1).and_then(|c| c.parse::<PublicKey>().ok())
                         {
                             members.push(pk);
                         }
@@ -6898,8 +7143,15 @@ impl Core {
         let keys = signer::parse_local_secret(secret)?;
         let pk = keys.public_key();
 
-        secrets::store(secrets::NSEC, &keys.secret_key().display_secret().to_string()).await?;
-        let session = Session { pubkey: pk.to_string(), mode: SessionMode::Local };
+        secrets::store(
+            secrets::NSEC,
+            &keys.secret_key().display_secret().to_string(),
+        )
+        .await?;
+        let session = Session {
+            pubkey: pk.to_string(),
+            mode: SessionMode::Local,
+        };
         session::save(&session)?;
 
         let active = self.build_active(&session).await?;
@@ -6939,10 +7191,7 @@ mod tests {
         assert_eq!(back.attachments, vec![imeta]);
 
         // Legacy shape: the key is absent entirely.
-        let legacy: DraftEntry = serde_json::from_str(
-            r#"{"text":"old","at":7}"#,
-        )
-        .unwrap();
+        let legacy: DraftEntry = serde_json::from_str(r#"{"text":"old","at":7}"#).unwrap();
         assert!(legacy.attachments.is_empty());
         assert!(!legacy.photo_post, "absent = a note draft");
         assert!(legacy.matches(None, None));
@@ -7037,9 +7286,7 @@ mod tests {
     fn profile_banner_blurhash_needs_an_exact_url_match() {
         use nostr::prelude::*;
         let banner = "https://b/banner.webp";
-        let content = format!(
-            "{{\"name\":\"luna\",\"banner\":\"{banner}\"}}"
-        );
+        let content = format!("{{\"name\":\"luna\",\"banner\":\"{banner}\"}}");
         let build = |imeta: &[&str]| {
             let keys = Keys::generate();
             let mut tags = Tags::new();
@@ -7073,7 +7320,6 @@ mod tests {
         assert_eq!(miss.banner_blurhash, None);
     }
 
-
     /// The D32 crash seam: the poster job must run on THIS runtime no
     /// matter which thread summons it — the first cut let the UI poll the
     /// futures on gpui's executor, where `spawn_blocking` has no tokio
@@ -7087,8 +7333,9 @@ mod tests {
         let _env = crate::test_env::EnvGuard::new("poster");
         let core = Arc::new(Core::new());
         let mut rx = core.fetch_poster("not a url".into(), 16, |_| Err(()));
-        let verdict =
-            std::thread::spawn(move || rx.blocking_recv()).join().unwrap();
+        let verdict = std::thread::spawn(move || rx.blocking_recv())
+            .join()
+            .unwrap();
         assert!(matches!(
             verdict,
             Some(Err(crate::media::MediaError::NotMedia))
@@ -7107,8 +7354,7 @@ mod tests {
         // The nsec lands inside the guard's isolated dir (never a shared
         // temp path a parallel run could race).
         let secret_path = env.dir().join("test-nsec");
-        let secret =
-            "e1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554";
+        let secret = "e1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554";
         let _ = std::fs::write(&secret_path, secret);
 
         core.rt
@@ -7154,7 +7400,10 @@ mod tests {
         }
         match got {
             Some(FeedEvent::Failed(msg)) => {
-                assert!(!msg.contains("no active session"), "session lost after re-login: {msg}");
+                assert!(
+                    !msg.contains("no active session"),
+                    "session lost after re-login: {msg}"
+                );
                 eprintln!("network failure after re-login (acceptable headless): {msg}");
             }
             Some(_) => {}
@@ -7260,8 +7509,7 @@ mod tests {
         // `unseen` was observed by nobody → Unknown. One reply: passes,
         // and the delivering pass feeds the counter (1 in window).
         let unseen = Keys::generate();
-        let (kept, sup) =
-            split_wot_tier(vec![reply(&unseen, my_note, 1000)], &my_notes, true);
+        let (kept, sup) = split_wot_tier(vec![reply(&unseen, my_note, 1000)], &my_notes, true);
         assert_eq!(kept.len(), 1, "Unknown ≠ outside; one reply passes");
         assert!(sup.is_empty());
         assert!(!crate::rate::reply_flooded(&unseen.public_key(), 1000));
@@ -7290,7 +7538,10 @@ mod tests {
         // the ring still trips, it did not grow past it).
         assert!(crate::rate::reply_flooded(&mule.public_key(), at + 100));
         // Window reset: silence past the window and the author passes.
-        assert!(!crate::rate::reply_flooded(&mule.public_key(), at + crate::rate::REPLY_WINDOW_SECS + 1));
+        assert!(!crate::rate::reply_flooded(
+            &mule.public_key(),
+            at + crate::rate::REPLY_WINDOW_SECS + 1
+        ));
         crate::wot::clear_identity();
         crate::rate::clear();
     }

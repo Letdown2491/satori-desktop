@@ -1,0 +1,73 @@
+# PR CI (issue #14): every pull request (and push to main) passes the
+# same gates the maintainer's manual container run did — fmt, clippy
+# with warnings denied, the test suite, the advisory scan, and a lint
+# of these workflow files themselves. --locked everywhere: the lock
+# changes only via explicit review (Renovate/Dependabot is the follow-up).
+#
+# No container images enter this workflow (the toolchains install from
+# the distro and crates.io), so there is nothing to digest-pin yet;
+# keep it that way, or pin by digest when one appears.
+#
+# audit.toml carries the advisory baseline: the six informational
+# unmaintained warnings are ignored BY ID, everything else fails.
+
+name: pr
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install the client libraries satori links
+        # Same list as release.yml — the crate graph cannot even resolve
+        # (pkg-config/fontconfig) without them.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libxcb1-dev \
+            libvulkan-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Clippy (warnings denied)
+        run: cargo clippy --workspace --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked --workspace
+
+      - name: Install cargo-audit and actionlint
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,actionlint
+
+      - name: Lint the workflows
+        run: actionlint
+
+      - name: Advisories (audit.toml is the baseline)
+        run: cargo audit

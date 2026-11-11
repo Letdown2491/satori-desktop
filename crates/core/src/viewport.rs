@@ -13,8 +13,8 @@
 //! leaked REQs, D24's no-unbounded-churn rule). manager.rs owns the live
 //! half: one long-lived task that consumes the plan and rides pool.rs.
 
-use nostr::prelude::*;
 use nostr::event::Event;
+use nostr::prelude::*;
 
 use crate::outbox;
 
@@ -187,7 +187,11 @@ mod tests {
         let ids: Vec<EventId> = (0..310).map(id).collect();
         let shards = chunks_for_ids(&ids);
         assert_eq!(shards.len(), 3);
-        assert!(shards[..2].iter().all(|s| s.len() == outbox::MAX_ETAGS_PER_FILTER));
+        assert!(
+            shards[..2]
+                .iter()
+                .all(|s| s.len() == outbox::MAX_ETAGS_PER_FILTER)
+        );
         assert_eq!(shards[2].len(), 10);
         // The viewport cap keeps a whole window in one shard.
         assert_eq!(chunks_for_ids(&ids[..50]).len(), 1);
@@ -219,7 +223,10 @@ mod tests {
         let mut t = ViewportTracker::default();
         let a: Vec<EventId> = (0..5).map(id).collect();
         let b: Vec<EventId> = (5..10).map(id).collect();
-        assert_eq!(t.plan(&a), Plan::Replace(chunks_for_ids(&canonical(a.clone()))));
+        assert_eq!(
+            t.plan(&a),
+            Plan::Replace(chunks_for_ids(&canonical(a.clone())))
+        );
         t.commit(a.clone());
         assert_eq!(t.plan(&b.clone()), Plan::Replace(chunks_for_ids(&b)));
         // A failed arm: the owner commits empty, the retry plans a replace.

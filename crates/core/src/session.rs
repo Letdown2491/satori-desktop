@@ -45,8 +45,8 @@ pub fn save(session: &Session) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| LoginError::Store(e.to_string()))?;
     }
-    let body = serde_json::to_string_pretty(session)
-        .map_err(|e| LoginError::Store(e.to_string()))?;
+    let body =
+        serde_json::to_string_pretty(session).map_err(|e| LoginError::Store(e.to_string()))?;
     std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -103,7 +103,9 @@ mod tests {
             .build()
             .unwrap()
             .block_on(async {
-                secrets::store(secrets::NSEC, TEST_SECRET).await.expect("store fallback");
+                secrets::store(secrets::NSEC, TEST_SECRET)
+                    .await
+                    .expect("store fallback");
                 let path = config::data_dir().join(format!("{}.secret", secrets::NSEC));
                 let mode = std::fs::metadata(&path).unwrap().permissions().mode();
                 assert_eq!(mode & 0o777, 0o600, "fallback secret file must be 0600");

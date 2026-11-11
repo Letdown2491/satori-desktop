@@ -305,10 +305,12 @@ fn mark_dirty() {
     FLUSHER.get_or_init(|| {
         std::thread::Builder::new()
             .name("dedup-flush".into())
-            .spawn(|| loop {
-                std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
-                if DIRTY.swap(false, Ordering::Relaxed) {
-                    write_disk();
+            .spawn(|| {
+                loop {
+                    std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
+                    if DIRTY.swap(false, Ordering::Relaxed) {
+                        write_disk();
+                    }
                 }
             })
             .ok();

@@ -27,7 +27,10 @@ fn default_seconds() -> u32 {
 
 impl Default for UndoWindow {
     fn default() -> Self {
-        Self { enabled: true, seconds: DEFAULT_UNDO_SECONDS }
+        Self {
+            enabled: true,
+            seconds: DEFAULT_UNDO_SECONDS,
+        }
     }
 }
 
@@ -41,7 +44,8 @@ impl UndoWindow {
     }
 
     pub fn hold_duration(&self) -> Option<Duration> {
-        self.enabled.then(|| Duration::from_secs(self.seconds() as u64))
+        self.enabled
+            .then(|| Duration::from_secs(self.seconds() as u64))
     }
 
     /// When the backstop commits even if nothing asked for the tick.

@@ -12,18 +12,16 @@ use std::{
 };
 
 use gpui::{
-    div, list, prelude::*, px, rgb, Context, Entity, EventEmitter, FontWeight, ListAlignment,
-    ListState, Render, SharedString, Window,
+    Context, Entity, EventEmitter, FontWeight, ListAlignment, ListState, Render, SharedString,
+    Window, div, list, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
-use satori_core::manager::{
-    Core, FeedEvent, FeedRx, ParentNote, Profile, PublishEvent,
-};
+use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile, PublishEvent};
 use satori_core::wallet::{Status, WalletEvent};
 use satori_core::wot::Verdict;
 
-use crate::{media, prefs, theme};
 use super::{actions, content, nav::Nav, states};
+use crate::{media, prefs, theme};
 
 pub struct ThreadView {
     core: Arc<Core>,
@@ -72,10 +70,8 @@ impl actions::ActionHost for ThreadView {
             return;
         }
         let mut rx = self.core.react(ev);
-        cx.spawn(async move |_, _| {
-            while rx.recv().await.is_some() {}
-        })
-        .detach();
+        cx.spawn(async move |_, _| while rx.recv().await.is_some() {})
+            .detach();
         cx.notify();
     }
 
@@ -259,8 +255,13 @@ impl ThreadView {
                             .map(|p| p.display())
                             .or_else(|| this.profiles.get(&key).map(|p| p.display()))
                             .unwrap_or_else(|| format!("{}…", &key[..8]));
-                        this.quotes
-                            .insert(bech.clone(), Some(content::Embed { event: target, name }));
+                        this.quotes.insert(
+                            bech.clone(),
+                            Some(content::Embed {
+                                event: target,
+                                name,
+                            }),
+                        );
                         cx.notify();
                     });
                 }
@@ -576,7 +577,11 @@ fn reply_row(
     let open_handle = handle.clone();
     let body_handle = handle.clone();
     // thread.rs comment-children: 20px for the first level, 14px deeper.
-    let indent = if depth == 0 { 0.0 } else { 20.0 + 14.0 * (depth - 1) as f32 };
+    let indent = if depth == 0 {
+        0.0
+    } else {
+        20.0 + 14.0 * (depth - 1) as f32
+    };
 
     div()
         .w_full()
@@ -645,7 +650,11 @@ fn reply_row(
                 })
                 .child(content::body(
                     ev,
-                    &content::Body { media, quotes, profiles },
+                    &content::Body {
+                        media,
+                        quotes,
+                        profiles,
+                    },
                     body_handle,
                 )),
         )
@@ -818,35 +827,28 @@ impl Render for ThreadView {
                     .when_some(self.error.clone(), |d, err| {
                         let retry = handle.clone();
                         let dismiss = handle.clone();
-                        d.child(
-                            div()
-                                .w_full()
-                                .max_w(px(content::COL_W))
-                                .child(states::error_strip(
-                                    &err,
-                                    // Retry: re-ask the anchor and the thread.
-                                    move |_, _, cx| {
-                                        retry.update(cx, |view, cx| {
-                                            view.error = None;
-                                            view.pump(
-                                                view.core.event_by_id(
-                                                    view.anchor_id,
-                                                    Vec::new(),
-                                                    None,
-                                                ),
-                                                cx,
-                                            );
-                                            view.pump(view.core.thread(view.anchor_id), cx);
-                                        });
-                                    },
-                                    move |_, _, cx| {
-                                        dismiss.update(cx, |view, cx| {
-                                            view.error = None;
-                                            cx.notify();
-                                        });
-                                    },
-                                )),
-                        )
+                        d.child(div().w_full().max_w(px(content::COL_W)).child(
+                            states::error_strip(
+                                &err,
+                                // Retry: re-ask the anchor and the thread.
+                                move |_, _, cx| {
+                                    retry.update(cx, |view, cx| {
+                                        view.error = None;
+                                        view.pump(
+                                            view.core.event_by_id(view.anchor_id, Vec::new(), None),
+                                            cx,
+                                        );
+                                        view.pump(view.core.thread(view.anchor_id), cx);
+                                    });
+                                },
+                                move |_, _, cx| {
+                                    dismiss.update(cx, |view, cx| {
+                                        view.error = None;
+                                        cx.notify();
+                                    });
+                                },
+                            ),
+                        ))
                     })
                     .child(if replies_empty {
                         div()
@@ -905,9 +907,7 @@ impl Render for ThreadView {
                                             let name = profiles
                                                 .get(&key)
                                                 .map(|p| p.display())
-                                                .unwrap_or_else(|| {
-                                                    format!("{}…", &key[..8])
-                                                });
+                                                .unwrap_or_else(|| format!("{}…", &key[..8]));
                                             // The stamp reads the current mode +
                                             // blocktime cache per frame; ensure
                                             // refines Block mode from the bridge.
@@ -1003,8 +1003,19 @@ mod tests {
 
         // An Unknown author never collapses (not a judgment).
         let r = note(&unseen, None);
-        let p = plan(&[(r.clone(), 0)], &[known.public_key()], &HashSet::new(), true);
-        assert_eq!(p[0], CollapsePlan { hidden_by: None, hidden: 0 });
+        let p = plan(
+            &[(r.clone(), 0)],
+            &[known.public_key()],
+            &HashSet::new(),
+            true,
+        );
+        assert_eq!(
+            p[0],
+            CollapsePlan {
+                hidden_by: None,
+                hidden: 0
+            }
+        );
 
         // The pref off: nothing collapses (feature-off is a first-class state).
         let p = plan(&replies, &[known.public_key()], &HashSet::new(), false);

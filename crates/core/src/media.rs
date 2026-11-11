@@ -196,10 +196,7 @@ async fn fetch_capped(url: &str, cap: usize) -> Result<Vec<u8>, MediaError> {
         // during the backoff sleep, so a dead CDN can't pin a slot for its
         // whole retry cycle and starve the queue behind it.
         let outcome = {
-            let _permit = gate()
-                .acquire()
-                .await
-                .map_err(|_| MediaError::Transient)?;
+            let _permit = gate().acquire().await.map_err(|_| MediaError::Transient)?;
             match guarded_get(url).await {
                 // The permit is held through the body read — the transfer
                 // is the thing being bounded.
@@ -363,9 +360,7 @@ fn poster_key(url: &str) -> String {
 /// The cached poster frame for `url`, when one was sniffed before (raw
 /// PNG bytes — decoded by `fetch_poster`'s ordinary validate path).
 async fn poster_cached(url: &str) -> Option<Vec<u8>> {
-    read_cache_off_rt(cache_path(&poster_key(url)))
-        .await
-        .ok()
+    read_cache_off_rt(cache_path(&poster_key(url))).await.ok()
 }
 
 /// Store a sniffed poster (a PNG the sniffer encoded — valid by
@@ -497,12 +492,11 @@ impl reqwest::dns::Resolve for SafeResolver {
         Box::pin(async move {
             // Port 0: reqwest replaces it with the scheme's conventional
             // port (the trait contract).
-            let addrs: Vec<std::net::SocketAddr> =
-                tokio::net::lookup_host((host.as_str(), 0))
-                    .await
-                    .map_err(std::io::Error::other)?
-                    .filter(|a| is_global_ip(a.ip()))
-                    .collect();
+            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(std::io::Error::other)?
+                .filter(|a| is_global_ip(a.ip()))
+                .collect();
             if addrs.is_empty() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -653,7 +647,10 @@ mod tests {
 
     #[test]
     fn media_error_display() {
-        assert_eq!(MediaError::Transient.to_string(), "media fetch failed, will retry");
+        assert_eq!(
+            MediaError::Transient.to_string(),
+            "media fetch failed, will retry"
+        );
         assert_eq!(MediaError::NotMedia.to_string(), "not an image");
     }
 
@@ -701,7 +698,11 @@ mod tests {
             assert_eq!(keep(&[ip, global]), vec![s(global)], "{hostile} must drop");
         }
         assert_eq!(keep(&[v6]), vec![s(v6)], "a global v6 survives");
-        assert_eq!(keep(&["::ffff:8.8.8.8".parse().unwrap()]), vec![s("::ffff:8.8.8.8".parse().unwrap())], "a mapped GLOBAL v4 survives the v4 screen");
+        assert_eq!(
+            keep(&["::ffff:8.8.8.8".parse().unwrap()]),
+            vec![s("::ffff:8.8.8.8".parse().unwrap())],
+            "a mapped GLOBAL v4 survives the v4 screen"
+        );
         assert!(keep(&["127.0.0.1".parse().unwrap()]).is_empty());
     }
 
@@ -748,7 +749,10 @@ mod tests {
     fn real_png(w: u32, h: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
         image::DynamicImage::new_rgba8(w, h)
-            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
             .unwrap();
         bytes
     }
@@ -761,7 +765,10 @@ mod tests {
 
         // 225MP: the byte cap passes (1KB file!) but the header check must
         // reject before any allocation — a 20MB bomb would be ~900MB RGBA.
-        assert!(matches!(decode(&png_header(15000, 15000)), Err(MediaError::NotMedia)));
+        assert!(matches!(
+            decode(&png_header(15000, 15000)),
+            Err(MediaError::NotMedia)
+        ));
     }
 
     #[tokio::test]

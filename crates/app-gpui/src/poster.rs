@@ -51,11 +51,10 @@ pub struct InFlight;
 
 impl InFlight {
     pub fn take() -> Option<Self> {
-        (IN_FLIGHT.load(Ordering::Relaxed) < MAX_IN_FLIGHT)
-            .then(|| {
-                IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
-                Self
-            })
+        (IN_FLIGHT.load(Ordering::Relaxed) < MAX_IN_FLIGHT).then(|| {
+            IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+            Self
+        })
     }
 }
 
@@ -171,15 +170,15 @@ fn sniff_file(path: &std::path::Path) -> Result<(u32, u32, Vec<u8>), ()> {
     // converter then, and only then (audio pads die here).
     let conv_sink = conv.static_pad("sink").ok_or(())?;
     dec.connect_pad_added(move |_d, pad| {
-        let caps = pad
-            .current_caps()
-            .unwrap_or_else(|| pad.query_caps(None));
+        let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
         if caps.iter().any(|s| s.name().starts_with("video/")) {
             let _ = pad.link(&conv_sink);
         }
     });
 
-    pipeline.set_state(gstreamer::State::Paused).map_err(|_| ())?;
+    pipeline
+        .set_state(gstreamer::State::Paused)
+        .map_err(|_| ())?;
 
     // The deadline bounds the whole sniff: a server that trickles, a file
     // whose moov lives at the end (nothing decodable from head bytes), a
@@ -223,7 +222,10 @@ fn sniff_file(path: &std::path::Path) -> Result<(u32, u32, Vec<u8>), ()> {
 
 /// One sample before `deadline`, else None (a cheap poll: preroll and
 /// post-seek buffers both arrive as ordinary appsink pushes).
-fn pull_until(sink: &gstreamer_app::AppSink, deadline: std::time::Instant) -> Option<gstreamer::Sample> {
+fn pull_until(
+    sink: &gstreamer_app::AppSink,
+    deadline: std::time::Instant,
+) -> Option<gstreamer::Sample> {
     while std::time::Instant::now() < deadline {
         if let Some(s) = sink.try_pull_sample(Some(gstreamer::ClockTime::from_mseconds(250))) {
             return Some(s);
@@ -268,7 +270,12 @@ fn encode_png(img: &image::RgbImage, w: u32, h: u32) -> Result<(u32, u32, Vec<u8
     let (img, w, h) = if w > PREVIEW_MAX_W {
         let nh = (h * PREVIEW_MAX_W / w).max(1);
         (
-            image::imageops::resize(img, PREVIEW_MAX_W, nh, image::imageops::FilterType::Triangle),
+            image::imageops::resize(
+                img,
+                PREVIEW_MAX_W,
+                nh,
+                image::imageops::FilterType::Triangle,
+            ),
             PREVIEW_MAX_W,
             nh,
         )

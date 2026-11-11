@@ -9,14 +9,14 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, rgb, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
-    Render, SharedString, Stateful, Window,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString,
+    Stateful, Window, div, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::Core;
 
-use crate::{input::Input, theme};
 use super::nav::Nav;
+use crate::{input::Input, theme};
 
 /// The one-tap default (sats).
 pub(crate) const TAP_SATS: u64 = 21;

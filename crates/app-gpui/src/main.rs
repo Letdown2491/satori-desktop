@@ -7,8 +7,8 @@ mod desktop;
 mod emoji;
 mod icons;
 mod input;
-mod media;
 mod markdown;
+mod media;
 mod poster;
 mod prefs;
 mod theme;
@@ -20,8 +20,8 @@ mod views;
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, App, Application, Bounds, Context, Entity, Render, WindowBounds,
-    WindowOptions, size,
+    App, Application, Bounds, Context, Entity, Render, WindowBounds, WindowOptions, div,
+    prelude::*, px, size,
 };
 use satori_core::manager::{Core, FeedEvent};
 
@@ -29,7 +29,9 @@ use crate::{
     input::bind_input_keys,
     uris::{Instance, UriTarget, uri_target},
     views::{
-        composer::bind_composer_keys, login::{Login, LoginView}, shell::{Shell, ShellEvent},
+        composer::bind_composer_keys,
+        login::{Login, LoginView},
+        shell::{Shell, ShellEvent},
     },
 };
 
@@ -64,7 +66,10 @@ impl Root {
             false => {
                 // Resume failures surface on the doors — the user must know
                 // why they're back here (login.rs set_resume_error).
-                (Some(cx.new(|cx| LoginView::new(core.clone(), resume_error, cx))), None)
+                (
+                    Some(cx.new(|cx| LoginView::new(core.clone(), resume_error, cx))),
+                    None,
+                )
             }
         };
         if let Some(login) = login.clone() {
@@ -95,7 +100,12 @@ impl Root {
             })
             .detach();
         }
-        let mut root = Self { core, login, shell, pending: None };
+        let mut root = Self {
+            core,
+            login,
+            shell,
+            pending: None,
+        };
         // argv on a resumed session routes immediately; pre-login it parks.
         if let Some(uri) = argv_uri {
             root.route(&uri, cx);
@@ -119,7 +129,11 @@ impl Root {
         match target {
             UriTarget::Thread(id) => shell.update(cx, |s, cx| s.open_thread(id, cx)),
             UriTarget::Profile(who) => shell.update(cx, |s, cx| s.open_profile(who, cx)),
-            UriTarget::Article { kind, author, identifier } => {
+            UriTarget::Article {
+                kind,
+                author,
+                identifier,
+            } => {
                 // naddr: resolve against relays first (newest wins, NIP-01
                 // addressable semantics), then open what came back — an
                 // article for 30023, the thread containing it for anything
@@ -127,7 +141,9 @@ impl Root {
                 let mut rx = self.core.event_by_address(kind, author, identifier);
                 let shell2 = shell.clone();
                 cx.spawn(async move |_, cx| {
-                    let Some(FeedEvent::One(Some(ev), _)) = rx.recv().await else { return };
+                    let Some(FeedEvent::One(Some(ev), _)) = rx.recv().await else {
+                        return;
+                    };
                     if u16::from(ev.kind) == 30023 {
                         shell2.update(cx, |s, cx| s.open_article(ev, cx));
                     } else {
@@ -141,10 +157,7 @@ impl Root {
 
     /// Shell-to-root subscription: sign-out clears the core (done by the
     /// shell before it emits) and the window returns to the login doors.
-    fn watch_shell(
-        shell: Entity<Shell>,
-        cx: &mut Context<Self>,
-    ) {
+    fn watch_shell(shell: Entity<Shell>, cx: &mut Context<Self>) {
         cx.subscribe(&shell, |this, _, ev: &ShellEvent, cx| match ev {
             ShellEvent::SignedOut => {
                 this.shell = None;
@@ -157,11 +170,7 @@ impl Root {
 }
 
 impl Render for Root {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render(&mut self, _window: &mut gpui::Window, _cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(login) = self.login.clone() {
             login.into_any_element()
         } else if let Some(shell) = self.shell.clone() {
@@ -221,7 +230,9 @@ fn main() {
         let desktop = crate::desktop::probe();
         // Palette before the first frame: the pref wins; unset follows the
         // desktop's color-scheme (falls back to the night paper).
-        if let Some(false) = crate::prefs::load().dark.or(desktop.dark) { crate::theme::select(crate::theme::LIGHT) }
+        if let Some(false) = crate::prefs::load().dark.or(desktop.dark) {
+            crate::theme::select(crate::theme::LIGHT)
+        }
         cx.set_global(desktop);
         let core = Arc::new(Core::new());
         // The suspend watchdog (DESIGN.md §3.4): after sleep/hibernate,

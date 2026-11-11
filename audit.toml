@@ -1,0 +1,24 @@
+# cargo audit's baseline (issue #14): ONLY new advisories may fail CI.
+#
+# The six below are the informational "unmaintained" warnings at the
+# 0.5.0 lock (no fixed upgrade exists for any of them):
+#   paste           RUSTSEC-2024-0436  (transitive of wry/tao, x11)
+#   rustybuzz       RUSTSEC-2026-0206  (gpui's text shaping)
+#   ttf-parser      RUSTSEC-2026-0192  (rustybuzz's dependency)
+#   zbus_names      RUSTSEC-2026-0371  (zbus, the Linux portal client)
+#   zvariant        RUSTSEC-2026-0370  (zbus, the Linux portal client)
+#   zvariant_derive RUSTSEC-2026-0372  (zbus, the Linux portal client)
+#
+# When one of these gains a fix upstream, REMOVE it from the list and
+# bump the dependency; when a NEW advisory appears, CI fails and the
+# fix lands like any other review finding. Prune this list as the
+# upstreams resolve.
+[advisories]
+ignore = [
+    "RUSTSEC-2024-0436",
+    "RUSTSEC-2026-0206",
+    "RUSTSEC-2026-0192",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0372",
+]

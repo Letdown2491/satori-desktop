@@ -65,16 +65,30 @@ pub enum WalletEvent {
     /// The URI failed to connect (status is back to Disconnected).
     ConnectFailed(String),
     /// The NWC wallet confirmed the payment: bolt settles accent.
-    ZapPaid { note: String, req: String, msat: u64 },
+    ZapPaid {
+        note: String,
+        req: String,
+        msat: u64,
+    },
     /// Terminal uncertainty: the payment MAY have gone through (timeout or
     /// unknown response). Never auto-retried; surfaced quietly.
-    ZapUncertain { note: String, req: String, msat: u64 },
+    ZapUncertain {
+        note: String,
+        req: String,
+        msat: u64,
+    },
     /// Honest quiet failure (NIP-47 code or LNURL error) — the payment
     /// definitely did not happen; retrying is safe.
-    ZapFailed { note: String, reason: String },
+    ZapFailed {
+        note: String,
+        reason: String,
+    },
     /// A verified receipt landed on the relays for a zap we paid — the
     /// settled state reconciles (also recovers an old Uncertain entry).
-    ZapReceipt { note: String, req: String },
+    ZapReceipt {
+        note: String,
+        req: String,
+    },
 }
 
 pub type WalletRx = tokio::sync::broadcast::Receiver<WalletEvent>;
@@ -98,7 +112,10 @@ impl std::fmt::Display for PayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Code(s) => write!(f, "{s}"),
-            Self::Uncertain => write!(f, "payment state unknown, check your wallet before retrying"),
+            Self::Uncertain => write!(
+                f,
+                "payment state unknown, check your wallet before retrying"
+            ),
             Self::NoWallet => write!(f, "no wallet connected"),
         }
     }
@@ -273,10 +290,8 @@ fn save_conn(c: &Conn) {
 }
 
 fn load_conn() -> Option<Conn> {
-    serde_json::from_str(
-        &std::fs::read_to_string(config::state_file(config::files::WALLET)).ok()?,
-    )
-    .ok()
+    serde_json::from_str(&std::fs::read_to_string(config::state_file(config::files::WALLET)).ok()?)
+        .ok()
 }
 
 fn clear_conn() {
@@ -438,11 +453,7 @@ impl Wallet {
         };
         let conn = Conn {
             wallet: parsed.public_key.to_string(),
-            relays: parsed
-                .relays
-                .iter()
-                .map(|r| r.to_string())
-                .collect(),
+            relays: parsed.relays.iter().map(|r| r.to_string()).collect(),
         };
         self.set_status(Status::Connecting);
         if let Err(e) = secrets::store(secrets::NWC_SECRET, &parsed.secret.to_secret_hex()).await {
@@ -468,9 +479,9 @@ impl Wallet {
                 client.shutdown().await;
                 clear_conn();
                 secrets::delete(secrets::NWC_SECRET);
-                let _ = self
-                    .events
-                    .send(WalletEvent::ConnectFailed(format!("wallet didn't answer: {e}")));
+                let _ = self.events.send(WalletEvent::ConnectFailed(format!(
+                    "wallet didn't answer: {e}"
+                )));
                 self.set_status(Status::Disconnected);
             }
         }
@@ -485,11 +496,7 @@ impl Wallet {
         let Some(conn) = load_conn() else {
             return;
         };
-        let Some(secret_hex) = secrets::load(secrets::NWC_SECRET)
-            .await
-            .ok()
-            .flatten()
-        else {
+        let Some(secret_hex) = secrets::load(secrets::NWC_SECRET).await.ok().flatten() else {
             clear_conn(); // secret gone — the connection is unrecoverable
             return;
         };
@@ -662,11 +669,20 @@ mod tests {
     fn bolt11_amounts_parse() {
         // 21 sats = lnbc210n (nano-BTC × 100 msat). The signature separator
         // ('1') must follow the unit — anything else is not an invoice.
-        assert_eq!(crate::notifications::msats_from_bolt11("lnbc210n1abc"), 21_000);
-        assert_eq!(crate::notifications::msats_from_bolt11("LNBC210N1ABC"), 21_000);
+        assert_eq!(
+            crate::notifications::msats_from_bolt11("lnbc210n1abc"),
+            21_000
+        );
+        assert_eq!(
+            crate::notifications::msats_from_bolt11("LNBC210N1ABC"),
+            21_000
+        );
         // 1 sat = lnbc10n; 1000 sats = lnbc1u (micro).
         assert_eq!(crate::notifications::msats_from_bolt11("lnbc10n1x"), 1_000);
-        assert_eq!(crate::notifications::msats_from_bolt11("lnbc1u1abc"), 100_000);
+        assert_eq!(
+            crate::notifications::msats_from_bolt11("lnbc1u1abc"),
+            100_000
+        );
         // No separator after the unit → malformed, reads as 0 (the caller
         // passes those through to the wallet's own display).
         assert_eq!(crate::notifications::msats_from_bolt11("lnbc210nabc"), 0);
@@ -730,18 +746,14 @@ mod tests {
 
     #[test]
     fn zap_request_carries_nip57_tags() {
-        let me = Keys::parse(
-            "e1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554",
-        )
-        .unwrap();
-        let recipient = Keys::parse(
-            "a1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554",
-        )
-        .unwrap();
-        let note_id = EventId::from_hex(
-            "0707070707070707070707070707070707070707070707070707070707070707",
-        )
-        .unwrap();
+        let me = Keys::parse("e1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554")
+            .unwrap();
+        let recipient =
+            Keys::parse("a1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554")
+                .unwrap();
+        let note_id =
+            EventId::from_hex("0707070707070707070707070707070707070707070707070707070707070707")
+                .unwrap();
         let unsigned = zap_request(
             me.public_key(),
             recipient.public_key(),

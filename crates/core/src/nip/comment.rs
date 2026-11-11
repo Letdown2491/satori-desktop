@@ -11,7 +11,11 @@ use nostr::prelude::*;
 #[derive(Debug, Clone)]
 pub enum Ref {
     Event(EventId),
-    Address { kind: u16, author: PublicKey, d: String },
+    Address {
+        kind: u16,
+        author: PublicKey,
+        d: String,
+    },
     Url(String),
 }
 
@@ -35,9 +39,27 @@ impl Ref {
 
     pub fn tag_letter(&self, root: bool) -> char {
         match self {
-            Ref::Event(_) => if root { 'E' } else { 'e' },
-            Ref::Address { .. } => if root { 'A' } else { 'a' },
-            Ref::Url(_) => if root { 'I' } else { 'i' },
+            Ref::Event(_) => {
+                if root {
+                    'E'
+                } else {
+                    'e'
+                }
+            }
+            Ref::Address { .. } => {
+                if root {
+                    'A'
+                } else {
+                    'a'
+                }
+            }
+            Ref::Url(_) => {
+                if root {
+                    'I'
+                } else {
+                    'i'
+                }
+            }
         }
     }
 
@@ -96,9 +118,17 @@ pub fn parse_refs(ev: &Event) -> CommentRefs {
 #[derive(Debug, Clone)]
 pub enum CommentTarget {
     /// An immutable event root (e.g. highlights).
-    Event { id: EventId, kind: u16, author: PublicKey },
+    Event {
+        id: EventId,
+        kind: u16,
+        author: PublicKey,
+    },
     /// An addressable root (articles, wikis) — stable across edits.
-    Address { kind: u16, author: PublicKey, d: String },
+    Address {
+        kind: u16,
+        author: PublicKey,
+        d: String,
+    },
 }
 
 impl CommentTarget {
@@ -135,10 +165,10 @@ impl CommentTarget {
                 vec![kind_filter.custom_tag(SingleLetterTag::LOWERCASE_E, id.to_string())]
             }
             CommentTarget::Address { kind, author, d } => {
-                vec![kind_filter.custom_tag(
-                    SingleLetterTag::LOWERCASE_A,
-                    format!("{kind}:{author}:{d}"),
-                )]
+                vec![
+                    kind_filter
+                        .custom_tag(SingleLetterTag::LOWERCASE_A, format!("{kind}:{author}:{d}")),
+                ]
             }
         }
     }
@@ -161,9 +191,12 @@ impl CommentTarget {
                     d: d.clone(),
                 };
                 let value = match &addr {
-                    CommentTarget::Address { .. } => {
-                        Ref::Address { kind: *kind, author: *author, d: d.clone() }.value()
+                    CommentTarget::Address { .. } => Ref::Address {
+                        kind: *kind,
+                        author: *author,
+                        d: d.clone(),
                     }
+                    .value(),
                     _ => unreachable!(),
                 };
                 vec![
@@ -200,7 +233,11 @@ fn root_tags_of(root: &CommentTarget) -> Vec<Tag> {
         .filter(|t| {
             let first = t.as_slice().first().map(String::as_str).unwrap_or("");
             // Keep only the uppercase (root) halves; reply_tags appends parent.
-            first.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+            first
+                .chars()
+                .next()
+                .map(|c| c.is_uppercase())
+                .unwrap_or(false)
         })
         .collect()
 }

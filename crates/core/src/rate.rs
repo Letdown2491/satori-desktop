@@ -25,10 +25,10 @@
 //! tier itself (rule 1), regardless of velocity.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use nostr::prelude::*;
 
@@ -125,7 +125,9 @@ pub fn reply_flooded(author: &PublicKey, at: u64) -> bool {
     let mut r = RATE.lock().unwrap();
     let key = author.to_string();
     r.evict(&key, at);
-    r.stamps.get(&key).is_some_and(|ring| ring.len() + 1 >= REPLY_VELOCITY_LIMIT)
+    r.stamps
+        .get(&key)
+        .is_some_and(|ring| ring.len() + 1 >= REPLY_VELOCITY_LIMIT)
 }
 
 /// Record one DELIVERED reply (the caller already checked `reply_flooded`
@@ -190,10 +192,12 @@ fn mark_dirty() {
     FLUSHER.get_or_init(|| {
         std::thread::Builder::new()
             .name("rate-flush".into())
-            .spawn(|| loop {
-                std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
-                if DIRTY.swap(false, Ordering::Relaxed) {
-                    write_disk();
+            .spawn(|| {
+                loop {
+                    std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
+                    if DIRTY.swap(false, Ordering::Relaxed) {
+                        write_disk();
+                    }
                 }
             })
             .ok();
@@ -207,7 +211,10 @@ fn write_disk() {
         .iter()
         .filter_map(|pk| {
             let ring = r.stamps.get(pk)?;
-            Some((pk.clone(), serde_json::json!(ring.iter().copied().collect::<Vec<u64>>())))
+            Some((
+                pk.clone(),
+                serde_json::json!(ring.iter().copied().collect::<Vec<u64>>()),
+            ))
         })
         .collect();
     let counted: Vec<String> = r.counted_order.iter().cloned().collect();
@@ -326,8 +333,15 @@ mod tests {
         assert!(reply_flooded(&bot.public_key(), t() + 600));
         // Window reset: half an hour of silence and the author passes
         // untouched again (1–4 fresh replies start a new window).
-        assert!(!reply_flooded(&bot.public_key(), t() + REPLY_WINDOW_SECS + 1));
-        assert!(admit_reply(&bot.public_key(), t() + REPLY_WINDOW_SECS + 2, "e6"));
+        assert!(!reply_flooded(
+            &bot.public_key(),
+            t() + REPLY_WINDOW_SECS + 1
+        ));
+        assert!(admit_reply(
+            &bot.public_key(),
+            t() + REPLY_WINDOW_SECS + 2,
+            "e6"
+        ));
         clear();
     }
 
@@ -349,7 +363,10 @@ mod tests {
         // below proves nothing leaked in.
         // Distinct event id (a re-delivery would return true without counting).
         assert!(!admit_reply(&bot.public_key(), t() + 20, "x5-suppressed"));
-        assert!(!reply_flooded(&bot.public_key(), t() + REPLY_WINDOW_SECS + 1));
+        assert!(!reply_flooded(
+            &bot.public_key(),
+            t() + REPLY_WINDOW_SECS + 1
+        ));
         clear();
     }
 
@@ -365,11 +382,7 @@ mod tests {
         // first visit counts them (4 stamps), the repeats are no-ops.
         for _visit in 0..4u64 {
             for i in 0..4u64 {
-                assert!(admit_reply(
-                    &bot.public_key(),
-                    t() + i,
-                    &format!("evt-{i}"),
-                ));
+                assert!(admit_reply(&bot.public_key(), t() + i, &format!("evt-{i}"),));
             }
         }
         // The 5th DISTINCT reply still trips: the ring holds 4 stamps.

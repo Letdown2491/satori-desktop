@@ -132,17 +132,17 @@ mod tests {
         // real NIP-47 URI.
         let hostile = [
             "127.0.0.1",
-            "2130706433",       // decimal loopback
-            "0x7f.0.0.1",       // hex loopback
-            "127.1",            // short loopback
+            "2130706433", // decimal loopback
+            "0x7f.0.0.1", // hex loopback
+            "127.1",      // short loopback
             "192.168.1.10",
             "10.0.0.5",
             "172.16.0.9",
-            "169.254.169.254",  // the metadata endpoint
-            "100.64.0.1",       // CGNAT
+            "169.254.169.254", // the metadata endpoint
+            "100.64.0.1",      // CGNAT
             "[::1]",
-            "[fd00::1]",        // ULA
-            "[fe80::1]",        // link-local
+            "[fd00::1]", // ULA
+            "[fe80::1]", // link-local
         ];
         for host in hostile {
             let uri = format!(

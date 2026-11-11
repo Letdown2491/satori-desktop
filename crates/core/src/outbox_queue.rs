@@ -160,7 +160,11 @@ pub(crate) fn enqueue(event: &Event) -> bool {
         let mut held = outbox().lock().unwrap();
         // Replaceable coordinate: drop older pending versions so a
         // superseded relay list can't resurrect on retry.
-        if (10000..20000).contains(&u16::from(event.kind)) || u16::from(event.kind) == 0 || u16::from(event.kind) == 3 || (30000..40000).contains(&u16::from(event.kind)) {
+        if (10000..20000).contains(&u16::from(event.kind))
+            || u16::from(event.kind) == 0
+            || u16::from(event.kind) == 3
+            || (30000..40000).contains(&u16::from(event.kind))
+        {
             let coord = key.clone();
             let stale: Vec<String> = held
                 .map
@@ -196,7 +200,10 @@ pub(crate) fn enqueue(event: &Event) -> bool {
                 break;
             };
             if held.map.remove(&old).is_some() {
-                eprintln!("[core] outbox: backlog over {}, dropping oldest pending", MAX_PENDING);
+                eprintln!(
+                    "[core] outbox: backlog over {}, dropping oldest pending",
+                    MAX_PENDING
+                );
             }
         }
     }
@@ -273,7 +280,12 @@ pub(crate) fn contains(event: &Event) -> bool {
 #[cfg(test)]
 fn stored_event(event: &Event) -> Option<Event> {
     let key = outbox_key(event)?;
-    outbox().lock().unwrap().map.get(&key).map(|p| p.event.clone())
+    outbox()
+        .lock()
+        .unwrap()
+        .map
+        .get(&key)
+        .map(|p| p.event.clone())
 }
 
 fn write_disk() {
@@ -281,7 +293,11 @@ fn write_disk() {
     // same mutex must never gate a JSON-format behind a render lookup).
     let snap: Vec<Pending> = {
         let held = outbox().lock().unwrap();
-        held.order.iter().filter_map(|k| held.map.get(k)).cloned().collect()
+        held.order
+            .iter()
+            .filter_map(|k| held.map.get(k))
+            .cloned()
+            .collect()
     };
     let body = serde_json::to_string(&Stored { items: snap }).unwrap_or_default();
     let path = config::state_file(config::files::OUTBOX_PENDING);
@@ -325,10 +341,12 @@ fn write_disk() {
 fn spawn_flusher() {
     std::thread::Builder::new()
         .name("outbox-flush".into())
-        .spawn(|| loop {
-            std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
-            if DIRTY.swap(false, Ordering::Relaxed) {
-                write_disk();
+        .spawn(|| {
+            loop {
+                std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
+                if DIRTY.swap(false, Ordering::Relaxed) {
+                    write_disk();
+                }
             }
         })
         .ok();
@@ -354,11 +372,7 @@ pub(crate) fn targets(write_relays: &[String]) -> Vec<String> {
         .filter(|r| !crate::relay_latency::is_write_dead(r))
         .cloned()
         .collect();
-    if live.is_empty() {
-        norm
-    } else {
-        live
-    }
+    if live.is_empty() { norm } else { live }
 }
 
 #[cfg(test)]

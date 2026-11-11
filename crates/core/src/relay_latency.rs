@@ -97,7 +97,10 @@ static DIRTY: AtomicBool = AtomicBool::new(false);
 
 fn stats() -> &'static Mutex<Stats> {
     STATS.get_or_init(|| {
-        let mut s = Stats { map: HashMap::new(), order: VecDeque::new() };
+        let mut s = Stats {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        };
         for (url, stat) in read_disk() {
             s.map.insert(url.clone(), stat);
             s.order.push_back(url);
@@ -160,10 +163,12 @@ fn write_disk() {
 fn spawn_flusher() {
     std::thread::Builder::new()
         .name("latency-flush".into())
-        .spawn(|| loop {
-            std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
-            if DIRTY.swap(false, Ordering::Relaxed) {
-                write_disk();
+        .spawn(|| {
+            loop {
+                std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
+                if DIRTY.swap(false, Ordering::Relaxed) {
+                    write_disk();
+                }
             }
         })
         .ok();
@@ -206,7 +211,10 @@ pub fn record(relay: &str, ms: u64, truncated: bool, events: usize) {
         ms: ms2,
         ev,
         n: prev.as_ref().map(|p| p.n + 1).unwrap_or(1),
-        trunc: prev.as_ref().map(|p| p.trunc + u32::from(truncated)).unwrap_or(u32::from(truncated)),
+        trunc: prev
+            .as_ref()
+            .map(|p| p.trunc + u32::from(truncated))
+            .unwrap_or(u32::from(truncated)),
         at: now_secs(),
         denied_at: prev.as_ref().and_then(|p| p.denied_at),
         write_fails: prev.as_ref().map(|p| p.write_fails).unwrap_or(0),
@@ -253,7 +261,8 @@ pub fn budget(relay: &str, floor: Duration, base: Duration, ceiling: Duration) -
     // the rare rich-but-truncating branch — TS's own note).
     let trunc_rate = s.trunc as f64 / s.n as f64;
     if trunc_rate >= TRUNC_HI && s.ev >= RICH_EV {
-        let ext = base.as_millis() as f64 + trunc_rate * (ceiling.as_millis() as f64 - base.as_millis() as f64);
+        let ext = base.as_millis() as f64
+            + trunc_rate * (ceiling.as_millis() as f64 - base.as_millis() as f64);
         return Duration::from_millis(ext.min(ceiling.as_millis() as f64) as u64);
     }
     base
@@ -306,9 +315,7 @@ fn stat_read_dead(s: &RelayStat) -> bool {
 /// picked) and shard skips drop it at query time.
 pub fn is_read_dead(relay: &str) -> bool {
     let held = stats().lock().unwrap();
-    held.map
-        .get(&key(relay))
-        .is_some_and(stat_read_dead)
+    held.map.get(&key(relay)).is_some_and(stat_read_dead)
 }
 
 /// Note a publish outcome for this relay (D36 write-dead learning — the
@@ -334,7 +341,11 @@ pub fn record_write_result(relay: &str, ok: bool) {
         RelayStat {
             write_fails: fails,
             at: now,
-            ok_at: if ok { Some(now) } else { prev.as_ref().and_then(|p| p.ok_at) },
+            ok_at: if ok {
+                Some(now)
+            } else {
+                prev.as_ref().and_then(|p| p.ok_at)
+            },
             ..prev.unwrap_or_default()
         },
     );
@@ -377,7 +388,10 @@ pub fn mark_delivery(relay: &str) {
         None => {
             held.map.insert(
                 url,
-                RelayStat { ok_at: Some(now_secs()), ..RelayStat::default() },
+                RelayStat {
+                    ok_at: Some(now_secs()),
+                    ..RelayStat::default()
+                },
             );
         }
     }
@@ -398,9 +412,10 @@ const CONNECTED_WINDOW_SECS: u64 = 300;
 pub fn connected() -> bool {
     let now = now_secs();
     let held = stats().lock().unwrap();
-    held.map
-        .values()
-        .any(|s| s.ok_at.is_some_and(|at| now.saturating_sub(at) < CONNECTED_WINDOW_SECS))
+    held.map.values().any(|s| {
+        s.ok_at
+            .is_some_and(|at| now.saturating_sub(at) < CONNECTED_WINDOW_SECS)
+    })
 }
 
 /// One relay's learned health, for the settings pane (WS4): the EWMA
@@ -461,9 +476,17 @@ pub fn quality(relay: &str) -> f64 {
 /// close reasons never look like this.
 pub fn is_read_denial(reason: &str) -> bool {
     let lower = reason.to_lowercase();
-    ["denied", "not accept", "restricted", "blocked", "forbidden", "auth-required", "payment"]
-        .iter()
-        .any(|m| lower.contains(m))
+    [
+        "denied",
+        "not accept",
+        "restricted",
+        "blocked",
+        "forbidden",
+        "auth-required",
+        "payment",
+    ]
+    .iter()
+    .any(|m| lower.contains(m))
 }
 
 #[cfg(test)]
@@ -489,8 +512,11 @@ mod tests {
     #[test]
     fn budget_branches() {
         let _env = EnvGuard::new("lat-budget");
-        let (floor, base, ceiling) =
-            (Duration::from_secs(2), Duration::from_secs(4), Duration::from_secs(8));
+        let (floor, base, ceiling) = (
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+            Duration::from_secs(8),
+        );
         // Unknown / low confidence → base.
         assert_eq!(budget("wss://x.example", floor, base, ceiling), base);
         // Fewer than N_MIN samples → base regardless of shape.
@@ -537,7 +563,9 @@ mod tests {
         // An explicit denial is trusted immediately.
         record_read_denial("wss://wall.example");
         assert!(is_read_denial("CLOSED: auth-required: please sign in"));
-        assert!(!is_read_denial("CLOSED by relay: connection closed cleanly"));
+        assert!(!is_read_denial(
+            "CLOSED by relay: connection closed cleanly"
+        ));
     }
 
     #[test]

@@ -9,16 +9,16 @@
 //! silently clobber them with empty strings.
 
 use gpui::{
-    div, img, prelude::*, px, rgb, App, Context, Entity, EventEmitter, Focusable, FontWeight,
-    ObjectFit, Render, SharedString, Window,
+    App, Context, Entity, EventEmitter, Focusable, FontWeight, ObjectFit, Render, SharedString,
+    Window, div, img, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, ProfileEdit, PublishEvent};
 
 use std::sync::Arc;
 
-use crate::{input::Input, media, theme};
 use super::nav::Nav;
+use crate::{input::Input, media, theme};
 
 /// One labelled input row's geometry: the label column is fixed so the
 /// fields align; the editor fills the rest.
@@ -72,9 +72,7 @@ impl EditProfileView {
             if let Some(raw) = rx.recv().await {
                 let _ = this.update(cx, |this, cx| {
                     let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
-                    let s = |k: &str| {
-                        v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
-                    };
+                    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
                     prefill(&this.name, &s("name"), cx);
                     prefill(&this.display_name, &s("display_name"), cx);
                     prefill(&this.about, &s("about"), cx);
@@ -408,12 +406,20 @@ impl Render for EditProfileView {
                             .max_w(px(560.))
                             .mx_auto()
                             .child(self.image_row(
-                                "row-picture", "Picture", &self.picture, &self.pic_status,
-                                "picture", cx,
+                                "row-picture",
+                                "Picture",
+                                &self.picture,
+                                &self.pic_status,
+                                "picture",
+                                cx,
                             ))
                             .child(self.image_row(
-                                "row-banner", "Banner", &self.banner, &self.banner_status,
-                                "banner", cx,
+                                "row-banner",
+                                "Banner",
+                                &self.banner,
+                                &self.banner_status,
+                                "banner",
+                                cx,
                             ))
                             .child(self.field_row("row-name", "Name", &self.name))
                             .child(self.field_row(
@@ -449,14 +455,8 @@ impl Render for EditProfileView {
                                                 theme::vermilion()
                                             }))
                                             .text_size(px(theme::T_SMALL))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.save(cx)
-                                            }))
-                                            .child(if self.saving {
-                                                "saving…"
-                                            } else {
-                                                "Save"
-                                            }),
+                                            .on_click(cx.listener(|this, _, _, cx| this.save(cx)))
+                                            .child(if self.saving { "saving…" } else { "Save" }),
                                     )
                                     .when(!self.status.is_empty(), |d| {
                                         d.child(

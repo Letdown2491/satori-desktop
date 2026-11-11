@@ -36,9 +36,9 @@ impl Signer {
                 .sign_event_async(unsigned)
                 .await
                 .map_err(|e| LoginError::Connect(e.to_string())),
-            Self::Local(k) => {
-                k.sign_event(unsigned).map_err(|e| LoginError::Connect(e.to_string()))
-            }
+            Self::Local(k) => k
+                .sign_event(unsigned)
+                .map_err(|e| LoginError::Connect(e.to_string())),
         }
     }
 
@@ -66,12 +66,8 @@ impl Signer {
                 .nip44_decrypt_async(me, payload)
                 .await
                 .map_err(|e| LoginError::Connect(e.to_string())),
-            Self::Local(k) => nostr::nips::nip44::decrypt(
-                k.secret_key(),
-                me,
-                payload,
-            )
-            .map_err(|e| LoginError::Connect(e.to_string())),
+            Self::Local(k) => nostr::nips::nip44::decrypt(k.secret_key(), me, payload)
+                .map_err(|e| LoginError::Connect(e.to_string())),
         }
     }
 }
@@ -83,7 +79,8 @@ pub fn parse_local_secret(secret: &str) -> Result<Keys> {
 
 /// Rebuild client keys from the persisted transport secret (hex).
 pub fn client_keys_from_secret(secret: &str) -> Result<Keys> {
-    let sk = SecretKey::from_str(secret.trim()).map_err(|_| LoginError::Resume("bad client secret".into()))?;
+    let sk = SecretKey::from_str(secret.trim())
+        .map_err(|_| LoginError::Resume("bad client secret".into()))?;
     Ok(Keys::new(sk))
 }
 

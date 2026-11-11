@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, img, prelude::*, px, rgb, Animation, AnimationExt, App, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, Image, ImageFormat, KeyDownEvent, Render, TextAlign, Window,
+    Animation, AnimationExt, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Image,
+    ImageFormat, KeyDownEvent, Render, TextAlign, Window, div, img, prelude::*, px, rgb,
 };
 use satori_core::dlog;
 use satori_core::manager::{ConnectEvent, ConnectRx, Core};
@@ -98,7 +98,9 @@ impl LoginView {
         self.qr_uri = None;
         self.qr = None;
         self.connecting = true;
-        let rx = self.core.connect_nostrconnect("wss://relay.nip46.com".into());
+        let rx = self
+            .core
+            .connect_nostrconnect("wss://relay.nip46.com".into());
         let mut rx = rx;
         dlog!("[login] nostrconnect pump armed (generation {generation})");
         cx.spawn(async move |this, cx| {
@@ -123,13 +125,7 @@ impl LoginView {
         .detach();
     }
 
-    fn begin(
-        &mut self,
-        status: &str,
-        hint: &str,
-        rx: ConnectRx,
-        cx: &mut Context<Self>,
-    ) {
+    fn begin(&mut self, status: &str, hint: &str, rx: ConnectRx, cx: &mut Context<Self>) {
         self.generation += 1;
         let generation = self.generation;
         self.error.clear();
@@ -163,7 +159,10 @@ impl LoginView {
     /// Returns false when the flow is over (approved, failed or superseded).
     fn on_event(&mut self, ev: ConnectEvent, generation: u64, cx: &mut Context<Self>) -> bool {
         if generation != self.generation {
-            dlog!("[login] event {ev:?} arrived stale (gen {generation} vs {})", self.generation);
+            dlog!(
+                "[login] event {ev:?} arrived stale (gen {generation} vs {})",
+                self.generation
+            );
             return false; // superseded by a newer attempt or a cancel
         }
         match ev {
@@ -210,7 +209,6 @@ impl LoginView {
             cx,
         );
     }
-
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
         self.generation += 1; // invalidate the pump: failures stay quiet
@@ -480,9 +478,8 @@ impl Render for LoginView {
                                             }))
                                             .into_any_element(),
                                         None => {
-                                            let enso =
-                                                icons::enso_icon(theme::muted(), 60.0);
-                                            
+                                            let enso = icons::enso_icon(theme::muted(), 60.0);
+
                                             if desktop::Desktop::get(cx)
                                                 .reduced_motion
                                             {
@@ -637,7 +634,10 @@ fn qr_image(uri: &str) -> Option<Arc<Image>> {
     image::DynamicImage::ImageLuma8(luma)
         .write_to(&mut png, image::ImageFormat::Png)
         .ok()?;
-    Some(Arc::new(Image::from_bytes(ImageFormat::Png, png.into_inner())))
+    Some(Arc::new(Image::from_bytes(
+        ImageFormat::Png,
+        png.into_inner(),
+    )))
 }
 
 #[cfg(test)]

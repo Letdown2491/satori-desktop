@@ -141,7 +141,10 @@ mod tests {
     fn dim_tolerates_decimals_and_rejects_nonpositive() {
         let m = &parse(&ev(&["url https://c/v.mp4", "dim 464.0x848.0"]))[0];
         assert_eq!(m.dim, Some((464, 848)));
-        assert_eq!(parse(&ev(&["url https://c/v.mp4", "dim 0x10"]))[0].dim, None);
+        assert_eq!(
+            parse(&ev(&["url https://c/v.mp4", "dim 0x10"]))[0].dim,
+            None
+        );
     }
 
     #[test]
@@ -157,13 +160,19 @@ mod tests {
             "image https://c/v.jpg",
             "thumb https://c/v_t.jpg",
         ]))[0];
-        assert_eq!(image_then_thumb.poster.as_deref(), Some("https://c/v_t.jpg"));
+        assert_eq!(
+            image_then_thumb.poster.as_deref(),
+            Some("https://c/v_t.jpg")
+        );
         let thumb_then_image = &parse(&ev(&[
             "url https://c/v.mp4",
             "thumb https://c/v_t.jpg",
             "image https://c/v.jpg",
         ]))[0];
-        assert_eq!(thumb_then_image.poster.as_deref(), Some("https://c/v_t.jpg"));
+        assert_eq!(
+            thumb_then_image.poster.as_deref(),
+            Some("https://c/v_t.jpg")
+        );
         let image_only = &parse(&ev(&["url https://c/v.mp4", "image https://c/v.jpg"]))[0];
         assert_eq!(image_only.poster.as_deref(), Some("https://c/v.jpg"));
     }

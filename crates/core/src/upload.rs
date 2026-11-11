@@ -55,8 +55,7 @@ fn http() -> &'static reqwest::Client {
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(300))
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() > 5
-                    || !media::is_safe_media_url(attempt.url().as_str())
+                if attempt.previous().len() > 5 || !media::is_safe_media_url(attempt.url().as_str())
                 {
                     attempt.stop()
                 } else {
@@ -234,9 +233,7 @@ pub async fn blossom_upload_all(
 ) -> Result<Upload, String> {
     let safe: Vec<&String> = servers
         .iter()
-        .filter(|s| {
-            media::is_safe_media_url(&format!("{}/upload", s.trim_end_matches('/')))
-        })
+        .filter(|s| media::is_safe_media_url(&format!("{}/upload", s.trim_end_matches('/'))))
         .collect();
     if safe.is_empty() {
         return Err("no safe Blossom server to upload to".into());
@@ -266,17 +263,21 @@ pub async fn blossom_upload_all(
     }
     let (url, sha) = blob.ok_or(last_err)?;
     let dim = image_dim(&bytes);
-    let mut imeta = vec![
-        "imeta".to_string(),
-        format!("url {url}"),
-    ];
+    let mut imeta = vec!["imeta".to_string(), format!("url {url}")];
     if !content_type.is_empty() {
         imeta.push(format!("m {content_type}"));
     }
     if let Some(d) = dim {
         imeta.push(format!("dim {d}"));
     }
-    imeta.push(format!("x {}", if sha.is_empty() { hash.to_string() } else { sha }));
+    imeta.push(format!(
+        "x {}",
+        if sha.is_empty() {
+            hash.to_string()
+        } else {
+            sha
+        }
+    ));
     Ok(Upload { url, imeta })
 }
 

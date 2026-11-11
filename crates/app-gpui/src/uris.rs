@@ -210,7 +210,11 @@ mod tests {
         .to_nostr_uri()
         .unwrap();
         match uri_target(&uri) {
-            Some(UriTarget::Article { kind, author, identifier }) => {
+            Some(UriTarget::Article {
+                kind,
+                author,
+                identifier,
+            }) => {
                 assert_eq!(kind, 30023);
                 assert_eq!(author, pk());
                 assert_eq!(identifier, "slug");

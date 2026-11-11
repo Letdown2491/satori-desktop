@@ -64,12 +64,11 @@ impl Blocktime {
     /// Loads the persisted table (missing file = first run) and seeds the
     /// compiled-in anchor.
     pub fn new(rt: tokio::runtime::Handle) -> Self {
-        let mut points: BTreeMap<u64, u64> = std::fs::read_to_string(crate::config::state_file(
-            crate::config::files::BLOCKTIME,
-        ))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+        let mut points: BTreeMap<u64, u64> =
+            std::fs::read_to_string(crate::config::state_file(crate::config::files::BLOCKTIME))
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
         points.entry(ANCHOR.0).or_insert(ANCHOR.1);
         Self {
             rt,
@@ -110,7 +109,12 @@ impl Blocktime {
     pub fn get(self: &Arc<Self>, ts: u64) -> BlockRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut inner = self.inner.lock().unwrap();
-        if let Some(h) = inner.lru.get(&ts).copied().or_else(|| inner.points.get(&ts).copied()) {
+        if let Some(h) = inner
+            .lru
+            .get(&ts)
+            .copied()
+            .or_else(|| inner.points.get(&ts).copied())
+        {
             inner.touch(ts, h);
             let _ = tx.send(Ok(h));
             return rx;

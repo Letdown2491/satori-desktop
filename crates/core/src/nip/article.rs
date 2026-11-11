@@ -73,7 +73,12 @@ impl ArticleDraft {
         if !summary.is_empty() {
             tags.push(Tag::custom("summary", [summary]));
         }
-        if let Some(image) = self.image.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
+        if let Some(image) = self
+            .image
+            .as_deref()
+            .map(str::trim)
+            .filter(|i| !i.is_empty())
+        {
             tags.push(Tag::custom("image", [image]));
         }
         tags.push(Tag::custom("published_at", [now.to_string()]));
@@ -137,7 +142,11 @@ mod tests {
         assert_eq!(find("summary"), vec!["why margins matter"]);
         assert_eq!(find("image"), vec!["https://cdn.example/cover.png"]);
         assert_eq!(find("published_at"), vec!["1700000000"]);
-        assert_eq!(find("t"), vec!["writing", "nostr"], "topics trimmed, # stripped, blanks dropped");
+        assert_eq!(
+            find("t"),
+            vec!["writing", "nostr"],
+            "topics trimmed, # stripped, blanks dropped"
+        );
     }
 
     /// A carried identifier survives verbatim (the edit-path shape).

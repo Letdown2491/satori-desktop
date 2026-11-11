@@ -12,6 +12,9 @@ pub struct Emoji {
 }
 
 /// The curated table (emoji.ts EMOJI), reading order preserved.
+/// rustfmt::skip: the one-struct-per-line rows ARE the readability (a
+/// colon-formatted table rustfmt would explode into 6 lines each).
+#[rustfmt::skip]
 pub static EMOJI: &[Emoji] = &[
     // faces
     Emoji { char: "😀", name: "grinning", k: &[] },

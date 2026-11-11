@@ -60,7 +60,10 @@ pub struct Registry {
 
 impl Registry {
     pub fn new() -> Self {
-        Self { handlers: Vec::new(), fallback: None }
+        Self {
+            handlers: Vec::new(),
+            fallback: None,
+        }
     }
 
     /// Last registration wins (matches registry.ts `registerKind`).
@@ -73,7 +76,10 @@ impl Registry {
     }
 
     pub fn handler_for(&self, kind: u32) -> Option<&Arc<dyn KindHandler>> {
-        self.handlers.iter().rev().find(|h| h.kinds().contains(&kind))
+        self.handlers
+            .iter()
+            .rev()
+            .find(|h| h.kinds().contains(&kind))
     }
 
     pub fn fallback_handler(&self) -> Option<&Arc<dyn KindHandler>> {

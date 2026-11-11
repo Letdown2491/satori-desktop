@@ -32,7 +32,6 @@ pub mod undo;
 
 pub mod dms;
 pub mod engagement;
-pub mod viewport;
 pub mod kinds;
 pub mod media;
 pub mod nip;
@@ -48,6 +47,7 @@ pub mod seen;
 pub mod store;
 pub mod tor;
 pub mod upload;
+pub mod viewport;
 pub mod wallet;
 pub mod wot;
 
@@ -83,12 +83,15 @@ pub(crate) mod test_env {
         pub fn new(tag: &str) -> Self {
             let lock = Some(ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner));
             let prior = std::env::var_os("XDG_DATA_HOME");
-            let dir =
-                std::env::temp_dir().join(format!("satori-env-{tag}-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("satori-env-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("create isolated test data dir");
             unsafe { std::env::set_var("XDG_DATA_HOME", &dir) };
-            Self { _lock: lock, prior, dir }
+            Self {
+                _lock: lock,
+                prior,
+                dir,
+            }
         }
 
         /// The isolated data dir (tests plant state here, never in $HOME).

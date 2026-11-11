@@ -138,9 +138,22 @@ pub fn route(
     for author in authors {
         let write: Vec<String> = relay_lists
             .get(author)
-            .map(|l| l.write.iter().take(MAX_RELAYS_PER_AUTHOR).cloned().collect())
+            .map(|l| {
+                l.write
+                    .iter()
+                    .take(MAX_RELAYS_PER_AUTHOR)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
-        author_relays.insert(author, if write.is_empty() { fallback.clone() } else { write });
+        author_relays.insert(
+            author,
+            if write.is_empty() {
+                fallback.clone()
+            } else {
+                write
+            },
+        );
     }
 
     // want = how many MORE relays each author still wants. An author stays in
@@ -293,7 +306,10 @@ mod tests {
         // x covers all three at 1st pick; y and z cover 2 each at 2nd — both
         // make the cap (3 relays << 70). Each author ends on x + one more.
         assert_eq!(route.len(), 3);
-        assert_eq!(route["wss://x"], BTreeSet::from(["a".into(), "b".into(), "c".into()]));
+        assert_eq!(
+            route["wss://x"],
+            BTreeSet::from(["a".into(), "b".into(), "c".into()])
+        );
         assert_eq!(route["wss://y"], BTreeSet::from(["a".into()]));
         assert_eq!(route["wss://z"], BTreeSet::from(["b".into()]));
     }
@@ -329,10 +345,13 @@ mod tests {
         let mut l = lists(&[("a", "wss://a0")]);
         for i in 0..70 {
             let pk = format!("p{i:02}");
-            l.insert(pk.clone(), RelayList {
-                write: vec![format!("wss://r{i:02}")],
-                ..Default::default()
-            });
+            l.insert(
+                pk.clone(),
+                RelayList {
+                    write: vec![format!("wss://r{i:02}")],
+                    ..Default::default()
+                },
+            );
             let _ = pk;
         }
         let route = route(&l, &authors(&["a", "p00"]), &[fallback()], |_| 1.0);
@@ -349,10 +368,7 @@ mod tests {
     /// fall to the indexers when it's their only one.
     #[test]
     fn read_dead_relay_never_picked() {
-        let l = lists(&[
-            ("a", "wss://dead,wss://live"),
-            ("b", "wss://dead-only"),
-        ]);
+        let l = lists(&[("a", "wss://dead,wss://live"), ("b", "wss://dead-only")]);
         let route = route(&l, &authors(&["a", "b"]), &[fallback()], |r| {
             if r.contains("dead") { 0.0 } else { 1.0 }
         });
@@ -381,10 +397,13 @@ mod tests {
         let mut a = Vec::new();
         for i in 0..150 {
             let pk = format!("p{i:03}");
-            l.insert(pk.clone(), RelayList {
-                write: vec![format!("wss://r{i:03}")],
-                ..Default::default()
-            });
+            l.insert(
+                pk.clone(),
+                RelayList {
+                    write: vec![format!("wss://r{i:03}")],
+                    ..Default::default()
+                },
+            );
             a.push(pk);
         }
         let route = route(&l, &a, &[fallback()], |_| 1.0);
@@ -403,7 +422,10 @@ mod tests {
     fn chunk_enforces_ceilings() {
         let ids: Vec<usize> = (0..350).collect();
         let shards = chunk(&ids, MAX_AUTHORS_PER_FILTER);
-        assert_eq!(shards, vec![(0..200).collect::<Vec<_>>(), (200..350).collect::<Vec<_>>()]);
+        assert_eq!(
+            shards,
+            vec![(0..200).collect::<Vec<_>>(), (200..350).collect::<Vec<_>>()]
+        );
         let shards = chunk(&ids, MAX_ETAGS_PER_FILTER);
         assert_eq!(shards.len(), 3); // 150 + 150 + 50
         assert!(shards[..2].iter().all(|s| s.len() == MAX_ETAGS_PER_FILTER));
@@ -494,4 +516,3 @@ mod tests {
         assert!(!routable_relay("wss://")); // empty host
     }
 }
-

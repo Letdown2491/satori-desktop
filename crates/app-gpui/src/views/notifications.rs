@@ -8,14 +8,17 @@ use std::{collections::HashMap, sync::Arc};
 
 use std::collections::HashSet;
 
-use gpui::{div, list, prelude::*, px, rgb, Context, Entity, EventEmitter, FontWeight, ListAlignment, ListOffset, ListScrollEvent, ListState, Render, SharedString, Window};
+use gpui::{
+    Context, Entity, EventEmitter, FontWeight, ListAlignment, ListOffset, ListScrollEvent,
+    ListState, Render, SharedString, Window, div, list, prelude::*, px, rgb,
+};
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile};
 use satori_core::nip::{comment, nip10};
 use satori_core::notifications::parse_zap_receipt;
 
-use crate::{media, theme};
 use super::{content, nav::Nav, states};
+use crate::{media, theme};
 
 /// What the event did to you (notifications.ts `add`): a comment is always
 /// a reply; kind 1 splits by whether it carries an `e` tag.
@@ -35,8 +38,15 @@ fn notif_type(ev: &Event) -> NotifType {
         1018 => NotifType::PollVote,
         1111 => NotifType::Reply,
         _ => {
-            let has_e = ev.tags.iter().any(|t| t.as_slice().first().map(String::as_str) == Some("e"));
-            if has_e { NotifType::Reply } else { NotifType::Mention }
+            let has_e = ev
+                .tags
+                .iter()
+                .any(|t| t.as_slice().first().map(String::as_str) == Some("e"));
+            if has_e {
+                NotifType::Reply
+            } else {
+                NotifType::Mention
+            }
         }
     }
 }
@@ -124,15 +134,16 @@ impl NotificationsView {
         // threshold is shallow (three rows): the button should arrive
         // early, not after the reader has given up looking for it.
         let this = cx.entity().downgrade();
-        view.list.set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
-            let _ = this.update(cx, |n, cx| {
-                let deep = ev.visible_range.start >= 3;
-                if n.deep != deep {
-                    n.deep = deep;
-                    cx.emit(Nav::PaneDeep);
-                }
+        view.list
+            .set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
+                let _ = this.update(cx, |n, cx| {
+                    let deep = ev.visible_range.start >= 3;
+                    if n.deep != deep {
+                        n.deep = deep;
+                        cx.emit(Nav::PaneDeep);
+                    }
+                });
             });
-        });
         view
     }
 
@@ -164,9 +175,11 @@ impl NotificationsView {
         for row in &self.rows {
             if let Row::Note(ev, _) = row
                 && let Some(pid) = notif_parent_id(ev)
-                    && !self.parents.contains_key(&pid) && self.parents_asked.insert(pid.clone()) {
-                        ids.push(pid);
-                    }
+                && !self.parents.contains_key(&pid)
+                && self.parents_asked.insert(pid.clone())
+            {
+                ids.push(pid);
+            }
         }
         if ids.is_empty() {
             return;
@@ -265,8 +278,13 @@ impl NotificationsView {
                             .map(|p| p.display())
                             .or_else(|| this.profiles.get(&key).map(|p| p.display()))
                             .unwrap_or_else(|| format!("{}…", &key[..8]));
-                        this.quotes
-                            .insert(bech.clone(), Some(content::Embed { event: target, name }));
+                        this.quotes.insert(
+                            bech.clone(),
+                            Some(content::Embed {
+                                event: target,
+                                name,
+                            }),
+                        );
                         cx.notify();
                     });
                 }
@@ -350,12 +368,14 @@ fn notif_whisper<V: EventEmitter<Nav> + 'static>(
                 });
             })
             .children({
-                let mut kids = vec![div()
-                    .text_size(px(theme::T_SMALL))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(theme::ink()))
-                    .child(label)
-                    .into_any_element()];
+                let mut kids = vec![
+                    div()
+                        .text_size(px(theme::T_SMALL))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme::ink()))
+                        .child(label)
+                        .into_any_element(),
+                ];
                 if let Some(snippet) = snippet {
                     kids.push(
                         div()
@@ -410,7 +430,11 @@ fn notif_card(
         .or_else(|| matches!(t, NotifType::Reply | NotifType::Mention).then_some(ev.id));
     let ev_for_profile = ev.clone();
     let handle_profile = handle.clone();
-    let ctx = content::Body { media, quotes, profiles };
+    let ctx = content::Body {
+        media,
+        quotes,
+        profiles,
+    };
 
     let mut row = div()
         .w_full()
@@ -452,27 +476,26 @@ fn notif_card(
                 ),
         );
     if let Some(pid) = &parent_id
-        && let Some(w) = notif_whisper(idx, pid, parents, profiles, me, handle.clone()) {
-            row = row.child(w);
-        }
+        && let Some(w) = notif_whisper(idx, pid, parents, profiles, me, handle.clone())
+    {
+        row = row.child(w);
+    }
     let action_line = div()
         .text_size(px(theme::T_UI))
         .text_color(rgb(theme::muted()))
         .child(action_word(t, ev));
     let handle_body = handle.clone();
     let open_block = match open {
-        Some(target) => {
-            div()
-                .id(SharedString::from(format!("notif-open-{idx}")))
-                .cursor_pointer()
-                .on_click(move |_, _, cx| {
-                    let target = target;
-                    handle.update(cx, |_, cx| cx.emit(Nav::OpenThread(target)));
-                })
-                .child(action_line)
-                .child(content::body(ev, &ctx, handle_body.clone()))
-                .into_any_element()
-        }
+        Some(target) => div()
+            .id(SharedString::from(format!("notif-open-{idx}")))
+            .cursor_pointer()
+            .on_click(move |_, _, cx| {
+                let target = target;
+                handle.update(cx, |_, cx| cx.emit(Nav::OpenThread(target)));
+            })
+            .child(action_line)
+            .child(content::body(ev, &ctx, handle_body.clone()))
+            .into_any_element(),
         None => div()
             .child(action_line)
             .child(content::body(ev, &ctx, handle_body.clone()))
@@ -577,13 +600,9 @@ impl Render for NotificationsView {
                     .flex()
                     .justify_center()
                     // §4.3: the kinded error strip — Retry re-asks with the same
-            // pre-visit high-water.
-            .when_some(self.error.clone(), |d, err| {
-                d.child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .child(states::error_strip(
+                    // pre-visit high-water.
+                    .when_some(self.error.clone(), |d, err| {
+                        d.child(div().px_4().py_2().child(states::error_strip(
                             &err,
                             cx.listener(move |this, _, _, cx| {
                                 let prev = this.prev;
@@ -595,10 +614,9 @@ impl Render for NotificationsView {
                                 this.error = None;
                                 cx.notify();
                             }),
-                        )),
-                )
-            })
-            .child(if empty {
+                        )))
+                    })
+                    .child(if empty {
                         div()
                             .w_full()
                             .max_w(px(content::COL_W))

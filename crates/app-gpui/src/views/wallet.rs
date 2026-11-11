@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, rgb, App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
-    Render, Window,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, Focusable, Render, Window, div,
+    prelude::*, px, rgb,
 };
 use satori_core::manager::Core;
 use satori_core::wallet::{self, Status};

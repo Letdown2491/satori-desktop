@@ -16,17 +16,20 @@ async fn main() {
     let kinds = satori_core::store::visible_kinds();
     let filter = Filter::new().kinds(kinds.clone()).limit(limit);
     let events: Vec<Event> = db.query(filter).await.unwrap().into_iter().collect();
-    println!("=== {} events (kinds {:?}) ===", events.len(), kinds
-        .iter()
-        .map(|k| u16::from(*k))
-        .collect::<Vec<_>>());
+    println!(
+        "=== {} events (kinds {:?}) ===",
+        events.len(),
+        kinds.iter().map(|k| u16::from(*k)).collect::<Vec<_>>()
+    );
     let _drop_machines = satori_core::store::machine_notes_hidden();
     let mut blank = 0;
     for e in &events {
         let kind = u16::from(e.kind);
         let content = e.content.trim();
         let blankish = content.is_empty()
-            || content.chars().all(|c| c.is_whitespace() || c == '\u{200b}');
+            || content
+                .chars()
+                .all(|c| c.is_whitespace() || c == '\u{200b}');
         // Quote-only: every paragraph a standalone nostr ref — renders as
         // embeds alone ("…" until resolved).
         let paras: Vec<&str> = e

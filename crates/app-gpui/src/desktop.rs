@@ -63,5 +63,8 @@ pub fn probe() -> Desktop {
     let dark = read_one("color-scheme").map(|v| v == 1);
     let reduced_motion = read_one("prefers-reduced-motion") == Some(1);
     REDUCED_MOTION.store(reduced_motion, std::sync::atomic::Ordering::Relaxed);
-    Desktop { dark, reduced_motion }
+    Desktop {
+        dark,
+        reduced_motion,
+    }
 }

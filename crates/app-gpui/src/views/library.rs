@@ -4,14 +4,16 @@
 //! an embedded Feed so the rows ARE the feed's rows. Drafts (synced
 //! encrypted, NIP-78) and Lists (NIP-51) land in their own slices.
 
-use gpui::{div, prelude::*, px, rgb, AnyElement, Context, Entity, EventEmitter, FontWeight,
-           Render, SharedString, Window};
+use gpui::{
+    AnyElement, Context, Entity, EventEmitter, FontWeight, Render, SharedString, Window, div,
+    prelude::*, px, rgb,
+};
 use nostr::prelude::*;
-use std::{collections::HashMap, sync::Arc};
 use satori_core::manager::{Core, DraftEntry, FeedEvent, FeedRx, NostrList, Profile, PublishEvent};
+use std::{collections::HashMap, sync::Arc};
 
-use crate::{media, theme};
 use super::{content, feed::Feed, nav::Nav};
+use crate::{media, theme};
 
 pub(crate) struct LibraryView {
     core: Arc<Core>,
@@ -210,11 +212,7 @@ impl LibraryView {
         let hex = pk.to_string();
         let p = self.members.get(&hex);
         let (name, picture, nip05) = match p {
-            Some(p) => (
-                p.display(),
-                p.picture.clone(),
-                p.nip05.clone(),
-            ),
+            Some(p) => (p.display(), p.picture.clone(), p.nip05.clone()),
             None => (hex.clone(), String::new(), String::new()),
         };
         let who = *pk;
@@ -271,7 +269,9 @@ impl LibraryView {
         // composer is up either way; this keeps the tab honest).
         let mut rx = match d.id {
             Some(id) => self.core.drop_draft(id),
-            None => self.core.save_draft(reply_id, quote_id, String::new(), Vec::new(), false),
+            None => self
+                .core
+                .save_draft(reply_id, quote_id, String::new(), Vec::new(), false),
         };
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.recv().await {
@@ -318,7 +318,9 @@ impl LibraryView {
         let quote_id = d.quote.as_ref().and_then(|h| EventId::from_hex(h).ok());
         let mut rx = match d.id.clone() {
             Some(id) => self.core.drop_draft(id),
-            None => self.core.save_draft(reply_id, quote_id, String::new(), Vec::new(), false),
+            None => self
+                .core
+                .save_draft(reply_id, quote_id, String::new(), Vec::new(), false),
         };
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -333,7 +335,12 @@ impl LibraryView {
 
     /// One draft row: context chip, the first line's snippet, the delete x.
     fn draft_row(&self, i: usize, d: &DraftEntry, cx: &mut Context<Self>) -> AnyElement {
-        let snippet = d.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").to_string();
+        let snippet = d
+            .text
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .to_string();
         let label = match (&d.reply_to, &d.quote) {
             (Some(_), _) => "reply",
             (None, Some(_)) => "quote",
@@ -435,21 +442,17 @@ impl Render for LibraryView {
             .bg(rgb(theme::washi()))
             // The tab strip: centered, the profile's rhythm.
             .child(
-                div()
-                    .bg(rgb(theme::panel()))
-                    .flex()
-                    .justify_center()
-                    .child(
-                        div()
-                            .w(px(content::COL_W))
-                            .flex()
-                            .gap_4()
-                            .px_4()
-                            .py_2()
-                            .child(self.tab_btn(LibTab::Bookmarks, "Bookmarks", tab, cx))
-                            .child(self.tab_btn(LibTab::Drafts, "Drafts", tab, cx))
-                            .child(self.tab_btn(LibTab::Lists, "Lists", tab, cx)),
-                    ),
+                div().bg(rgb(theme::panel())).flex().justify_center().child(
+                    div()
+                        .w(px(content::COL_W))
+                        .flex()
+                        .gap_4()
+                        .px_4()
+                        .py_2()
+                        .child(self.tab_btn(LibTab::Bookmarks, "Bookmarks", tab, cx))
+                        .child(self.tab_btn(LibTab::Drafts, "Drafts", tab, cx))
+                        .child(self.tab_btn(LibTab::Lists, "Lists", tab, cx)),
+                ),
             )
             .child(match tab {
                 // The Bookmarks tab IS a feed (FeedMode::Bookmarks): the
@@ -484,9 +487,12 @@ impl Render for LibraryView {
                             .flex()
                             .flex_col()
                             .overflow_y_scroll()
-                            .children(drafts.iter().enumerate().map(|(i, d)| {
-                                self.draft_row(i, d, cx)
-                            }))
+                            .children(
+                                drafts
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, d)| self.draft_row(i, d, cx)),
+                            )
                             .into_any_element()
                     }
                 }

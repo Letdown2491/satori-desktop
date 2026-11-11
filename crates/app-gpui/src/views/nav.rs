@@ -24,7 +24,12 @@ pub enum Nav {
     OpenComposer(Option<Event>),
     /// Reopen a synced draft (D38): text + the resolved context events
     /// (boxed — Nav must not carry a three-event-sized variant).
-    OpenDraft(String, Vec<Vec<String>>, Option<Box<Event>>, Option<Box<Event>>),
+    OpenDraft(
+        String,
+        Vec<Vec<String>>,
+        Option<Box<Event>>,
+        Option<Box<Event>>,
+    ),
     /// The composer quoting a note (NIP-18 quote repost).
     OpenQuote(Event),
     /// The article reader page (markdown).

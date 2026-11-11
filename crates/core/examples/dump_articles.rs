@@ -59,10 +59,7 @@ async fn main() {
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         v["pubkey"].as_str().unwrap().parse().unwrap()
     };
-    let contact = Filter::new()
-        .kind(Kind::ContactList)
-        .author(me)
-        .limit(1);
+    let contact = Filter::new().kind(Kind::ContactList).author(me).limit(1);
     let mut follows: Vec<PublicKey> = db
         .query(contact)
         .await
@@ -84,11 +81,17 @@ async fn main() {
         .kind(Kind::Custom(30023))
         .authors(follows.clone())
         .limit(300);
-    let got = client.fetch_events(filter).timeout(std::time::Duration::from_secs(8)).await.unwrap();
+    let got = client
+        .fetch_events(filter)
+        .timeout(std::time::Duration::from_secs(8))
+        .await
+        .unwrap();
     let mut hist: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut newest = 0u64;
     for e in got.iter() {
-        *hist.entry(e.pubkey.to_string()[..8].to_string()).or_default() += 1;
+        *hist
+            .entry(e.pubkey.to_string()[..8].to_string())
+            .or_default() += 1;
         newest = newest.max(e.created_at.as_secs());
     }
     let mut hist: Vec<_> = hist.into_iter().collect();

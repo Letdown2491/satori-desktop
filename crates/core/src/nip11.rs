@@ -46,8 +46,9 @@ static MAP: OnceLock<Mutex<HashMap<String, Entry>>> = OnceLock::new();
 
 fn map() -> &'static Mutex<HashMap<String, Entry>> {
     MAP.get_or_init(|| {
-        let raw = std::fs::read_to_string(crate::config::state_file(crate::config::files::RELAY_INFO))
-            .unwrap_or_default();
+        let raw =
+            std::fs::read_to_string(crate::config::state_file(crate::config::files::RELAY_INFO))
+                .unwrap_or_default();
         let parsed: HashMap<String, Entry> = serde_json::from_str(&raw).unwrap_or_default();
         Mutex::new(parsed)
     })
@@ -97,14 +98,19 @@ fn now_secs() -> u64 {
 pub fn snapshot() -> Vec<RelayCaps> {
     let held = map().lock().unwrap();
     held.iter()
-        .map(|(url, e)| RelayCaps { url: url.clone(), search: e.search, at: e.at })
+        .map(|(url, e)| RelayCaps {
+            url: url.clone(),
+            search: e.search,
+            at: e.at,
+        })
         .collect()
 }
 
 /// The advertised NIP-50 search support for one relay (None = unknown).
 pub fn search(relay: &str) -> Option<bool> {
     let held = map().lock().unwrap();
-    held.get(&crate::outbox::relay_key(relay)).and_then(|e| e.search)
+    held.get(&crate::outbox::relay_key(relay))
+        .and_then(|e| e.search)
 }
 
 /// Fetch one relay's document and remember `limitation.search`. Any
@@ -147,7 +153,13 @@ pub async fn refresh(relay: &str) -> bool {
         .and_then(|v| v.as_bool());
     let key = crate::outbox::relay_key(relay);
     let mut held = map().lock().unwrap();
-    held.insert(key, Entry { search, at: now_secs() });
+    held.insert(
+        key,
+        Entry {
+            search,
+            at: now_secs(),
+        },
+    );
     write_disk(&held);
     true
 }
@@ -158,8 +170,10 @@ fn http() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
-                         (KHTML, like Gecko) Chrome/126.0.0.1 Safari/537.36")
+            .user_agent(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+                         (KHTML, like Gecko) Chrome/126.0.0.1 Safari/537.36",
+            )
             .connect_timeout(FETCH_BUDGET)
             .timeout(FETCH_BUDGET)
             .build()
@@ -205,7 +219,10 @@ mod tests {
         let key = crate::outbox::relay_key("wss://r.example");
         map().lock().unwrap().insert(
             key,
-            Entry { search: Some(true), at: now_secs() },
+            Entry {
+                search: Some(true),
+                at: now_secs(),
+            },
         );
         assert_eq!(search("wss://r.example"), Some(true));
         let snap = snapshot();
@@ -218,7 +235,11 @@ mod tests {
     fn refresh_rejects_non_ws_urls_without_network() {
         let _env = EnvGuard::new("nip11-refresh");
         // Not a websocket url → no document, no entry, no panic.
-        assert!(!tokio::runtime::Runtime::new().unwrap().block_on(refresh("https://x.example")));
+        assert!(
+            !tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(refresh("https://x.example"))
+        );
         assert_eq!(search("https://x.example"), None);
     }
 }

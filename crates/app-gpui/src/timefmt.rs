@@ -9,8 +9,8 @@
 //! Block mode can refine itself from item closures.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use satori_core::manager::Core;
@@ -161,7 +161,10 @@ pub fn ensure(secs: u64, cx: &mut gpui::App) {
         bridge.core.block_height(secs)
     };
     cx.spawn(async move |cx| {
-        let res = { let mut rx = rx; rx.recv().await };
+        let res = {
+            let mut rx = rx;
+            rx.recv().await
+        };
         cx.update(|cx| {
             if cx.has_global::<Bridge>() {
                 let bridge = cx.global_mut::<Bridge>();

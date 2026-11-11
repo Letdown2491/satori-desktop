@@ -12,18 +12,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
-    actions, div, img, prelude::*, px, relative, rgb, App, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, Global, Render, ScrollHandle, SharedString, Window,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Global, Render,
+    ScrollHandle, SharedString, Window, actions, div, img, prelude::*, px, relative, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile, PublishEvent};
 
-use crate::{input::Input, markdown, media, theme};
 use super::{
     content,
     nav::Nav,
     reader::{block_item, image_tile, render_block},
 };
+use crate::{input::Input, markdown, media, theme};
 
 actions!(composer, [Publish]);
 
@@ -337,9 +337,7 @@ impl Composer {
             f.update(cx, |i, _| i.single_paragraph = true);
         }
         // Poll options share the shape (a choice is one line of text).
-        let mut poll_options = (0..2)
-            .map(|_| new_poll_option(cx))
-            .collect::<Vec<_>>();
+        let mut poll_options = (0..2).map(|_| new_poll_option(cx)).collect::<Vec<_>>();
         let mut poll_multi = false;
         // D17 tripwire: the note field and the alt field are not places a
         // private key belongs — a pasted nsec is intercepted with a strip.
@@ -352,7 +350,8 @@ impl Composer {
         // A quote compose carries the quote, so it skips the stash too.
         // Tab-aware (0.4): an article/photo/poll close reopens on its own
         // tab with its own fields; the note stash's shape is unchanged.
-        if reply_to.is_none() && quote.is_none()
+        if reply_to.is_none()
+            && quote.is_none()
             && let Some(stash) = draft_take(cx)
             && let Some(restorable) = stash.restorable()
         {
@@ -647,8 +646,7 @@ impl Composer {
         let before = &text[..cursor];
         let at = before.rfind('@')?;
         let token = &before[at + 1..];
-        (token.len() <= 30 && !token.contains(char::is_whitespace))
-            .then(|| token.to_string())
+        (token.len() <= 30 && !token.contains(char::is_whitespace)).then(|| token.to_string())
     }
 
     fn detect_mention(&mut self, cx: &mut Context<Self>) {
@@ -730,7 +728,7 @@ impl Composer {
             && !token.contains(char::is_whitespace)
             && !token.contains('/')
             && !token.contains(':'))
-            .then(|| token.to_string())
+        .then(|| token.to_string())
     }
 
     /// The emoji side of the same buffer watch: the strip's candidates,
@@ -850,7 +848,17 @@ impl Composer {
         let imetas: Vec<Vec<String>> = self.ready_imetas();
         let core = self.core.clone();
         cx.notify();
-        let mut rx = core.schedule_note(String::new(), text, reply, mentions, quote, imetas, false, false, at);
+        let mut rx = core.schedule_note(
+            String::new(),
+            text,
+            reply,
+            mentions,
+            quote,
+            imetas,
+            false,
+            false,
+            at,
+        );
         cx.spawn(async move |this, cx| {
             // Every ScheduleEvent settles the pane (Scheduled pops, Failed
             // stays with a word) — one receipt, no pump.
@@ -885,7 +893,13 @@ impl Composer {
     /// stray newline (paste paths that bypass the field's fold) would
     /// corrupt the tag.
     fn save_alt(&mut self, id: u64, cx: &mut Context<Self>) {
-        let text = self.alt_input.read(cx).content.split_whitespace().collect::<Vec<_>>().join(" ");
+        let text = self
+            .alt_input
+            .read(cx)
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         if let Some(a) = self.attachments.iter_mut().find(|a| a.id == id) {
             if let Some(imeta) = a.imeta.as_mut() {
                 imeta.retain(|e| !e.starts_with("alt "));
@@ -1127,8 +1141,7 @@ impl Composer {
         // out. Attachments survive the switch.
         if self.attachments.iter().any(Attachment::is_video) {
             self.status =
-                "a photo post takes images; video rides a note (switch tabs to send it)"
-                    .into();
+                "a photo post takes images; video rides a note (switch tabs to send it)".into();
             cx.notify();
             return;
         }
@@ -1194,8 +1207,7 @@ impl Composer {
         // Same NIP-68 guard as the instant path.
         if self.attachments.iter().any(Attachment::is_video) {
             self.status =
-                "a photo post takes images; video rides a note (switch tabs to send it)"
-                    .into();
+                "a photo post takes images; video rides a note (switch tabs to send it)".into();
             cx.notify();
             return;
         }
@@ -1219,7 +1231,8 @@ impl Composer {
         let title = self.photo_title.read(cx).content.trim().to_string();
         let caption = self.input.read(cx).content.trim().to_string();
         let imetas = self.ready_imetas();
-        let mut rx = core.schedule_note(title, caption, None, vec![], None, imetas, true, false, at);
+        let mut rx =
+            core.schedule_note(title, caption, None, vec![], None, imetas, true, false, at);
         cx.spawn(async move |this, cx| {
             if let Some(ev) = rx.recv().await {
                 match ev {
@@ -1346,7 +1359,8 @@ impl Composer {
         let title = self.photo_title.read(cx).content.trim().to_string();
         let caption = self.input.read(cx).content.trim().to_string();
         let imetas = self.ready_imetas();
-        let mut rx = core.schedule_note(title, caption, None, vec![], None, imetas, false, true, at);
+        let mut rx =
+            core.schedule_note(title, caption, None, vec![], None, imetas, false, true, at);
         cx.spawn(async move |this, cx| {
             if let Some(ev) = rx.recv().await {
                 match ev {
@@ -1562,7 +1576,13 @@ impl Composer {
                         // D38: the synced slot is spent — the note will go
                         // out unless undone (then the composer stays open
                         // and a close re-saves the draft).
-                        let _ = core.save_draft(draft_key.0, draft_key.1, String::new(), Vec::new(), false);
+                        let _ = core.save_draft(
+                            draft_key.0,
+                            draft_key.1,
+                            String::new(),
+                            Vec::new(),
+                            false,
+                        );
                         let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
                         return;
                     }
@@ -1578,7 +1598,13 @@ impl Composer {
                     }
                     PublishEvent::Committed { .. } => {
                         // D38: the synced draft slot is spent with the send.
-                        let _ = core.save_draft(draft_key.0, draft_key.1, String::new(), Vec::new(), false);
+                        let _ = core.save_draft(
+                            draft_key.0,
+                            draft_key.1,
+                            String::new(),
+                            Vec::new(),
+                            false,
+                        );
                         let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
                         return;
                     }
@@ -1738,12 +1764,7 @@ impl Composer {
     /// whatever the session stash restored (the synced slot was spent at
     /// tap time; the close saves whatever the user does with it).
     /// v1.4: the entry's attachment imetas restore with it.
-    pub fn prefill(
-        &mut self,
-        text: &str,
-        attachments: Vec<Vec<String>>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn prefill(&mut self, text: &str, attachments: Vec<Vec<String>>, cx: &mut Context<Self>) {
         self.input.update(cx, |i, cx| i.set_text(text, cx));
         for m in attachments.into_iter() {
             if let Some(mut a) = Attachment::from_imeta(m) {
@@ -1783,12 +1804,11 @@ impl Render for Composer {
             // dangling focus eats keys.)
             self.focused_tab = Some(self.tab);
             match self.tab {
-                Tab::Poll => window
-                    .focus(&self.poll_question.read(cx).focus_handle(cx), cx),
-                Tab::Article => window
-                    .focus(&self.art_title.read(cx).focus_handle(cx), cx),
-                Tab::Photo | Tab::Video => window
-                    .focus(&self.photo_title.read(cx).focus_handle(cx), cx),
+                Tab::Poll => window.focus(&self.poll_question.read(cx).focus_handle(cx), cx),
+                Tab::Article => window.focus(&self.art_title.read(cx).focus_handle(cx), cx),
+                Tab::Photo | Tab::Video => {
+                    window.focus(&self.photo_title.read(cx).focus_handle(cx), cx)
+                }
                 Tab::Note => window.focus(&self.focus, cx),
             }
         }
@@ -3012,7 +3032,11 @@ impl Composer {
                     .collect();
                 tags.push(Tag::custom(
                     "polltype",
-                    [if self.poll_multi { "multiplechoice" } else { "singlechoice" }],
+                    [if self.poll_multi {
+                        "multiplechoice"
+                    } else {
+                        "singlechoice"
+                    }],
                 ));
                 self.draft_event(Kind::Custom(1068), tags, &question)
             }
@@ -3053,11 +3077,7 @@ impl Composer {
                                     .text_color(rgb(theme::ink()))
                                     .child(name.clone()),
                             )
-                            .child(
-                                div()
-                                    .text_color(rgb(theme::muted()))
-                                    .child("· preview"),
-                            ),
+                            .child(div().text_color(rgb(theme::muted())).child("· preview")),
                     ),
             );
         // The media header title (the typed one; a blank title derives
@@ -3164,12 +3184,8 @@ impl Composer {
                 media::fetch(&self.core, url, cx.entity_id(), cx);
             }
         }
-        let mut grid = div()
-            .w_full()
-            .flex()
-            .flex_wrap()
-            .gap_2()
-            .children(self.attachments.iter().enumerate().map(|(i, a)| {
+        let mut grid = div().w_full().flex().flex_wrap().gap_2().children(
+            self.attachments.iter().enumerate().map(|(i, a)| {
                 let att_id = a.id;
                 let has_alt = a.alt.is_some();
                 let open = alt_edit == Some(att_id);
@@ -3215,21 +3231,24 @@ impl Composer {
                                 // CDN copy (restored) through the cache; a
                                 // still-uploading tile says so instead of
                                 // staring at an ellipsis.
-                                None => match a.poster().or_else(|| a.url()).and_then(|u| snap.png(&u)) {
-                                    Some(png) => img(png)
-                                        .size_full()
-                                        .object_fit(gpui::ObjectFit::Cover)
-                                        .into_any_element(),
-                                    None => div()
-                                        .text_size(px(theme::T_SMALL))
-                                        .text_color(rgb(theme::muted()))
-                                        .child(if a.bytes.is_some() && a.imeta.is_none() {
-                                            "uploading…"
-                                        } else {
-                                            "…"
-                                        })
-                                        .into_any_element(),
-                                },
+                                None => {
+                                    match a.poster().or_else(|| a.url()).and_then(|u| snap.png(&u))
+                                    {
+                                        Some(png) => img(png)
+                                            .size_full()
+                                            .object_fit(gpui::ObjectFit::Cover)
+                                            .into_any_element(),
+                                        None => div()
+                                            .text_size(px(theme::T_SMALL))
+                                            .text_color(rgb(theme::muted()))
+                                            .child(if a.bytes.is_some() && a.imeta.is_none() {
+                                                "uploading…"
+                                            } else {
+                                                "…"
+                                            })
+                                            .into_any_element(),
+                                    }
+                                }
                             }),
                     )
                     .child(
@@ -3270,7 +3289,8 @@ impl Composer {
                                     }),
                             ),
                     )
-            }));
+            }),
+        );
         // The one shared alt editor opens under the tile that asked for
         // it (research §4.2's editor dialog, inline — no modal needed).
         if let Some(id) = alt_edit {
