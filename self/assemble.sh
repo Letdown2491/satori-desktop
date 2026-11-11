@@ -6,6 +6,26 @@
 # libraries the binary links (wayland, xkbcommon-x11, fontconfig) and,
 # via the runtime's GStreamer, the demuxers and codecs the deb/rpm name
 # as Recommends — the sandbox sees no host plugins either way.
+#
+# GLIBC CONTRACT: the binary must be built against a glibc no newer
+# than the runtime's (org.freedesktop.Platform 25.08: 2.42). The
+# release CI builds on ubuntu-24.04 (2.39), which clears it; the local
+# satori-dev container is Fedora 44 (2.43) and its binary dies in the
+# sandbox with "version `GLIBC_2.43' not found". Local flatpak builds:
+#
+#   podman run --rm -v satori-cargo:/usr/local/cargo \
+#     -v "$HOME/.rustup:/mnt/rustup:ro,Z" -v "$HOME/.cargo/bin:/opt/rustbin:ro,Z" \
+#     -v "$PWD:/srv:Z" -w /srv ubuntu:24.04 bash -c '
+#       export RUSTUP_HOME=/mnt/rustup PATH=/opt/rustbin:$PATH
+#       apt-get update -qq && apt-get install -y -qq pkg-config \
+#         libfontconfig-dev libfreetype-dev libxkbcommon-dev \
+#         libxkbcommon-x11-dev libwayland-dev libxcb1-dev libvulkan-dev \
+#         libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev clang git
+#       cargo build --release --locked -p satori-gpui'
+#   ./self/assemble.sh
+#   flatpak build-export repo self/tree stable
+#   flatpak build-bundle repo bundles/satori-<ver>-$(uname -m).flatpak \
+#     io.github.Letdown2491.satori stable
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

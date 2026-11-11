@@ -29,6 +29,12 @@
   <launchable type="desktop-id">io.github.Letdown2491.satori.desktop</launchable>
   <url type="homepage">https://github.com/Letdown2491/satori-desktop</url>
   <releases>
+    <release version="0.5.0" date="2026-11-11">
+      <description>
+        <p>An iteration release with no theme: the composer grew a Video tab (a deliberate video post is its own NIP-71 event, instant or scheduled, videos only), thread notes now carry the full action row the timeline has (reactions, repost, quote, reply, delete, zap), and the gallery carousel's arrows and position dots page the gallery instead of opening the thread.</p>
+        <p>Under the hood: paste-time screening refuses wallet and bunker URIs whose relays point at private addresses, the publish path refuses expired events and records its own deletions as tombstones at the door, and dependencies are current (cargo audit reports zero vulnerabilities). A CI workflow now gates every pull request.</p>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-11-08">
       <description>
         <p>The media and long-form release: attachments publish right (a note with an image is a kind-1 note with imeta; replies keep their thread), the Photo tab returns as its own picture-post surface, a full article composer (title, summary, cover upload, topics, markdown body) with strikethrough, task lists and tables in the reader, and hardenened media fetching (DNS-rebinding-safe resolution, search only asks search-capable relays).</p>
