@@ -114,6 +114,14 @@ pub struct Feed {
     pub(crate) deep: bool,
     /// j/k's row cursor (key_nav); the scroll handler re-anchors it.
     cursor: usize,
+    /// The visible window's media urls, pinned against eviction while
+    /// they are on screen (the rail avatar's discipline): an idle pane's
+    /// renders stop, and only renders touch — so past the grace window
+    /// foreign landings evict exactly the images the reader is looking
+    /// at, the articles-feed flash (a cover blanks and re-decodes back).
+    /// Released wholesale when the window moves (search.rs's People-row
+    /// discipline), so the set stays bounded by what is on screen.
+    pinned: Vec<String>,
     /// WS2 viewport debounce: bumps on every scroll/nav/landing; the
     /// spawned push only fires if the pulse_id is still current (fast
     /// scrolling coalesces into ONE core.set_viewport per settle).
@@ -204,6 +212,7 @@ impl Feed {
             // j/k's row cursor (feed.rs key_nav) — re-anchored by every
             // scroll event, so mouse and keys never disagree for long.
             cursor: 0,
+            pinned: vec![],
             viewport_gen: 0,
             deep: false,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
@@ -235,6 +244,9 @@ impl Feed {
                     // WS2: the visible window moved — re-scope the engagement
                     // subscription (debounced in viewport_pulse).
                     feed.viewport_pulse(cx);
+                    // The window moved: pin its media, release the old
+                    // window's (the idle-pane flash fix).
+                    feed.pin_window(cx);
                 });
             });
         // Live push: fresh follow posts bump the new-notes pill (the list
@@ -620,6 +632,30 @@ impl Feed {
         if !missing.is_empty() {
             let rx = self.core.ensure_profiles(missing);
             self.pump(rx, cx);
+        }
+        // Fresh data: pin the visible window's media (the reader may be
+        // idle-staring at it for minutes; the grace window cannot cover
+        // an idle pane — only renders touch).
+        self.pin_window(cx);
+    }
+
+    /// Pin the visible window's media urls, release the previous
+    /// window's. Called when the window moves (the list's scroll stream)
+    /// and when data lands (absorb) — the two moments the on-screen set
+    /// can change.
+    fn pin_window(&mut self, cx: &mut Context<Self>) {
+        let start = self.cursor.min(self.notes.len());
+        // Before the first scroll event the end is still 0: pin the top
+        // rows (the list reports the true range once the wheel moves).
+        let end = self.last_visible_end.max(start + 8).min(self.notes.len());
+        let mut urls: Vec<String> = Vec::new();
+        for note in &self.notes[start..end] {
+            urls.extend(content::media_urls(note));
+        }
+        media::unpin(&self.pinned, cx);
+        self.pinned = urls;
+        for url in &self.pinned {
+            media::pin(url, cx);
         }
     }
 

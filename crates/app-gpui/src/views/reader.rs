@@ -27,6 +27,13 @@ pub struct ArticleView {
     data: article::ArticleData,
     profiles: HashMap<String, Profile>,
     list: ListState,
+    /// This render's media urls, pinned against eviction (media.rs's
+    /// idle-pane flash): a long read outlives the grace window — renders
+    /// stop while the reader sits on the article, so foreign landings
+    /// would evict exactly the images on screen. Released wholesale on
+    /// the next render; the set is fixed per article, so after the first
+    /// render every pin is a no-op.
+    pinned: Vec<String>,
 }
 
 impl EventEmitter<Nav> for ArticleView {}
@@ -48,6 +55,7 @@ impl ArticleView {
             data,
             profiles: HashMap::new(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
+            pinned: vec![],
         };
         // Mentions in the body resolve to @names, same as the feed and
         // thread panes (TODO(port): content.ts mentionPubkeys) — and the
@@ -479,6 +487,34 @@ impl Render for ArticleView {
             if let markdown::Block::Image { url } = block {
                 media::fetch(&self.core, url.clone(), cx.entity_id(), cx);
             }
+        }
+        // The long-read flash (media.rs's idle-pane eviction): a reader
+        // sits minutes on one article — renders stop, the grace window
+        // expires, and foreign landings evict exactly the images on
+        // screen. Pin this render's set, release the previous one's
+        // (the feed's window discipline): the set is fixed per article,
+        // so after the first render every pin is a no-op.
+        let mut painted: Vec<String> = content::media_urls_cached(&self.ev)
+            .iter()
+            .cloned()
+            .collect();
+        if let Some(c) = &cover
+            && !c.is_empty()
+            && !painted.contains(c)
+        {
+            painted.push(c.clone());
+        }
+        for block in &blocks {
+            if let markdown::Block::Image { url } = block
+                && !url.is_empty()
+                && !painted.contains(url)
+            {
+                painted.push(url.clone());
+            }
+        }        media::unpin(&self.pinned, cx);
+        self.pinned = painted;
+        for url in &self.pinned {
+            media::pin(url, cx);
         }
         // Mode-aware stamp; ensure refines Block mode from the bridge
         // (render-path spawns are silent no-ops when cached — media.rs's

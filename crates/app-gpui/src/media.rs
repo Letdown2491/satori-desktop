@@ -914,6 +914,35 @@ mod tests {
         );
     }
 
+    /// The articles-feed flash: a VISIBLE cover whose pane idles — GPUI
+    /// renders only on events, and only renders touch — ages past the
+    /// grace while foreign landings (avatars' originals, other panes'
+    /// covers) keep the big class over budget. Every landing then evicts
+    /// the on-screen cover (remove_asset: a multi-frame blank), the
+    /// pane's next render re-fetches it, and it flashes back. The rail
+    /// avatar got `pin` for exactly this freeze (its touch freezes while
+    /// the shell idles); a feed row's media has the same freeze and the
+    /// same protection: the feed pins its visible window's media and
+    /// releases the previous window's.
+    #[test]
+    fn an_idle_panes_visible_cover_survives_foreign_landings() {
+        let cache = Cache::default();
+        // The cover the reader is looking at, last touched by a render
+        // two minutes ago; the feed pins what it paints.
+        insert(&cache, "cover", 3000, 3000, EVICT_GRACE + Duration::from_secs(1));
+        cache.pinned.borrow_mut().insert("cover".to_string());
+        // Foreign landings: a burst of fresh bigs over the budget.
+        for i in 0..5 {
+            insert(&cache, &format!("f{i}"), 3000, 3000, Duration::from_secs(1));
+        } // 216MB > 96MB
+        let dropped = cache.evict();
+        assert!(!dropped.is_empty(), "pressure must still evict something");
+        assert!(
+            cache.map.borrow().contains_key("cover"),
+            "the on-screen cover must not be the victim"
+        );
+    }
+
     /// The notifications-page flicker regression: photo pressure must
     /// never evict avatars. Thirty 128px thumbs (the rail avatar's shape,
     /// stale — an idle pane's touches are old) plus stale bigs over the
