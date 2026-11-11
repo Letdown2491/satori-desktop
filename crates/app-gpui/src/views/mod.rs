@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod cards;
 pub mod composer;
 pub mod content;

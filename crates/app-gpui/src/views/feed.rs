@@ -11,7 +11,7 @@ use std::{
 };
 
 use gpui::{
-    div, list, prelude::*, px, relative, rgb, AnimationExt, Context, Entity, EventEmitter,
+    div, list, prelude::*, px, relative, rgb, Context, Entity, EventEmitter,
     FontWeight, ListAlignment, ListOffset, ListScrollEvent, ListState, Render, SharedString,
     Window, Div,
 };
@@ -22,8 +22,8 @@ use satori_core::wallet::{Status, WalletEvent};
 
 use crate::prefs;
 
-use crate::{icons, media, theme};
-use super::{content, nav::Nav, cards, states};
+use crate::{media, theme};
+use super::{actions, content, nav::Nav, cards, states};
 
 /// Which surface a feed pane carries: the timeline (the visible catalog),
 /// the articles shelf (kind 30023 from the same follows), or a hashtag
@@ -1039,8 +1039,22 @@ impl Drop for Feed {
     }
 }
 
-/// How long a bolt press reads as "deliberate" (the sheet, not the tap).
-const ZAP_HOLD: std::time::Duration = std::time::Duration::from_millis(500);
+/// The row's toggles land here (actions.rs): Feed's optimistic mirrors ARE
+/// the implementation the timeline has always had — the trait just names it.
+impl actions::ActionHost for Feed {
+    fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        self.toggle_like(ev, cx)
+    }
+    fn toggle_repost(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        self.toggle_repost(ev, cx)
+    }
+    fn toggle_bookmark(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        self.toggle_bookmark(ev, cx)
+    }
+    fn zap_tap(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        self.zap_tap(ev, cx)
+    }
+}
 
 /// The chip's label — the count, capped at 99+ (a four-digit count would
 /// set the chip's width, and nobody reads the tail of a stampede). What
@@ -1099,20 +1113,8 @@ fn note_card(
     let zapping = zap_pending.contains(&id);
     let ev_for_open = ev.clone();
     let ev_for_profile = ev.clone();
-    let ev_for_like = ev.clone();
-    let ev_for_bookmark = ev.clone();
-    let ev_for_reply = ev.clone();
-    let ev_for_repost = ev.clone();
-    let ev_for_quote = ev.clone();
-    let ev_for_zap = ev.clone();
     let handle_open = handle.clone();
     let handle_profile = handle.clone();
-    let handle_like = handle.clone();
-    let handle_bookmark = handle.clone();
-    let handle_reply = handle.clone();
-    let handle_repost = handle.clone();
-    let handle_quote = handle.clone();
-    let handle_zap = handle.clone();
 
     // No card box: posts sit directly on the washi, separated by whitespace
     // alone (sumi-e — the empty space carries the composition).
@@ -1198,161 +1200,20 @@ fn note_card(
                     cards,
                 )),
         )
-        .child(
-            // §2.1: body→actions sits at S3 (8px) — the extra S1 on top of
-            // the card's S2 gap.
-            div()
-                .flex()
-                .gap_5()
-                .items_center()
-                .mt_1()
-                // The reply door (thread.rs reply-to): opens the composer
-                // carrying this note as the parent.
-                .child(
-                    div()
-                        .id(SharedString::from(format!("reply-{idx}")))
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| {
-                            let ev = ev_for_reply.clone();
-                            handle_reply.update(cx, |_, cx| {
-                                cx.emit(Nav::OpenComposer(Some((*ev).clone())));
-                            });
-                        })
-                        .hover(|s| s.bg(theme::hover_wash()))
-                        .child(icons::bubble_icon(theme::muted())),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("like-{idx}")))
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| {
-                            let ev = ev_for_like.clone();
-                            handle_like.update(cx, |feed, cx| feed.toggle_like(&ev, cx));
-                        })
-                        .hover(|s| s.bg(theme::hover_wash()))
-                        .child(icons::heart_icon(if engaged {
-                            theme::vermilion()
-                        } else {
-                            theme::muted()
-                        })),
-                )
-                // The bolt (NIP-57, D20): tap = 21 sats, no dialog; hold
-                // (~500ms) or right-click = the amount sheet. No wallet
-                // behind the tap → the dim glyph opens the wallet pane.
-                // States: dim (no wallet) / muted (idle) / amber breathing
-                // (in flight) / vermilion (settled).
-                .child({
-                    let color = if zapping {
-                        theme::warn()
-                    } else if zapped {
-                        theme::vermilion()
-                    } else if !wallet_ready {
-                        theme::hairline()
-                    } else {
-                        theme::muted()
-                    };
-                    let start = std::rc::Rc::new(std::cell::Cell::new(
-                        Option::<std::time::Instant>::None,
-                    ));
-                    let bolt = div()
-                        .id(SharedString::from(format!("zap-{idx}")))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::hover_wash()))
-                        // Right-click opens the sheet at once.
-                        .on_mouse_down(gpui::MouseButton::Right, {
-                            let ev = ev_for_zap.clone();
-                            let handle = handle_zap.clone();
-                            move |_, _, cx| {
-                                handle.update(cx, |_, cx| {
-                                    cx.emit(Nav::OpenZapSheet((*ev).clone()));
-                                });
-                            }
-                        })
-                        // Left: remember when the press began; the release
-                        // decides tap vs hold (no timer machinery, the
-                        // decision is honest at release).
-                        .on_mouse_down(gpui::MouseButton::Left, {
-                            let start = start.clone();
-                            move |_, _, _| start.set(Some(std::time::Instant::now()))
-                        })
-                        .on_mouse_up(gpui::MouseButton::Left, {
-                            let start = start.clone();
-                            let ev = ev_for_zap.clone();
-                            let handle = handle_zap.clone();
-                            move |_, _, cx| {
-                                let Some(t0) = start.get() else { return };
-                                start.set(None);
-                                let held = t0.elapsed() >= ZAP_HOLD;
-                                handle.update(cx, |feed, cx| {
-                                    if held {
-                                        cx.emit(Nav::OpenZapSheet((*ev).clone()));
-                                    } else {
-                                        feed.zap_tap(&ev, cx);
-                                    }
-                                });
-                            }
-                        })
-                        .child(icons::bolt_icon(color));
-                    // In flight and motion allowed: breathe (a slow opacity
-                    // triangle — payment pending, nothing more).
-                    if zapping && !reduced_motion {
-                        bolt.with_animation(
-                            SharedString::from(format!("zap-pulse-{idx}")),
-                            gpui::Animation::new(std::time::Duration::from_millis(900)).repeat(),
-                            |el, delta| el.opacity(0.55 - 0.25 * (2.0 * delta - 1.0).abs()),
-                        )
-                        .into_any_element()
-                    } else if zapping {
-                        // Reduced motion: a steady mid-amber, no pulsing.
-                        div().opacity(0.7).child(bolt).into_any_element()
-                    } else {
-                        bolt.into_any_element()
-                    }
-                })
-                .child(
-                    div()
-                        .id(SharedString::from(format!("repost-{idx}")))
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| {
-                            let ev = ev_for_repost.clone();
-                            handle_repost.update(cx, |feed, cx| feed.toggle_repost(&ev, cx));
-                        })
-                        .hover(|s| s.bg(theme::hover_wash()))
-                        .child(icons::repost_icon(if shared {
-                            theme::vermilion()
-                        } else {
-                            theme::muted()
-                        })),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("quote-{idx}")))
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| {
-                            let ev = ev_for_quote.clone();
-                            handle_quote.update(cx, |_, cx| {
-                                cx.emit(Nav::OpenQuote((*ev).clone()));
-                            });
-                        })
-                        .hover(|s| s.bg(theme::hover_wash()))
-                        .child(icons::quote_icon(theme::muted())),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("bookmark-{idx}")))
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| {
-                            let ev = ev_for_bookmark.clone();
-                            handle_bookmark.update(cx, |feed, cx| feed.toggle_bookmark(&ev, cx));
-                        })
-                        .hover(|s| s.bg(theme::hover_wash()))
-                        .child(icons::bookmark_icon(if saved {
-                            theme::vermilion()
-                        } else {
-                            theme::muted()
-                        })),
-                ),
-        )
+        .child(actions::action_row(
+            &id,
+            &ev,
+            actions::ActionState {
+                liked: engaged,
+                reposted: shared,
+                bookmarked: saved,
+                zapped,
+                zapping,
+                wallet_ready,
+                reduced_motion,
+            },
+            handle,
+        ))
 }
 
 impl Render for Feed {

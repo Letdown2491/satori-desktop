@@ -16,11 +16,14 @@ use gpui::{
     ListState, Render, SharedString, Window,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile};
+use satori_core::manager::{
+    Core, FeedEvent, FeedRx, ParentNote, Profile, PublishEvent,
+};
+use satori_core::wallet::{Status, WalletEvent};
 use satori_core::wot::Verdict;
 
-use crate::{icons, media, theme};
-use super::{content, nav::Nav, states};
+use crate::{media, prefs, theme};
+use super::{actions, content, nav::Nav, states};
 
 pub struct ThreadView {
     core: Arc<Core>,
@@ -44,15 +47,126 @@ pub struct ThreadView {
     parents: HashMap<String, ParentNote>,
     parents_asked: HashSet<String>,
     list: ListState,
+    /// The action row's mirrors (actions.rs): loaded from core's persisted
+    /// engagement sets at construction, kept optimistic per toggle.
+    liked: HashSet<String>,
+    reposted: HashSet<String>,
+    bookmarked: HashSet<String>,
+    zapped: HashSet<String>,
+    /// Session zap-in-flight set; the wallet broadcast clears it.
+    zap_pending: HashSet<String>,
+    wallet_ready: bool,
 }
 
 impl EventEmitter<Nav> for ThreadView {}
+
+/// The thread's toggles (actions.rs): the optimistic-mirror discipline —
+/// flip the glyph now, reconcile against the publish stream later (feed.rs's
+/// pattern; the mirrors live on the view, the publish rides core's commit()).
+impl actions::ActionHost for ThreadView {
+    /// Optimistic like: mutate state first, reconcile against core's publish
+    /// events later (§1.2).
+    fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        let id = ev.id.to_string();
+        if !self.liked.insert(id) {
+            return;
+        }
+        let mut rx = self.core.react(ev);
+        cx.spawn(async move |_, _| {
+            while rx.recv().await.is_some() {}
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Optimistic repost (NIP-18 kind 6): the glyph flips vermilion now; a
+    /// failure — or an undo — rolls it back.
+    fn toggle_repost(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        let id = ev.id.to_string();
+        if !self.reposted.insert(id.clone()) {
+            return;
+        }
+        let mut rx = self.core.repost(ev);
+        cx.spawn(async move |this, cx| {
+            while let Some(pv) = rx.recv().await {
+                match pv {
+                    PublishEvent::Failed { .. } | PublishEvent::Undone { .. } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.reposted.remove(&id);
+                            this.status = "repost didn't go through, try again".into();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Bookmark toggle (D38): the star fills for either list (private 10003 /
+    /// public 30001 — the settings pref picks which one a star WRITES); a
+    /// second click unbookmarks through the RMW that clears both.
+    fn toggle_bookmark(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        let id = ev.id.to_string();
+        let ev_id = ev.id;
+        let adding = self.bookmarked.insert(id.clone());
+        if !adding {
+            self.bookmarked.remove(&id);
+        }
+        // The scope read rides the click (feed.rs's comment stands: a
+        // mid-session pref flip applies to the NEXT star).
+        let public = prefs::get_bool("bookmarkPublic");
+        let mut rx = if adding {
+            self.core.bookmark(ev, public)
+        } else {
+            self.core.unbookmark(ev_id)
+        };
+        cx.spawn(async move |this, cx| {
+            while let Some(pv) = rx.recv().await {
+                if let PublishEvent::Failed { .. } = pv {
+                    let _ = this.update(cx, |this, cx| {
+                        if adding {
+                            this.bookmarked.remove(&id);
+                        } else {
+                            this.bookmarked.insert(id.clone());
+                        }
+                        this.status = "bookmark didn't go through, try again".into();
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// One zap in flight per note (the Feather rule; core enforces too).
+    fn zap_tap(&mut self, ev: &Event, cx: &mut Context<Self>) {
+        if !self.wallet_ready {
+            cx.emit(Nav::OpenWallet);
+            return;
+        }
+        if !self.zap_pending.insert(ev.id.to_string()) {
+            return;
+        }
+        self.core.zap(ev.clone(), super::zap::TAP_SATS * 1000);
+        cx.notify();
+    }
+}
 
 impl ThreadView {
     pub fn new(core: Arc<Core>, id: EventId, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
         crate::video::watch(cx); // repaint on player open/toggle/close
+        let liked = core.liked_set();
+        let reposted = core.reposted_set();
+        let bookmarked = core.bookmarked_set();
+        let zapped = core.zapped_set();
+        let wallet_ready = core.wallet().is_ready();
         let view = Self {
             core,
             anchor: None,
@@ -66,11 +180,61 @@ impl ThreadView {
             parents: HashMap::new(),
             parents_asked: HashSet::new(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
+            liked,
+            reposted,
+            bookmarked,
+            zapped,
+            zap_pending: HashSet::new(),
+            wallet_ready,
         };
         // The anchor rides in with its author's profile; replies follow.
         view.pump(view.core.event_by_id(id, Vec::new(), None), cx);
         view.pump(view.core.thread(id), cx);
+        // The wallet broadcast (D20): the thread's bolts follow every zap,
+        // theirs or the sheet's, wherever it started.
+        let this = cx.entity().downgrade();
+        let mut wallet_rx = view.core.subscribe_wallet();
+        cx.spawn(async move |_, cx| {
+            loop {
+                match wallet_rx.recv().await {
+                    Ok(ev) => {
+                        let _ = this.update(cx, |view, cx| view.on_wallet(ev, cx));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(_) => continue, // lagged: the next event re-syncs
+                }
+            }
+        })
+        .detach();
         view
+    }
+
+    /// The wallet broadcast → glyph states + the quiet status whisper
+    /// (feed.rs's on_wallet, minus the Bookmarks row-drop: a thread never
+    /// IS a bookmark list).
+    fn on_wallet(&mut self, ev: WalletEvent, cx: &mut Context<Self>) {
+        match ev {
+            WalletEvent::Status(s) => {
+                self.wallet_ready = matches!(s, Status::Ready(_));
+            }
+            WalletEvent::ZapPaid { note, .. } => {
+                self.zap_pending.remove(&note);
+                self.zapped.insert(note);
+            }
+            WalletEvent::ZapUncertain { note, .. } => {
+                self.zap_pending.remove(&note);
+                self.status = "zap state unknown, check your wallet before retrying".into();
+            }
+            WalletEvent::ZapFailed { note, reason } => {
+                self.zap_pending.remove(&note);
+                self.status = format!("zap didn't go through: {reason}");
+            }
+            WalletEvent::ZapReceipt { note, .. } => {
+                self.zapped.insert(note);
+            }
+            WalletEvent::ConnectFailed(_) => {} // the wallet pane's concern
+        }
+        cx.notify();
     }
 
     fn pump(&self, mut rx: FeedRx, cx: &mut Context<Self>) {
@@ -401,6 +565,7 @@ fn reply_row(
     quotes: &content::Quotes,
     profiles: &HashMap<String, Profile>,
     time: String,
+    state: actions::ActionState,
     handle: Entity<ThreadView>,
 ) -> impl IntoElement {
     let picture = profiles
@@ -408,9 +573,7 @@ fn reply_row(
         .map(|p| p.picture.clone())
         .unwrap_or_default();
     let ev_for_click = ev.clone();
-    let ev_for_reply = ev.clone();
     let open_handle = handle.clone();
-    let reply_handle = handle.clone();
     let body_handle = handle.clone();
     // thread.rs comment-children: 20px for the first level, 14px deeper.
     let indent = if depth == 0 { 0.0 } else { 20.0 + 14.0 * (depth - 1) as f32 };
@@ -486,33 +649,12 @@ fn reply_row(
                     body_handle,
                 )),
         )
-        .child(
-            div()
-                .flex()
-                .gap_4()
-                .items_center()
-                .child(
-                    // D23's one-link-token rule: pressable = muted + underline
-                    // at rest, vermilion on hover (theme::pressable).
-                    theme::pressable(
-                        div()
-                            .id(SharedString::from(format!("reply-to-{idx}")))
-                            .cursor_pointer()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_size(px(theme::T_SMALL)),
-                    )
-                    .on_click(move |_, _, cx| {
-                        let ev = ev_for_reply.clone();
-                        reply_handle.update(cx, |_view, cx| {
-                            cx.emit(Nav::OpenComposer(Some(ev)));
-                        });
-                    })
-                    .child(icons::bubble_icon(theme::muted()))
-                    .child("Reply"),
-                ),
-        )
+        .child(actions::action_row(
+            &ev.id.to_string(),
+            &std::sync::Arc::new(ev.clone()),
+            state,
+            handle,
+        ))
 }
 
 impl Render for ThreadView {
@@ -544,6 +686,25 @@ impl Render for ThreadView {
         let anchor = self.anchor.clone();
         let anchor_handle = handle.clone();
         let reply_all_handle = handle.clone();
+        // The action row's glyph states, snapshotted once per render
+        // (mirrors mutated optimistically by the ActionHost impl).
+        let (liked, reposted, bookmarked) = (
+            self.liked.clone(),
+            self.reposted.clone(),
+            self.bookmarked.clone(),
+        );
+        let (zapped, zap_pending) = (self.zapped.clone(), self.zap_pending.clone());
+        let wallet_ready = self.wallet_ready;
+        let reduced_motion = actions::reduced_motion(cx);
+        let note_state = move |note: &Event| actions::ActionState {
+            liked: liked.contains(&note.id.to_string()),
+            reposted: reposted.contains(&note.id.to_string()),
+            bookmarked: bookmarked.contains(&note.id.to_string()),
+            zapped: zapped.contains(&note.id.to_string()),
+            zapping: zap_pending.contains(&note.id.to_string()),
+            wallet_ready,
+            reduced_motion,
+        };
         // The WS3 collapse line's click target (the list closure moves its
         // own clone; `handle` stays for the anchor above).
         let collapse_handle = handle.clone();
@@ -591,7 +752,7 @@ impl Render for ThreadView {
                     .items_center()
                     .child(match anchor {
                         Some(note) => {
-                            let anchor_reply = note.clone();
+                            let anchor_ev = std::sync::Arc::new(note.clone());
                             div()
                                 .w_full()
                                 .max_w(px(content::COL_W))
@@ -637,32 +798,12 @@ impl Render for ThreadView {
                                     },
                                     handle.clone(),
                                 ))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .gap_5()
-                                        .items_center()
-                                        .child(
-                                            // D23's one-link-token rule: pressable.
-                                            theme::pressable(
-                                                div()
-                                                    .id("anchor-reply")
-                                                    .cursor_pointer()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1()
-                                                    .text_size(px(theme::T_SMALL)),
-                                            )
-                                            .on_click(move |_, _, cx| {
-                                                let ev = anchor_reply.clone();
-                                                reply_all_handle.update(cx, |_view, cx| {
-                                                    cx.emit(Nav::OpenComposer(Some(ev)));
-                                                });
-                                            })
-                                            .child(icons::bubble_icon(theme::muted()))
-                                            .child("Reply"),
-                                        ),
-                                )
+                                .child(actions::action_row(
+                                    &note.id.to_string(),
+                                    &anchor_ev,
+                                    note_state(&note),
+                                    reply_all_handle,
+                                ))
                                 .into_any_element()
                         }
                         None => div()
@@ -783,6 +924,7 @@ impl Render for ThreadView {
                                                 &quotes,
                                                 &profiles,
                                                 time,
+                                                note_state(ev),
                                                 anchor_handle.clone(),
                                             )
                                             .into_any_element()
