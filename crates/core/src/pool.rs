@@ -10,10 +10,11 @@
 //!   Seen-on memory (seen.rs) folds learned relays into single-event
 //!   fetches (`get_from`, the resolveEvent shape) and the `e`/`q` tag
 //!   hints on write paths (actions.ts addTag).
-//! - WRITE: own NIP-65 write relays, falling back to indexers.
-//! - TODO(port): NIP-09 tombstones + NIP-40 expiry at the chokepoint (M2)
-//!   — deletions are filtered at the manager's render filter today, not
-//!   here.
+//! - WRITE: own NIP-65 write relays, falling back to indexers. The
+//!   publish door gates too (WS2, issue #4): NIP-40-expired events are
+//!   refused (the outbox queue must not retry a corpse) and outgoing
+//!   kind:5s record their pinned tombstones at the door; reads filter
+//!   kind:5 + expired + author-deleted at consume_and_filter (D34).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
@@ -743,6 +744,11 @@ impl Pool {
         } else {
             write_relays.to_vec()
         };
+        // WS2 (issue #4): the publish chokepoint — the one door every
+        // outgoing event walks through, the mirror of consume_and_filter.
+        if let Some(report) = publish_gate(event, &targets) {
+            return report;
+        }
         // D36: WRITE relays join at publish time — this was the documented
         // contract, but nothing registered them anymore and nostr-sdk 0.45
         // gates every send on per-relay capability ("write actions are
@@ -833,6 +839,29 @@ impl PublishReport {
     }
 }
 
+/// The publish gate (WS2, issue #4): the outgoing half of the chokepoint.
+/// NIP-40: an expired event is REFUSED — the relays would reject it and
+/// D36's outbox queue would otherwise retry a corpse forever; the report
+/// marks every target failed. NIP-09: a kind:5 leaving through this door
+/// records its tombstone HERE, pinned (we signed it), so every delete
+/// path gets the gate for free (manager.rs's own pin stays: idempotent).
+/// None = the event may fan out.
+pub(crate) fn publish_gate(event: &Event, targets: &[String]) -> Option<PublishReport> {
+    if nip40::is_expired(event) {
+        return Some(PublishReport {
+            ok: Vec::new(),
+            failed: targets
+                .iter()
+                .map(|t| (t.clone(), "expired (NIP-40)".into()))
+                .collect(),
+        });
+    }
+    if u16::from(event.kind) == 5 {
+        deletions::record(event, true);
+    }
+    None
+}
+
 /// Relay-supplied text is hostile input: strip control chars (a message
 /// carrying `\n` could forge log lines) and cap the length.
 fn clean_reason(s: &str) -> String {
@@ -845,6 +874,48 @@ mod tests {
 
     /// Any 32-byte value; a throwaway test key, never an identity.
     const TEST_HEX: &str = "e1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554";
+
+    /// WS2 (issue #4): the publish gate. An expired event is refused on
+    /// every target (the outbox must not queue a corpse); a live one
+    /// fans out; a kind:5 records its pinned tombstone at the door.
+    #[test]
+    fn publish_gate_refuses_expired_and_records_own_deletions() {
+        let keys = Keys::generate();
+        let targets = vec!["wss://relay.example".to_string()];
+
+        // A live note fans out.
+        let note = EventBuilder::new(Kind::TextNote, "still fresh")
+            .finalize(&keys)
+            .unwrap();
+        assert!(publish_gate(&note, &targets).is_none());
+
+        // An expired event is refused on every target.
+        let past = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .saturating_sub(60);
+        let expired = EventBuilder::new(Kind::TextNote, "ghost")
+            .tags([Tag::custom("expiration", [past.to_string()])])
+            .finalize(&keys)
+            .unwrap();
+        let report = publish_gate(&expired, &targets).unwrap();
+        assert!(!report.accepted());
+        assert_eq!(report.failed.len(), targets.len());
+
+        // An outgoing kind:5 records a PINNED tombstone (ours, we signed
+        // it) — the gate the delete flow's own record used to be alone in.
+        let target = EventBuilder::new(Kind::TextNote, "to be deleted")
+            .finalize(&keys)
+            .unwrap();
+        assert!(!deletions::is_deleted(&target));
+        let del = EventBuilder::new(Kind::EventDeletion, "")
+            .tags([Tag::event(target.id)])
+            .finalize(&keys)
+            .unwrap();
+        assert!(publish_gate(&del, &targets).is_none());
+        assert!(deletions::is_deleted(&target));
+    }
 
     fn auth() -> PoolAuthenticator {
         PoolAuthenticator(PoolIdentity::default())
