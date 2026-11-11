@@ -2,8 +2,9 @@
 //!
 //! TODO(port): crates/app/src/composer.rs (Adw dialog) — P2. Same write path:
 //! attachments upload through `blossom_upload` one by one, then the note goes
-//! out via `post_note` (text/reply) or `post_picture` (kind 20 with imetas),
-//! pops on Held — the countdown toast lives in the shell. Draft semantics
+//! out via `post_note` (text/reply), `post_picture` (kind 20 with imetas),
+//! or `post_video` (NIP-71 kind 22, #18), pops on Held — the countdown toast
+//! lives in the shell. Draft semantics
 //! match the GTK composer: a top-level compose restores whatever was stashed,
 //! and closing with un-published text stashes it again (replies get neither).
 
@@ -177,15 +178,17 @@ impl Attachment {
     }
 }
 
-/// The compose tab: a note (kind 1), a photo (NIP-68, kind 20), a poll
-/// (NIP-88, kind 1068), or an article (NIP-23, kind 30023) — the web
-/// app's Note · Picture · Poll · Article selector. Replies carry no
-/// tabs — they're notes/comments by nature.
+/// The compose tab: a note (kind 1), a photo (NIP-68, kind 20), a video
+/// (NIP-71, kind 22), a poll (NIP-88, kind 1068), or an article (NIP-23,
+/// kind 30023) — the web app's Note · Picture · Poll · Article selector
+/// with the Video sibling (#18). Replies carry no tabs — they're
+/// notes/comments by nature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) enum Tab {
     #[default]
     Note,
     Photo,
+    Video,
     Poll,
     Article,
 }
@@ -372,7 +375,7 @@ impl Composer {
                     art_cover.update(cx, |i, cx| i.set_text(&restorable.cover, cx));
                     art_topics.update(cx, |i, cx| i.set_text(&restorable.topics, cx));
                 }
-                Tab::Photo => {
+                Tab::Photo | Tab::Video => {
                     photo_title.update(cx, |i, cx| i.set_text(&restorable.title, cx));
                 }
                 Tab::Poll => {
@@ -847,7 +850,7 @@ impl Composer {
         let imetas: Vec<Vec<String>> = self.ready_imetas();
         let core = self.core.clone();
         cx.notify();
-        let mut rx = core.schedule_note(String::new(), text, reply, mentions, quote, imetas, false, at);
+        let mut rx = core.schedule_note(String::new(), text, reply, mentions, quote, imetas, false, false, at);
         cx.spawn(async move |this, cx| {
             // Every ScheduleEvent settles the pane (Scheduled pops, Failed
             // stays with a word) — one receipt, no pump.
@@ -1216,7 +1219,134 @@ impl Composer {
         let title = self.photo_title.read(cx).content.trim().to_string();
         let caption = self.input.read(cx).content.trim().to_string();
         let imetas = self.ready_imetas();
-        let mut rx = core.schedule_note(title, caption, None, vec![], None, imetas, true, at);
+        let mut rx = core.schedule_note(title, caption, None, vec![], None, imetas, true, false, at);
+        cx.spawn(async move |this, cx| {
+            if let Some(ev) = rx.recv().await {
+                match ev {
+                    satori_core::manager::ScheduleEvent::Scheduled { .. } => {
+                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                    }
+                    satori_core::manager::ScheduleEvent::Failed { error } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.posting = false;
+                            this.status = format!("couldn't schedule: {error}");
+                            cx.notify();
+                        });
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The video publish (NIP-71 kind 22, issue #18): the strip is the
+    /// video list, the buffer the caption, the title field the `title`
+    /// tag (blank derives from the caption's first line — video_tags'
+    /// rule). Videos only; a picture riding the strip is refused with the
+    /// way out (the NIP-68 guard's mirror). Top-level only. Pump mirrors
+    /// the photo's.
+    fn post_video(&mut self, cx: &mut Context<Self>) {
+        if self.attachments.is_empty() {
+            self.status = "a video post needs at least one video".into();
+            cx.notify();
+            return;
+        }
+        // NIP-71 spec guard: images ride a note or the photo tab.
+        if self.attachments.iter().any(|a| !a.is_video()) {
+            self.status =
+                "a video post takes videos; images ride a note or the photo tab (switch tabs to send them)"
+                    .into();
+            cx.notify();
+            return;
+        }
+        if self.attachments.iter().any(|a| a.imeta.is_none()) {
+            self.status = "waiting for the upload to finish…".into();
+            cx.notify();
+            return;
+        }
+        self.posting = true;
+        self.status.clear();
+        cx.notify();
+        let core = self.core.clone();
+        let title = self.photo_title.read(cx).content.trim().to_string();
+        let caption = self.input.read(cx).content.trim().to_string();
+        let imetas = self.ready_imetas();
+        let mut rx = core.post_video(title, caption, imetas, None);
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    PublishEvent::Held { .. } => {
+                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                        return;
+                    }
+                    PublishEvent::Undone { .. } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.posting = false;
+                            this.status = "undone, nothing was sent".into();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    PublishEvent::Committed { .. } => {
+                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                        return;
+                    }
+                    PublishEvent::Failed { error, .. } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.posting = false;
+                            this.status = format!("couldn't post: {error}");
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The scheduled video: schedule_note with video_post=true — core
+    /// signs the SAME kind-22 event an instant post makes, the sweep
+    /// fires it.
+    fn schedule_video(&mut self, cx: &mut Context<Self>) {
+        if self.posting {
+            return;
+        }
+        if self.attachments.is_empty() {
+            self.status = "a video post needs at least one video".into();
+            cx.notify();
+            return;
+        }
+        // Same NIP-71 guard as the instant path.
+        if self.attachments.iter().any(|a| !a.is_video()) {
+            self.status =
+                "a video post takes videos; images ride a note or the photo tab (switch tabs to send them)"
+                    .into();
+            cx.notify();
+            return;
+        }
+        if self.attachments.iter().any(|a| a.imeta.is_none()) {
+            self.status = "waiting for the upload to finish…".into();
+            cx.notify();
+            return;
+        }
+        let when_field = self.sched_at.read(cx).content.clone();
+        let Some(at) = Self::parse_schedule(&when_field) else {
+            self.status =
+                "when? enter a future date and time, YYYY-MM-DD HH:MM, at least a minute ahead"
+                    .into();
+            cx.notify();
+            return;
+        };
+        self.posting = true;
+        self.status.clear();
+        cx.notify();
+        let core = self.core.clone();
+        let title = self.photo_title.read(cx).content.trim().to_string();
+        let caption = self.input.read(cx).content.trim().to_string();
+        let imetas = self.ready_imetas();
+        let mut rx = core.schedule_note(title, caption, None, vec![], None, imetas, false, true, at);
         cx.spawn(async move |this, cx| {
             if let Some(ev) = rx.recv().await {
                 match ev {
@@ -1329,6 +1459,16 @@ impl Composer {
                 self.schedule_photo(cx);
             } else {
                 self.post_photo(cx);
+            }
+            return;
+        }
+        // The video tab publishes a NIP-71 kind 22 (issue #18): same shape,
+        // videos only.
+        if self.tab == Tab::Video {
+            if self.sched_on {
+                self.schedule_video(cx);
+            } else {
+                self.post_video(cx);
             }
             return;
         }
@@ -1531,7 +1671,7 @@ impl Composer {
             text: self.input.read(cx).content.clone(),
             attachments: self.ready_imetas(),
             title: match self.tab {
-                Tab::Photo => self.photo_title.read(cx).content.clone(),
+                Tab::Photo | Tab::Video => self.photo_title.read(cx).content.clone(),
                 Tab::Article => self.art_title.read(cx).content.clone(),
                 _ => String::new(),
             },
@@ -1621,7 +1761,9 @@ impl Focusable for Composer {
         match self.tab {
             Tab::Poll => self.poll_question.read(cx).focus_handle(cx),
             Tab::Article => self.art_title.read(cx).focus_handle(cx),
-            Tab::Photo => self.photo_title.read(cx).focus_handle(cx),
+            // Photo and Video share the field: the media title (NIP-68's
+            // gallery title, NIP-71's video title).
+            Tab::Photo | Tab::Video => self.photo_title.read(cx).focus_handle(cx),
             Tab::Note => self.focus.clone(),
         }
     }
@@ -1645,7 +1787,7 @@ impl Render for Composer {
                     .focus(&self.poll_question.read(cx).focus_handle(cx), cx),
                 Tab::Article => window
                     .focus(&self.art_title.read(cx).focus_handle(cx), cx),
-                Tab::Photo => window
+                Tab::Photo | Tab::Video => window
                     .focus(&self.photo_title.read(cx).focus_handle(cx), cx),
                 Tab::Note => window.focus(&self.focus, cx),
             }
@@ -1847,6 +1989,12 @@ impl Render for Composer {
                                 })),
                         )
                         .child(
+                            seg("tab-video", "Video", tab == Tab::Video)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_tab(Tab::Video, cx)
+                                })),
+                        )
+                        .child(
                             seg("tab-poll", "Poll", tab == Tab::Poll)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.set_tab(Tab::Poll, cx)
@@ -1895,9 +2043,10 @@ impl Render for Composer {
                         ),
                 )
             })
-            .when(tab == Tab::Photo, |d| {
-                // The NIP-68 field: the gallery's title. The caption is the
-                // buffer below; the attachments strip is the gallery.
+            .when(matches!(tab, Tab::Photo | Tab::Video), |d| {
+                // The media field: the gallery's title (NIP-68) or the
+                // video's title (NIP-71, #18). The caption is the buffer
+                // below; the attachments strip is the gallery/video list.
                 d.child(
                     div()
                         .rounded(px(theme::R_EMBED))
@@ -2330,7 +2479,7 @@ impl Render for Composer {
                         ),
                 )
             })
-            .when(matches!(tab, Tab::Note | Tab::Photo), |d| {
+            .when(matches!(tab, Tab::Note | Tab::Photo | Tab::Video), |d| {
                 d.child(self.attachment_row(cx))
             })
             .when(tab != Tab::Poll && sched_on, |d| {
@@ -2844,6 +2993,12 @@ impl Composer {
                 let tags = Core::picture_tags(&title, &caption, &imetas, None);
                 self.draft_event(Kind::Custom(20), tags, &caption)
             }
+            Tab::Video => {
+                let title = self.photo_title.read(cx).content.trim().to_string();
+                let caption = self.input.read(cx).content.clone();
+                let tags = Core::video_tags(&title, &caption, &imetas, None);
+                self.draft_event(Kind::Custom(22), tags, &caption)
+            }
             Tab::Poll => {
                 let question = self.poll_question.read(cx).content.trim().to_string();
                 let mut tags: Vec<Tag> = self
@@ -2905,9 +3060,10 @@ impl Composer {
                             ),
                     ),
             );
-        // The photo's header title (the typed one; a blank title derives
+        // The media header title (the typed one; a blank title derives
         // from the caption at publish — the preview shows what's typed).
-        if tab == Tab::Photo {
+        // Video's title display rides Photo's (#18: same field, same rule).
+        if matches!(tab, Tab::Photo | Tab::Video) {
             let title = self.photo_title.read(cx).content.trim().to_string();
             if !title.is_empty() {
                 card = card.child(

@@ -1697,7 +1697,7 @@ impl Core {
         // bunker transport's dials, outside the pool's screens — the same
         // ruleset screens them before the nostrconnect client is built.
         crate::net_guard::screen_bunker_uri(uri)
-            .map_err(|e| LoginError::InvalidBunkerUri(e))?;
+            .map_err(LoginError::InvalidBunkerUri)?;
 
         let parsed = NostrConnectUri::parse(uri.trim())
             .map_err(|e| LoginError::InvalidBunkerUri(e.to_string()))?;
@@ -4489,6 +4489,7 @@ impl Core {
         quote: Option<Event>,
         imetas: Vec<Vec<String>>,
         photo_post: bool,
+        video_post: bool,
         scheduled_at: u64,
     ) -> mpsc::UnboundedReceiver<ScheduleEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -4500,13 +4501,17 @@ impl Core {
                 // The composer's tab decides: a photo post schedules as the
                 // SAME kind-20 picture event an instant post makes
                 // (picture_tags' build — the composer's title rides, blank
-                // derives from the caption like the instant path); a note
-                // with attachments schedules as kind 1 + imeta (note_tags'
-                // build), matching the instant path's routing (issue #3
-                // WS1).
+                // derives from the caption like the instant path); a video
+                // post likewise rides NIP-71 kind 22 (video_tags, issue
+                // #18); a note with attachments schedules as kind 1 + imeta
+                // (note_tags' build), matching the instant path's routing
+                // (issue #3 WS1).
                 let (kind, content, tags) = if !imetas.is_empty() && photo_post {
                     let tags = Self::picture_tags(&title, &content, &imetas, None);
                     (Kind::Custom(20), content, tags)
+                } else if !imetas.is_empty() && video_post {
+                    let tags = Self::video_tags(&title, &content, &imetas, None);
+                    (Kind::Custom(22), content, tags)
                 } else {
                     let (content, tags) =
                         Self::note_tags(content, reply_to, mentions, quote, &imetas, me);
@@ -4766,6 +4771,93 @@ impl Core {
             }
         });
         rx
+    }
+
+    /// Post a NIP-71 video (kind 22, the general video; kind 21 is the
+    /// short-vertical sibling, not built here) — the Video tab's publish
+    /// (issue #18), the D49 routing discipline's deliberate-video twin of
+    /// the Photo tab's kind 20: a video POST is its own kind; a video
+    /// attached to a note stays kind 1 + imeta (issue #3 WS1). imeta shape
+    /// is the uploader's (url/m/dim/x + the D38 poster `image`).
+    pub fn post_video(
+        self: &Arc<Self>,
+        title: String,
+        content: String,
+        imeta: Vec<Vec<String>>,
+        content_warning: Option<String>,
+    ) -> PublishRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res = this.post_video_inner(&tx, title, content, imeta, content_warning).await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed { token: 0, error: e.to_string() });
+            }
+        });
+        rx
+    }
+
+    /// The NIP-71 kind-22 tag build, shared by the instant path and the
+    /// scheduled path (byte-identical, the picture_tags discipline) and by
+    /// the composer's preview. (pub: the composer's preview uses it.)
+    pub fn video_tags(
+        title: &str,
+        content: &str,
+        imetas: &[Vec<String>],
+        content_warning: Option<&str>,
+    ) -> Vec<Tag> {
+        // NIP-71: a `title` tag when there is one; a blank composer title
+        // derives from the content's first non-empty line (picture_tags'
+        // rule). Everything else — url/m/dim/x/image — rides the imeta.
+        let mut tags: Vec<Tag> = vec![Tag::custom(
+            "title",
+            [if title.trim().is_empty() {
+                first_caption_line(content)
+            } else {
+                title.trim().to_string()
+            }],
+        )];
+        if let Some(cw) = content_warning {
+            tags.push(Tag::custom("content-warning", [cw]));
+        }
+        for m in imetas {
+            if m.len() >= 2 && m[0] == "imeta" {
+                tags.push(Tag::custom("imeta", m[1..].iter()));
+            }
+        }
+        tags
+    }
+
+    async fn post_video_inner(
+        self: &Arc<Self>,
+        tx: &mpsc::UnboundedSender<PublishEvent>,
+        title: String,
+        content: String,
+        imeta: Vec<Vec<String>>,
+        content_warning: Option<String>,
+    ) -> Result<()> {
+        if imeta.is_empty() {
+            return Err(LoginError::Other("a video post needs at least one video".into()));
+        }
+        let active = self.active().await?;
+        let me = active.me();
+        let tags = Self::video_tags(&title, &content, &imeta, content_warning.as_deref());
+        let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(22), tags, content);
+        let signed = active.signer.sign_event(unsigned).await?;
+
+        match active.undo.hold_duration() {
+            Some(hold) => {
+                let token = self.hold_seq.fetch_add(1, Ordering::SeqCst);
+                let _ = tx.send(PublishEvent::Held {
+                    token,
+                    event: signed.clone(),
+                    hold_secs: hold.as_secs(),
+                });
+                self.hold_and_commit(Arc::new(active.clone()), token, signed, hold, tx.clone()).await;
+            }
+            None => Self::commit(&active, &signed, tx).await?,
+        }
+        Ok(())
     }
 
     /// The NIP-68 kind-20 tag build, shared by the instant path
