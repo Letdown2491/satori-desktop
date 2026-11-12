@@ -68,9 +68,18 @@ pub fn opening(url: &str) -> bool {
 
 /// Can this video play inline (Phase 3 §5)? Video by extension or imeta
 /// mime, never a YouTube watch/shorts page (GStreamer can't stream those —
-/// they stay browser links), never under strict Tor (the facade rule).
+/// they stay browser links), never under strict Tor (the facade rule),
+/// never cleartext http (PR #7): the tap hands the URL to a GStreamer
+/// playbin, which dials it directly with its own redirect chain — none of
+/// the media.rs discipline (SafeResolver, redirect re-validation) exists
+/// inside gst. http(s) videos keep working end to end: `web_url()` still
+/// admits them, so the tile degrades to the browser link, the exact
+/// facade behavior YouTube already gets.
 pub fn inline_able(url: &str, mime: Option<&str>) -> bool {
     if crate::prefs::privacy_mode() == satori_core::privacy::PrivacyMode::Strict {
+        return false;
+    }
+    if !url.starts_with("https://") {
         return false;
     }
     if content::youtube_thumb(url).is_some() {
@@ -180,4 +189,27 @@ pub fn close(cx: &mut gpui::App) {
 /// contract — callers hand the area they can spare.
 pub fn element(video: &Video, box_w: f32, box_h: f32) -> gpui_video_player::VideoElement {
     gpui_video_player::video(video.clone()).size(px(box_w), px(box_h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inline_able;
+
+    /// PR #7: the inline pipeline hands the URL to a GStreamer playbin,
+    /// which dials it with no SSRF discipline — cleartext http never
+    /// inlines; the tile degrades to the browser link instead.
+    #[test]
+    fn inline_video_is_https_only() {
+        assert!(!inline_able(
+            "http://127.0.0.1:8080/x.mp4",
+            Some("video/mp4")
+        ));
+        assert!(!inline_able("http://cdn.example.com/x.mp4", Some("video/mp4")));
+        assert!(inline_able(
+            "https://cdn.example.com/x.mp4",
+            Some("video/mp4")
+        ));
+        // An https non-video stays un-inlinable (mime + extension rule).
+        assert!(!inline_able("https://example.com/page", None));
+    }
 }
