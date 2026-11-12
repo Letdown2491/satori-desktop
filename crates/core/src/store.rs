@@ -522,16 +522,32 @@ async fn vacuum_at(dir: &std::path::Path) -> Result<VacuumReport, String> {
     }
     copied += tail.len();
 
-    // The only honesty check that matters: nothing lost, nothing gained.
+    // The honesty checks: nothing lost, nothing gained - and if the
+    // store moved under us, say so instead of crying copy error. Any
+    // abort here leaves the live store untouched; the staging dir is
+    // debris for the next run (or boot) to clear.
     let fresh_count = fresh
         .count(Filter::new())
         .await
         .map_err(|e| e.to_string())?;
-    if fresh_count != total {
-        // Leave the live store untouched; the staging dir is debris for
-        // the next run (or boot) to clear.
+    if fresh_count != copied {
+        // Unreachable in practice: a failed save aborts before this.
         return Err(format!(
-            "vacuum aborted: copied {copied} events but source holds {total} (fresh counts {fresh_count})"
+            "vacuum aborted: staging holds {fresh_count} events but {copied} were copied"
+        ));
+    }
+    // The source was counted at the start; if it holds a different
+    // count now, something wrote mid-run (the app opened during the
+    // vacuum and saved live traffic - the second attempt on the live
+    // store died exactly there, +2 events). Swapping would drop the
+    // newcomers, so refuse and say what to do about it.
+    let source_now = source
+        .count(Filter::new())
+        .await
+        .map_err(|e| e.to_string())?;
+    if source_now != total {
+        return Err(format!(
+            "vacuum aborted: the store changed during the run ({total} events at the start, {source_now} now) - Satori was open? Close it and run the vacuum again"
         ));
     }
 
