@@ -49,6 +49,10 @@ pub struct LoginView {
     /// silently discards the completed login (session saved core-side
     /// before the UI ever saw Approved) — the quit-and-restart bug.
     connecting: bool,
+    /// Paste-time screening refused a private relay in the pasted bunker
+    /// URI (issue #11): the hosts the "allow & retry" chip consents to.
+    /// Cleared on the next attempt or cancel.
+    screened: Option<Vec<String>>,
     autofocused: bool,
 }
 
@@ -83,6 +87,7 @@ impl LoginView {
             error_is_notice: resume_notice,
             generation: 0,
             connecting: false,
+            screened: None,
             autofocused: false,
         };
         view.start_nostrconnect(cx);
@@ -178,6 +183,13 @@ impl LoginView {
                 cx.emit(Login::Approved);
                 return false;
             }
+            ConnectEvent::RelayScreened(hosts) => {
+                dlog!("[login] relay screening refused {} host(s)", hosts.len());
+                // The banner line rides the following Failed; this arms
+                // the allow-and-retry chip under it.
+                self.screened = Some(hosts);
+                return true; // keep pumping — the notice is next
+            }
             ConnectEvent::Failed(msg) => {
                 dlog!("[login] failed: {msg}");
                 self.error = msg;
@@ -201,6 +213,7 @@ impl LoginView {
         if uri.is_empty() {
             return;
         }
+        self.screened = None; // a fresh attempt re-screens
         let rx = self.core.connect_bunker(uri);
         self.begin(
             "Waiting for approval…",
@@ -216,6 +229,7 @@ impl LoginView {
         self.connecting = false;
         self.waiting = None;
         self.auth_url = None;
+        self.screened = None;
         cx.notify();
     }
 }
@@ -397,6 +411,35 @@ impl Render for LoginView {
                                             .text_color(rgb(err_color))
                                             .text_align(TextAlign::Center)
                                             .child(error),
+                                    )
+                                })
+                                .into_any_element(),
+                            // The issue-#11 screen refused a private relay
+                            // in the pasted URI: consent chip under the
+                            // banner — allow writes the net_guard ledger,
+                            // retry re-runs the (still-filled) URI.
+                            div()
+                                .when(self.screened.is_some(), |d| {
+                                    let Some(hosts) = self.screened.clone() else {
+                                        return d;
+                                    };
+                                    d.child(
+                                        div()
+                                            .id("allow-relay")
+                                            .cursor_pointer()
+                                            .p_1()
+                                            .px_2()
+                                            .text_size(px(theme::T_UI))
+                                            .text_color(rgb(theme::vermilion()))
+                                            .child("Allow private host & retry")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                for h in &hosts {
+                                                    satori_core::net_guard::allow_direct_relay(h);
+                                                }
+                                                this.screened = None;
+                                                this.error.clear();
+                                                this.connect_bunker(cx);
+                                            })),
                                     )
                                 })
                                 .into_any_element(),

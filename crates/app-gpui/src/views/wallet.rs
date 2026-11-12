@@ -28,6 +28,10 @@ pub struct WalletView {
     status: Status,
     /// The last connect failure (cleared on the next status change).
     err: Option<String>,
+    /// Paste-time relay screening refused a private relay (issue #11):
+    /// the banner line + the hosts the "allow" affordance consents to.
+    /// Cleared on the next status change or allow-and-retry.
+    screened: Option<(String, Vec<String>)>,
 }
 
 impl Focusable for WalletView {
@@ -50,6 +54,7 @@ impl WalletView {
             }),
             status: core.wallet().status(),
             err: None,
+            screened: None,
             core,
         };
         this.pump_wallet(cx);
@@ -68,6 +73,21 @@ impl WalletView {
                             .update(cx, |this, cx| {
                                 this.status = s;
                                 this.err = None;
+                                this.screened = None;
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break; // dead pane
+                        }
+                    }
+                    Ok(wallet::WalletEvent::RelayScreened { verdicts }) => {
+                        // The verdicts cross the core boundary whole; the
+                        // dialog derives the banner and the allow list from
+                        // them (review Tier 2.5).
+                        if this
+                            .update(cx, |this, cx| {
+                                this.screened = Some(verdicts);
                                 cx.notify();
                             })
                             .is_err()
@@ -201,6 +221,39 @@ impl Render for WalletView {
                             .on_click(cx.listener(|this, _, _, cx| this.connect(cx))),
                     ),
                 )
+                // The issue-#11 screen refused a private relay in the
+                // pasted URI: name it, offer the consent toggle. Allowing
+                // writes the SAME ledger the relay allowlist uses, then
+                // retries (the input still holds the URI).
+                .when(self.screened.is_some(), |d| {
+                    let Some((notice, hosts)) = self.screened.clone() else {
+                        return d;
+                    };
+                    d.child(
+                        div()
+                            .text_size(px(theme::T_SMALL))
+                            .text_color(rgb(theme::err()))
+                            .child(notice),
+                    )
+                    .child(div().flex().child(
+                        div()
+                            .id("wallet-allow-relay")
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .text_size(px(theme::T_UI))
+                            .text_color(rgb(theme::vermilion()))
+                            .child("Allow & retry")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                for h in &hosts {
+                                    satori_core::net_guard::allow_direct_relay(h);
+                                }
+                                this.screened = None;
+                                this.err = None;
+                                this.connect(cx);
+                            })),
+                    ))
+                })
             })
             .when(connecting, |d| {
                 d.child(
