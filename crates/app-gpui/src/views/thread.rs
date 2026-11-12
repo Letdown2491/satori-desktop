@@ -12,16 +12,16 @@ use std::{
 };
 
 use gpui::{
-    Context, Entity, EventEmitter, FontWeight, ListAlignment, ListState, Render, SharedString,
-    Window, div, list, prelude::*, px, rgb,
+    Context, Entity, EventEmitter, Focusable, FontWeight, ListAlignment, ListState, Render,
+    SharedString, Window, div, list, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile, PublishEvent};
+use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile, PublishEvent, PublishRx};
 use satori_core::wallet::{Status, WalletEvent};
 use satori_core::wot::Verdict;
 
 use super::{actions, content, nav::Nav, states};
-use crate::{media, prefs, theme};
+use crate::{input::Input, media, prefs, theme};
 
 pub struct ThreadView {
     core: Arc<Core>,
@@ -54,6 +54,12 @@ pub struct ThreadView {
     /// Session zap-in-flight set; the wallet broadcast clears it.
     zap_pending: HashSet<String>,
     wallet_ready: bool,
+    /// The inline reply box (#21): pinned at the bottom of the thread —
+    /// the conversation stays in view while the reply is written. The
+    /// action-row bubble (reply sheet) covers every OTHER surface.
+    reply_input: Entity<Input>,
+    reply_posting: bool,
+    reply_status: String,
 }
 
 impl EventEmitter<Nav> for ThreadView {}
@@ -163,6 +169,7 @@ impl ThreadView {
         let bookmarked = core.bookmarked_set();
         let zapped = core.zapped_set();
         let wallet_ready = core.wallet().is_ready();
+        let reply_input = cx.new(|cx| Input::new(cx).placeholder("Reply to the thread…"));
         let view = Self {
             core,
             anchor: None,
@@ -182,6 +189,9 @@ impl ThreadView {
             zapped,
             zap_pending: HashSet::new(),
             wallet_ready,
+            reply_input,
+            reply_posting: false,
+            reply_status: String::new(),
         };
         // The anchor rides in with its author's profile; replies follow.
         view.pump(view.core.event_by_id(id, Vec::new(), None), cx);
@@ -231,6 +241,40 @@ impl ThreadView {
             WalletEvent::ConnectFailed(_) => {} // the wallet pane's concern
         }
         cx.notify();
+    }
+
+    /// The inline box's publish (#21): kind-1 anchors keep kind-1 replies
+    /// (NIP-10 tags via core); every other anchor goes out as a NIP-22
+    /// comment (the composer's Amethyst migration rule). Tag building is
+    /// core's (note_tags / reply_tags) — the box is only text + pump.
+    fn publish_inline_reply(&mut self, cx: &mut Context<Self>) {
+        if self.reply_posting {
+            return;
+        }
+        let Some(parent) = self.anchor.clone() else {
+            return;
+        };
+        let text = self.reply_input.read(cx).content.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.reply_posting = true;
+        self.reply_status.clear();
+        cx.notify();
+        let core = self.core.clone();
+        let rx = if u16::from(parent.kind) != 1 {
+            core.comment(
+                text,
+                satori_core::nip::comment::CommentTarget::for_event(&parent),
+                Some(parent),
+                Vec::new(),
+                Vec::new(),
+            )
+        } else {
+            core.post_note(text, Some(parent), Vec::new(), None, Vec::new())
+        };
+        cx.spawn(async move |this, cx| inline_pump(this, rx, cx).await)
+            .detach();
     }
 
     fn pump(&self, mut rx: FeedRx, cx: &mut Context<Self>) {
@@ -940,6 +984,115 @@ impl Render for ThreadView {
                         .into_any_element()
                     }),
             )
+            // The inline reply box (#21): pinned under the thread — the
+            // conversation stays in view while the reply is written. No
+            // anchor, no box (the error strip owns the pane).
+            .when_some(self.anchor.clone(), |d, _| {
+                let posting = self.reply_posting;
+                let rstatus = self.reply_status.clone();
+                d.child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .border_t_1()
+                        .border_color(rgb(theme::hairline()))
+                        .p_4()
+                        .child(
+                            div()
+                                .w_full()
+                                .max_w(px(content::COL_W))
+                                .self_center()
+                                .flex()
+                                .items_end()
+                                .gap_2()
+                                .child(
+                                    // Definite height — the Input fills
+                                    // its parent (relative 1.0); a
+                                    // content-sized chain collapses it
+                                    // (login.rs field()).
+                                    div()
+                                        .id("thread-reply-field")
+                                        .flex_1()
+                                        .min_w_0()
+                                        .h(px(64.))
+                                        .overflow_y_scroll()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded(px(theme::R_EMBED))
+                                        .bg(rgb(theme::panel()))
+                                        .border_1()
+                                        .border_color(rgb(theme::hairline()))
+                                        .cursor(gpui::CursorStyle::IBeam)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let focus = this.reply_input.read(cx).focus_handle(cx);
+                                            window.focus(&focus, cx);
+                                        }))
+                                        .child(self.reply_input.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .id("thread-reply-send")
+                                        .cursor_pointer()
+                                        .px_3()
+                                        .py_1()
+                                        .rounded(px(theme::R_EMBED))
+                                        .bg(rgb(theme::vermilion()))
+                                        .text_size(px(theme::T_UI))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(theme::washi()))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.publish_inline_reply(cx);
+                                        }))
+                                        .child(if posting { "…" } else { "Reply" }),
+                                ),
+                        )
+                        .when(!rstatus.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(content::COL_W))
+                                    .self_center()
+                                    .text_size(px(theme::T_SMALL))
+                                    .text_color(rgb(theme::muted()))
+                                    .child(rstatus),
+                            )
+                        }),
+                )
+            })
+    }
+}
+
+/// The inline box's publish pump: success clears the field (the reply
+/// arrives through the thread pump like any other reply; the undo toast
+/// floats in the shell off core.subscribe_hold); failure sticks as the
+/// box's status line.
+async fn inline_pump(
+    this: gpui::WeakEntity<ThreadView>,
+    mut rx: PublishRx,
+    cx: &mut gpui::AsyncApp,
+) {
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            PublishEvent::Held { .. } | PublishEvent::Committed { .. } => {
+                let _ = this.update(cx, |view, cx| {
+                    view.reply_posting = false;
+                    view.reply_input.update(cx, |input, cx| input.clear(cx));
+                    cx.notify();
+                });
+                return;
+            }
+            PublishEvent::Failed { error, .. } => {
+                let _ = this.update(cx, |view, cx| {
+                    view.reply_posting = false;
+                    view.reply_status = format!("failed: {error}");
+                    cx.notify();
+                });
+                return;
+            }
+            _ => {}
+        }
     }
 }
 

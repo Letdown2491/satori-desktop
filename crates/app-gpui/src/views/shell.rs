@@ -26,6 +26,7 @@ use super::{
     notifications::NotificationsView,
     profile::ProfileView,
     reader::ArticleView,
+    reply::ReplySheet,
     search::SearchView,
     settings::SettingsView,
     states,
@@ -92,6 +93,9 @@ pub struct Shell {
     /// The zap amount sheet (bolt hold / right-click) — a floating card
     /// over the pane, not a page: zapping never costs you your place.
     zap_overlay: Option<Entity<ZapSheet>>,
+    /// The reply sheet (#21) — same overlay layer; the action row's
+    /// bubble opens it over whatever pane you were reading.
+    reply_overlay: Option<Entity<ReplySheet>>,
     /// The undo window's floating toast (compose.ts undo-toast): the
     /// composer pops on Held, so the countdown lives HERE, over any pane.
     /// Undone flashes briefly; a Failed error sticks until the next try.
@@ -124,7 +128,7 @@ impl Shell {
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenEditProfile(me) => this.open_edit_profile(*me, cx),
             Nav::OpenHashtag(tag) => this.open_hashtag(tag.clone(), cx),
-            Nav::OpenComposer(reply) => this.open_composer(reply.clone(), None, cx),
+            Nav::OpenReply(ev) => this.open_reply_sheet(ev.clone(), cx),
             Nav::OpenDraft(text, attachments, reply, quote) => this.open_draft(
                 text,
                 attachments.clone(),
@@ -152,6 +156,7 @@ impl Shell {
             lightbox: None,
             video_overlay: None,
             zap_overlay: None,
+            reply_overlay: None,
             hold: None,
             notif_unread: false,
             outbox_pending: 0,
@@ -213,7 +218,7 @@ impl Shell {
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenEditProfile(me) => this.open_edit_profile(*me, cx),
             Nav::OpenHashtag(tag) => this.open_hashtag(tag.clone(), cx),
-            Nav::OpenComposer(reply) => this.open_composer(reply.clone(), None, cx),
+            Nav::OpenReply(ev) => this.open_reply_sheet(ev.clone(), cx),
             Nav::OpenDraft(text, attachments, reply, quote) => this.open_draft(
                 text,
                 attachments.clone(),
@@ -345,6 +350,16 @@ impl Shell {
         let view = cx.new(|cx| ZapSheet::new(self.core.clone(), ev, cx));
         self.subscribe_nav(&view, cx);
         self.zap_overlay = Some(view);
+        cx.notify();
+    }
+
+    /// The reply sheet (#21): a floating card over the current pane (the
+    /// overlay layer, like the zap sheet) — the action row's bubble opens
+    /// this, never the compose page.
+    fn open_reply_sheet(&mut self, ev: Event, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| ReplySheet::new(self.core.clone(), ev, cx));
+        self.subscribe_nav(&view, cx);
+        self.reply_overlay = Some(view);
         cx.notify();
     }
 
@@ -659,10 +674,10 @@ impl Shell {
     }
 
     fn back(&mut self, cx: &mut Context<Self>) {
-        // An overlay owns the back door while it's up: the zap sheet
-        // closes first (its Nav::Pop and the Esc key both land here),
-        // the pane underneath never notices.
-        if self.zap_overlay.take().is_some() {
+        // An overlay owns the back door while it's up: the reply and zap
+        // sheets close first (their Nav::Pop and the Esc key both land
+        // here), the pane underneath never notices.
+        if self.reply_overlay.take().is_some() || self.zap_overlay.take().is_some() {
             cx.notify();
             return;
         }
@@ -1277,7 +1292,10 @@ impl Render for Shell {
                 d.child(video_overlay(&url, cx))
             })
             .when_some(self.zap_overlay.clone(), |d, sheet| {
-                d.child(zap_overlay(sheet, cx))
+                d.child(card_overlay("zap", sheet, cx))
+            })
+            .when_some(self.reply_overlay.clone(), |d, sheet| {
+                d.child(card_overlay("reply", sheet, cx))
             })
     }
 }
@@ -1346,15 +1364,19 @@ impl Shell {
     }
 }
 
-/// The zap sheet overlay: the amount card floats centered over a dim
-/// scrim (the pane you were reading stays visible underneath). Any
-/// click that bubbles to the overlay root closes — the card stops
-/// propagation so a stray click inside it doesn't; Esc goes through
-/// back(), which the overlay owns. The scrim is a separate visual
-/// layer because opacity washes the whole subtree.
-fn zap_overlay(sheet: Entity<ZapSheet>, cx: &mut Context<Shell>) -> impl IntoElement {
+/// A sheet overlay (the zap amount card, the reply box, #21): the card
+/// floats centered over a dim scrim — the pane you were reading stays
+/// visible underneath. Any click that bubbles to the overlay root closes
+/// — the card stops propagation so a stray click inside it doesn't; Esc
+/// goes through back(), which the overlay owns. The scrim is a separate
+/// visual layer because opacity washes the whole subtree.
+fn card_overlay<V: gpui::Render>(
+    id: &'static str,
+    card: Entity<V>,
+    cx: &mut Context<Shell>,
+) -> impl IntoElement {
     div()
-        .id("zap-overlay")
+        .id(SharedString::from(format!("{id}-overlay")))
         .absolute()
         .inset_0()
         .on_mouse_down(
@@ -1373,7 +1395,7 @@ fn zap_overlay(sheet: Entity<ZapSheet>, cx: &mut Context<Shell>) -> impl IntoEle
                 .justify_center()
                 .child(
                     div()
-                        .id("zap-card")
+                        .id(SharedString::from(format!("{id}-card")))
                         .w(px(420.))
                         .max_w(px(content::COL_W))
                         .rounded(px(theme::R_INPUT))
@@ -1384,7 +1406,7 @@ fn zap_overlay(sheet: Entity<ZapSheet>, cx: &mut Context<Shell>) -> impl IntoEle
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                             cx.stop_propagation();
                         })
-                        .child(sheet),
+                        .child(card),
                 ),
         )
 }

@@ -82,7 +82,9 @@ pub(crate) fn action_row<H: ActionHost>(
                 .on_click(move |_, _, cx| {
                     let ev = ev_for_reply.clone();
                     handle_reply.update(cx, |_, cx| {
-                        cx.emit(Nav::OpenComposer(Some((*ev).clone())));
+                        // The reply sheet (#21): replying never navigates
+                        // away — a floating card over the current pane.
+                        cx.emit(Nav::OpenReply((*ev).clone()));
                     });
                 })
                 .hover(|s| s.bg(theme::hover_wash()))

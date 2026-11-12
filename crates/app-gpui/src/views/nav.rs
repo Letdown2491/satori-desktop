@@ -20,8 +20,9 @@ pub enum Nav {
     OpenProfile(PublicKey),
     /// The profile edit form (D38) for the given (own) pubkey.
     OpenEditProfile(PublicKey),
-    /// The composer, optionally replying to a note.
-    OpenComposer(Option<Event>),
+    /// The reply sheet (#21): a floating card over the current pane —
+    /// the action row's bubble opens THIS, never the compose page.
+    OpenReply(Event),
     /// Reopen a synced draft (D38): text + the resolved context events
     /// (boxed — Nav must not carry a three-event-sized variant).
     OpenDraft(
