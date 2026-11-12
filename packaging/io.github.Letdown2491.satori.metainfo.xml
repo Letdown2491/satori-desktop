@@ -32,7 +32,8 @@
     <release version="0.5.0" date="2026-11-11">
       <description>
         <p>An iteration release with no theme: the composer grew a Video tab (a deliberate video post is its own NIP-71 event, instant or scheduled, videos only), thread notes now carry the full action row the timeline has (reactions, repost, quote, reply, delete, zap), and the gallery carousel's arrows and position dots page the gallery instead of opening the thread.</p>
-        <p>Under the hood: paste-time screening refuses wallet and bunker URIs whose relays point at private addresses, the publish path refuses expired events and records its own deletions as tombstones at the door, and dependencies are current (cargo audit reports zero vulnerabilities). A CI workflow now gates every pull request.</p>
+        <p>Under the hood: paste-time screening refuses wallet and bunker URIs whose relays point at private addresses, the publish path refuses expired events and records its own deletions as tombstones at the door, and dependencies are current (cargo audit reports zero vulnerabilities). A CI workflow now gates every pull request, with a cargo-deny pass beside the audit.</p>
+        <p>New in the final cut: a store vacuum (satori-desktop --vacuum rebuilds the LMDB store offline, recovering the space deletions left behind) and an Alpine package beside the deb, rpm and flatpak - the first musl build.</p>
       </description>
     </release>
     <release version="0.4.0" date="2026-11-08">
