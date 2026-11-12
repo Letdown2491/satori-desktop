@@ -78,6 +78,11 @@ pub struct Store {
 impl Store {
     pub async fn open() -> NostrResult<Self> {
         std::fs::create_dir_all(config::events_dir()).map_err(|e| DbError::other(e.to_string()))?;
+        // Post-vacuum hygiene (vacuum's swap left events.prev): this boot
+        // opened the REBUILT store, so the previous generation is dead.
+        // A staging dir from a crashed vacuum is debris too.
+        let _ = std::fs::remove_dir_all(config::events_dir().with_extension("prev"));
+        let _ = std::fs::remove_dir_all(config::events_dir().with_extension("vacuum"));
         let db = NostrLmdb::open(config::events_dir()).await?;
         Ok(Self { db: Arc::new(db) })
     }
@@ -411,6 +416,135 @@ impl Store {
     }
 }
 
+// --- The vacuum (WS3, issue #23) --------------------------------------
+//
+// LMDB never returns dead pages: deletions and the daily prune free
+// records, but data.mdb's mapped extent only ever grows (67MB as of the
+// 0.5.0 tag). nostr-lmdb 0.45.3 exposes no compaction hook — the env
+// handle is private — so the shape is a REBUILD: copy every surviving
+// event into a fresh store directory, verify the counts, then atomically
+// swap the directories. The previous store is kept as `events.prev`
+// until the next successful boot (Store::open removes it), so a vacuum
+// that produced a bad store is recoverable by hand.
+//
+// Deliberately offline and explicit: `satori-desktop --vacuum` runs the
+// rebuild INSTEAD of the app (two writers on one LMDB is corruption),
+// prints the report, and exits. A boot-time threshold gate waits for
+// the trigger (issue #4: a month of week-over-week growth).
+
+/// What a vacuum moved: the event count and the physical store size
+/// before and after (data.mdb's extent; the 32GB map is sparse, the
+/// extent is the honest number).
+#[derive(Debug, Clone, Copy)]
+pub struct VacuumReport {
+    pub events: usize,
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+}
+
+pub async fn vacuum() -> Result<VacuumReport, String> {
+    vacuum_at(&config::events_dir()).await
+}
+
+/// The rebuild itself, against explicit paths: `dir` is the live store
+/// (`events/`), the staging copy goes to `events.vacuum` beside it, and
+/// on success `dir` becomes `events.prev` while the staging copy takes
+/// its name. Same-filesystem renames: atomic, no copy.
+async fn vacuum_at(dir: &std::path::Path) -> Result<VacuumReport, String> {
+    let staging = dir.with_extension("vacuum"); // events/ -> events.vacuum/
+    let prev = dir.with_extension("prev");
+    let bytes_of = |d: &std::path::Path| {
+        std::fs::metadata(d.join("data.mdb"))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    };
+    let bytes_before = bytes_of(dir);
+
+    // Staging from a crashed vacuum is debris: start clean.
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+
+    // Both envs open here — the caller's contract is that the app is
+    // closed (the --vacuum flag runs instead of it), so nothing else
+    // holds the live store.
+    let source = NostrLmdb::open(dir).await.map_err(|e| e.to_string())?;
+    let fresh = NostrLmdb::open(&staging).await.map_err(|e| e.to_string())?;
+
+    let total = source
+        .count(Filter::new())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Copy in created_at windows, walking BACKWARDS from now: the hot
+    // 90 days first, then bookmark-preserved elders. The stop is
+    // EIGHT consecutive empty windows (~8 months past the oldest
+    // survivor) — cheap window queries against the created_at index.
+    const WINDOW: u64 = 30 * 24 * 3600;
+    const EMPTY_STOP: u64 = 8;
+    let now = Timestamp::now().as_secs();
+    let mut copied = 0usize;
+    let mut empty_run = 0u64;
+    let mut hi = now;
+    while empty_run < EMPTY_STOP {
+        let lo = hi.saturating_sub(WINDOW - 1);
+        let filter = Filter::new()
+            .since(Timestamp::from(lo))
+            .until(Timestamp::from(hi));
+        let events = source.query(filter).await.map_err(|e| e.to_string())?;
+        if events.is_empty() {
+            empty_run += 1;
+        } else {
+            empty_run = 0;
+        }
+        for event in &events {
+            fresh.save_event(event).await.map_err(|e| e.to_string())?;
+        }
+        copied += events.len();
+        if lo == 0 {
+            break;
+        }
+        hi = lo - 1;
+    }
+
+    // The only honesty check that matters: nothing lost, nothing gained.
+    let fresh_count = fresh
+        .count(Filter::new())
+        .await
+        .map_err(|e| e.to_string())?;
+    if fresh_count != total {
+        // Leave the live store untouched; the staging dir is debris for
+        // the next run (or boot) to clear.
+        return Err(format!(
+            "vacuum aborted: copied {copied} events but source holds {total} (fresh counts {fresh_count})"
+        ));
+    }
+
+    // Durability before the swap: the LMDB commits are synced; the
+    // directory entries are not until we say so.
+    for d in [&staging, dir, staging.parent().unwrap_or(&staging)] {
+        std::fs::File::open(d)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())?;
+    }
+
+    if prev.exists() {
+        std::fs::remove_dir_all(&prev).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(dir, &prev).map_err(|e| e.to_string())?;
+    std::fs::rename(&staging, dir).map_err(|e| e.to_string())?;
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::File::open(parent).and_then(|f| f.sync_all());
+    }
+
+    Ok(VacuumReport {
+        events: total,
+        bytes_before,
+        bytes_after: bytes_of(dir),
+    })
+}
+
 /// Machine notes (filters.ts:104-109): a kind:1 whose ENTIRE content is a
 /// bare JSON object/array — an app using kind:1 as a data transport (chess
 /// moves, bots), never human discussion. The {/[ lead keeps prose that
@@ -450,4 +584,82 @@ pub fn machine_notes_hidden() -> bool {
 
 pub fn parse_key(hex: &str) -> Option<PublicKey> {
     PublicKey::from_str(hex).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_env::EnvGuard;
+
+    fn note(author: &Keys, content: &str, ts: u64) -> Event {
+        author
+            .sign_event(UnsignedEvent::new(
+                author.public_key(),
+                Timestamp::from(ts),
+                Kind::TextNote,
+                vec![],
+                content,
+            ))
+            .unwrap()
+    }
+
+    /// The vacuum's contract: every event survives into a fresh env,
+    /// the counts agree, the swap is real, and the previous generation
+    /// parks beside the store until the next boot clears it.
+    #[test]
+    fn vacuum_rebuilds_and_swaps() {
+        let env = EnvGuard::new("store-vacuum");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store_dir = config::events_dir();
+        std::fs::create_dir_all(&store_dir).unwrap();
+
+        let db = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
+        let keys = Keys::generate();
+        let now = Timestamp::now().as_secs();
+        // Two events past the 90-day prune window (bookmark-kept elders),
+        // one inside it: the copy must span created_at windows.
+        let events = vec![
+            note(&keys, "elder one", now.saturating_sub(200 * 24 * 3600)),
+            note(&keys, "elder two", now.saturating_sub(199 * 24 * 3600)),
+            note(&keys, "fresh", now.saturating_sub(60)),
+        ];
+        for event in &events {
+            rt.block_on(db.save_event(event)).unwrap();
+        }
+        drop(db);
+
+        let report = rt.block_on(vacuum()).unwrap();
+        assert_eq!(report.events, 3);
+        assert!(report.bytes_before > 0);
+        assert!(report.bytes_after > 0);
+
+        // The swap: the live path opens and holds every event by id.
+        let reopened = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
+        assert_eq!(rt.block_on(reopened.count(Filter::new())).unwrap(), 3);
+        for event in &events {
+            assert!(
+                rt.block_on(reopened.event_by_id(&event.id))
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        drop(reopened);
+
+        // The previous generation parks until Store::open clears it.
+        assert!(store_dir.with_extension("prev").exists());
+        assert!(!store_dir.with_extension("vacuum").exists());
+
+        // A vacuum over a rebuilt store round-trips too (idempotent).
+        let again = rt.block_on(vacuum()).unwrap();
+        assert_eq!(again.events, 3);
+
+        // Store::open is the boot door: it must clear events.prev.
+        let _store = rt.block_on(Store::open()).unwrap();
+        assert!(!store_dir.with_extension("prev").exists());
+        drop(_store);
+        drop(env);
+    }
 }

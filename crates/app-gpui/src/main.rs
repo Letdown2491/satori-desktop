@@ -190,6 +190,34 @@ impl Render for Root {
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
+    // The vacuum door (WS3, issue #23): an offline store rebuild, run
+    // INSTEAD of the app — two writers on one LMDB is corruption. The
+    // rebuild copies every surviving event into a fresh env, verifies
+    // the counts, and swaps the directories (details in store::vacuum).
+    if std::env::args().any(|arg| arg == "--vacuum") {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("vacuum runtime");
+        match rt.block_on(satori_core::store::vacuum()) {
+            Ok(report) => {
+                println!(
+                    "vacuum: {} events rebuilt, data.mdb {:.1} MB -> {:.1} MB",
+                    report.events,
+                    report.bytes_before as f64 / 1048576.0,
+                    report.bytes_after as f64 / 1048576.0
+                );
+                println!(
+                    "the previous store is parked at events.prev; boot Satori once to clear it"
+                );
+            }
+            Err(err) => {
+                eprintln!("vacuum failed (the live store is untouched): {err}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // The C side (glib, gstreamer, lmdb) keeps glibc malloc: cap its arena
     // count so its retention stays bounded too (default 8x ncores = 96
     // possible 64MB arenas). The malloc_trim loop below keeps cycling it.
