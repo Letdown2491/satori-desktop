@@ -10,7 +10,7 @@ use std::collections::HashSet;
 
 use gpui::{
     Context, Entity, EventEmitter, FontWeight, ListAlignment, ListOffset, ListScrollEvent,
-    ListState, Render, SharedString, Window, div, list, prelude::*, px, rgb,
+    ListState, Render, SharedString, Window, div, img, list, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile, PublishEvent};
@@ -19,7 +19,7 @@ use satori_core::notifications::parse_zap_receipt;
 use satori_core::wallet::{Status, WalletEvent};
 
 use super::{actions, content, nav::Nav, states};
-use crate::{media, theme};
+use crate::{icons, media, theme};
 
 /// What the event did to you (notifications.ts `add`): a comment is always
 /// a reply; kind 1 splits by whether it carries an `e` tag.
@@ -28,6 +28,8 @@ enum NotifType {
     Reply,
     Mention,
     Reaction,
+    Repost,
+    Quote,
     PollVote,
     Zap,
 }
@@ -36,15 +38,21 @@ fn notif_type(ev: &Event) -> NotifType {
     match u16::from(ev.kind) {
         9735 => NotifType::Zap,
         7 => NotifType::Reaction,
+        6 | 16 => NotifType::Repost,
         1018 => NotifType::PollVote,
-        1111 => NotifType::Reply,
         _ => {
-            let has_e = ev
-                .tags
-                .iter()
-                .any(|t| t.as_slice().first().map(String::as_str) == Some("e"));
-            if has_e {
+            // NIP-18: a `q` tag quotes a note without replying into its
+            // thread — a quote repost of one of mine. `e` stays the reply
+            // marker: a note that both replies and quotes is a reply.
+            let has = |tag: &str| {
+                ev.tags
+                    .iter()
+                    .any(|t| t.as_slice().first().map(String::as_str) == Some(tag))
+            };
+            if has("e") {
                 NotifType::Reply
+            } else if has("q") {
+                NotifType::Quote
             } else {
                 NotifType::Mention
             }
@@ -52,18 +60,22 @@ fn notif_type(ev: &Event) -> NotifType {
     }
 }
 
-fn action_word(t: NotifType, ev: &Event) -> String {
+/// The verb and, for zaps, the emphasized tail: the amount IS the news
+/// (it rides the header line set in ink, next to the actor's name).
+fn action_parts(t: NotifType, ev: &Event) -> (&'static str, Option<String>) {
     match t {
-        NotifType::Reply => "replied".into(),
-        NotifType::Mention => "mentioned you".into(),
-        NotifType::Reaction => "reacted".into(),
-        NotifType::PollVote => "voted in your poll".into(),
+        NotifType::Reply => ("replied", None),
+        NotifType::Mention => ("mentioned you", None),
+        NotifType::Reaction => ("reacted", None),
+        NotifType::Repost => ("reposted", None),
+        NotifType::Quote => ("quoted your note", None),
+        NotifType::PollVote => ("voted in your poll", None),
         NotifType::Zap => {
             let info = parse_zap_receipt(ev);
             if info.sats == 0 {
-                "zapped".into()
+                ("zapped", None)
             } else {
-                format!("zapped {} sats", info.sats)
+                ("zapped", Some(format!("{} sats", info.sats)))
             }
         }
     }
@@ -380,18 +392,36 @@ impl NotificationsView {
 /// e tag), a poll vote at the poll.
 fn notif_parent_id(ev: &Event) -> Option<String> {
     match u16::from(ev.kind) {
-        1 => nip10::reply_parent(ev).map(|(id, _)| id),
+        1 => nip10::reply_parent(ev)
+            .map(|(id, _)| id)
+            .or_else(|| q_tag(ev)),
         1111 => match comment::parse_refs(ev).parent {
             Some(comment::Ref::Event(id)) => Some(id.to_string()),
             _ => None,
         },
-        9735 | 1018 => ev
+        9735 | 1018 | 16 => ev
             .tags
             .iter()
             .find(|t| t.as_slice().first().map(String::as_str) == Some("e"))
             .and_then(|t| t.as_slice().get(1).cloned()),
+        // A kind-6 repost's subject: the e tag when the reposter's client
+        // sent one, else the note embedded in the content.
+        6 => ev
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(String::as_str) == Some("e"))
+            .and_then(|t| t.as_slice().get(1).cloned())
+            .or_else(|| content::repost_inner(ev).map(|n| n.id.to_string())),
         _ => None,
     }
+}
+
+/// The NIP-18 quote marker: the first `q` tag's event id.
+fn q_tag(ev: &Event) -> Option<String> {
+    ev.tags
+        .iter()
+        .find(|t| t.as_slice().first().map(String::as_str) == Some("q"))
+        .and_then(|t| t.as_slice().get(1).cloned())
 }
 
 /// The row's toggles (actions.rs's state-blind contract; thread.rs's impl
@@ -540,11 +570,13 @@ fn notif_whisper<V: EventEmitter<Nav> + 'static>(
                 ];
                 if let Some(snippet) = snippet {
                     kids.push(
+                        // The parent's words read as the note's words: ink
+                        // serif at body size, not a faded aside — the
+                        // whisper IS the subject of the row.
                         div()
                             .font_family(theme::SERIF)
-                            .italic()
-                            .text_size(px(theme::T_UI))
-                            .text_color(rgb(theme::muted()))
+                            .text_size(px(theme::T_UI + 2.0))
+                            .text_color(rgb(theme::ink()))
                             .child(snippet)
                             .into_any_element(),
                     );
@@ -570,6 +602,8 @@ fn notif_card(
     quotes: &content::Quotes,
     me: &str,
     time: String,
+    core: &Arc<Core>,
+    cx: &mut gpui::App,
     handle: Entity<NotificationsView>,
 ) -> gpui::AnyElement {
     let key = ev.pubkey.to_string();
@@ -591,12 +625,35 @@ fn notif_card(
         .and_then(|(id, _)| EventId::from_hex(&id).ok())
         .or_else(|| parent_id.as_ref().and_then(|p| EventId::from_hex(p).ok()))
         .or_else(|| matches!(t, NotifType::Reply | NotifType::Mention).then_some(ev.id));
-    let ev_for_profile = ev.clone();
-    let handle_profile = handle.clone();
     let ctx = content::Body {
         media,
         quotes,
         profiles,
+    };
+    // The verb rides the header (the Dark Wisp anatomy): glyph, actor,
+    // "name verb", time — one line, the news at a glance. Zap sats set
+    // in ink: the amount is the second thing the eye hits.
+    let (verb, emph) = action_parts(t, ev);
+    let verb_el: gpui::AnyElement = match emph {
+        Some(sats) => div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_size(px(theme::T_UI))
+            .text_color(rgb(theme::muted()))
+            .child(verb)
+            .child(
+                div()
+                    .text_color(rgb(theme::ink()))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(sats),
+            )
+            .into_any_element(),
+        None => div()
+            .text_size(px(theme::T_UI))
+            .text_color(rgb(theme::muted()))
+            .child(verb)
+            .into_any_element(),
     };
 
     let mut row = div()
@@ -606,82 +663,134 @@ fn notif_card(
         .gap_2()
         .px_4()
         .py_3()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(media::avatar(media, &picture, &name, 28.0))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("notif-author-{idx}")))
-                        .cursor_pointer()
-                        .flex_1()
-                        .text_size(px(theme::T_UI))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::ink()))
-                        .on_click(move |_, _, cx| {
-                            let ev = ev_for_profile.clone();
-                            handle_profile.update(cx, |_, cx| cx.emit(Nav::OpenProfile(ev.pubkey)));
-                        })
-                        .child(name),
-                )
-                .child(
-                    // The timestamp is the third mode toggle (timefmt.rs):
-                    // tap cycles relative → date → block height.
-                    div()
-                        .id(SharedString::from(format!("notif-time-{idx}")))
-                        .cursor_pointer()
-                        .text_size(px(theme::T_SMALL))
-                        .text_color(rgb(theme::muted()))
-                        .on_click(|_, _, cx| crate::timefmt::cycle(cx))
-                        .child(time),
-                ),
-        );
+        .child(content::actor_header(
+            Some(glyph_slot(t, ev, media, core, handle.entity_id(), cx)),
+            media,
+            &picture,
+            name,
+            Some(verb_el),
+            time,
+            format!("notif-{idx}"),
+            Some(ev.pubkey),
+            handle.clone(),
+        ));
     if let Some(pid) = &parent_id
         && let Some(w) = notif_whisper(idx, pid, parents, profiles, me, handle.clone())
     {
         row = row.child(w);
     }
-    let action_line = div()
-        .text_size(px(theme::T_UI))
-        .text_color(rgb(theme::muted()))
-        .child(action_word(t, ev));
+    // The reaction's content is its glyph (a `+` rendered twice helps
+    // nobody); a repost has no content of its own — the whisper below
+    // IS the boosted note. Everything else wears its body.
+    let has_body = !matches!(t, NotifType::Reaction | NotifType::Repost);
     let handle_body = handle.clone();
     let handle_actions = handle.clone();
-    let open_block = match open {
-        Some(target) => div()
+    if has_body {
+        // The id is unconditional (the click only exists when there is
+        // somewhere to go) — both arms stay one type.
+        let block = div()
             .id(SharedString::from(format!("notif-open-{idx}")))
-            .cursor_pointer()
-            .on_click(move |_, _, cx| {
+            .child(content::body(ev, &ctx, handle_body.clone()));
+        let block = match open {
+            Some(target) => block.cursor_pointer().on_click(move |_, _, cx| {
                 let target = target;
-                handle.update(cx, |_, cx| cx.emit(Nav::OpenThread(target)));
-            })
-            .child(action_line)
-            .child(content::body(ev, &ctx, handle_body.clone()))
-            .into_any_element(),
-        None => div()
-            .child(action_line)
-            .child(content::body(ev, &ctx, handle_body.clone()))
-            .into_any_element(),
-    };
-    // The one-row rule (#16): reply and mention rows ARE notes — they
-    // wear the timeline's full action row, so the most common response
-    // to a notification (a like, a zap) doesn't demand opening the
-    // thread. Receipt rows (reactions, zaps, poll votes) aren't notes;
-    // no row for them.
-    if !matches!(t, NotifType::Reply | NotifType::Mention) {
-        return row.child(open_block).into_any_element();
+                handle_body.update(cx, |_, cx| cx.emit(Nav::OpenThread(target)));
+            }),
+            None => block,
+        };
+        row = row.child(block);
+    }
+    // The one-row rule (#16): reply, mention and quote rows ARE notes —
+    // they wear the timeline's full action row, so the most common
+    // response to a notification (a like, a zap) doesn't demand opening
+    // the thread. Receipt rows (reactions, zaps, poll votes, reposts)
+    // aren't notes; no row for them.
+    if !matches!(t, NotifType::Reply | NotifType::Mention | NotifType::Quote) {
+        return row.into_any_element();
     }
     let ev_arc = Arc::new(ev.clone());
-    row.child(open_block)
-        .child(actions::action_row(
-            &ev.id.to_string(),
-            &ev_arc,
-            st,
-            handle_actions,
-        ))
+    row.child(actions::action_row(
+        &ev.id.to_string(),
+        &ev_arc,
+        st,
+        handle_actions,
+    ))
+    .into_any_element()
+}
+
+/// The glyph slot leading the actor header: the type's news at a glance.
+/// Reactions wear their own content (NIP-30 image when the shortcode
+/// resolves through the emoji tags, else the raw emoji); every other
+/// type wears a stroke icon. The fixed-width slot keeps the avatar
+/// column aligned across types.
+fn glyph_slot(
+    t: NotifType,
+    ev: &Event,
+    media: &media::Snapshot,
+    core: &Arc<Core>,
+    view_id: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> gpui::AnyElement {
+    let glyph: gpui::AnyElement = match t {
+        NotifType::Reaction => reaction_glyph(ev, media, core, view_id, cx),
+        NotifType::Repost => icons::repost_icon(theme::muted()).into_any_element(),
+        NotifType::Quote => icons::quote_icon(theme::muted()).into_any_element(),
+        NotifType::Reply => icons::bubble_icon(theme::muted()).into_any_element(),
+        NotifType::Mention => icons::at_icon(theme::muted()).into_any_element(),
+        NotifType::PollVote => icons::check_icon(theme::muted()).into_any_element(),
+        NotifType::Zap => icons::bolt_icon(theme::muted()).into_any_element(),
+    };
+    div()
+        .w(px(24.0))
+        .flex_none()
+        .flex()
+        .justify_center()
+        .child(glyph)
         .into_any_element()
+}
+
+/// A reaction's own content as the glyph: a NIP-30 `:shortcode:` resolves
+/// through the event's emoji tags to an image — fetched through the
+/// guarded media pipeline (the text shortcode shows until it lands);
+/// anything else renders as-is (the plain emoji most reactions carry).
+fn reaction_glyph(
+    ev: &Event,
+    media: &media::Snapshot,
+    core: &Arc<Core>,
+    view_id: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> gpui::AnyElement {
+    let raw = ev.content.trim();
+    let shortcode = raw
+        .strip_prefix(':')
+        .and_then(|r| r.strip_suffix(':'))
+        .filter(|c| !c.is_empty());
+    let url = shortcode.and_then(|code| {
+        ev.tags.iter().find_map(|t| {
+            let s = t.as_slice();
+            (s.first().map(String::as_str) == Some("emoji")
+                && s.get(1).map(String::as_str) == Some(code))
+            .then(|| s.get(2).cloned())
+            .flatten()
+        })
+    });
+    let fallback = || {
+        div()
+            .text_size(px(20.0))
+            .line_height(px(24.0))
+            .child(raw.to_string())
+            .into_any_element()
+    };
+    match url.filter(|u| !u.is_empty()) {
+        Some(u) => match media.thumb(&u) {
+            Some(png) => img(png).size(px(22.0)).into_any_element(),
+            None => {
+                media::fetch(core, u, view_id, cx);
+                fallback()
+            }
+        },
+        None => fallback(),
+    }
 }
 
 /// New / Earlier section labels at the high-water boundary
@@ -766,7 +875,7 @@ impl Render for NotificationsView {
                     .unwrap_or_else(|| format!("{}…", &key[..8]));
                 (
                     name,
-                    action_word(notif_type(&s.event), &s.event),
+                    action_parts(notif_type(&s.event), &s.event).0.to_string(),
                     s.reason.clone(),
                     key,
                 )
@@ -819,6 +928,7 @@ impl Render for NotificationsView {
                             .into_any_element()
                     } else {
                         let list_handle = handle.clone();
+                        let core = self.core.clone();
                         list(self.list.clone(), move |idx, _w, cx| {
                             match rows.get(idx) {
                                 Some(Row::Label(text)) => div()
@@ -859,6 +969,8 @@ impl Render for NotificationsView {
                                         &quotes,
                                         &me,
                                         time,
+                                        &core,
+                                        cx,
                                         list_handle.clone(),
                                     )
                                 }
@@ -955,5 +1067,95 @@ impl Render for NotificationsView {
                 }
                 d.child(strip)
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::prelude::*;
+
+    fn note(kind: Kind, tags: Tags, content: &str) -> Event {
+        let k = Keys::generate();
+        let unsigned = UnsignedEvent::new(
+            k.public_key(),
+            Timestamp::from_secs(1000),
+            kind,
+            tags,
+            content.to_string(),
+        );
+        k.sign_event(unsigned).unwrap()
+    }
+
+    fn tags_for(kind: &str, id: &EventId) -> Tags {
+        let mut tags = Tags::new();
+        tags.push(Tag::custom(kind, [id.to_string()]));
+        tags
+    }
+
+    #[test]
+    fn kinds_classify() {
+        // Direct kinds.
+        assert!(matches!(
+            notif_type(&note(Kind::Repost, Tags::new(), "{}")),
+            NotifType::Repost
+        ));
+        assert!(matches!(
+            notif_type(&note(Kind::Custom(16), Tags::new(), "")),
+            NotifType::Repost
+        ));
+        assert!(matches!(
+            notif_type(&note(Kind::Custom(9735), Tags::new(), "")),
+            NotifType::Zap
+        ));
+        assert!(matches!(
+            notif_type(&note(Kind::Reaction, Tags::new(), "+")),
+            NotifType::Reaction
+        ));
+        // kind 1: e is the reply marker, q the quote marker, neither a mention.
+        let mine = EventId::from_byte_array([3u8; 32]);
+        let mut p = Tags::new();
+        p.push(Tag::public_key(Keys::generate().public_key()));
+        assert!(matches!(
+            notif_type(&note(Kind::TextNote, p, "gm")),
+            NotifType::Mention
+        ));
+        assert!(matches!(
+            notif_type(&note(Kind::TextNote, tags_for("e", &mine), "gm")),
+            NotifType::Reply
+        ));
+        assert!(matches!(
+            notif_type(&note(Kind::TextNote, tags_for("q", &mine), "gm")),
+            NotifType::Quote
+        ));
+        // A note that both replies and quotes is a reply (e wins).
+        let mut eq = tags_for("q", &mine);
+        eq.push(Tag::event(mine));
+        assert!(matches!(
+            notif_type(&note(Kind::TextNote, eq, "gm")),
+            NotifType::Reply
+        ));
+    }
+
+    #[test]
+    fn repost_subject_via_tag_or_content() {
+        let mine = EventId::from_byte_array([7u8; 32]);
+        // The e tag wins when the reposter's client sent one.
+        assert_eq!(
+            notif_parent_id(&note(Kind::Repost, tags_for("e", &mine), "{}")).as_deref(),
+            Some(mine.to_string()).as_deref()
+        );
+        // Else the boosted note rides in the content.
+        let inner = note(Kind::TextNote, Tags::new(), "the words");
+        let content = serde_json::to_string(&inner).unwrap();
+        assert_eq!(
+            notif_parent_id(&note(Kind::Repost, Tags::new(), &content)).as_deref(),
+            Some(inner.id.to_string()).as_deref()
+        );
+        // Quotes point at the quoted note through q.
+        assert_eq!(
+            notif_parent_id(&note(Kind::TextNote, tags_for("q", &mine), "gm")).as_deref(),
+            Some(mine.to_string()).as_deref()
+        );
     }
 }

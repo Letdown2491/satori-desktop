@@ -86,6 +86,28 @@ fn repost(b: &mut PathBuilder, g: &Grid) {
     b.line_to(g.p(3.0, 18.5));
 }
 
+// The mention — an `a` in the ring (feather at-sign): the bowl, the
+// ring sweeping around open at the right, the tail hooking out.
+fn at_sign(b: &mut PathBuilder, g: &Grid) {
+    circle(b, g, 12.0, 12.5, 3.2);
+    b.move_to(g.p(16.0, 10.0));
+    b.curve_to(g.p(16.0, 6.5), g.p(12.0, 5.0));
+    b.curve_to(g.p(6.0, 5.5), g.p(4.5, 10.0));
+    b.curve_to(g.p(3.5, 14.5), g.p(7.0, 18.5));
+    b.curve_to(g.p(10.0, 20.5), g.p(15.0, 19.5));
+    b.move_to(g.p(16.0, 10.0));
+    b.line_to(g.p(16.0, 14.0));
+    b.curve_to(g.p(16.0, 17.0), g.p(20.5, 17.0));
+    b.line_to(g.p(20.5, 12.0));
+}
+
+// The poll vote — a check (feather check, on the stroke grid).
+fn check(b: &mut PathBuilder, g: &Grid) {
+    b.move_to(g.p(19.5, 6.5));
+    b.line_to(g.p(9.5, 17.0));
+    b.line_to(g.p(4.5, 11.5));
+}
+
 // NIP-18: the quote — a doubled quotation mark, bowl and tail, outline.
 fn quote(b: &mut PathBuilder, g: &Grid) {
     // left mark: bowl (three sides) + tail sweeping down-left
@@ -159,6 +181,15 @@ pub fn quote_icon(color: u32) -> impl IntoElement {
 /// The zap bolt (NIP-57) — action-row size.
 pub fn bolt_icon(color: u32) -> impl IntoElement {
     icon(bolt, color, 17.0)
+}
+
+/// Notification-header glyphs (the glyph slot leading an actor header).
+pub fn at_icon(color: u32) -> impl IntoElement {
+    icon(at_sign, color, 18.0)
+}
+
+pub fn check_icon(color: u32) -> impl IntoElement {
+    icon(check, color, 18.0)
 }
 
 /// Rail glyphs at rail size (icons.rs rail pass — the sidebar icons).

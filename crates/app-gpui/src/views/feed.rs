@@ -22,7 +22,7 @@ use satori_core::wallet::{Status, WalletEvent};
 use crate::prefs;
 
 use super::{actions, cards, content, nav::Nav, states};
-use crate::{media, theme};
+use crate::{icons, media, theme};
 
 /// Which surface a feed pane carries: the timeline (the visible catalog),
 /// the articles shelf (kind 30023 from the same follows), or a hashtag
@@ -599,7 +599,7 @@ impl Feed {
             // if the boosted kind has no card here, the row never renders
             // (a kind-6 payload is the original event's JSON; raw text
             // would leak it).
-            if u16::from(note.kind) == 6 && repost_inner(&note).is_none() {
+            if u16::from(note.kind) == 6 && content::repost_inner(&note).is_none() {
                 continue;
             }
             if self.note_ids.contains(&note.id) {
@@ -1506,20 +1506,13 @@ fn card_media_urls(ev: &Event, profiles: &HashMap<String, Profile>) -> Vec<Strin
     let mut urls: Vec<String> = Vec::new();
     if u16::from(ev.kind) == 6 {
         one(ev, profiles, &mut urls);
-        if let Some(inner) = repost_inner(ev) {
+        if let Some(inner) = content::repost_inner(ev) {
             one(&inner, profiles, &mut urls);
         }
     } else {
         one(ev, profiles, &mut urls);
     }
     urls
-}
-
-/// The boosted event inside a kind-6 payload (NIP-18: the content is the
-/// original event's JSON). Only kinds with a card here pass the guard.
-fn repost_inner(ev: &Event) -> Option<Event> {
-    let inner = serde_json::from_str::<Event>(&ev.content).ok()?;
-    (inner.kind == Kind::TextNote || cards::is_feed_kind(inner.kind)).then_some(inner)
 }
 
 /// A repost row (NIP-18 kind 6): the reposter in the header slot, the
@@ -1544,7 +1537,7 @@ fn repost_card(
         .get(&key)
         .map(|p| p.picture.clone())
         .unwrap_or_default();
-    let inner = repost_inner(ev);
+    let inner = content::repost_inner(ev);
     let open = inner.clone();
     let open_handle = handle.clone();
     inner.map_or_else(
@@ -1568,25 +1561,25 @@ fn repost_card(
                 .gap_2()
                 .px_4()
                 .py_4()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(media::avatar(media, &picture, &name, 28.0))
-                        .child(
-                            // The timestamp is the third mode toggle (timefmt.rs):
-                            // tap cycles relative → date → block height.
-                            div()
-                                .id(SharedString::from(format!("boost-time-{}", ev.id)))
-                                .cursor_pointer()
-                                .text_size(px(theme::T_SMALL))
-                                .text_color(rgb(theme::muted()))
-                                .hover(|s| s.text_color(rgb(theme::ink())))
-                                .on_click(|_, _, cx| crate::timefmt::cycle(cx))
-                                .child(format!("{name} boosted · {time}")),
-                        ),
-                )
+                .child(content::actor_header(
+                    // The same glyph slot the notification rows wear: the
+                    // boost announces itself before the words.
+                    Some(icons::repost_icon(theme::muted()).into_any_element()),
+                    media,
+                    &picture,
+                    name.clone(),
+                    Some(
+                        div()
+                            .text_size(px(theme::T_UI))
+                            .text_color(rgb(theme::muted()))
+                            .child("boosted")
+                            .into_any_element(),
+                    ),
+                    time,
+                    format!("boost-{}", ev.id),
+                    None,
+                    handle.clone(),
+                ))
                 .child(
                     div()
                         .id(SharedString::from(format!("repost-{}", ev.id)))
