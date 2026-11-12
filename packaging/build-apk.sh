@@ -61,6 +61,13 @@ cp /home/builder/.abuild/*.pub /etc/apk/keys/ 2>/dev/null || true
 # checksums, builds, tests (check(): the core suite), and packages.
 su builder -c "cd $WORK && abuild checksum && abuild -r"
 
-find /home/builder -name '*.apk' -exec cp {} /srv/packaging/apk/out/ \; 2>/dev/null || true
-cp /home/builder/.abuild/*.pub /srv/packaging/apk/out/ 2>/dev/null || true
+# apk filenames carry no arch (that lives in the APK-INFO), so the two
+# release jobs' uploads would collide on the release page - 0.5.0
+# shipped one apk, not two. Name the artifacts like the flatpaks do:
+# version + arch.
+ARCH=$(apk --print-arch)
+find /home/builder -name '*.apk' 2>/dev/null | while read -r f; do
+	cp "$f" "/srv/packaging/apk/out/$(basename "$f" .apk)-$ARCH.apk"
+done
+cp /home/builder/.abuild/*.pub "/srv/packaging/apk/out/satori-desktop-$VERSION-$ARCH.pub" 2>/dev/null || true
 ls -la /srv/packaging/apk/out/
