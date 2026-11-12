@@ -682,6 +682,9 @@ mod tests {
     use super::*;
     use crate::test_env::EnvGuard;
 
+    /// The wot tests' turnstile (see Session::_serial).
+    static TEST_SERIAL: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
     fn keys() -> Keys {
         Keys::generate()
     }
@@ -709,17 +712,26 @@ mod tests {
     struct Session {
         me: Keys,
         env: EnvGuard,
+        /// Serializes the wot tests: every Session RESETS the process-
+        /// global graph on drop, so two tests interleaving (cargo runs a
+        /// module's tests in parallel threads) flake — one test's cleanup
+        /// wipes another's observed kind-3s mid-assert. Hold the lock for
+        /// the Session's whole life.
+        _serial: std::sync::MutexGuard<'static, ()>,
     }
 
     impl Session {
         fn new(follows: &[Keys]) -> Self {
+            let _serial = TEST_SERIAL
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let env = EnvGuard::new("wot");
             let me = Keys::generate();
             set_identity(
                 me.public_key(),
                 &follows.iter().map(|k| k.public_key()).collect::<Vec<_>>(),
             );
-            Self { me, env }
+            Self { me, env, _serial }
         }
     }
 
