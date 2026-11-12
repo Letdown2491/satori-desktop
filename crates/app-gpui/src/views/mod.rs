@@ -10,7 +10,6 @@ pub mod nav;
 pub mod notifications;
 pub mod profile;
 pub mod reader;
-pub mod reply;
 pub mod search;
 pub mod settings;
 pub mod shell;

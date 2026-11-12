@@ -1728,6 +1728,21 @@ impl Render for Composer {
                 prof.map(|p| p.picture).unwrap_or_default(),
             )
         });
+        let reply_prev = self.reply_to.as_ref().map(|r| {
+            let prof = self.core.profile_of(&r.pubkey);
+            (
+                prof.as_ref()
+                    .map(|p| p.display())
+                    .unwrap_or_else(|| format!("{}…", &r.pubkey.to_string()[..8])),
+                r.content
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .take(240)
+                    .collect::<String>(),
+            )
+        });
         let status = self.status.clone();
         let input = self.input.clone();
         let posting = self.posting;
@@ -1924,6 +1939,33 @@ impl Render for Composer {
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.set_tab(Tab::Article, cx)
                                 })),
+                        ),
+                )
+            })
+            .when_some(reply_prev, |d, (name, snippet)| {
+                // The reply context (the quick-reply sheet's header, now
+                // that the sheet IS this view): replying to WHOM, about
+                // WHAT — a whisper line, never a card (the quote carries
+                // the card; a reply is conversation, not attribution).
+                d.child(
+                    div()
+                        .flex_col()
+                        .gap_0p5()
+                        .px_1()
+                        .child(
+                            div()
+                                .text_size(px(theme::T_UI))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(theme::ink()))
+                                .child(format!("Replying to {name}")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::T_SMALL))
+                                .text_color(rgb(theme::muted()))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(snippet),
                         ),
                 )
             })

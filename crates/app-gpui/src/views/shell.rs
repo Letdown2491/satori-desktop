@@ -26,7 +26,6 @@ use super::{
     notifications::NotificationsView,
     profile::ProfileView,
     reader::ArticleView,
-    reply::ReplySheet,
     search::SearchView,
     settings::SettingsView,
     states,
@@ -93,9 +92,11 @@ pub struct Shell {
     /// The zap amount sheet (bolt hold / right-click) — a floating card
     /// over the pane, not a page: zapping never costs you your place.
     zap_overlay: Option<Entity<ZapSheet>>,
-    /// The reply sheet (#21) — same overlay layer; the action row's
-    /// bubble opens it over whatever pane you were reading.
-    reply_overlay: Option<Entity<ReplySheet>>,
+    /// The reply sheet (#21) — the COMPOSER in reply mode floating in a
+    /// card (its tab strip is already suppressed for replies): the quick
+    /// surface carries everything a note compose does — attachments,
+    /// alt text, preview, schedule.
+    reply_overlay: Option<Entity<Composer>>,
     /// The undo window's floating toast (compose.ts undo-toast): the
     /// composer pops on Held, so the countdown lives HERE, over any pane.
     /// Undone flashes briefly; a Failed error sticks until the next try.
@@ -353,11 +354,11 @@ impl Shell {
         cx.notify();
     }
 
-    /// The reply sheet (#21): a floating card over the current pane (the
-    /// overlay layer, like the zap sheet) — the action row's bubble opens
-    /// this, never the compose page.
+    /// The reply sheet (#21): the composer's reply mode floating over the
+    /// current pane (the overlay layer, like the zap sheet) — the action
+    /// row's bubble opens this, never the compose page.
     fn open_reply_sheet(&mut self, ev: Event, cx: &mut Context<Self>) {
-        let view = cx.new(|cx| ReplySheet::new(self.core.clone(), ev, cx));
+        let view = cx.new(|cx| Composer::new(self.core.clone(), Some(ev), None, cx));
         self.subscribe_nav(&view, cx);
         self.reply_overlay = Some(view);
         cx.notify();
@@ -1292,10 +1293,13 @@ impl Render for Shell {
                 d.child(video_overlay(&url, cx))
             })
             .when_some(self.zap_overlay.clone(), |d, sheet| {
-                d.child(card_overlay("zap", sheet, cx))
+                d.child(card_overlay("zap", sheet, 420., None, cx))
             })
             .when_some(self.reply_overlay.clone(), |d, sheet| {
-                d.child(card_overlay("reply", sheet, cx))
+                // The composer wants room: attachments strip, preview, the
+                // body's own scroller. Definite height — the root flex_1
+                // fills it and scrolls inside.
+                d.child(card_overlay("reply", sheet, 560., Some(560.), cx))
             })
     }
 }
@@ -1373,6 +1377,8 @@ impl Shell {
 fn card_overlay<V: gpui::Render>(
     id: &'static str,
     card: Entity<V>,
+    w: f32,
+    h: Option<f32>,
     cx: &mut Context<Shell>,
 ) -> impl IntoElement {
     div()
@@ -1396,13 +1402,20 @@ fn card_overlay<V: gpui::Render>(
                 .child(
                     div()
                         .id(SharedString::from(format!("{id}-card")))
-                        .w(px(420.))
-                        .max_w(px(content::COL_W))
+                        .w(px(w))
+                        .max_w(px(content::COL_W + 120.))
+                        .when_some(h, |d, h| d.h(px(h)))
                         .rounded(px(theme::R_INPUT))
                         .border_1()
                         .border_color(rgb(theme::hairline()))
                         .bg(rgb(theme::washi()))
                         .shadow_lg()
+                        .overflow_hidden()
+                        // A flex column: a definite-height card (the
+                        // composer) lets a flex_1 child fill it; a
+                        // content-sized one (zap) ignores the axis.
+                        .flex()
+                        .flex_col()
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                             cx.stop_propagation();
                         })
