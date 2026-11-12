@@ -208,9 +208,6 @@ impl Render for ZapSheet {
                     this.zap(cx);
                 }
             }))
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
             .px_4()
             .py_3()
             .flex()

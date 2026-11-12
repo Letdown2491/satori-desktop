@@ -53,8 +53,6 @@ pub enum Pane {
     Settings(Entity<SettingsView>),
     Article(Entity<ArticleView>),
     Composer(Entity<Composer>),
-    /// The zap amount sheet (bolt long-press).
-    ZapSheet(Entity<ZapSheet>),
     /// The NWC wallet connect pane (D20).
     Wallet(Entity<WalletView>),
 }
@@ -91,6 +89,9 @@ pub struct Shell {
     /// The video overlay (Phase 3) — full-screen player over any pane:
     /// the URL + its imeta mime (the inline gate rode the Nav).
     video_overlay: Option<(String, Option<String>)>,
+    /// The zap amount sheet (bolt hold / right-click) — a floating card
+    /// over the pane, not a page: zapping never costs you your place.
+    zap_overlay: Option<Entity<ZapSheet>>,
     /// The undo window's floating toast (compose.ts undo-toast): the
     /// composer pops on Held, so the countdown lives HERE, over any pane.
     /// Undone flashes briefly; a Failed error sticks until the next try.
@@ -150,6 +151,7 @@ impl Shell {
             refocus: false,
             lightbox: None,
             video_overlay: None,
+            zap_overlay: None,
             hold: None,
             notif_unread: false,
             outbox_pending: 0,
@@ -336,11 +338,13 @@ impl Shell {
         cx.notify();
     }
 
-    /// The zap amount sheet (bolt long-press / right-click).
+    /// The zap amount sheet (bolt hold / right-click): a floating card
+    /// over the current pane (the overlay layer, like the lightbox) —
+    /// zapping keeps you where you were.
     fn open_zap_sheet(&mut self, ev: Event, cx: &mut Context<Self>) {
         let view = cx.new(|cx| ZapSheet::new(self.core.clone(), ev, cx));
         self.subscribe_nav(&view, cx);
-        self.stack.push(Pane::ZapSheet(view));
+        self.zap_overlay = Some(view);
         cx.notify();
     }
 
@@ -655,6 +659,13 @@ impl Shell {
     }
 
     fn back(&mut self, cx: &mut Context<Self>) {
+        // An overlay owns the back door while it's up: the zap sheet
+        // closes first (its Nav::Pop and the Esc key both land here),
+        // the pane underneath never notices.
+        if self.zap_overlay.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.stack.len() > 1 {
             // Closing a composer stashes the top-level buffer (composer.rs:288);
             // reply composers leave the draft untouched (`draft_candidate`).
@@ -716,7 +727,6 @@ impl Shell {
             Some(Pane::Settings(_)) => "Settings".into(),
             Some(Pane::Article(_)) => "Read".into(),
             Some(Pane::Composer(_)) => "Compose".into(),
-            Some(Pane::ZapSheet(_)) => "Zap".into(),
             Some(Pane::Wallet(_)) => "Wallet".into(),
             None => "Satori".into(),
         }
@@ -1240,7 +1250,6 @@ impl Render for Shell {
                         Pane::Settings(view) => view.clone().into_any_element(),
                         Pane::Article(view) => view.clone().into_any_element(),
                         Pane::Composer(view) => view.clone().into_any_element(),
-                        Pane::ZapSheet(view) => view.clone().into_any_element(),
                         Pane::Wallet(view) => view.clone().into_any_element(),
                     })
                     // The floating back-to-top whisper: the ACTIVE pane's own
@@ -1266,6 +1275,9 @@ impl Render for Shell {
             })
             .when_some(self.video_overlay.clone(), |d, (url, _mime)| {
                 d.child(video_overlay(&url, cx))
+            })
+            .when_some(self.zap_overlay.clone(), |d, sheet| {
+                d.child(zap_overlay(sheet, cx))
             })
     }
 }
@@ -1332,6 +1344,49 @@ impl Shell {
                 )
             })
     }
+}
+
+/// The zap sheet overlay: the amount card floats centered over a dim
+/// scrim (the pane you were reading stays visible underneath). Any
+/// click that bubbles to the overlay root closes — the card stops
+/// propagation so a stray click inside it doesn't; Esc goes through
+/// back(), which the overlay owns. The scrim is a separate visual
+/// layer because opacity washes the whole subtree.
+fn zap_overlay(sheet: Entity<ZapSheet>, cx: &mut Context<Shell>) -> impl IntoElement {
+    div()
+        .id("zap-overlay")
+        .absolute()
+        .inset_0()
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|shell, _, _, cx| {
+                shell.back(cx);
+            }),
+        )
+        .child(div().absolute().inset_0().bg(rgb(0x000000)).opacity(0.55))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .id("zap-card")
+                        .w(px(420.))
+                        .max_w(px(content::COL_W))
+                        .rounded(px(theme::R_INPUT))
+                        .border_1()
+                        .border_color(rgb(theme::hairline()))
+                        .bg(rgb(theme::washi()))
+                        .shadow_lg()
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(sheet),
+                ),
+        )
 }
 
 /// The lightbox overlay (lightbox.rs): dark full-screen viewer, fit-to-screen
