@@ -256,6 +256,10 @@ pub struct Composer {
     emoji_token: Option<String>,
     emoji_sel: usize,
     reply_to: Option<Event>,
+    /// Hosted in the reply sheet's floating card (shell.rs card_overlay):
+    /// content-sized there — the card hugs the form and scrolls when the
+    /// form outgrows its cap. The page mode fills the pane instead.
+    pub(crate) sheet: bool,
     /// The NIP-18 quote: folded into the content + a q tag at publish; the
     /// preview above the field says what's being quoted.
     quote: Option<Event>,
@@ -466,6 +470,7 @@ impl Composer {
             suggest: vec![],
             mention_token: None,
             reply_to,
+            sheet: false,
             quote,
             next_att: attachments.len() as u64,
             attachments,
@@ -1864,14 +1869,15 @@ impl Render for Composer {
             // (No root click hand-off: every Input focuses itself on mouse
             // down now — a pane-wide handler would steal the caret back
             // from the poll's question and options.)
-            .flex_1()
-            .min_h_0()
-            // The ROOT scrolls: stacked strips (quote card, attachments,
-            // alt editor, schedule, the emoji strip) can't push the Publish
-            // button off a short window anymore. The body box keeps its own
-            // internal scroller (nested scroll is fine — the inner only
-            // overflows when the essay does).
-            .overflow_y_scroll()
+            // The PAGE fills the pane and the ROOT scrolls: stacked
+            // strips (quote card, attachments, alt editor, schedule, the
+            // emoji strip) can't push the Publish button off a short
+            // window anymore. The body box keeps its own internal
+            // scroller (nested scroll is fine — the inner only overflows
+            // when the essay does). The SHEET (shell.rs card_overlay)
+            // inverts it: the composer is content-sized, the card hugs
+            // the form and scrolls when the form outgrows its cap.
+            .when(!self.sheet, |d| d.flex_1().min_h_0().overflow_y_scroll())
             .flex()
             .flex_col()
             .font_family(theme::SANS)

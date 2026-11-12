@@ -358,7 +358,11 @@ impl Shell {
     /// current pane (the overlay layer, like the zap sheet) — the action
     /// row's bubble opens this, never the compose page.
     fn open_reply_sheet(&mut self, ev: Event, cx: &mut Context<Self>) {
-        let view = cx.new(|cx| Composer::new(self.core.clone(), Some(ev), None, cx));
+        let view = cx.new(|cx| {
+            let mut composer = Composer::new(self.core.clone(), Some(ev), None, cx);
+            composer.sheet = true;
+            composer
+        });
         self.subscribe_nav(&view, cx);
         self.reply_overlay = Some(view);
         cx.notify();
@@ -1296,9 +1300,6 @@ impl Render for Shell {
                 d.child(card_overlay("zap", sheet, 420., None, cx))
             })
             .when_some(self.reply_overlay.clone(), |d, sheet| {
-                // The composer wants room: attachments strip, preview, the
-                // body's own scroller. Definite height — the root flex_1
-                // fills it and scrolls inside.
                 d.child(card_overlay("reply", sheet, 560., Some(560.), cx))
             })
     }
@@ -1385,7 +1386,7 @@ fn card_overlay<V: gpui::Render>(
     id: &'static str,
     card: Entity<V>,
     w: f32,
-    h: Option<f32>,
+    max_h: Option<f32>,
     cx: &mut Context<Shell>,
 ) -> impl IntoElement {
     div()
@@ -1411,18 +1412,17 @@ fn card_overlay<V: gpui::Render>(
                         .id(SharedString::from(format!("{id}-card")))
                         .w(px(w))
                         .max_w(px(content::COL_W + 120.))
-                        .when_some(h, |d, h| d.h(px(h)))
+                        // Content-sized: the card HUGS the form (a fixed height
+                        // strands dead space under the action bar). A cap turns
+                        // the card into the scroller — the form outgrows it, the
+                        // card never outgrows the window.
+                        .when_some(max_h, |d, h| d.max_h(px(h)))
+                        .when(max_h.is_some(), |d| d.overflow_y_scroll())
                         .rounded(px(theme::R_INPUT))
                         .border_1()
                         .border_color(rgb(theme::hairline()))
                         .bg(rgb(theme::washi()))
                         .shadow_lg()
-                        .overflow_hidden()
-                        // A flex column: a definite-height card (the
-                        // composer) lets a flex_1 child fill it; a
-                        // content-sized one (zap) ignores the axis.
-                        .flex()
-                        .flex_col()
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                             cx.stop_propagation();
                         })
