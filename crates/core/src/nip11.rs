@@ -133,12 +133,11 @@ pub async fn refresh(relay: &str) -> bool {
     // cleartext URL. The initial GET keeps admitting ws:// relays' plain-
     // http documents (user-chosen, like the relay dial itself); only the
     // hops are held to the full URL guard.
-    let res = match tokio::time::timeout(FETCH_BUDGET, crate::media::client().get(&url).send())
-        .await
-    {
-        Ok(Ok(res)) => res,
-        _ => return false,
-    };
+    let res =
+        match tokio::time::timeout(FETCH_BUDGET, crate::media::client().get(&url).send()).await {
+            Ok(Ok(res)) => res,
+            _ => return false,
+        };
     if !res.status().is_success() {
         return false;
     }

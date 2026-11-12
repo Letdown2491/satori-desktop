@@ -54,6 +54,7 @@ flatpak run io.github.Letdown2491.satori
 
 ## Gates
 
+- `cargo fmt --check` clean before any push (the PR CI enforces it).
 - `cargo check --workspace` clean before any commit.
 - Before asking anyone to test UI behavior: **`cargo build -p satori-gpui`**:
   clippy/test do NOT produce the binary; a stale binary has caused a phantom

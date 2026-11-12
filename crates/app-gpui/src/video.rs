@@ -204,7 +204,10 @@ mod tests {
             "http://127.0.0.1:8080/x.mp4",
             Some("video/mp4")
         ));
-        assert!(!inline_able("http://cdn.example.com/x.mp4", Some("video/mp4")));
+        assert!(!inline_able(
+            "http://cdn.example.com/x.mp4",
+            Some("video/mp4")
+        ));
         assert!(inline_able(
             "https://cdn.example.com/x.mp4",
             Some("video/mp4")
