@@ -197,13 +197,9 @@ pub(crate) enum Tab {
 /// the two-step Esc saves-and-arms, publish pops. The SHEET floats in a
 /// card (shell.rs card_overlay): content-sized — the card hugs the form
 /// and scrolls when it outgrows the cap, Esc falls through to back().
-/// The thread's INLINE embed is content-sized and keeps its pane open on
-/// publish (the field just clears), and eats Esc — a stray press must
-/// not close the pane under a half-typed reply.
 pub(crate) enum Surface {
     Page,
     Sheet,
-    Inline,
 }
 
 /// The compose field's resting height, in lines of text: present without
@@ -926,20 +922,10 @@ impl Composer {
         }
     }
 
-    /// Publish settled: the page and the sheet pop; the thread's inline
-    /// embed keeps its pane open — clear the field, the reply arrives
-    /// through the thread's pump like any other (the undo toast floats
-    /// in the shell off core.subscribe_hold).
+    /// Publish settled: the pane pops (page and sheet alike — the card's
+    /// Nav::Pop closes it), the toast floats over whatever is under it.
     fn settled(this: &gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp) {
-        let _ = this.update(cx, |this, cx| {
-            if matches!(this.surface, Surface::Inline) {
-                this.posting = false;
-                this.input.update(cx, |input, cx| input.clear(cx));
-                cx.notify();
-            } else {
-                cx.emit(Nav::Pop);
-            }
-        });
+        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
     }
 
     /// The publish pump every instant tab shares (poll, article, photo,
@@ -1725,12 +1711,7 @@ impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.autofocused {
             self.autofocused = true;
-            // The inline embed (thread bottom) must not steal the
-            // window's focus when the anchor lands — its field takes
-            // focus on click, like every Input.
-            if !matches!(self.surface, Surface::Inline) {
-                window.focus(&self.focus, cx);
-            }
+            window.focus(&self.focus, cx);
             self.focused_tab = Some(Tab::Note);
         }
         if self.focused_tab != Some(self.tab) {
@@ -1856,15 +1837,9 @@ impl Render for Composer {
                 // escape-to-back. Typing changes the fingerprint, so a
                 // save is never stale. An untouched form pops on the first
                 // Esc, as it always did. The SHEET's Esc falls through —
-                // the shell's back() closes the card. The INLINE embed
-                // EATS Esc: a stray press while typing must not close the
-                // pane under the reply.
+                // the shell's back() closes the card.
                 if ev.keystroke.key == "escape" && !this.posting && this.emoji_suggest.is_empty() {
                     match this.surface {
-                        Surface::Inline => {
-                            cx.stop_propagation();
-                            return;
-                        }
                         Surface::Sheet => {}
                         Surface::Page => {
                             if let Some(h) = this.draft_hash(cx) {
@@ -2012,16 +1987,14 @@ impl Render for Composer {
                                 .text_color(rgb(theme::ink()))
                                 .child(format!("Replying to {name}")),
                         )
-                        .when(!matches!(self.surface, Surface::Inline), |d| {
-                            d.child(
-                                div()
-                                    .text_size(px(theme::T_SMALL))
-                                    .text_color(rgb(theme::muted()))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(snippet),
-                            )
-                        }),
+                        .child(
+                            div()
+                                .text_size(px(theme::T_SMALL))
+                                .text_color(rgb(theme::muted()))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(snippet),
+                        ),
                 )
             })
             .when_some(quote_prev, |d, (name, snippet, picture)| {

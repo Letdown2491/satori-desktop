@@ -20,7 +20,7 @@ use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile, Publish
 use satori_core::wallet::{Status, WalletEvent};
 use satori_core::wot::Verdict;
 
-use super::{actions, composer, content, nav::Nav, states};
+use super::{actions, content, nav::Nav, states};
 use crate::{media, prefs, theme};
 
 pub struct ThreadView {
@@ -54,11 +54,6 @@ pub struct ThreadView {
     /// Session zap-in-flight set; the wallet broadcast clears it.
     zap_pending: HashSet<String>,
     wallet_ready: bool,
-    /// The inline reply box (#21): the COMPOSER in reply mode (sheet
-    /// surface — content-sized) embedded under the thread, replying to
-    /// the anchor: attachments, preview, schedule all ride along. Built
-    /// once the anchor lands (None until then — no anchor, no box).
-    reply_composer: Option<Entity<composer::Composer>>,
 }
 
 impl EventEmitter<Nav> for ThreadView {}
@@ -187,7 +182,6 @@ impl ThreadView {
             zapped,
             zap_pending: HashSet::new(),
             wallet_ready,
-            reply_composer: None,
         };
         // The anchor rides in with its author's profile; replies follow.
         view.pump(view.core.event_by_id(id, Vec::new(), None), cx);
@@ -307,26 +301,6 @@ impl ThreadView {
                 }
                 self.anchor = Some(note.clone());
                 self.error = None;
-                // The inline reply box builds ONCE the anchor exists: the
-                // composer in reply mode (sheet surface, content-sized),
-                // its Nav forwarded up through this pane.
-                if self.reply_composer.is_none() {
-                    let composer = cx.new(|cx| {
-                        let mut c = composer::Composer::new(
-                            self.core.clone(),
-                            Some(note.clone()),
-                            None,
-                            cx,
-                        );
-                        c.surface = composer::Surface::Inline;
-                        c
-                    });
-                    cx.subscribe(&composer, |_, _, ev: &Nav, cx| {
-                        cx.emit(ev.clone());
-                    })
-                    .detach();
-                    self.reply_composer = Some(composer);
-                }
                 if let Some(p) = profile {
                     self.profiles.insert(p.pubkey.clone(), p);
                 }
@@ -966,31 +940,6 @@ impl Render for ThreadView {
                         .into_any_element()
                     }),
             )
-            // The inline reply box (#21): the composer embedded under the
-            // thread (sheet surface — content-sized), replying to the
-            // anchor. The hairline rides the content COLUMN now, not the
-            // window — a full-width band read as a stray strip. The cap
-            // keeps a monster form from evicting the conversation; the
-            // embed scrolls within it.
-            .when_some(self.reply_composer.clone(), |d, composer| {
-                d.child(
-                    div()
-                        .w_full()
-                        .max_w(px(content::COL_W))
-                        .self_center()
-                        .flex()
-                        .flex_col()
-                        .border_t_1()
-                        .border_color(rgb(theme::hairline()))
-                        .child(
-                            div()
-                                .id("thread-reply-embed")
-                                .max_h(px(560.))
-                                .overflow_y_scroll()
-                                .child(composer),
-                        ),
-                )
-            })
     }
 }
 
