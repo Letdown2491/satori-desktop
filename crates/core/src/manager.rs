@@ -982,7 +982,7 @@ impl Core {
         let Some(session) = session::load() else {
             return (None, None); // first run — not an error
         };
-        match self.rt.block_on(self.build_active(&session)) {
+        match self.rt.block_on(self.build_active(&session, None)) {
             Ok(active) => {
                 *self.active.lock().unwrap() = Some(active);
                 self.resume_wallet();
@@ -1797,7 +1797,12 @@ impl Core {
         crate::dlog!("bunker: session saved");
 
         // Already on the runtime (spawned task): await, never block_on.
-        let active = self.build_active(&session).await?;
+        // The handshake-completed client IS the session signer — the
+        // rebuild would re-run the connect handshake secretless (the
+        // doc comment on build_active).
+        let active = self
+            .build_active(&session, Some(Signer::Bunker(Arc::clone(&connect))))
+            .await?;
         *self.active.lock().unwrap() = Some(active);
         // Clear pending only if it still points at THIS handshake — a newer
         // attempt may have replaced it.
@@ -1952,7 +1957,13 @@ impl Core {
         session::save(&session)?;
         crate::dlog!("nostrconnect: session saved");
 
-        let active = self.build_active(&session).await?;
+        // The handshake-completed client IS the session signer — the
+        // rebuild would re-run the connect handshake secretless and the
+        // user's first note send would eat the refusal (the doc comment
+        // on build_active).
+        let active = self
+            .build_active(&session, Some(Signer::Bunker(Arc::clone(&connect))))
+            .await?;
         *self.active.lock().unwrap() = Some(active);
         // Clear pending only if it still points at THIS handshake — a newer
         // attempt may have replaced it.
@@ -2094,13 +2105,25 @@ impl Core {
         Ok(p)
     }
 
-    async fn build_active(&self, session: &Session) -> Result<Active> {
+    /// The handshake-completed bunker client, when the caller just finished
+    /// one (both login paths hold a live `NostrConnect` whose pairing the
+    /// signer's secret established). Reusing it matters: `build_signer`'s
+    /// rebuild from the secretless bunker:// URI re-runs the NIP-46
+    /// `connect` handshake with NO secret on the first sign — and a signer
+    /// that requires the pairing secret refuses that ("the connect did not
+    /// carry the secret"), failing the user's FIRST NOTE SEND after a
+    /// perfectly green login. The live client's pairing is already
+    /// consumed and subscribed; the session wears it.
+    async fn build_active(&self, session: &Session, prebuilt: Option<Signer>) -> Result<Active> {
         // The session pubkey, parsed once. A corrupt session.json fails
         // the login here, with a message on the login pane, instead of
         // panicking at the first me() call somewhere deep in a feed task.
         let me = PublicKey::from_str(&session.pubkey)
             .map_err(|e| LoginError::Resume(format!("session pubkey: {e}")))?;
-        let signer = self.build_signer(session).await?;
+        let signer = match prebuilt {
+            Some(s) => s,
+            None => self.build_signer(session).await?,
+        };
         let pool = self.pool().await?;
         // The pool's NIP-42 authenticator now answers challenges AS this
         // account (pool.rs): strict relays serve kinds 78/30078 only to
@@ -7206,7 +7229,7 @@ impl Core {
         };
         session::save(&session)?;
 
-        let active = self.build_active(&session).await?;
+        let active = self.build_active(&session, None).await?;
         *self.active.lock().unwrap() = Some(active);
         Ok(pk)
     }
