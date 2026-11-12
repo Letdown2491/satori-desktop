@@ -5997,16 +5997,6 @@ impl Core {
         crate::relay_latency::snapshot()
     }
 
-    /// Pool connectivity for the shell rail's live dot (0.2-design-spec
-    /// §4.4), read off the D33/D36 latency machinery — the SDK's socket
-    /// states are not surfaced per relay, so "connected" means the only
-    /// thing we can honestly claim: some relay DELIVERED an event or ACKed
-    /// a publish inside the recent window. False = no recent proof of life
-    /// (startup, all relays dead, offline).
-    pub fn pool_connected() -> bool {
-        crate::relay_latency::connected()
-    }
-
     /// Remembered NIP-11 capabilities (nip11.rs): what each relay
     /// ADVERTISES it can do, for honest degradation whispers. A relay we
     /// never fetched is absent or `search: None` — unknown, not refused.

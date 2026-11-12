@@ -397,27 +397,6 @@ pub fn mark_delivery(relay: &str) {
     }
 }
 
-/// The window the rail's live dot reads (0.2-design-spec §4.4): a relay
-/// that delivered within the last five minutes counts as pool-liveness.
-/// Deliberately minutes-wide — an idle-but-connected pool goes quiet
-/// between the feed's queries, and the dot must not flicker on that.
-const CONNECTED_WINDOW_SECS: u64 = 300;
-
-/// Pool connectivity, honestly stated: did ANY relay deliver an event or
-/// ACK a publish inside the window? This is NOT socket state (nostr-sdk
-/// doesn't surface per-relay connection status we could trust) — it is
-/// "the pool recently did something real". False therefore covers startup
-/// (nothing proven yet) and full disconnection alike, which is exactly the
-/// one quiet state §4.4 wants the rail to show: dot grey, nothing moves.
-pub fn connected() -> bool {
-    let now = now_secs();
-    let held = stats().lock().unwrap();
-    held.map.values().any(|s| {
-        s.ok_at
-            .is_some_and(|at| now.saturating_sub(at) < CONNECTED_WINDOW_SECS)
-    })
-}
-
 /// One relay's learned health, for the settings pane (WS4): the EWMA
 /// latency, sample count, and the two dead-markers (D33 read-dead /
 /// D36 write-dead). A copy — the pane renders it, the lock is never
@@ -569,29 +548,25 @@ mod tests {
     }
 
     #[test]
-    fn connected_reads_recent_proof_of_life() {
+    fn write_ack_and_delivery_marks() {
         let _env = EnvGuard::new("lat-connected");
-        // NOTE: connected() scans the whole process-wide profile map, and
-        // the other tests in this file record deliveries concurrently —
-        // so the pool-level verdict is asserted only in the positive
-        // direction; the negative case (grey) is asserted per-relay.
-        // A query that delivered events proves life.
-        record("wss://alive.example", 200, false, 5);
-        assert!(connected());
-        // A zero-delivery sample does NOT (a denial or an empty EOSE is
-        // not proof the pool answers with content).
-        record("wss://alive.example", 200, false, 0);
-        assert!(connected()); // the earlier proof still stands (window)
-        // A live-bell arrival on an unprofiled relay seeds the field.
-        mark_delivery("wss://bell.example");
-        assert!(connected());
-        // A publish ACK proves life; a failure keeps whatever stood.
+        // A publish ACK proves life for the relay (ok_at stamped).
         record_write_result("wss://ack.example", true);
-        assert!(connected());
+        // A failure does NOT erase the success stamp (the relay answered
+        // before; the write-dead counter takes over from here).
         record_write_result("wss://ack.example", false);
-        assert!(connected());
-        // Per-relay honesty: a failure mark doesn't erase the success
-        // stamp, and an unprofiled relay has none.
+        assert!(!is_write_dead("wss://ack.example"));
+        // WRITE_DEAD_N consecutive failures mark the relay write-dead
+        // (D36's honesty state) — the outbox stops preferring it.
+        for _ in 0..WRITE_DEAD_N {
+            record_write_result("wss://dead.example", false);
+        }
+        assert!(is_write_dead("wss://dead.example"));
+        // Per-relay honesty, read under the lock LAST (the guard must be
+        // gone before any further record_* call locks the same mutex —
+        // the first draft of this test held it across record_write_result
+        // and deadlocked the suite): the failure mark accumulated, the
+        // success stamp stands, and an unprofiled relay has neither.
         let held = stats().lock().unwrap();
         let ack = held.map.get("wss://ack.example").unwrap();
         assert_eq!(ack.write_fails, 1);

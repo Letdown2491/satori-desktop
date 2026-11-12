@@ -102,11 +102,10 @@ pub struct Shell {
     /// signed and saved but not yet ACKed by any relay. A quiet pill, not
     /// an error (D26's split); the drainer owns the retries.
     outbox_pending: usize,
-    /// The rail's live dot (§4.4): did ANY relay recently deliver or ACK?
-    /// Read off core's latency machinery (Core::pool_connected), polled on
-    /// the settings pane's slow 30s cadence — the signal is minutes-wide
-    /// by design, so nothing faster is honest.
-    pool_live: bool,
+    /// The rail's live dot left (D56): the failure mode it covered is
+    /// either self-healed (the suspend watchdog recycles the sockets) or
+    /// discovered at the point of action (publish/zap whispers). The
+    /// durable diagnostics live in the settings pane's relay-health rows.
     stack: Vec<Pane>,
     /// The signed-in identity: the rail's top mark is the user's avatar
     /// (replacing the ensō as the home glyph).
@@ -154,7 +153,6 @@ impl Shell {
             hold: None,
             notif_unread: false,
             outbox_pending: 0,
-            pool_live: Core::pool_connected(),
             stack: vec![],
             me: None,
             me_profile: None,
@@ -169,24 +167,6 @@ impl Shell {
         shell.want_avatar(cx);
         shell.watch_notif(cx);
         shell.outbox_pending = Core::outbox_pending();
-        // The live dot's slow poll (the settings relay-health pane's
-        // cadence): connectivity is a state, not an event stream — nothing
-        // in the pool broadcasts "all sockets died", so we re-ask.
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(30))
-                    .await;
-                let _ = this.update(cx, |shell, cx| {
-                    let live = Core::pool_connected();
-                    if live != shell.pool_live {
-                        shell.pool_live = live;
-                        cx.notify();
-                    }
-                });
-            }
-        })
-        .detach();
         shell
     }
 
@@ -995,21 +975,6 @@ impl Shell {
                     }
                 }),
             ))
-            // The live dot (§4.4): ink while some relay recently answered,
-            // grey the moment nothing has. The one quiet connectivity
-            // state — it never moves on its own, only flips.
-            .child(
-                div()
-                    .mt_auto()
-                    .mb(px(12.0))
-                    .size(px(5.0))
-                    .rounded_full()
-                    .bg(rgb(if self.pool_live {
-                        theme::ink()
-                    } else {
-                        theme::muted()
-                    })),
-            )
     }
 
     fn rail_button(
