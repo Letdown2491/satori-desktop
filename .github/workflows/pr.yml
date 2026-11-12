@@ -61,13 +61,22 @@ jobs:
       - name: Tests
         run: cargo test --locked --workspace
 
-      - name: Install cargo-audit and actionlint
+      - name: Install cargo-audit
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit,actionlint
+          tool: cargo-audit
+
+      # install-action dropped actionlint support (its fallback, cargo
+      # binstall, looks for a crate that does not exist); the tool's own
+      # download script, pinned at the tool's tag, is the documented route.
+      - name: Install actionlint
+        run: |
+          curl -fsSf https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash \
+            | bash -s -- v1.7.12
+          ./actionlint --version | head -1
 
       - name: Lint the workflows
-        run: actionlint
+        run: ./actionlint
 
       - name: Advisories (audit.toml is the baseline)
         run: cargo audit
