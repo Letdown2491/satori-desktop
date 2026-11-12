@@ -221,6 +221,9 @@ fn main() {
     // The C side (glib, gstreamer, lmdb) keeps glibc malloc: cap its arena
     // count so its retention stays bounded too (default 8x ncores = 96
     // possible 64MB arenas). The malloc_trim loop below keeps cycling it.
+    // glibc-only knobs: musl's mallocng hands pages back eagerly and has
+    // no arena tunables (the alpine/musl build, issue #23).
+    #[cfg(target_env = "gnu")]
     unsafe {
         let _ = libc::mallopt(libc::M_ARENA_MAX, 4);
     }
@@ -232,6 +235,7 @@ fn main() {
         // the freed arenas (RSS stays at the high-water mark otherwise).
         // malloc_trim(0) walks the arenas and gives the untouched pages
         // back — cheap every 5 minutes, invisible otherwise.
+        #[cfg(target_env = "gnu")]
         cx.spawn(async move |cx| {
             loop {
                 cx.background_executor()
