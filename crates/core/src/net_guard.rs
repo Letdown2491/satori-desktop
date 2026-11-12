@@ -354,7 +354,7 @@ fn normalize_host(host: &str) -> String {
 // PASTED, so the screen must run at paste/connect time, before anything
 // dials. Same ruleset, same ledger: exemption is `allow_direct_relay` (the
 // consent record the connect dialogs write), the address test is
-// [`is_public_unicast_ip`]. No second ruleset.
+// [`is_public_ip`]. No second ruleset.
 
 /// How one pasted URI relay classified at paste-time screening.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -393,7 +393,7 @@ impl RelayVerdict {
 /// Screen the relay URLs of a user-pasted URI (NWC `nostr+walletconnect://`,
 /// bunker `bunker://`) at paste/connect time. Public/exempted relays pass;
 /// relays resolving to RFC1918 / loopback / link-local / CGNAT / ULA (the
-/// [`is_public_unicast_ip`] rules) are refused so the dialog can surface
+/// [`is_public_ip`] rules) are refused so the dialog can surface
 /// "this URI wants to talk to 192.168.1.10 — allow?" before any socket
 /// opens. DNS weather (resolve errors) is NOT a refusal — the dial fails
 /// honestly on its own; this screen refuses ADDRESS classes.
@@ -431,7 +431,7 @@ where
             Ok(addrs) => {
                 let refused: Vec<IpAddr> = addrs
                     .map(|a| a.ip())
-                    .filter(|ip| !is_public_unicast_ip(*ip))
+                    .filter(|ip| !is_public_ip(ip))
                     .collect();
                 if refused.is_empty() {
                     RelayScreen::Public

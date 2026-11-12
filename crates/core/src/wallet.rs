@@ -29,6 +29,7 @@ use nostr::prelude::*;
 use nwc::prelude::*;
 
 use crate::config;
+use crate::net_guard;
 use crate::secrets;
 
 /// How long a pay_invoice may run before it becomes Uncertain. Lightning
@@ -88,6 +89,13 @@ pub enum WalletEvent {
     ZapReceipt {
         note: String,
         req: String,
+    },
+    /// Paste-time relay screening refused a private-network relay in the
+    /// pasted URI (issue #11): the full verdicts. The dialog derives the
+    /// banner line and the allow affordance from them (the consent write
+    /// is net_guard::allow_direct_relay). Nothing was stored or dialed.
+    RelayScreened {
+        verdicts: Vec<net_guard::RelayVerdict>,
     },
 }
 
@@ -272,6 +280,12 @@ pub struct Conn {
     pub wallet: String,
     /// Relay(s) the wallet service listens on.
     pub relays: Vec<String>,
+    /// Relay hosts the user explicitly allowed onto non-public space at
+    /// paste time (the issue-#11 consent). Re-seeds the net_guard ledger
+    /// on resume, so an approved LAN wallet still connects after a
+    /// restart. Old wallet.json files load unchanged (serde default).
+    #[serde(default)]
+    pub direct: Vec<String>,
 }
 
 fn save_conn(c: &Conn) {
@@ -431,17 +445,12 @@ impl Wallet {
         let _ = self.events.send(WalletEvent::Status(s));
     }
 
-    /// Connect to a `nostr+walletconnect://` URI: parse, seal the secret in
-    /// the secret store, persist the secret-free record, probe the wallet.
-    /// Status events stream on the channel (Connecting → Ready | failed).
+    /// Connect to a `nostr+walletconnect://` URI: parse, screen the URI's
+    /// relays through net_guard (issue #11 — this transport sits outside
+    /// the pool's screening), seal the secret in the secret store, persist
+    /// the secret-free record, probe the wallet. Status events stream on
+    /// the channel (Connecting → Ready | failed).
     pub async fn connect(&self, uri: String) {
-        // Paste-time transport screen (issue #11): the URI's relays are the
-        // wallet transport's dials, outside the pool's screens — the same
-        // ruleset screens them here, before anything connects.
-        if let Err(e) = crate::net_guard::screen_nwc_uri(&uri) {
-            let _ = self.events.send(WalletEvent::ConnectFailed(e));
-            return;
-        }
         let parsed = match NostrWalletConnectUri::parse(uri.trim()) {
             Ok(u) => u,
             Err(e) => {
@@ -451,9 +460,33 @@ impl Wallet {
                 return;
             }
         };
+        // Paste-time relay screen: the NWC client dials these relays
+        // directly (no pool screening), so private-space answers are
+        // refused BEFORE anything opens — the dialog offers the consent
+        // toggle instead. Nothing is stored on a refusal.
+        let relay_urls: Vec<String> = parsed.relays.iter().map(|r| r.to_string()).collect();
+        let verdicts =
+            net_guard::screen_uri_relays(relay_urls.iter().map(String::as_str)).await;
+        let refused: Vec<&net_guard::RelayVerdict> = verdicts
+            .iter()
+            .filter(|v| matches!(v.screen, net_guard::RelayScreen::Refused(_)))
+            .collect();
+        if !refused.is_empty() {
+            let owned: Vec<net_guard::RelayVerdict> = refused.into_iter().cloned().collect();
+            let _ = self.events.send(WalletEvent::RelayScreened { verdicts: owned });
+            return;
+        }
         let conn = Conn {
             wallet: parsed.public_key.to_string(),
-            relays: parsed.relays.iter().map(|r| r.to_string()).collect(),
+            relays: relay_urls,
+            // The consent ledger members among this URI's relays —
+            // persisted so resume re-seeds the ledger and keeps an
+            // approved LAN wallet working across restarts.
+            direct: verdicts
+                .iter()
+                .filter(|v| v.screen == net_guard::RelayScreen::Exempted)
+                .map(|v| v.host.clone())
+                .collect(),
         };
         self.set_status(Status::Connecting);
         if let Err(e) = secrets::store(secrets::NWC_SECRET, &parsed.secret.to_secret_hex()).await {
@@ -496,6 +529,25 @@ impl Wallet {
         let Some(conn) = load_conn() else {
             return;
         };
+        // Re-seed the consent ledger from the persisted record, then
+        // re-screen: the paste-time approval covers the HOST, not a
+        // snapshot of its addresses — a name that now resolves into
+        // private space fails the resume loudly, with the same affordance
+        // the connect path offers (issue #11; review Tier 2.4).
+        for host in &conn.direct {
+            net_guard::allow_direct_relay(host);
+        }
+        let verdicts =
+            net_guard::screen_uri_relays(conn.relays.iter().map(String::as_str)).await;
+        let refused: Vec<net_guard::RelayVerdict> = verdicts
+            .into_iter()
+            .filter(|v| matches!(v.screen, net_guard::RelayScreen::Refused(_)))
+            .collect();
+        if !refused.is_empty() {
+            let _ = self.events.send(WalletEvent::RelayScreened { verdicts: refused });
+            self.set_status(Status::Disconnected);
+            return;
+        }
         let Some(secret_hex) = secrets::load(secrets::NWC_SECRET).await.ok().flatten() else {
             clear_conn(); // secret gone — the connection is unrecoverable
             return;
@@ -640,11 +692,18 @@ mod tests {
         let conn = Conn {
             wallet: parsed.public_key.to_string(),
             relays: parsed.relays.iter().map(|r| r.to_string()).collect(),
+            direct: Vec::new(),
         };
         let json = serde_json::to_string(&conn).unwrap();
         assert!(!json.contains("71a8c14c"), "secret leaked into wallet.json");
         let back: Conn = serde_json::from_str(&json).unwrap();
         assert_eq!(back.relays, vec!["wss://relay.damus.io".to_string()]);
+        assert!(back.direct.is_empty(), "no consent recorded by default");
+
+        // Old wallet.json (before the issue-#11 `direct` field) still loads.
+        let legacy = r#"{"wallet":"a","relays":["wss://r.example"]}"#;
+        let old: Conn = serde_json::from_str(legacy).expect("legacy record loads");
+        assert!(old.direct.is_empty());
 
         // And the URI round-trips through Display (the resume path rebuilds
         // from parts; this proves the parse side).
@@ -774,6 +833,23 @@ mod tests {
         assert!(has("lnurl"), "bech32 lnurl tag");
         assert!(has("relays"), "receipt relays tag");
         assert_eq!(unsigned.pubkey, me.public_key());
+    }
+
+    // --- paste-time consent persistence (issue #11) ----------------------
+
+    #[test]
+    fn conn_persists_and_reseeds_consent_hosts() {
+        // The consent hosts survive the JSON round-trip (resume re-seeds
+        // the net_guard ledger from this list) and the secret never does.
+        let conn = Conn {
+            wallet: "ab".repeat(32),
+            relays: vec!["wss://umbrel.local:7777".to_string()],
+            direct: vec!["umbrel.local".to_string()],
+        };
+        let json = serde_json::to_string(&conn).unwrap();
+        let back: Conn = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.direct, vec!["umbrel.local".to_string()]);
+        assert!(!json.contains("secret"), "record stays secret-free");
     }
 
     // --- ledger: request-stored-before-pay, retry reuses the ID ----------
