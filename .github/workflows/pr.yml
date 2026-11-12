@@ -10,6 +10,8 @@
 #
 # audit.toml carries the advisory baseline: the six informational
 # unmaintained warnings are ignored BY ID, everything else fails.
+# deny.toml mirrors that philosophy (advisories by ID, a permissive
+# license allow-list, duplicate-major-versions as warnings).
 
 name: pr
 
@@ -61,10 +63,10 @@ jobs:
       - name: Tests
         run: cargo test --locked --workspace
 
-      - name: Install cargo-audit
+      - name: Install cargo-audit and cargo-deny
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit
+          tool: cargo-audit,cargo-deny
 
       # install-action dropped actionlint support (its fallback, cargo
       # binstall, looks for a crate that does not exist); the tool's own
@@ -80,3 +82,6 @@ jobs:
 
       - name: Advisories (audit.toml is the baseline)
         run: cargo audit
+
+      - name: Supply chain (deny.toml is the baseline)
+        run: cargo deny check
