@@ -347,6 +347,138 @@ fn normalize_host(host: &str) -> String {
         .to_ascii_lowercase()
 }
 
+// --- paste-time URI relay screening (issue #11) ----------------------------
+
+// The NWC wallet and bunker clients build their own transports, outside the
+// pool's `Proxy::custom` screening — their relays come from a URI the user
+// PASTED, so the screen must run at paste/connect time, before anything
+// dials. Same ruleset, same ledger: exemption is `allow_direct_relay` (the
+// consent record the connect dialogs write), the address test is
+// [`is_public_unicast_ip`]. No second ruleset.
+
+/// How one pasted URI relay classified at paste-time screening.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayScreen {
+    /// Every resolved answer was public unicast (no answers = dial weather;
+    /// the connect attempt reports it honestly).
+    Public,
+    /// The host sits in the user-exemption ledger (consent recorded at a
+    /// past connect attempt — dial direct, LAN relays included).
+    Exempted,
+    /// Resolved to at least one non-public address. Fail closed on the
+    /// whole name (the `resolve_pinned_public` mix rule): the dialog gets
+    /// the offending addresses as evidence for the allow affordance.
+    Refused(Vec<IpAddr>),
+}
+
+/// One pasted URI relay's verdict (the dialog's line item).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayVerdict {
+    pub url: String,
+    /// Normalized host key (lowercase, no brackets/dot) — the ledger key.
+    pub host: String,
+    pub screen: RelayScreen,
+}
+
+impl RelayVerdict {
+    fn refused(url: &str, host: &str, addrs: Vec<IpAddr>) -> Self {
+        Self {
+            url: url.to_string(),
+            host: host.to_string(),
+            screen: RelayScreen::Refused(addrs),
+        }
+    }
+}
+
+/// Screen the relay URLs of a user-pasted URI (NWC `nostr+walletconnect://`,
+/// bunker `bunker://`) at paste/connect time. Public/exempted relays pass;
+/// relays resolving to RFC1918 / loopback / link-local / CGNAT / ULA (the
+/// [`is_public_unicast_ip`] rules) are refused so the dialog can surface
+/// "this URI wants to talk to 192.168.1.10 — allow?" before any socket
+/// opens. DNS weather (resolve errors) is NOT a refusal — the dial fails
+/// honestly on its own; this screen refuses ADDRESS classes.
+pub async fn screen_uri_relays<'a, I>(urls: I) -> Vec<RelayVerdict>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut verdicts = Vec::new();
+    for url in urls {
+        let parsed = match url::Url::parse(url) {
+            Ok(p) => p,
+            Err(_) => {
+                // Unparseable inside an already-parsed URI: refuse shut.
+                verdicts.push(RelayVerdict::refused(url, "(unparseable)", Vec::new()));
+                continue;
+            }
+        };
+        let Some(host) = parsed.host_str() else {
+            verdicts.push(RelayVerdict::refused(url, "(no host)", Vec::new()));
+            continue;
+        };
+        let key = normalize_host(host);
+        if user_chosen_relay(url) {
+            verdicts.push(RelayVerdict {
+                url: url.to_string(),
+                host: key,
+                screen: RelayScreen::Exempted,
+            });
+            continue;
+        }
+        // Resolve the normalized key: `host_str` keeps the brackets on
+        // IPv6 literals, and `lookup_host` wants them bare — and the
+        // ledger compares against the same normalized form.
+        let screen = match tokio::net::lookup_host((key.as_str(), 0)).await {
+            Ok(addrs) => {
+                let refused: Vec<IpAddr> = addrs
+                    .map(|a| a.ip())
+                    .filter(|ip| !is_public_unicast_ip(*ip))
+                    .collect();
+                if refused.is_empty() {
+                    RelayScreen::Public
+                } else {
+                    // Fail closed on the whole name: a public/private mix
+                    // never dials the private leg.
+                    RelayScreen::Refused(refused)
+                }
+            }
+            // No answer / resolver down: dial weather, not a refusal.
+            Err(_) => RelayScreen::Public,
+        };
+        verdicts.push(RelayVerdict {
+            url: url.to_string(),
+            host: key,
+            screen,
+        });
+    }
+    verdicts
+}
+
+/// The connect dialog's banner line for refused relays (issue #11): names
+/// the host and the internal address it answered with. Empty when nothing
+/// was refused.
+pub fn relay_screen_notice(verdicts: &[RelayVerdict]) -> String {
+    let mut lines = Vec::new();
+    for v in verdicts {
+        if let RelayScreen::Refused(addrs) = &v.screen {
+            let shown = addrs
+                .first()
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "a non-public address".into());
+            if v.host == shown {
+                lines.push(format!(
+                    "this URI wants to talk to {shown} — a private address. Allow it?"
+                ));
+            } else {
+                lines.push(format!(
+                    "this URI wants to talk to {} ({shown}) — a private address. Allow it?",
+                    v.host
+                ));
+            }
+        }
+    }
+    lines.join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,5 +658,84 @@ mod tests {
         assert!(!user_chosen_relay(url));
         // Garbage URLs are never "user chosen".
         assert!(!user_chosen_relay("not a url"));
+    }
+
+    // --- paste-time URI relay screening (issue #11) ----------------------
+
+    #[test]
+    fn uri_relay_screen_refuses_private_dial_targets() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            // IP-literal hosts: lookup_host parses them without DNS, so
+            // these verdicts are device-independent.
+            let vs = screen_uri_relays([
+                "wss://127.0.0.1:7777",
+                "wss://10.0.0.7:9735",
+                "wss://[::1]:8080",
+                "wss://100.64.0.9",
+                "wss://8.8.8.8",
+            ])
+            .await;
+            assert_eq!(vs.len(), 5);
+            assert!(matches!(vs[0].screen, RelayScreen::Refused(_)), "loopback");
+            assert!(matches!(vs[1].screen, RelayScreen::Refused(_)), "RFC1918");
+            assert!(
+                matches!(vs[2].screen, RelayScreen::Refused(_)),
+                "v6 loopback"
+            );
+            assert!(matches!(vs[3].screen, RelayScreen::Refused(_)), "CGNAT");
+            assert_eq!(vs[4].screen, RelayScreen::Public, "public unicast");
+            assert_eq!(vs[0].host, "127.0.0.1");
+
+            // The v4-mapped form screens through the v4 rules, same as the
+            // dial paths.
+            let vs = screen_uri_relays(["wss://[::ffff:192.168.1.1]"]).await;
+            assert!(matches!(vs[0].screen, RelayScreen::Refused(_)));
+        });
+    }
+
+    #[test]
+    fn uri_relay_screen_honors_the_consent_ledger() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let url = "wss://127.0.0.1:7777";
+            let vs = screen_uri_relays([url]).await;
+            assert!(matches!(vs[0].screen, RelayScreen::Refused(_)));
+            // The dialog's allow affordance writes the SAME ledger the
+            // relay allowlist uses; the retry classifies Exempted.
+            allow_direct_relay("127.0.0.1");
+            let vs = screen_uri_relays([url]).await;
+            assert_eq!(vs[0].screen, RelayScreen::Exempted);
+            disallow_direct_relay("127.0.0.1");
+        });
+    }
+
+    #[test]
+    fn relay_screen_notice_names_host_and_address() {
+        let vs = vec![RelayVerdict::refused(
+            "wss://home-lan.example:7777",
+            "home-lan.example",
+            vec!["192.168.1.10".parse().unwrap()],
+        )];
+        let n = relay_screen_notice(&vs);
+        assert!(n.contains("home-lan.example"));
+        assert!(n.contains("192.168.1.10"));
+        assert!(n.contains("Allow it?"));
+        // An IP-literal host doesn't repeat itself.
+        let vs = vec![RelayVerdict::refused(
+            "wss://192.168.1.10",
+            "192.168.1.10",
+            vec!["192.168.1.10".parse().unwrap()],
+        )];
+        let n = relay_screen_notice(&vs);
+        assert_eq!(n.matches("192.168.1.10").count(), 1);
+        // Nothing refused → empty notice.
+        assert_eq!(relay_screen_notice(&[]), "");
     }
 }
