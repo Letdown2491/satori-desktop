@@ -148,6 +148,15 @@ fn http() -> &'static reqwest::Client {
     })
 }
 
+/// The shared guarded client for the other core HTTP surfaces (PR #6):
+/// NIP-11 relay documents ride the same SSRF discipline as every image —
+/// SafeResolver on every hop, per-hop `is_safe_media_url` re-validation,
+/// hop cap 5. Bounded but real before: a hostile relay-list entry could
+/// 302 the document fetch at any http(s) URL.
+pub(crate) fn client() -> &'static reqwest::Client {
+    http()
+}
+
 /// GET through the guarded client with the status→verdict mapping: 429/5xx
 /// and every transport-level failure are Transient; the other 4xx are
 /// verdicts (a 404 will not heal by Tuesday).
