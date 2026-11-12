@@ -68,8 +68,9 @@ timeouts; `h-optimistic` → mutate-then-reconcile.
 - **Quiet by default**: reactions off, no like/repost counters, dots instead of badges,
   instant scrolls, `prefers-reduced-motion` honored.
 - **Sumi-e aesthetic** (§5): ink on washi, vermilion only for seal moments.
-- **Leave things out**: no wallet in v1, no NIP-07 (browser-only), no multi-user daemon,
-  no HTTP API, no SPA. Every feature must earn its place.
+- **Leave things out**: no NIP-07 (browser-only), no multi-user daemon,
+  no HTTP API, no SPA. Every feature must earn its place. (The D6 "no
+  wallet in v1" carve was un-deferred for the NWC payer alone — D20.)
 
 ---
 
@@ -100,33 +101,74 @@ timeouts; `h-optimistic` → mutate-then-reconcile.
 
 ```
 satori/
-  Cargo.toml                # workspace
+  Cargo.toml                # workspace: crates/core + crates/app-gpui
   crates/
     core/                   # satori-core: nostr domain. NO UI dependency.
       src/
+        manager.rs          # the Core handle: every channel pump the views read
         pool.rs             # relay pool glue: outbox routing, budgets, auth, seen-on
+        outbox.rs           # NIP-65 read/write routing, per-shard budgets (D33)
+        outbox_queue.rs     # the restart-safe pending-publish queue (D36)
+        relay_latency.rs    # per-relay EWMA latency/health, read-dead/write-dead (D33/D36)
+        seen.rs             # seen-on memory (relay attribution)
+        hints.rs            # author-keyed relay hints (NIP-65 lists, live bell)
+        store.rs            # event cache (nostr-lmdb) + tombstones + expiry + prune
         signer.rs           # bunker (nostr-connect) / local-key (Secret Service)
-        dms.rs              # NIP-17: unwrap, routing, read state, request triage
-        store.rs            # event cache (nostr-lmdb) + tombstones + expiry
-        appstate.rs         # JSON state files: prefs, drafts, holds, scheduled, filters
+        session.rs          # session persistence/resume
+        secrets.rs          # keyring-first, 0600-file fallback (D26)
         publish.rs          # tag building (NIP-10/22), relay targets, delivery report
         engagement.rs       # own-likes/reposts/replies/zapped sets
         notifications.rs    # notification stream assembly
         media.rs            # SSRF-guarded fetcher, media proxy, NIP-B7 healing
-        tor.rs              # SOCKS transport, per-host isolation, privacy modes
-        nip/                # thin NIPs not in nostr-sdk: 24,31,34,37,52,54,68,71,84,89,99,F4
+        upload.rs           # Blossom upload (NIP-B7)
+        nip11.rs            # relay documents: capability whispers
+        net_guard.rs        # paste-time relay screening for nwc/bunker URIs (D51)
+        nip40.rs            # NIP-40 expiry
+        wallet.rs           # NIP-47 NWC payer (D20)
+        dms.rs              # NIP-17: unwrap, routing, read state, request triage
+        tor.rs              # SOCKS transport stub, privacy modes (M5 pending)
+        privacy.rs          # off / balanced / strict modes
+        dedup.rs            # duplicate-content spam filter (D41)
+        wot.rs              # web of trust: qualified set, relay set-cover (D41)
+        rate.rs             # reply-velocity gate (D43)
+        deletions.rs        # NIP-09 tombstones
+        scheduled.rs        # scheduled-post holds + sweep
+        undo.rs             # the undo window
+        read_state.rs       # high-waters, notification state
+        profiles.rs         # profile cache service (10k cap, 12h TTL)
+        blocktime.rs        # block heights by timestamp (the third stamp mode)
+        viewport.rs         # viewport-scoped engagement subscriptions
         kinds.rs            # KindHandler trait + registry (§6.1)
+        config.rs           # filesystem layout + identity constants
+        diag.rs / error.rs  # the diagnostic log; login/session errors
+        nip/                # thin NIPs: article (23), comment (22), poll (88),
+                            # calendar (52), classified (99), highlight (84),
+                            # wiki (54), repo (34), podcast (F4), imeta (68/71/92),
+                            # nip10 (threads), nip78 (app-data)
     app-gpui/               # satori-desktop (package satori-gpui): the GPUI binary.
       src/
         main.rs             # Application, the Root view (login doors → shell)
-        theme.rs            # sumi-e tokens (P052/Cantarell, night/washi palettes)
+        theme.rs            # sumi-e tokens (Adwaita Sans/C059, night/washi palettes; D28)
         icons.rs            # PathBuilder stroke glyphs
+        media.rs            # the media cache (D14/D22), pin/unpin machinery
+        video.rs            # inline player (D21), https-only inline gate
+        poster.rs           # video head-sniff + blurhash (D32)
+        markdown.rs / input.rs / emoji.rs / timefmt.rs / desktop.rs
+        prefs.rs            # config-cache reads (the view side)
+        uris.rs             # nostr: URI routing (D27)
         views/              # shell, feed, thread, profile, reader, search,
-                            # notifications, composer, settings, login, lightbox
-  packaging/                # .desktop file; Flatpak manifest is the open P4 item
+                            # notifications, composer, settings, wallet, library,
+                            # login, edit_profile, actions (the one action row, D54),
+                            # cards, content, states, nav, zap
+  packaging/                # deb/rpm metadata, desktop file, metainfo, icons
+  self/                     # the flatpak-shaped bundle: assemble.sh + Orchard publish
+  .github/workflows/        # tag-driven release.yml (deb/rpm/flatpak/orchard), pr.yml CI
   Containerfile.dev         # podman dev image (host is bootc; no GTK/Vulkan headers)
-  vendor/xattr              # gpui 0.2.2 transitive-dep compile fix ([patch.crates-io])
+  vendor/                   # the D13/D29/D30 patches, all RETIRED by D35's
+                            # gpui-pre graph (no [patch] section remains);
+                            # kept for re-vendoring if the chains return
 ```
+
 
 ### 3.2 Async model
 
@@ -143,12 +185,16 @@ satori/
 Flatpak-safe XDG paths (`~/.local/share/satori/` inside the sandbox):
 
 - `events/`: LMDB event store (nostr-lmdb), the projection source of truth.
-- `*.json`: app state, 0600, debounced flush + flush-on-exit (ports `json-store.ts`):
-  `prefs.json`, `drafts.json`, `holds.json`, `scheduled.json`, `filters.json`,
-  `read-state.json`, `dm-read.json`, `relays-cache.json`, `seen-relays.json`,
-  `relay-latency.json`, `relay-info.json`, `relay-favorites.json`, `engagement.json`,
-  `deletions.json`, `profiles.json`.
+- `*.json`: app state, 0600, debounced flush + flush-on-exit (ports `json-store.ts`;
+  the full register lives in `config.rs::files`): `prefs.json`, `session.json`,
+  `drafts.json`, `holds.json` (the undo window), `scheduled.json`, `filters.json`,
+  `read-state.json`, `dm-read.json`, `relays-cache.json`, `relay-hints.json`,
+  `seen-relays.json`, `relay-latency.json`, `relay-info.json`, `relay-favorites.json`,
+  `engagement.json`, `deletions.json`, `profiles.json`, `blocktime.json`,
+  `wot-sources.json`, `dedup-state.json`, `rate-state.json`, `suppressed-notifs.json`
+  (D48's persistence trio), `outbox-pending.json` (D36's queue).
 - `media-cache/`: avatar/media blob cache (LRU, size-capped), keyed by sha256.
+- `satori.log`: the diag mirror (stderr plus file).
 - Secrets: the bunker transport secret only (D17; no master key in the app),
   stored Secret-Service-first via the `keyring` crate (2s deadline; the
   keyring path can block on niri sessions without gnome-keyring), 0600-file
@@ -238,19 +284,35 @@ not accent-colored. Hover washes: `text @ 5%` alpha.
   denser than the web.)*
 - **Monospace**: Adwaita Mono for npubs, invoices, clone URLs.
 
-### 5.3 Shell
+### 5.3 Shell (as built on GPUI; the GTK-era text retired with D13/P4)
 
-- Single 720px reading column, centered, on the washi background.
-- Custom header bar (`AdwToolbarView` + `GtkHeaderBar` with custom center widget):
-  home+bell left, feed switcher center (popover: Following, timelines, Browse a relay),
-  search + avatar menu right. Avatar shows a privacy shield when Tor mode is on.
-- Compose FAB bottom-right; scroll-top button above it (revealed past ~800px).
-- Views map: feed/thread/profile/article → navigation stack (`AdwNavigationView`);
-  modals (compose, zap placeholder, edit profile, new message) → `AdwDialog`;
-  settings → `AdwPreferencesWindow`-style custom page with the 5 tabs
-  (General, Backup, Content, Privacy, Relays; Relays keeps 4 sub-panes).
+- A 52px left rail, icons only, top to bottom: the user's avatar (the
+  Profile spot — re-click scrolls the profile back up), Feed, Articles,
+  Library, Search, Notifications (bell; the vermilion dot lights on
+  anything newer than the read high-water, 90s poll), Settings, Compose
+  (the pen wears vermilion). Active state is a small vermilion brush
+  tick, not a pill; every rail button carries a tooltip.
+- One reading column (720px max) on the washi background; panes push and
+  pop on a stack (feed → thread → profile → reader → …); the composer is
+  a pane, not a modal (the hold countdown and the draft live with it).
+- Full-screen takeovers: the lightbox (galleries) and the video overlay
+  (one player per process, D21), both ✕/Esc/backdrop-dismissable.
+- Floating affordances: the hold toast (undo window countdown, bottom
+  center over any pane), the back-to-top whisper (bottom right, sealed
+  click, revealed when scrolled deep), the new-notes pill (top of the
+  feed; counts what arrived while reading, loads on click), the outbox
+  pending pill (D36's honesty state).
 
 ### 5.4 Components (web → GTK)
+
+*(The table below is the P2/P3 PORTING LEDGER: it records how each web
+component mapped to GTK and where the semantics landed. The P4 cutover
+(D13) retired GTK; the implementations now live in `crates/app-gpui/src/
+views/` — cards.rs (note cards), content.rs (bodies/media/galleries),
+actions.rs (the one action row, D54), states.rs (empty/error strips),
+composer.rs, settings.rs, wallet.rs — with the tokens as Rust constants
+(§5.1) and glyphs as PathBuilder strokes. Read the table for the
+BEHAVIOR contracts, the Rust views for the code.)*
 
 | Web component | GTK implementation |
 |---|---|

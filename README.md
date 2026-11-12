@@ -24,11 +24,12 @@ Satori is built on three commitments:
 Satori is a daily-driver desktop client, in active development.
 
 - Timeline: endless scrolling through your history. Media, quotes,
-  reposts (NIP-18), polls (NIP-68, vote and compose), long-form articles
+  reposts (NIP-18), polls (NIP-88, vote and compose), long-form articles
   (NIP-23), hashtag timelines; a pill counts new notes that arrive
   while you read and loads them on click
 - Threads: NIP-10 reply trees, NIP-22 comments, reply-to-root routing
-- Composer: an undo window on every publish kind, draft restore,
+- Composer: tabs for note, picture (NIP-68), video (NIP-71 kind 22),
+  poll, and article; an undo window on every publish kind, draft restore,
   scheduled posts, Blossom attachments, @-mentions, quote cards
 - Zaps: NIP-57 with verified receipts, paid through a connected NWC
   wallet (NIP-47)

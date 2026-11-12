@@ -39,6 +39,19 @@ Daily-driver install (release): `cargo build --release` in the container, then
 `./packaging/install-local.sh` (bin + wrapper + desktop file + hicolor icons
 into `~/.local`; `target/debug` can be deleted after).
 
+User-testing loop (local flatpak): release binaries MUST be built in an
+`ubuntu:24.04` container, not satori-dev (Fedora 44's glibc 2.43 binaries die
+in the freedesktop 25.08 runtime; the runner contract is the same, see
+`self/assemble.sh`'s header). Then:
+
+```
+./self/assemble.sh
+flatpak build-export repo self/tree stable
+flatpak build-bundle repo bundles/satori-<ver>-x86_64.flatpak io.github.Letdown2491.satori stable
+flatpak install --user -y --reinstall ./bundles/satori-<ver>-x86_64.flatpak
+flatpak run io.github.Letdown2491.satori
+```
+
 ## Gates
 
 - `cargo check --workspace` clean before any commit.
