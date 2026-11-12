@@ -550,6 +550,47 @@ fn is_global_ip(ip: std::net::IpAddr) -> bool {
             }
             // Global unicast lives in 2000::/3; ULA (fc00::/7),
             // link-local (fe80::/10) and everything experimental dies.
+            // Transition mechanisms embed IPv4 INSIDE (or beside) 2000::/3
+            // — screen the embedded leg too, or a hostile DNS answer rides
+            // a transition gateway onto the internal network (PR #13):
+            // - 64:ff9b::/96 (well-known NAT64): v4 in segments 6+7
+            //   (outside 2000::/3, so previously refused wholesale — now
+            //   the public-embedded case passes, the private one dies)
+            // - 2002::/16 (6to4): v4 in segments 1+2 — INSIDE 2000::/3,
+            //   previously sailed straight through
+            // - 2001:0::/32 (Teredo): server v4 in segments 2+3, client
+            //   v4 XOR-obfuscated in segments 6+7 — screen BOTH legs
+            if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] {
+                return is_global_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                    (s[6] >> 8) as u8,
+                    s[6] as u8,
+                    (s[7] >> 8) as u8,
+                    s[7] as u8,
+                )));
+            }
+            if s[0] == 0x2002 {
+                return is_global_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                    (s[1] >> 8) as u8,
+                    s[1] as u8,
+                    (s[2] >> 8) as u8,
+                    s[2] as u8,
+                )));
+            }
+            if s[0] == 0x2001 && s[1] == 0 {
+                let server = is_global_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                    (s[2] >> 8) as u8,
+                    s[2] as u8,
+                    (s[3] >> 8) as u8,
+                    s[3] as u8,
+                )));
+                let client = is_global_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                    !(s[6] >> 8) as u8,
+                    !(s[6] as u8),
+                    !(s[7] >> 8) as u8,
+                    !(s[7] as u8),
+                )));
+                return server && client;
+            }
             (s[0] & 0xe000) == 0x2000 && !(s[0] == 0x2001 && s[1] == 0x0db8)
         }
     }
@@ -704,6 +745,42 @@ mod tests {
             "a mapped GLOBAL v4 survives the v4 screen"
         );
         assert!(keep(&["127.0.0.1".parse().unwrap()]).is_empty());
+    }
+
+    /// PR #13's class: transition mechanisms embed IPv4 inside (or
+    /// beside) 2000::/3. 6to4 and Teredo sailed past the global-unicast
+    /// screen with a private leg; a NAT64 answer was refused wholesale,
+    /// public leg included (now: the embedded leg decides).
+    #[test]
+    fn transition_mechanism_embedded_v4_is_screened() {
+        let refused = |bad: &str| {
+            let ip: std::net::IpAddr = bad.parse().unwrap();
+            assert!(!is_global_ip(ip), "{bad} must be refused");
+        };
+        let passed = |good: &str| {
+            let ip: std::net::IpAddr = good.parse().unwrap();
+            assert!(is_global_ip(ip), "{good} must pass");
+        };
+        // NAT64 (well-known prefix) with an internal or reserved leg.
+        refused("64:ff9b::192.0.2.9"); // → TEST-NET-1
+        refused("64:ff9b::127.0.0.1"); // → loopback
+        refused("64:ff9b::10.0.0.5"); // → private
+        // NAT64 with a PUBLIC leg now passes (previously died with the
+        // whole prefix).
+        passed("64:ff9b::8.8.8.8");
+        // 6to4: the v4 rides segments 1+2, inside 2000::/3.
+        refused("2002:7f00:1::1"); // → 127.0.0.1
+        refused("2002:c0a8:101::1"); // → 192.168.1.1
+        passed("2002:0808:0808::1"); // → 8.8.8.8
+        // Teredo (2001:0::/32): server v4 in segments 2+3, client v4
+        // XOR-obfuscated in 6+7 (RFC 4380 layout: 32 prefix, 32 server,
+        // 16 flags, 16 port, 32 client) — BOTH legs screened.
+        refused("2001:0:c0a8:101::1"); // server → 192.168.1.1
+        // Public server 8.8.8.8, client 192.168.1.1 obfuscated:
+        // 0xc0a8^0xffff = 0x3f57, 0x0101^0xffff = 0xfefe.
+        refused("2001:0:0808:0808:0:0:3f57:fefe");
+        // Both legs public (server 8.8.8.8, client 8.8.4.4 → 0xf7f7:0xfbfb).
+        passed("2001:0:0808:0808:0:0:f7f7:fbfb");
     }
 
     /// F5: the guard holds for every IP-literal spelling getaddrinfo
