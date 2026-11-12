@@ -1998,6 +1998,8 @@ impl Render for Composer {
                 // that the sheet IS this view): replying to WHOM, about
                 // WHAT — a whisper line, never a card (the quote carries
                 // the card; a reply is conversation, not attribution).
+                // The INLINE embed skips the snippet: it sits inside the
+                // thread itself — the post is right there above the box.
                 d.child(
                     div()
                         .flex_col()
@@ -2010,14 +2012,16 @@ impl Render for Composer {
                                 .text_color(rgb(theme::ink()))
                                 .child(format!("Replying to {name}")),
                         )
-                        .child(
-                            div()
-                                .text_size(px(theme::T_SMALL))
-                                .text_color(rgb(theme::muted()))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .child(snippet),
-                        ),
+                        .when(!matches!(self.surface, Surface::Inline), |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(theme::T_SMALL))
+                                    .text_color(rgb(theme::muted()))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .child(snippet),
+                            )
+                        }),
                 )
             })
             .when_some(quote_prev, |d, (name, snippet, picture)| {
