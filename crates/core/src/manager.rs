@@ -3231,7 +3231,7 @@ impl Core {
                         active.pool.get(
                             Filter::new()
                                 .kinds([Kind::TextNote, Kind::Custom(1111)])
-                                .events(ids)
+                                .events(ids.clone())
                                 .since(Timestamp::from(since))
                                 .limit(200),
                         ),
@@ -3255,7 +3255,39 @@ impl Core {
                     }
                     active.pool.get(f).await.unwrap_or_default()
                 });
-                let (mentions_res, replies_res, votes_res) = tokio::join!(
+                // NIP-18 reach (this task): reposts of my notes (kind 6,
+                // or 16 for the verticals) arrive #e-tagged; a QUOTE of my
+                // note (kind 1/1111 carrying `q`) tags nobody at all —
+                // each needs its own query. No pref gate: direct
+                // engagement, like a reply.
+                let repost_q = if ids.is_empty() {
+                    None
+                } else {
+                    Some(Box::pin(
+                        active.pool.get(
+                            Filter::new()
+                                .kinds([Kind::Repost, Kind::Custom(16)])
+                                .events(ids.clone())
+                                .since(Timestamp::from(since))
+                                .limit(200),
+                        ),
+                    ))
+                };
+                let quote_ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+                let quote_q = if quote_ids.is_empty() {
+                    None
+                } else {
+                    Some(Box::pin(
+                        active.pool.get(
+                            Filter::new()
+                                .kinds([Kind::TextNote, Kind::Custom(1111)])
+                                .custom_tags(SingleLetterTag::LOWERCASE_Q, quote_ids)
+                                .since(Timestamp::from(since))
+                                .limit(200),
+                        ),
+                    ))
+                };
+                let (mentions_res, replies_res, votes_res, reposts_res, quotes_res) = tokio::join!(
                     mention_q,
                     async {
                         match reply_q {
@@ -3263,13 +3295,27 @@ impl Core {
                             None => Default::default(),
                         }
                     },
-                    vote_q
+                    vote_q,
+                    async {
+                        match repost_q {
+                            Some(q) => q.await.unwrap_or_default(),
+                            None => Default::default(),
+                        }
+                    },
+                    async {
+                        match quote_q {
+                            Some(q) => q.await.unwrap_or_default(),
+                            None => Default::default(),
+                        }
+                    }
                 );
                 let mine_events: Vec<Event> = mentions_res
                     .into_iter()
                     .flat_map(|set| set.into_iter())
                     .chain(replies_res)
                     .chain(votes_res)
+                    .chain(reposts_res)
+                    .chain(quotes_res)
                     .collect();
                 // (no explicit save: the SDK persists what it receives)
 

@@ -650,6 +650,73 @@ fn body_parse_cached(ev: &Event) -> std::sync::Arc<BodyParse> {
     parsed
 }
 
+/// The one actor header every "someone did X" row wears — notification
+/// rows and the feed's repost card alike: optional leading glyph (the
+/// reaction's emoji, or a stroke icon), avatar, name, optional verb (the
+/// caller styles it; zap sats ride in here emphasized), and the time,
+/// which is the third mode toggle (timefmt.rs) everywhere. The name opens
+/// the actor's profile when `open_profile` is given.
+#[allow(clippy::too_many_arguments)]
+pub fn actor_header<V: EventEmitter<Nav> + 'static>(
+    glyph: Option<AnyElement>,
+    snap: &media::Snapshot,
+    picture: &str,
+    name: String,
+    verb: Option<AnyElement>,
+    time: String,
+    id_prefix: String,
+    open_profile: Option<PublicKey>,
+    handle: Entity<V>,
+) -> Div {
+    // The name always carries an id (the click lives on it only when the
+    // actor's profile is openable). The flex rides on whichever middle
+    // element exists — verb when there is one, name otherwise — so the
+    // time pins right in both shapes.
+    let name_el = div()
+        .text_size(px(theme::T_UI))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(theme::ink()))
+        .id(SharedString::from(format!("{id_prefix}-author")));
+    let name_el = match open_profile {
+        Some(pk) => name_el.cursor_pointer().on_click(move |_, _, cx| {
+            handle.update(cx, |_, cx| cx.emit(Nav::OpenProfile(pk)));
+        }),
+        None => name_el,
+    }
+    .child(name.clone());
+    let mut head = div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .children(glyph)
+        .child(media::avatar(snap, picture, &name, 28.0));
+    match verb {
+        Some(v) => {
+            head = head
+                .child(name_el)
+                .child(div().flex_1().min_w_0().flex().items_center().child(v))
+        }
+        None => head = head.child(name_el.flex_1()),
+    }
+    head.child(
+        div()
+            .id(SharedString::from(format!("{id_prefix}-time")))
+            .cursor_pointer()
+            .text_size(px(theme::T_SMALL))
+            .text_color(rgb(theme::muted()))
+            .hover(|s| s.text_color(rgb(theme::ink())))
+            .on_click(|_, _, cx| crate::timefmt::cycle(cx))
+            .child(time),
+    )
+}
+
+/// The note a kind-6/16 repost carries (Amethyst's repost guard: a repost
+/// is not content of its own — the body is the boosted note's card).
+pub(crate) fn repost_inner(ev: &Event) -> Option<Event> {
+    let inner = serde_json::from_str::<Event>(&ev.content).ok()?;
+    (inner.kind == Kind::TextNote || super::cards::is_feed_kind(inner.kind)).then_some(inner)
+}
+
 /// Render a note body: word-flow paragraphs, media gallery section, quote
 /// embeds. Media fetches ride the shared cache (`media::Snapshot`); the view
 /// queues them via `content::media_urls` + `media::fetch`.
