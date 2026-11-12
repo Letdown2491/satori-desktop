@@ -51,6 +51,10 @@ pub enum ConnectEvent {
     /// NIP-46; the signer scans it and approves.
     Uri(String),
     Approved(PublicKey),
+    /// Paste-time screening refused a private relay (issue #11): the
+    /// refused hosts, for the login dialog's allow-and-retry button. The
+    /// banner line rides the following `Failed`.
+    RelayScreened(Vec<String>),
     Failed(String),
 }
 
@@ -1722,6 +1726,13 @@ impl Core {
                     crate::dlog!("bunker: approved for {pk}");
                     let _ = tx.send(ConnectEvent::Approved(pk));
                 }
+                Err(LoginError::RelayScreened(notice, hosts)) => {
+                    crate::dlog!("bunker: relay screening refused {}", hosts.len());
+                    // Ordered: the hosts land first, the banner line last
+                    // (the pump paints the affordance, then the notice).
+                    let _ = tx.send(ConnectEvent::RelayScreened(hosts));
+                    let _ = tx.send(ConnectEvent::Failed(notice));
+                }
                 Err(e) => {
                     crate::dlog!("bunker: failed: {e}");
                     let _ = tx.send(ConnectEvent::Failed(e.to_string()));
@@ -1782,6 +1793,26 @@ impl Core {
             }
         };
         crate::dlog!("bunker: parsed, remote signer {remote}");
+
+        // Paste-time relay screen (issue #11): the nostr-connect client
+        // dials these relays directly, outside the pool's screening —
+        // private-space answers are refused before any socket opens, and
+        // the dialog offers the consent toggle instead.
+        let relay_urls: Vec<String> = parsed.relays().iter().map(|r| r.to_string()).collect();
+        let verdicts =
+            crate::net_guard::screen_uri_relays(relay_urls.iter().map(String::as_str)).await;
+        let refused: Vec<crate::net_guard::RelayVerdict> = verdicts
+            .iter()
+            .filter(|v| matches!(v.screen, crate::net_guard::RelayScreen::Refused(_)))
+            .cloned()
+            .collect();
+        if !refused.is_empty() {
+            let hosts = refused.iter().map(|v| v.host.clone()).collect();
+            return Err(LoginError::RelayScreened(
+                crate::net_guard::relay_screen_notice(&refused),
+                hosts,
+            ));
+        }
 
         let client_keys = Keys::generate();
         let connect = Arc::new(
