@@ -8,7 +8,9 @@ Satori is built on three commitments:
 - **Your keys stay yours.** The app never sees your master private key:
   you sign in through a remote signer (`bunker://` or `nostrconnect://`,
   NIP-46) and every incoming event is verified locally; relays are
-  treated as untrusted. No telemetry, and Tor routing is built in.
+  treated as untrusted. No telemetry. Privacy modes gate media today;
+  the Tor transport itself is still pending (DESIGN.md M5), so traffic
+  runs direct until it lands.
 - **The event stream is the state.** Everything on screen is a projection
   of your Nostr events. New event kinds are supported through a handler
   registry (`KindHandler`), not hardcoded into the views.
@@ -39,10 +41,11 @@ Satori is a daily-driver desktop client, in active development.
   light and dark themes, reduced-motion honored
 
 Not done yet: NIP-37 draft sync, a debug metrics pane, the private-relay
-routing policy, Tor-routed media fetching, and Flatpak packaging. The
-release meanwhile installs via `packaging/install-local.sh` (binary,
-desktop file, and icons into `~/.local`). The full design and build spec
-is [DESIGN.md](DESIGN.md).
+routing policy, and Tor-routed traffic (the M5 transport). Flatpak
+packaging exists: tag-driven deb/rpm/flatpak builds (`.github/workflows/
+release.yml`), with local installs via `packaging/install-local.sh`
+(binary, desktop file, and icons into `~/.local`). The full design and
+build spec is [DESIGN.md](DESIGN.md).
 
 ## Development
 
