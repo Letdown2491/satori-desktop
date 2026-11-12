@@ -17,7 +17,7 @@ use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, Profile, PublishEvent};
 
 use super::{
-    composer::{Composer, Draft},
+    composer::{Composer, Draft, Surface},
     content,
     edit_profile::EditProfileView,
     feed::Feed,
@@ -360,7 +360,7 @@ impl Shell {
     fn open_reply_sheet(&mut self, ev: Event, cx: &mut Context<Self>) {
         let view = cx.new(|cx| {
             let mut composer = Composer::new(self.core.clone(), Some(ev), None, cx);
-            composer.sheet = true;
+            composer.surface = Surface::Sheet;
             composer
         });
         self.subscribe_nav(&view, cx);

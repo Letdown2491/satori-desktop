@@ -193,6 +193,19 @@ pub(crate) enum Tab {
     Article,
 }
 
+/// Where this composer lives. The PAGE fills the pane: the root scrolls,
+/// the two-step Esc saves-and-arms, publish pops. The SHEET floats in a
+/// card (shell.rs card_overlay): content-sized — the card hugs the form
+/// and scrolls when it outgrows the cap, Esc falls through to back().
+/// The thread's INLINE embed is content-sized and keeps its pane open on
+/// publish (the field just clears), and eats Esc — a stray press must
+/// not close the pane under a half-typed reply.
+pub(crate) enum Surface {
+    Page,
+    Sheet,
+    Inline,
+}
+
 /// The compose field's resting height, in lines of text: present without
 /// dominating (note.rs composer.rs:114 — the reference's 8 rows grew up).
 const LINES_MIN: f32 = 10.0;
@@ -256,10 +269,8 @@ pub struct Composer {
     emoji_token: Option<String>,
     emoji_sel: usize,
     reply_to: Option<Event>,
-    /// Hosted in the reply sheet's floating card (shell.rs card_overlay):
-    /// content-sized there — the card hugs the form and scrolls when the
-    /// form outgrows its cap. The page mode fills the pane instead.
-    pub(crate) sheet: bool,
+    /// Where this composer lives (see Surface).
+    pub(crate) surface: Surface,
     /// The NIP-18 quote: folded into the content + a q tag at publish; the
     /// preview above the field says what's being quoted.
     quote: Option<Event>,
@@ -470,7 +481,7 @@ impl Composer {
             suggest: vec![],
             mention_token: None,
             reply_to,
-            sheet: false,
+            surface: Surface::Page,
             quote,
             next_att: attachments.len() as u64,
             attachments,
@@ -915,6 +926,22 @@ impl Composer {
         }
     }
 
+    /// Publish settled: the page and the sheet pop; the thread's inline
+    /// embed keeps its pane open — clear the field, the reply arrives
+    /// through the thread's pump like any other (the undo toast floats
+    /// in the shell off core.subscribe_hold).
+    fn settled(this: &gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp) {
+        let _ = this.update(cx, |this, cx| {
+            if matches!(this.surface, Surface::Inline) {
+                this.posting = false;
+                this.input.update(cx, |input, cx| input.clear(cx));
+                cx.notify();
+            } else {
+                cx.emit(Nav::Pop);
+            }
+        });
+    }
+
     /// The publish pump every instant tab shares (poll, article, photo,
     /// video): Held pops the pane NOW (publish.ts: the composer closes
     /// and a toast floats the countdown over the feed; the pump dies with
@@ -934,7 +961,7 @@ impl Composer {
         while let Some(ev) = rx.recv().await {
             match ev {
                 PublishEvent::Held { .. } => {
-                    let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                    Self::settled(&this, cx);
                     return;
                 }
                 PublishEvent::Undone { .. } => {
@@ -946,7 +973,7 @@ impl Composer {
                     return;
                 }
                 PublishEvent::Committed { .. } => {
-                    let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                    Self::settled(&this, cx);
                     return;
                 }
                 PublishEvent::Failed { error, .. } => {
@@ -973,7 +1000,7 @@ impl Composer {
         if let Some(ev) = rx.recv().await {
             match ev {
                 satori_core::manager::ScheduleEvent::Scheduled { .. } => {
-                    let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                    Self::settled(&this, cx);
                 }
                 satori_core::manager::ScheduleEvent::Failed { error } => {
                     let _ = this.update(cx, |this, cx| {
@@ -1487,7 +1514,7 @@ impl Composer {
                             Vec::new(),
                             false,
                         );
-                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                        Self::settled(&this, cx);
                         return;
                     }
                     PublishEvent::Undone { .. } => {
@@ -1509,7 +1536,7 @@ impl Composer {
                             Vec::new(),
                             false,
                         );
-                        let _ = this.update(cx, |_this, cx| cx.emit(Nav::Pop));
+                        Self::settled(&this, cx);
                         return;
                     }
                     PublishEvent::Failed { error, .. } => {
@@ -1698,7 +1725,12 @@ impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.autofocused {
             self.autofocused = true;
-            window.focus(&self.focus, cx);
+            // The inline embed (thread bottom) must not steal the
+            // window's focus when the anchor lands — its field takes
+            // focus on click, like every Input.
+            if !matches!(self.surface, Surface::Inline) {
+                window.focus(&self.focus, cx);
+            }
             self.focused_tab = Some(Tab::Note);
         }
         if self.focused_tab != Some(self.tab) {
@@ -1818,25 +1850,36 @@ impl Render for Composer {
                     cx.notify();
                     return;
                 }
-                // The two-step Esc (B3): a typed-but-unsent form's first
-                // Esc saves exactly what a close would and HOLDS the pane;
-                // the second passes through to escape-to-back. Typing
-                // changes the fingerprint, so a save is never stale. An
-                // untouched form pops on the first Esc, as it always did.
-                if ev.keystroke.key == "escape"
-                    && !this.posting
-                    && this.emoji_suggest.is_empty()
-                    && let Some(h) = this.draft_hash(cx)
-                {
-                    if this.esc_arm == Some(h) {
-                        this.esc_arm = None;
-                    // fall through: the shell's escape-to-back pops
-                    } else {
-                        this.esc_arm = Some(h);
-                        this.stash_now(cx);
-                        cx.stop_propagation();
-                        cx.notify();
-                        return;
+                // Esc is the PAGE's two-step save (B3): a typed-but-unsent
+                // form's first Esc saves exactly what a close would and
+                // HOLDS the pane; the second passes through to
+                // escape-to-back. Typing changes the fingerprint, so a
+                // save is never stale. An untouched form pops on the first
+                // Esc, as it always did. The SHEET's Esc falls through —
+                // the shell's back() closes the card. The INLINE embed
+                // EATS Esc: a stray press while typing must not close the
+                // pane under the reply.
+                if ev.keystroke.key == "escape" && !this.posting && this.emoji_suggest.is_empty() {
+                    match this.surface {
+                        Surface::Inline => {
+                            cx.stop_propagation();
+                            return;
+                        }
+                        Surface::Sheet => {}
+                        Surface::Page => {
+                            if let Some(h) = this.draft_hash(cx) {
+                                if this.esc_arm == Some(h) {
+                                    this.esc_arm = None;
+                                    // fall through: the shell's escape-to-back pops
+                                } else {
+                                    this.esc_arm = Some(h);
+                                    this.stash_now(cx);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                    return;
+                                }
+                            }
+                        }
                     }
                 }
                 if this.emoji_suggest.is_empty() {
@@ -1874,10 +1917,12 @@ impl Render for Composer {
             // emoji strip) can't push the Publish button off a short
             // window anymore. The body box keeps its own internal
             // scroller (nested scroll is fine — the inner only overflows
-            // when the essay does). The SHEET (shell.rs card_overlay)
-            // inverts it: the composer is content-sized, the card hugs
-            // the form and scrolls when the form outgrows its cap.
-            .when(!self.sheet, |d| d.flex_1().min_h_0().overflow_y_scroll())
+            // when the essay does). The SHEET and INLINE surfaces are
+            // content-sized — the host (card / thread column) hugs the
+            // form and scrolls when the form outgrows its cap.
+            .when(matches!(self.surface, Surface::Page), |d| {
+                d.flex_1().min_h_0().overflow_y_scroll()
+            })
             .flex()
             .flex_col()
             .font_family(theme::SANS)
