@@ -508,6 +508,20 @@ async fn vacuum_at(dir: &std::path::Path) -> Result<VacuumReport, String> {
         hi = lo - 1;
     }
 
+    // The windows tile [0, now); an event with a created_at AHEAD of the
+    // local clock (one relay or client with a skewed time is enough) is
+    // counted by the total above but covered by no window, and the verify
+    // below would refuse the swap over it - the 0.5.0 vacuum aborted on
+    // exactly this, one future-dated event among 25,544. Catch the tail.
+    let tail = source
+        .query(Filter::new().since(Timestamp::from(now + 1)))
+        .await
+        .map_err(|e| e.to_string())?;
+    for event in &tail {
+        fresh.save_event(event).await.map_err(|e| e.to_string())?;
+    }
+    copied += tail.len();
+
     // The only honesty check that matters: nothing lost, nothing gained.
     let fresh_count = fresh
         .count(Filter::new())
@@ -620,11 +634,15 @@ mod tests {
         let keys = Keys::generate();
         let now = Timestamp::now().as_secs();
         // Two events past the 90-day prune window (bookmark-kept elders),
-        // one inside it: the copy must span created_at windows.
+        // one inside it: the copy must span created_at windows. The last
+        // one is DATED AHEAD of the clock (a skewed relay sent it): the
+        // windows tile [0, now), so the vacuum needs an explicit tail
+        // catch or the count-verify refuses the swap (issue #23).
         let events = vec![
             note(&keys, "elder one", now.saturating_sub(200 * 24 * 3600)),
             note(&keys, "elder two", now.saturating_sub(199 * 24 * 3600)),
             note(&keys, "fresh", now.saturating_sub(60)),
+            note(&keys, "from a skewed clock", now + 3600),
         ];
         for event in &events {
             rt.block_on(db.save_event(event)).unwrap();
@@ -632,13 +650,13 @@ mod tests {
         drop(db);
 
         let report = rt.block_on(vacuum()).unwrap();
-        assert_eq!(report.events, 3);
+        assert_eq!(report.events, 4);
         assert!(report.bytes_before > 0);
         assert!(report.bytes_after > 0);
 
         // The swap: the live path opens and holds every event by id.
         let reopened = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
-        assert_eq!(rt.block_on(reopened.count(Filter::new())).unwrap(), 3);
+        assert_eq!(rt.block_on(reopened.count(Filter::new())).unwrap(), 4);
         for event in &events {
             assert!(
                 rt.block_on(reopened.event_by_id(&event.id))
@@ -654,7 +672,7 @@ mod tests {
 
         // A vacuum over a rebuilt store round-trips too (idempotent).
         let again = rt.block_on(vacuum()).unwrap();
-        assert_eq!(again.events, 3);
+        assert_eq!(again.events, 4);
 
         // Store::open is the boot door: it must clear events.prev.
         let _store = rt.block_on(Store::open()).unwrap();
