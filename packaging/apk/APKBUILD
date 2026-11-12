@@ -31,6 +31,15 @@ builddir="$srcdir/$pkgname-$pkgver"
 # the lockfile's MSRV. Top-level so every abuild phase sees it.
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# The musl target defaults to crt-static (a static-pie link), which
+# demands a static archive for every C library - glib, gstreamer, xcb,
+# freetype, xkbcommon - and alpine ships those shared only (the 0.5.0
+# apk legs died exactly there). Drop crt-static: the binary links
+# dynamically against musl and the C libs, which is the normal shape
+# for a shipped alpine package - the runtime libs arrive through the
+# depends line + apk's DT_NEEDED scan.
+export RUSTFLAGS="-C target-feature=-crt-static"
+
 build() {
 	cargo build --release --locked -p satori-gpui
 }
