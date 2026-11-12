@@ -1354,6 +1354,13 @@ impl Shell {
                 d.child(
                     div()
                         .id("hold-undo")
+                        .flex()
+                        // Center the label in its own box: a plain text
+                        // child paints at the top of the button's padded
+                        // box and reads as misaligned against the toast's
+                        // centered line.
+                        .items_center()
+                        .justify_center()
                         .cursor_pointer()
                         .px_2()
                         .py(px(2.))
