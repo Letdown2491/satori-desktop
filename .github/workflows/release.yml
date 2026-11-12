@@ -160,6 +160,38 @@ jobs:
           path: app-tree.tar.gz
           retention-days: 1
 
+  apk:
+    # The musl leg (issue #23): an abuild-packaged apk beside the deb/rpm.
+    # Runs through podman + alpine:3.22 (musl) rather than a container:
+    # job, because GitHub's runner injects a glibc node binary that
+    # cannot execute under musl — actions/checkout would die on arrival.
+    # packaging/build-apk.sh is the ONE code path (CI and local builds);
+    # it documents the spike's findings (rustup over the system cargo,
+    # no libxkbcommon-x11-dev split, one :Z volume at a time).
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+          - runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Build the apk (alpine 3.22, musl)
+        run: |
+          podman run --rm -v "$PWD:/srv:Z" -w /srv alpine:3.22 \
+            sh packaging/build-apk.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Attach the apk and its public key to the release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: |
+            packaging/apk/out/*.apk
+            packaging/apk/out/*.pub
+          generate_release_notes: true
+
   orchard:
     needs: flatpak
     runs-on: ubuntu-24.04

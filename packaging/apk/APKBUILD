@@ -1,0 +1,52 @@
+# The Alpine apk (issue #23): musl is a first-class ship target beside
+# the deb/rpm/flatpak. Built through packaging/build-apk.sh (abuild
+# refuses root, and the toolchain is rustup's stable — alpine 3.22's
+# system cargo 1.87 is below the lock's MSRV), never by hand.
+#
+# Trust model matches the deb/rpm: unsigned-ish sideload. The build
+# signs with a throwaway key generated per build; install with
+#   apk add --allow-untrusted ./satori-desktop-<ver>-<arch>.apk
+# or trust the shipped .pub key into /etc/apk/keys.
+
+pkgname=satori-desktop
+pkgver=0.5.0
+pkgrel=0
+pkgdesc="A quiet Nostr client with a GPU-rendered UI and a local-first event store"
+url="https://github.com/Letdown2491/satori-desktop"
+arch="x86_64 aarch64"
+license="MIT"
+# The linked libs (wayland, libxkbcommon, fontconfig, freetype, vulkan,
+# libxcb) come in automatically: apk scans the binary's DT_NEEDED.
+# The codec stack is named explicitly, mirroring the deb's Recommends.
+depends="gstreamer gst-plugins-base gst-plugins-good gst-libav"
+makedepends="pkgconfig fontconfig-dev freetype-dev libxkbcommon-dev
+	wayland-dev vulkan-headers libxcb-dev gstreamer-dev
+	gst-plugins-base-dev clang"
+source="$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
+# GitHub's tag tarball extracts to satori-desktop-<ver> (no v).
+builddir="$srcdir/$pkgname-$pkgver"
+
+# The toolchain is rustup's stable, installed for the builder user by
+# packaging/build-apk.sh: alpine 3.22's system cargo (1.87) is below
+# the lockfile's MSRV. Top-level so every abuild phase sees it.
+export PATH="$HOME/.cargo/bin:$PATH"
+
+build() {
+	cargo build --release --locked -p satori-gpui
+}
+
+check() {
+	# The domain layer's suite: no display, no sockets, minutes-fast.
+	cargo test --locked -p satori-core
+}
+
+package() {
+	install -Dm755 target/release/satori-desktop \
+		"$pkgdir"/usr/bin/satori-desktop
+	install -Dm644 packaging/io.github.Letdown2491.satori.desktop \
+		"$pkgdir"/usr/share/applications/io.github.Letdown2491.satori.desktop
+	install -Dm644 packaging/io.github.Letdown2491.satori.metainfo.xml \
+		"$pkgdir"/usr/share/metainfo/io.github.Letdown2491.satori.metainfo.xml
+	install -Dm644 packaging/icons/512x512/apps/io.github.Letdown2491.satori.png \
+		"$pkgdir"/usr/share/icons/hicolor/512x512/apps/io.github.Letdown2491.satori.png
+}
