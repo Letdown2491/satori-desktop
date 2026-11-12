@@ -726,47 +726,104 @@ impl Render for ProfileView {
                                                     ),
                                             ),
                                     )
-                                    // Someone else: Follow rides the header —
-                                    // an optimistic flip, publish events drained
-                                    // and ignored (P1). The own profile hides it
-                                    // (D38) — the edit form takes its place.
+                                    // Someone else: Follow + Mute ride the
+                                    // header as ONE right-hand group —
+                                    // justify_between with separate children
+                                    // flings them to opposite ends of the row.
+                                    // Optimistic flips; publish events drained
+                                    // and ignored (P1). The own profile hides
+                                    // both (D38) — the edit form takes their
+                                    // place.
                                     .when(!self.is_me, |d| {
                                         d.child(
                                             div()
-                                                .id("follow")
-                                                .cursor_pointer()
-                                                .px_2()
-                                                .py_1()
-                                                .rounded(px(theme::R_EMBED))
-                                                .border_1()
-                                                .border_color(rgb(theme::hairline()))
-                                                .hover(|s| s.border_color(rgb(theme::muted())))
-                                                .text_size(px(theme::T_SMALL))
-                                                .on_click(move |_, _, cx| {
-                                                    let h = follow_handle.clone();
-                                                    h.update(cx, |view, cx| {
-                                                        view.following = !view.following;
-                                                        // Optimistic flip; publish events are
-                                                        // drained and ignored (P1).
-                                                        let mut rx = view.core.set_following(
-                                                            view.who,
-                                                            view.following,
-                                                        );
-                                                        cx.spawn(async move |_, _| {
-                                                            while rx.recv().await.is_some() {}
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .id("follow")
+                                                        .cursor_pointer()
+                                                        .px_2()
+                                                        .py_1()
+                                                        .rounded(px(theme::R_EMBED))
+                                                        .border_1()
+                                                        .border_color(rgb(theme::hairline()))
+                                                        .hover(|s| {
+                                                            s.border_color(rgb(theme::muted()))
                                                         })
-                                                        .detach();
-                                                        cx.notify();
-                                                    });
-                                                })
-                                                .when(following, |d| {
-                                                    d.text_color(rgb(theme::muted()))
-                                                        .child("Following")
-                                                })
-                                                .when(!following, |d| {
-                                                    d.text_color(rgb(theme::vermilion()))
-                                                        .child("Follow")
-                                                }),
+                                                        .text_size(px(theme::T_SMALL))
+                                                        .on_click(move |_, _, cx| {
+                                                            let h = follow_handle.clone();
+                                                            h.update(cx, |view, cx| {
+                                                                view.following = !view.following;
+                                                                // Optimistic flip; publish events are
+                                                                // drained and ignored (P1).
+                                                                let mut rx =
+                                                                    view.core.set_following(
+                                                                        view.who,
+                                                                        view.following,
+                                                                    );
+                                                                cx.spawn(async move |_, _| {
+                                                                    while rx.recv().await.is_some()
+                                                                    {
+                                                                    }
+                                                                })
+                                                                .detach();
+                                                                cx.notify();
+                                                            });
+                                                        })
+                                                        .when(following, |d| {
+                                                            d.text_color(rgb(theme::muted()))
+                                                                .child("Following")
+                                                        })
+                                                        .when(!following, |d| {
+                                                            d.text_color(rgb(theme::vermilion()))
+                                                                .child("Follow")
+                                                        }),
+                                                )
+                                                // Mute rides next to Follow — an
+                                                // optimistic flip, publish events
+                                                // drained and ignored (the Follow
+                                                // button's pattern).
+                                                .child(
+                                                    div()
+                                                        .id("mute")
+                                                        .cursor_pointer()
+                                                        .px_2()
+                                                        .py_1()
+                                                        .rounded(px(theme::R_EMBED))
+                                                        .border_1()
+                                                        .border_color(rgb(theme::hairline()))
+                                                        .hover(|s| {
+                                                            s.border_color(rgb(theme::muted()))
+                                                        })
+                                                        .text_size(px(theme::T_SMALL))
+                                                        .on_click(move |_, _, cx| {
+                                                            let h = mute_handle.clone();
+                                                            h.update(cx, |view, cx| {
+                                                                view.muted = !view.muted;
+                                                                let mut rx = view.core.set_muted(
+                                                                    view.who, view.muted,
+                                                                );
+                                                                cx.spawn(async move |_, _| {
+                                                                    while rx.recv().await.is_some()
+                                                                    {
+                                                                    }
+                                                                })
+                                                                .detach();
+                                                                cx.notify();
+                                                            });
+                                                        })
+                                                        .when(muted, |d| {
+                                                            d.text_color(rgb(theme::muted()))
+                                                                .child("Muted")
+                                                        })
+                                                        .when(!muted, |d| {
+                                                            d.text_color(rgb(theme::vermilion()))
+                                                                .child("Mute")
+                                                        }),
+                                                ),
                                         )
                                     })
                                     // Own profile (D38): the edit form replaces
@@ -790,44 +847,6 @@ impl Render for ProfileView {
                                                     });
                                                 })
                                                 .child("Edit profile"),
-                                        )
-                                    })
-                                    // Someone else: Mute rides next to Follow —
-                                    // an optimistic flip, publish events drained
-                                    // and ignored (the Follow button's pattern).
-                                    .when(!self.is_me, |d| {
-                                        d.child(
-                                            div()
-                                                .id("mute")
-                                                .cursor_pointer()
-                                                .px_2()
-                                                .py_1()
-                                                .rounded(px(theme::R_EMBED))
-                                                .border_1()
-                                                .border_color(rgb(theme::hairline()))
-                                                .hover(|s| s.border_color(rgb(theme::muted())))
-                                                .text_size(px(theme::T_SMALL))
-                                                .on_click(move |_, _, cx| {
-                                                    let h = mute_handle.clone();
-                                                    h.update(cx, |view, cx| {
-                                                        view.muted = !view.muted;
-                                                        let mut rx = view
-                                                            .core
-                                                            .set_muted(view.who, view.muted);
-                                                        cx.spawn(async move |_, _| {
-                                                            while rx.recv().await.is_some() {}
-                                                        })
-                                                        .detach();
-                                                        cx.notify();
-                                                    });
-                                                })
-                                                .when(muted, |d| {
-                                                    d.text_color(rgb(theme::muted())).child("Muted")
-                                                })
-                                                .when(!muted, |d| {
-                                                    d.text_color(rgb(theme::vermilion()))
-                                                        .child("Mute")
-                                                }),
                                         )
                                     }),
                             )
