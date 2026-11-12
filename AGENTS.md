@@ -19,7 +19,9 @@ is commit `a4b09e8`: `git show a4b09e8:src/<file>`). The build spec is
 - `packaging/`: `install-local.sh` ships the release (bin + wrapper + desktop
   file + hicolor icons into `~/.local`). `self/` +
   `.github/workflows/release.yml`: tag-driven deb/rpm/flatpak builds and
-  the Orchard publish (D31).
+  the Orchard publish (D31). Release notes are written in `CHANGELOG.md`
+  first; at tagging, the new version's paragraph is copied into the
+  metainfo `<releases>` block.
 
 ## Dev environment (the bootc host has no GTK/Vulkan dev headers)
 
