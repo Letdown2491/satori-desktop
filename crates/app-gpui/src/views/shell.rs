@@ -1317,9 +1317,14 @@ impl Shell {
         } else {
             let left = held
                 .deadline
-                .saturating_duration_since(std::time::Instant::now())
-                .as_secs();
-            format!("publishing in {}s", left.max(1))
+                .saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                // The undo window closed; the commit rides the relays
+                // (seconds over Tor). The old fake "1s" read as stuck.
+                "sending…".to_string()
+            } else {
+                format!("publishing in {}s", left.as_secs().max(1))
+            }
         };
         div()
             .absolute()
@@ -1352,9 +1357,11 @@ impl Shell {
                         .px_2()
                         .py(px(2.))
                         .rounded(px(theme::R_EMBED))
-                        .border_1()
-                        .border_color(rgb(theme::vermilion()))
-                        .text_color(rgb(theme::vermilion()))
+                        // Solid, like the Reply/Publish buttons: a
+                        // border-only ghost on the pill read as a
+                        // transparent non-button.
+                        .bg(rgb(theme::vermilion()))
+                        .text_color(rgb(theme::washi()))
                         .text_size(px(theme::T_UI))
                         .on_click(cx.listener(|shell, _, _, cx| {
                             if let Some(h) = shell.hold.as_ref() {
