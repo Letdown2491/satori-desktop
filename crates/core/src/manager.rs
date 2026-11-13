@@ -7610,6 +7610,10 @@ mod tests {
     /// spawned-task variant hangs in this container; the host does not.
     #[test]
     fn login_then_notifications_has_session() {
+        // Login's bootstrap arms the process-global wot graph (set_identity
+        // + the store's cached kind-3s): serialize against wot's own tests,
+        // BEFORE the env guard (the wot serial's ordering contract).
+        let _serial = crate::wot::test_serial();
         let env = crate::test_env::EnvGuard::new("login");
         let core = Arc::new(Core::new());
         core.logout(); // start clean
@@ -7722,6 +7726,9 @@ mod tests {
 
     #[test]
     fn tier_gates_not_in_network_replies_and_engagement() {
+        // tier_session mutates the process-global wot graph: the serial
+        // goes BEFORE the env guard (wot's Session ordering contract).
+        let _serial = crate::wot::test_serial();
         let _env = TierEnv::new("tier-nin");
         let (my_note, _me, _f, outsider) = tier_session();
         let my_notes: HashSet<EventId> = [my_note].into();
@@ -7764,6 +7771,7 @@ mod tests {
 
     #[test]
     fn unknown_single_reply_passes() {
+        let _serial = crate::wot::test_serial();
         let _env = TierEnv::new("tier-unknown");
         let (my_note, _me, _f, _outsider) = tier_session();
         let my_notes: HashSet<EventId> = [my_note].into();
@@ -7780,6 +7788,7 @@ mod tests {
 
     #[test]
     fn velocity_flood_trips_with_receipt_reason() {
+        let _serial = crate::wot::test_serial();
         let _env = TierEnv::new("tier-velocity");
         let (my_note, _me, _f, _outsider) = tier_session();
         let my_notes: HashSet<EventId> = [my_note].into();
@@ -7809,6 +7818,7 @@ mod tests {
 
     #[test]
     fn velocity_clears_at_session_boundary() {
+        let _serial = crate::wot::test_serial();
         let _env = TierEnv::new("tier-clear");
         let (my_note, _me, _f, _outsider) = tier_session();
         let my_notes: HashSet<EventId> = [my_note].into();

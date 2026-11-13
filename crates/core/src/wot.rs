@@ -191,6 +191,21 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// The wot tests' turnstile (see Session::_serial): serialize against
+/// the process-global graph from OUTSIDE the module too — the manager's
+/// tier tests and its login test mutate the same graph (tier_session,
+/// the bootstrap's set_identity), and interleaving with this module's
+/// assertions flakes both ways. ORDERING: take this BEFORE any
+/// EnvGuard — Session::new's order — so no test holds the env lock
+/// while waiting on this one (a lock cycle would deadlock the run).
+#[cfg(test)]
+pub(crate) fn test_serial() -> std::sync::MutexGuard<'static, ()> {
+    static TEST_SERIAL: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    TEST_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn fresh(created_at: u64) -> bool {
     now_secs().saturating_sub(created_at) <= STALE_SECS
 }
@@ -682,9 +697,6 @@ mod tests {
     use super::*;
     use crate::test_env::EnvGuard;
 
-    /// The wot tests' turnstile (see Session::_serial).
-    static TEST_SERIAL: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
     fn keys() -> Keys {
         Keys::generate()
     }
@@ -722,9 +734,15 @@ mod tests {
 
     impl Session {
         fn new(follows: &[Keys]) -> Self {
-            let _serial = TEST_SERIAL
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _serial = test_serial();
+            Self::locked(follows, _serial)
+        }
+
+        /// The graph work of a Session; the caller holds test_serial
+        /// (tests that mutate OUTSIDE a Session — the signed-out replay,
+        /// the follows cap — take the lock themselves so no graph write
+        /// runs beside another test's assertions).
+        fn locked(follows: &[Keys], _serial: std::sync::MutexGuard<'static, ()>) -> Self {
             let env = EnvGuard::new("wot");
             let me = Keys::generate();
             set_identity(
@@ -899,6 +917,11 @@ mod tests {
     /// apply; over-cap and signed-out refuse).
     #[test]
     fn persisted_sources_replay() {
+        // The signed-out leg mutates the graph BEFORE any Session: hold
+        // the serial for the whole body (Session::locked, not new — the
+        // lock is already ours).
+        let _serial = test_serial();
+        reset_for_tests();
         let follows = ids(2);
         let target = Keys::generate();
         // Signed out: refused.
@@ -908,7 +931,7 @@ mod tests {
             &[target.public_key()],
         );
         assert_eq!(shared_follows(&target.public_key()), 0);
-        let _s = Session::new(&follows);
+        let _s = Session::locked(&follows, _serial);
         // Not a follow: refused.
         let stranger = Keys::generate();
         apply_persisted(
@@ -992,6 +1015,10 @@ mod tests {
     /// verdicts degrade to Unknown, ingest is refused.
     #[test]
     fn follows_cap_shuts_off() {
+        // No Session — the cap test drives set_identity directly, so the
+        // serial is held by hand and the graph is reset on the way out
+        // (the over-cap shutoff must not leak into a later test).
+        let _serial = test_serial();
         let follows = ids(MAX_FOLLOWS + 1);
         let me = Keys::generate();
         set_identity(
@@ -1002,6 +1029,7 @@ mod tests {
         let target = Keys::generate();
         observe(&kind3(&follows[0], &[&target], now()));
         assert_eq!(shared_follows(&target.public_key()), 0);
+        reset_for_tests();
     }
 
     /// The D24 target ceiling holds (tested through `insert_target` with
