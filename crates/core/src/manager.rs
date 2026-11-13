@@ -4878,7 +4878,7 @@ impl Core {
                     continue;
                 };
                 let mut settled: Vec<String> = Vec::new();
-                if let Ok(active) = core.active().await {
+                if let Ok(active) = core.try_active().await {
                     for p in due {
                         // Same funnel as Self::commit (the publish-before-
                         // mark discipline: acceptance is the durability
@@ -6753,6 +6753,14 @@ impl Core {
             eprintln!("{}", std::backtrace::Backtrace::force_capture());
             LoginError::Resume("no active session".into())
         })
+    }
+
+    /// The quiet twin: same lookup, no alarm. For callers whose tick
+    /// legitimately spans logged-out stretches (the scheduled sweep) —
+    /// a miss is a state, not a diagnosis.
+    async fn try_active(&self) -> Result<Active> {
+        let held = self.active.lock().unwrap().clone();
+        held.ok_or(LoginError::Resume("no active session".into()))
     }
 }
 

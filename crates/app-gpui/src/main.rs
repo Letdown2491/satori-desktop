@@ -73,19 +73,7 @@ impl Root {
             }
         };
         if let Some(login) = login.clone() {
-            cx.subscribe(&login, |this, _, _: &Login, cx| {
-                this.login = None;
-                let shell = cx.new(|cx| Shell::new(this.core.clone(), cx));
-                Self::watch_shell(shell.clone(), cx);
-                this.shell = Some(shell);
-                // A URI clicked while the doors were up opens right after
-                // sign-in — same behavior as the session-resume path.
-                if let Some(t) = this.pending.take() {
-                    this.route_target(t, cx);
-                }
-                cx.notify();
-            })
-            .detach();
+            Self::watch_login(&login, cx);
         }
         // The single-instance socket pump: forwarded URIs (and bare
         // "activate" pings) arrive here on a tokio channel and route into
@@ -155,13 +143,39 @@ impl Root {
         }
     }
 
+    /// Login-to-root subscription: the approved login swaps the window to
+    /// the shell. Attached per login view — sign-out builds a new one, so
+    /// the attachment must be born with it (a startup-only subscribe is
+    /// what stranded every post-sign-out login on the doors).
+    fn watch_login(login: &Entity<LoginView>, cx: &mut Context<Self>) {
+        cx.subscribe(login, |this, _, _: &Login, cx| {
+            this.login = None;
+            let shell = cx.new(|cx| Shell::new(this.core.clone(), cx));
+            Self::watch_shell(shell.clone(), cx);
+            this.shell = Some(shell);
+            // A URI clicked while the doors were up opens right after
+            // sign-in — same behavior as the session-resume path.
+            if let Some(t) = this.pending.take() {
+                this.route_target(t, cx);
+            }
+            cx.notify();
+        })
+        .detach();
+    }
+
     /// Shell-to-root subscription: sign-out clears the core (done by the
     /// shell before it emits) and the window returns to the login doors.
     fn watch_shell(shell: Entity<Shell>, cx: &mut Context<Self>) {
         cx.subscribe(&shell, |this, _, ev: &ShellEvent, cx| match ev {
             ShellEvent::SignedOut => {
                 this.shell = None;
-                this.login = Some(cx.new(|cx| LoginView::new(this.core.clone(), None, cx)));
+                let login = cx.new(|cx| LoginView::new(this.core.clone(), None, cx));
+                // The new doors need their own subscription: without it the
+                // next Approved is emitted with no listener and the window
+                // sits on the login page forever (the "frozen doors" bug —
+                // every login after a sign-out, on any build).
+                Self::watch_login(&login, cx);
+                this.login = Some(login);
                 cx.notify();
             }
         })
