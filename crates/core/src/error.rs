@@ -5,6 +5,11 @@ use std::fmt;
 #[derive(Debug)]
 pub enum LoginError {
     InvalidBunkerUri(String),
+    /// Paste-time relay screening refused a private-network relay in the
+    /// pasted URI (issue #11): the full verdicts cross the boundary (the
+    /// dialog derives the notice and the refused hosts from them; review
+    /// Tier 2.5). Nothing was dialed.
+    RelayScreened(Vec<crate::net_guard::RelayVerdict>),
     InvalidNsec,
     Connect(String),
     Store(String),
@@ -21,6 +26,9 @@ impl fmt::Display for LoginError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidBunkerUri(s) => write!(f, "not a valid bunker:// URI: {s}"),
+            Self::RelayScreened(verdicts) => {
+                write!(f, "{}", crate::net_guard::relay_screen_notice(verdicts))
+            }
             Self::InvalidNsec => write!(f, "not a valid nsec or hex secret key"),
             Self::Connect(s) => write!(f, "bunker connect failed: {s}"),
             Self::Store(s) => write!(f, "secret store: {s}"),

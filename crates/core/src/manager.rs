@@ -51,6 +51,14 @@ pub enum ConnectEvent {
     /// NIP-46; the signer scans it and approves.
     Uri(String),
     Approved(PublicKey),
+    /// Paste-time screening refused a private relay (issue #11): the
+    /// refused hosts, for the login dialog's allow-and-retry button. The
+    /// banner line rides the following `Failed`.
+    /// Paste-time relay screening refused a private relay (issue #11):
+    /// the full verdicts, for the login dialog's allow-and-retry
+    /// affordance (review Tier 2.5). Terminal, like `Failed`: the banner
+    /// line is derived from the verdicts, nothing was dialed.
+    RelayScreened(Vec<crate::net_guard::RelayVerdict>),
     Failed(String),
 }
 
@@ -1722,6 +1730,10 @@ impl Core {
                     crate::dlog!("bunker: approved for {pk}");
                     let _ = tx.send(ConnectEvent::Approved(pk));
                 }
+                Err(LoginError::RelayScreened(verdicts)) => {
+                    crate::dlog!("bunker: relay screening refused {}", verdicts.len());
+                    let _ = tx.send(ConnectEvent::RelayScreened(verdicts));
+                }
                 Err(e) => {
                     crate::dlog!("bunker: failed: {e}");
                     let _ = tx.send(ConnectEvent::Failed(e.to_string()));
@@ -1750,11 +1762,6 @@ impl Core {
     }
 
     async fn connect_bunker_inner(&self, uri: &str, seq: u64) -> Result<PublicKey> {
-        // Paste-time transport screen (issue #11): the URI's relays are the
-        // bunker transport's dials, outside the pool's screens — the same
-        // ruleset screens them before the nostrconnect client is built.
-        crate::net_guard::screen_bunker_uri(uri).map_err(LoginError::InvalidBunkerUri)?;
-
         let parsed = NostrConnectUri::parse(uri.trim())
             .map_err(|e| LoginError::InvalidBunkerUri(e.to_string()))?;
 
@@ -1782,6 +1789,22 @@ impl Core {
             }
         };
         crate::dlog!("bunker: parsed, remote signer {remote}");
+
+        // Paste-time relay screen (issue #11): the nostr-connect client
+        // dials these relays directly, outside the pool's screening —
+        // private-space answers are refused before any socket opens, and
+        // the dialog offers the consent toggle instead.
+        let relay_urls: Vec<String> = parsed.relays().iter().map(|r| r.to_string()).collect();
+        let verdicts =
+            crate::net_guard::screen_uri_relays(relay_urls.iter().map(String::as_str)).await;
+        let refused: Vec<crate::net_guard::RelayVerdict> = verdicts
+            .iter()
+            .filter(|v| matches!(v.screen, crate::net_guard::RelayScreen::Refused(_)))
+            .cloned()
+            .collect();
+        if !refused.is_empty() {
+            return Err(LoginError::RelayScreened(refused));
+        }
 
         let client_keys = Keys::generate();
         let connect = Arc::new(
