@@ -585,7 +585,7 @@ impl Render for ArticleView {
         let comment_rows: Vec<(String, String, String)> = comments
             .iter()
             .map(|c| {
-                let ts = u64::from(c.created_at.as_secs());
+                let ts = c.created_at.as_secs();
                 crate::timefmt::ensure(ts, cx);
                 (
                     self.name_for(&c.pubkey),

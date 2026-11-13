@@ -29,6 +29,7 @@
 //! check, so they cannot pose as names.
 
 use nostr::prelude::*;
+use std::net::ToSocketAddrs;
 
 /// Public unicast only — THE authority. Strict side: a block is asserted
 /// only when the address is demonstrably not globally reachable, so a
@@ -233,10 +234,34 @@ pub async fn resolve_pinned_public(
     host: &str,
     port: u16,
 ) -> Result<Vec<std::net::SocketAddr>, NetGuardError> {
-    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|_| NetGuardError::Resolve(host.to_string()))?
-        .collect();
+    // tokio::net::lookup_host needs a running reactor (the pool callers
+    // run inside core's runtime) — but the video overlay's pre-dial check
+    // runs on GPUI's executor, where the first lookup panicked the whole
+    // app (there is no reactor running). Inside a runtime, the async
+    // lookup; outside it, std's getaddrinfo inline: that path is already
+    // on a background executor (the tap spawns it off the UI thread), and
+    // a blocking resolve there costs what the playbin dial would anyway.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|_| NetGuardError::Resolve(host.to_string()))?
+            .collect();
+        screened(host, addrs)
+    } else {
+        let addrs: Vec<std::net::SocketAddr> = (host, port)
+            .to_socket_addrs()
+            .map_err(|_| NetGuardError::Resolve(host.to_string()))?
+            .collect();
+        screened(host, addrs)
+    }
+}
+
+/// The screen, split from the resolution: every answer public, else fail
+/// closed on the WHOLE name (no partial dials).
+fn screened(
+    host: &str,
+    addrs: Vec<std::net::SocketAddr>,
+) -> Result<Vec<std::net::SocketAddr>, NetGuardError> {
     if addrs.is_empty() {
         return Err(NetGuardError::Resolve(host.to_string()));
     }
@@ -463,6 +488,30 @@ mod tests {
                 Err(NetGuardError::NonPublic(_)) | Err(NetGuardError::Resolve(_))
             ));
         });
+    }
+
+    /// The video-overlay crash (user report, D59 cycle): the guard ran on
+    /// GPUI's executor, which has NO Tokio reactor — the first
+    /// `tokio::net::lookup_host` panicked ("there is no reactor running")
+    /// and the unwind under GStreamer's threads took the app down with a
+    /// segfault. Poll the guard outside any runtime, the exact shape of
+    /// the tap path: it must complete (localhost → refused), not panic.
+    #[test]
+    fn resolution_without_a_runtime_does_not_panic() {
+        use std::task::{Context, Poll};
+        let mut fut = Box::pin(resolve_pinned_public("localhost", 8080));
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(res) => assert!(matches!(
+                res,
+                Err(NetGuardError::NonPublic(_)) | Err(NetGuardError::Resolve(_))
+            )),
+            // The no-runtime path is a blocking resolve — first poll
+            // completes it; Pending would mean we regressed into an
+            // async lookup we can't drive here.
+            Poll::Pending => panic!("no-runtime resolve must not pend"),
+        }
     }
 
     // --- the user-relay exemption ------------------------------------------
