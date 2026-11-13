@@ -3,6 +3,7 @@ pub mod cards;
 pub mod composer;
 pub mod content;
 pub mod edit_profile;
+pub mod engagement;
 pub mod feed;
 pub mod library;
 pub mod login;

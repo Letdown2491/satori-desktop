@@ -7,9 +7,11 @@
 //! D17 removed the nsec login door; the `NSEC` slot survives only so the
 //! test fixture's local mode can read old session files.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::config;
 use crate::error::{LoginError, Result};
@@ -65,7 +67,10 @@ fn fallback_path(name: &str) -> PathBuf {
 
 /// Best-effort store: Secret Service (2s deadline), falling back to a
 /// 0600 file.
-pub async fn store(name: &str, secret: &str) -> Result<()> {
+pub async fn store(name: &'static str, secret: &str) -> Result<()> {
+    // A pending fire-and-forget delete (logout) must not eat this fresh
+    // secret: taking a ticket supersedes it (see delete).
+    take_ticket(name);
     let name = name.to_string();
     let secret = secret.to_string();
     let stored: bool = {
@@ -150,13 +155,43 @@ async fn migrate_legacy_service(name: &str) -> Result<Option<String>> {
 
 /// Best-effort delete from both stores (logout must not leave residue).
 /// Fire-and-forget thread: safe from the UI thread, immune to D-Bus hangs.
+///
+/// Ordered against stores by ticket (#33's CI catch): logout's slow delete
+/// used to land after a FAST logout→login's fresh store and eat the new
+/// secret (re-login died with `CredentialGone("local key")` — a real
+/// sign-out-then-sign-in race in the app too). Every store and delete
+/// takes a ticket per slot; a spawned delete only fires while its ticket
+/// is still current, so any newer store or delete supersedes it.
 pub fn delete(name: &'static str) {
+    let ticket = take_ticket(name);
     std::thread::spawn(move || {
+        if !ticket_live(name, ticket) {
+            return; // superseded: a newer store or delete owns this slot
+        }
         if let Ok(e) = entry(name) {
             let _ = e.delete_credential();
         }
-        let _ = std::fs::remove_file(fallback_path(name));
+        if ticket_live(name, ticket) {
+            let _ = std::fs::remove_file(fallback_path(name));
+        }
     });
+}
+
+fn tickets() -> &'static Mutex<HashMap<&'static str, u64>> {
+    static TICKETS: std::sync::OnceLock<Mutex<HashMap<&'static str, u64>>> =
+        std::sync::OnceLock::new();
+    TICKETS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn take_ticket(name: &'static str) -> u64 {
+    let mut map = tickets().lock().unwrap();
+    let slot = map.entry(name).or_insert(0);
+    *slot += 1;
+    *slot
+}
+
+fn ticket_live(name: &'static str, ticket: u64) -> bool {
+    tickets().lock().unwrap().get(name).copied() == Some(ticket)
 }
 
 fn file_store(name: &str, secret: &str) -> Result<()> {
@@ -192,4 +227,43 @@ fn file_load(name: &str) -> Result<Option<String>> {
     }
     let s = std::fs::read_to_string(&path).map_err(|e| LoginError::Store(e.to_string()))?;
     Ok(Some(s.trim().to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The re-login race (#33): a delete spawned by logout must not eat a
+    /// secret stored AFTER it. The sequence logout→login ran back-to-back
+    /// (the login_then_notifications_has_session test, and a real user
+    /// signing out then back in): the old delete thread landed on the new
+    /// store and the re-login died with CredentialGone. The ticket makes
+    /// the ordering deterministic — repeat it hard to prove it.
+    #[test]
+    fn delete_then_store_keeps_the_new_secret() {
+        let env = crate::test_env::EnvGuard::new("secrets-ticket");
+        let name = "nsec"; // the fixture's slot; the guard isolates the dir
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for round in 0..50 {
+            rt.block_on(async {
+                store(name, &format!("old-{round}")).await.expect("store");
+            });
+            delete(name); // fire-and-forget, like logout
+            rt.block_on(async {
+                store(name, &format!("new-{round}")).await.expect("store");
+            });
+            // Give the superseded delete every chance to land wrongly.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let got = rt.block_on(load(name)).expect("load").expect("present");
+            assert_eq!(
+                got,
+                format!("new-{round}"),
+                "round {round}: delete ate the fresh secret"
+            );
+        }
+        let _ = env;
+    }
 }

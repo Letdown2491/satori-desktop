@@ -16,12 +16,12 @@ use gpui::{
     Window, div, list, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile, PublishEvent};
-use satori_core::wallet::{Status, WalletEvent};
+use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile};
+use satori_core::wallet::WalletEvent;
 use satori_core::wot::Verdict;
 
-use super::{actions, content, nav::Nav, states};
-use crate::{media, prefs, theme};
+use super::{actions, content, engagement, nav::Nav, states};
+use crate::{media, theme};
 
 pub struct ThreadView {
     core: Arc<Core>,
@@ -45,111 +45,63 @@ pub struct ThreadView {
     parents: HashMap<String, ParentNote>,
     parents_asked: HashSet<String>,
     list: ListState,
-    /// The action row's mirrors (actions.rs): loaded from core's persisted
-    /// engagement sets at construction, kept optimistic per toggle.
-    liked: HashSet<String>,
-    reposted: HashSet<String>,
-    bookmarked: HashSet<String>,
-    zapped: HashSet<String>,
-    /// Session zap-in-flight set; the wallet broadcast clears it.
-    zap_pending: HashSet<String>,
-    wallet_ready: bool,
+    /// The action row's mirrors (engagement.rs): seeded from core's
+    /// persisted engagement sets at construction, kept optimistic per
+    /// toggle.
+    engagement: engagement::Engagement,
+    /// Render snapshot (feed.rs's FeedSnap discipline, #31's port): the
+    /// render used to deep-clone the whole reply tree, the profiles map
+    /// and the five engagement sets per repaint — a popular thread with
+    /// images loading paid a full deep copy per landing. Rebuilt only when
+    /// the data changed.
+    snap: Option<ThreadSnap>,
+    snap_dirty: bool,
+}
+
+/// The render-time snapshot: everything the item closure reads, rebuilt
+/// (one deep copy) only when the data changed instead of every frame; the
+/// Arcs make the per-frame clone a refcount bump.
+struct ThreadSnap {
+    anchor: std::sync::Arc<Option<Event>>,
+    replies: std::sync::Arc<Vec<(Event, usize)>>,
+    profiles: std::sync::Arc<HashMap<String, Profile>>,
+    quotes: std::sync::Arc<content::Quotes>,
+    engagement: std::sync::Arc<engagement::Engagement>,
 }
 
 impl EventEmitter<Nav> for ThreadView {}
 
 /// The thread's toggles (actions.rs): the optimistic-mirror discipline —
-/// flip the glyph now, reconcile against the publish stream later (feed.rs's
-/// pattern; the mirrors live on the view, the publish rides core's commit()).
+/// flip the glyph now, reconcile against the publish stream later. The
+/// behavior itself lives in engagement.rs (the extracted engine); the
+/// thread has no deltas, so its Host impl is just the plumbing.
 impl actions::ActionHost for ThreadView {
-    /// Optimistic like: mutate state first, reconcile against core's publish
-    /// events later (§1.2).
     fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>) {
-        let id = ev.id.to_string();
-        if !self.liked.insert(id) {
-            return;
-        }
-        let mut rx = self.core.react(ev);
-        cx.spawn(async move |_, _| while rx.recv().await.is_some() {})
-            .detach();
-        cx.notify();
+        engagement::toggle_like(self, ev, cx)
     }
-
-    /// Optimistic repost (NIP-18 kind 6): the glyph flips vermilion now; a
-    /// failure — or an undo — rolls it back.
     fn toggle_repost(&mut self, ev: &Event, cx: &mut Context<Self>) {
-        let id = ev.id.to_string();
-        if !self.reposted.insert(id.clone()) {
-            return;
-        }
-        let mut rx = self.core.repost(ev);
-        cx.spawn(async move |this, cx| {
-            while let Some(pv) = rx.recv().await {
-                match pv {
-                    PublishEvent::Failed { .. } | PublishEvent::Undone { .. } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.reposted.remove(&id);
-                            this.status = "repost didn't go through, try again".into();
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .detach();
-        cx.notify();
+        engagement::toggle_repost(self, ev, cx)
     }
-
-    /// Bookmark toggle (D38): the star fills for either list (private 10003 /
-    /// public 30001 — the settings pref picks which one a star WRITES); a
-    /// second click unbookmarks through the RMW that clears both.
     fn toggle_bookmark(&mut self, ev: &Event, cx: &mut Context<Self>) {
-        let id = ev.id.to_string();
-        let ev_id = ev.id;
-        let adding = self.bookmarked.insert(id.clone());
-        if !adding {
-            self.bookmarked.remove(&id);
-        }
-        // The scope read rides the click (feed.rs's comment stands: a
-        // mid-session pref flip applies to the NEXT star).
-        let public = prefs::get_bool("bookmarkPublic");
-        let mut rx = if adding {
-            self.core.bookmark(ev, public)
-        } else {
-            self.core.unbookmark(ev_id)
-        };
-        cx.spawn(async move |this, cx| {
-            while let Some(pv) = rx.recv().await {
-                if let PublishEvent::Failed { .. } = pv {
-                    let _ = this.update(cx, |this, cx| {
-                        if adding {
-                            this.bookmarked.remove(&id);
-                        } else {
-                            this.bookmarked.insert(id.clone());
-                        }
-                        this.status = "bookmark didn't go through, try again".into();
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
-        cx.notify();
+        engagement::toggle_bookmark(self, ev, cx)
     }
-
-    /// One zap in flight per note (the Feather rule; core enforces too).
     fn zap_tap(&mut self, ev: &Event, cx: &mut Context<Self>) {
-        if !self.wallet_ready {
-            cx.emit(Nav::OpenWallet);
-            return;
-        }
-        if !self.zap_pending.insert(ev.id.to_string()) {
-            return;
-        }
-        self.core.zap(ev.clone(), super::zap::TAP_SATS * 1000);
-        cx.notify();
+        engagement::zap_tap(self, ev, cx)
+    }
+}
+
+impl engagement::Host for ThreadView {
+    fn engagement(&mut self) -> &mut engagement::Engagement {
+        &mut self.engagement
+    }
+    fn core(&self) -> &Arc<Core> {
+        &self.core
+    }
+    fn whisper(&mut self, msg: String) {
+        self.status = msg;
+    }
+    fn touched(&mut self) {
+        self.touch();
     }
 }
 
@@ -158,11 +110,7 @@ impl ThreadView {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
         crate::video::watch(cx); // repaint on player open/toggle/close
-        let liked = core.liked_set();
-        let reposted = core.reposted_set();
-        let bookmarked = core.bookmarked_set();
-        let zapped = core.zapped_set();
-        let wallet_ready = core.wallet().is_ready();
+        let engagement = engagement::Engagement::new(&core);
         let view = Self {
             core,
             anchor: None,
@@ -176,12 +124,9 @@ impl ThreadView {
             parents: HashMap::new(),
             parents_asked: HashSet::new(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
-            liked,
-            reposted,
-            bookmarked,
-            zapped,
-            zap_pending: HashSet::new(),
-            wallet_ready,
+            engagement,
+            snap: None,
+            snap_dirty: true,
         };
         // The anchor rides in with its author's profile; replies follow.
         view.pump(view.core.event_by_id(id, Vec::new(), None), cx);
@@ -209,31 +154,15 @@ impl ThreadView {
     }
 
     /// The wallet broadcast → glyph states + the quiet status whisper
-    /// (feed.rs's on_wallet, minus the Bookmarks row-drop: a thread never
-    /// IS a bookmark list).
+    /// (engagement.rs's engine; the with_mode pump calls this).
     fn on_wallet(&mut self, ev: WalletEvent, cx: &mut Context<Self>) {
-        match ev {
-            WalletEvent::Status(s) => {
-                self.wallet_ready = matches!(s, Status::Ready(_));
-            }
-            WalletEvent::ZapPaid { note, .. } => {
-                self.zap_pending.remove(&note);
-                self.zapped.insert(note);
-            }
-            WalletEvent::ZapUncertain { note, .. } => {
-                self.zap_pending.remove(&note);
-                self.status = "zap state unknown, check your wallet before retrying".into();
-            }
-            WalletEvent::ZapFailed { note, reason } => {
-                self.zap_pending.remove(&note);
-                self.status = format!("zap didn't go through: {reason}");
-            }
-            WalletEvent::ZapReceipt { note, .. } => {
-                self.zapped.insert(note);
-            }
-            WalletEvent::ConnectFailed(_) => {} // the wallet pane's concern
-        }
-        cx.notify();
+        engagement::on_wallet(self, ev, cx);
+    }
+
+    /// Any snapshot-state mutation goes through here so the render
+    /// snapshot knows to rebuild (feed.rs's touch discipline).
+    fn touch(&mut self) {
+        self.snap_dirty = true;
     }
 
     fn pump(&self, mut rx: FeedRx, cx: &mut Context<Self>) {
@@ -265,6 +194,7 @@ impl ThreadView {
                                 name,
                             }),
                         );
+                        this.touch();
                         cx.notify();
                     });
                 }
@@ -355,6 +285,7 @@ impl ThreadView {
             _ => {}
         }
         self.list.reset(self.replies.len());
+        self.touch();
         cx.notify();
     }
 
@@ -375,6 +306,7 @@ impl ThreadView {
             // Reserve the key so we don't re-request while loading.
             self.quotes.insert(bech.clone(), None);
             let rx = self.core.event_by_id_dech32(&bech);
+            self.touch();
             self.pump_quote(bech, rx, cx);
         }
     }
@@ -674,8 +606,6 @@ impl Render for ThreadView {
         let handle = cx.entity();
         let status = self.status.clone();
         let replies_empty = self.replies.is_empty();
-        let replies = self.replies.clone();
-        let profiles = self.profiles.clone();
         let media = media::Snapshot::new(cx);
         // Evicted media comes back on render — a thread is bounded content,
         // so sweep everything it paints (Ready/not-media URLs are silent
@@ -694,27 +624,38 @@ impl Render for ThreadView {
                 media::fetch(&self.core, url, viewer, cx);
             }
         }
-        let quotes = self.quotes.clone();
-        let anchor = self.anchor.clone();
+        // Rebuild the render snapshot only when the DATA changed (any
+        // mutation sets snap_dirty): the reply tree, profiles, quotes and
+        // the engagement mirrors used to deep-clone per repaint (the
+        // pre-FeedSnap regression class, #31).
+        if self.snap_dirty || self.snap.is_none() {
+            self.snap = Some(ThreadSnap {
+                anchor: std::sync::Arc::new(self.anchor.clone()),
+                replies: std::sync::Arc::new(self.replies.clone()),
+                profiles: std::sync::Arc::new(self.profiles.clone()),
+                quotes: std::sync::Arc::new(self.quotes.clone()),
+                engagement: std::sync::Arc::new(self.engagement.clone()),
+            });
+            self.snap_dirty = false;
+        }
+        let snap = self.snap.as_ref().unwrap();
+        let anchor = snap.anchor.as_ref(); // &Option<Event>
+        let replies = snap.replies.clone();
+        let profiles = snap.profiles.clone();
+        let quotes = snap.quotes.clone();
+        let eng = snap.engagement.clone();
         let anchor_handle = handle.clone();
         let reply_all_handle = handle.clone();
         // The action row's glyph states, snapshotted once per render
         // (mirrors mutated optimistically by the ActionHost impl).
-        let (liked, reposted, bookmarked) = (
-            self.liked.clone(),
-            self.reposted.clone(),
-            self.bookmarked.clone(),
-        );
-        let (zapped, zap_pending) = (self.zapped.clone(), self.zap_pending.clone());
-        let wallet_ready = self.wallet_ready;
         let reduced_motion = actions::reduced_motion(cx);
         let note_state = move |note: &Event| actions::ActionState {
-            liked: liked.contains(&note.id.to_string()),
-            reposted: reposted.contains(&note.id.to_string()),
-            bookmarked: bookmarked.contains(&note.id.to_string()),
-            zapped: zapped.contains(&note.id.to_string()),
-            zapping: zap_pending.contains(&note.id.to_string()),
-            wallet_ready,
+            liked: eng.liked.contains(&note.id.to_string()),
+            reposted: eng.reposted.contains(&note.id.to_string()),
+            bookmarked: eng.bookmarked.contains(&note.id.to_string()),
+            zapped: eng.zapped.contains(&note.id.to_string()),
+            zapping: eng.zap_pending.contains(&note.id.to_string()),
+            wallet_ready: eng.wallet_ready,
             reduced_motion,
         };
         // The WS3 collapse line's click target (the list closure moves its
@@ -784,7 +725,7 @@ impl Render for ThreadView {
                                                 .get(&note.pubkey.to_string())
                                                 .map(|p| p.picture.clone())
                                                 .unwrap_or_default(),
-                                            &self.name_for(&note),
+                                            &self.name_for(note),
                                             28.0,
                                         ))
                                         .child(
@@ -792,7 +733,7 @@ impl Render for ThreadView {
                                                 .text_size(px(theme::T_UI))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(rgb(theme::ink()))
-                                                .child(self.name_for(&note)),
+                                                .child(self.name_for(note)),
                                         ),
                                 )
                                 .children(anchor_whisper.map(|w| {
@@ -802,7 +743,7 @@ impl Render for ThreadView {
                                         .child(w)
                                 }))
                                 .child(content::body(
-                                    &note,
+                                    note,
                                     &content::Body {
                                         media: &media,
                                         quotes: &quotes,
@@ -813,7 +754,7 @@ impl Render for ThreadView {
                                 .child(actions::action_row(
                                     &note.id.to_string(),
                                     &anchor_ev,
-                                    note_state(&note),
+                                    note_state(note),
                                     reply_all_handle,
                                 ))
                                 .into_any_element()
