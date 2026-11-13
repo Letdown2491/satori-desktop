@@ -153,6 +153,11 @@ pub struct NotificationsView {
     /// idles open (renders stop, only renders touch) and the next landing
     /// burst took exactly the images on screen.
     pinned: Vec<String>,
+    /// The scroll stream's visible window: the fetch/pin sweep covers only
+    /// these rows (the feed's window discipline — a full-page sweep queued
+    /// every row's media through the six-slot gate).
+    first_visible_start: usize,
+    last_visible_end: usize,
 }
 
 impl EventEmitter<Nav> for NotificationsView {}
@@ -184,6 +189,8 @@ impl NotificationsView {
             engagement,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             pinned: vec![],
+            first_visible_start: 0,
+            last_visible_end: 0,
         };
         view.pump_at(prev, cx);
         // Deep-scroll whisper: same threshold and emission shape as the
@@ -194,11 +201,16 @@ impl NotificationsView {
         view.list
             .set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
                 let _ = this.update(cx, |n, cx| {
+                    n.first_visible_start = ev.visible_range.start;
+                    n.last_visible_end = ev.visible_range.end;
                     let deep = ev.visible_range.start >= 3;
                     if n.deep != deep {
                         n.deep = deep;
                         cx.emit(Nav::PaneDeep);
                     }
+                    // The window moved: re-pin its media (the rows' fetches
+                    // ride the item closures).
+                    n.pin_window(cx);
                 });
             });
         // The wallet broadcast (D20): the rows' bolts follow every zap,
@@ -318,6 +330,41 @@ impl NotificationsView {
     fn want_media(&mut self, note: &Event, cx: &mut Context<Self>) {
         for url in content::media_urls_cached(note).iter().cloned() {
             media::fetch(&self.core, url, cx.entity_id(), cx);
+        }
+    }
+
+    /// Pin the VISIBLE window's media, release the previous window's (the
+    /// feed's pin_window discipline). Called at render (landings) and from
+    /// the scroll stream — the two moments the on-screen set changes. The
+    /// set is everything the visible rows paint: each row's author avatar
+    /// plus the note's own media. The item closures fetch their rows on
+    /// scroll (notif_card); this keeps the PIN matching what's on screen so
+    /// an idle page survives landing bursts.
+    fn pin_window(&mut self, cx: &mut Context<Self>) {
+        let win_start = self.first_visible_start.min(self.rows.len());
+        let win_end = self
+            .last_visible_end
+            .max(win_start + 8)
+            .min(self.rows.len());
+        let mut painted: Vec<String> = Vec::new();
+        for row in &self.rows[win_start..win_end] {
+            let Row::Note(ev, _) = row else { continue };
+            if let Some(p) = self.profiles.get(&ev.pubkey.to_string())
+                && !p.picture.is_empty()
+                && !painted.contains(&p.picture)
+            {
+                painted.push(p.picture.clone());
+            }
+            for url in content::media_urls_cached(ev).iter().cloned() {
+                if !url.is_empty() && !painted.contains(&url) {
+                    painted.push(url);
+                }
+            }
+        }
+        media::unpin(&self.pinned, cx);
+        self.pinned = painted;
+        for url in &self.pinned {
+            media::pin(url, cx);
         }
     }
 
@@ -775,40 +822,12 @@ impl Render for NotificationsView {
         // entries the cache holds; only a landing notifies, so this can't
         // loop a render.
         let viewer = cx.entity_id();
-        let mut painted: Vec<String> = Vec::new();
-        for p in self.profiles.values() {
-            media::fetch(&self.core, p.picture.clone(), viewer, cx);
-            if !p.picture.is_empty() && !painted.contains(&p.picture) {
-                painted.push(p.picture.clone());
-            }
-        }
-        for row in &self.rows {
-            if let Row::Note(ev, _) = row {
-                for url in content::media_urls_cached(ev).iter().cloned() {
-                    if url.is_empty() {
-                        continue;
-                    }
-                    let fresh = !painted.contains(&url);
-                    media::fetch(&self.core, url.clone(), viewer, cx);
-                    if fresh {
-                        painted.push(url);
-                    }
-                }
-            }
-        }
-        // The sweep matters: want_media only runs at rebuild, and once the
-        // cache evicted a note's image under feed-photo pressure NOTHING
-        // asked again — the tile went dark mid-session (owner: the image
-        // "first loads, then disappears"). fetch is a silent no-op for
-        // entries the cache holds; only a landing notifies, so this can't
-        // loop a render. The PIN keeps the page's images through idle
-        // stretches: a bell page sits open, renders stop, only renders
-        // touch (thread.rs render, same discipline).
-        media::unpin(&self.pinned, cx);
-        self.pinned = painted;
-        for url in &self.pinned {
-            media::pin(url, cx);
-        }
+        let _ = viewer;
+        // The VISIBLE window only: pin + sweep in one place (pin_window).
+        // The item closures fetch their own rows on scroll (notif_card), so
+        // this is the landing-time backstop; fetch is a silent no-op for
+        // entries the cache holds, so this can't loop a render.
+        self.pin_window(cx);
         let quotes = self.quotes.clone();
         let parents = self.parents.clone();
         let me = self.me.clone();

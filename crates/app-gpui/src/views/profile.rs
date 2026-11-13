@@ -73,6 +73,10 @@ pub struct ProfileView {
     paging: bool,
     oldest_ts: Option<u64>,
     last_visible_end: usize,
+    /// The scroll stream's first visible row (the strip window's head):
+    /// the fetch/pin sweep covers ONLY this window, so a photo-heavy
+    /// profile queues the viewport's tiles, not the whole scroll history.
+    first_visible_start: usize,
     note_ids: HashSet<EventId>,
     status: String,
     /// §4.3: the kinded error strip (replaces the raw `… {e}` status dump).
@@ -124,6 +128,7 @@ impl ProfileView {
             paging: false,
             oldest_ts: None,
             last_visible_end: 0,
+            first_visible_start: 0,
             note_ids: HashSet::new(),
             status: "loading…".into(),
             error: None,
@@ -142,6 +147,7 @@ impl ProfileView {
         view.list
             .set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
                 let _ = this.update(cx, |this, cx| {
+                    this.first_visible_start = ev.visible_range.start;
                     this.last_visible_end = ev.visible_range.end;
                     let deep = ev.visible_range.start >= 3;
                     if this.deep != deep {
@@ -149,11 +155,86 @@ impl ProfileView {
                         cx.emit(Nav::PaneDeep);
                     }
                     this.maybe_older(this.last_visible_end, cx);
+                    // The window moved: fetch + pin its tiles (the feed's
+                    // scroll-handler pin).
+                    this.pin_window(cx);
                 });
             });
         let rx = view.core.profile(view.who);
         view.pump(rx, cx);
         view
+    }
+
+    /// The profile's fetch + pin discipline in ONE place: the header
+    /// identity plus the VISIBLE strip tiles (three tiles per strip row,
+    /// the feed's window discipline). Called at render (landings) and from
+    /// the scroll stream — the two moments the on-screen set changes. The
+    /// Notes tab is the child Feed's list: it pins its own window.
+    fn pin_window(&mut self, cx: &mut Context<Self>) {
+        let viewer = cx.entity_id();
+        let mut painted: Vec<String> = Vec::new();
+        if let Some(p) = self.profile.as_ref() {
+            painted.push(p.picture.clone());
+            painted.push(p.banner.clone());
+            if let Some(h) = &p.banner_blurhash {
+                painted.push(crate::poster::blurhash_key(h));
+            }
+            media::fetch(&self.core, p.picture.clone(), viewer, cx);
+            media::fetch(&self.core, p.banner.clone(), viewer, cx);
+            // NIP-92: the banner's blurhash placeholder decodes locally
+            // (virtual key, no network).
+            if let Some(h) = &p.banner_blurhash {
+                media::fetch(&self.core, crate::poster::blurhash_key(h), viewer, cx);
+            }
+        }
+        match self.tab {
+            ProfileTab::Photos => {
+                let urls = self.photo_urls();
+                let start = self.first_visible_start.min(urls.len().div_ceil(3));
+                let end = self
+                    .last_visible_end
+                    .max(start + 3)
+                    .min(urls.len().div_ceil(3));
+                for url in urls.iter().take(end * 3).skip(start * 3) {
+                    media::fetch(&self.core, url.clone(), viewer, cx);
+                    if !url.is_empty() && !painted.contains(url) {
+                        painted.push(url.clone());
+                    }
+                }
+            }
+            ProfileTab::Videos => {
+                let urls = self.video_urls();
+                let start = self.first_visible_start.min(urls.len().div_ceil(3));
+                let end = self
+                    .last_visible_end
+                    .max(start + 3)
+                    .min(urls.len().div_ceil(3));
+                for (_, poster, blurhash, _) in urls.iter().take(end * 3).skip(start * 3) {
+                    // A tile paints its poster when there is one, else the
+                    // blurhash placeholder (the same ladder the feed paints).
+                    // The VIDEO url is never pinned: the tile never paints
+                    // it as an image, and pinning it would pin whole files.
+                    if let Some(p) = poster {
+                        media::fetch(&self.core, p.clone(), viewer, cx);
+                        if !p.is_empty() && !painted.contains(p) {
+                            painted.push(p.clone());
+                        }
+                    } else if let Some(h) = blurhash {
+                        let key = crate::poster::blurhash_key(h);
+                        media::fetch(&self.core, key.clone(), viewer, cx);
+                        if !painted.contains(&key) {
+                            painted.push(key);
+                        }
+                    }
+                }
+            }
+            ProfileTab::Notes => {}
+        }
+        media::unpin(&self.pinned, cx);
+        self.pinned = painted;
+        for url in &self.pinned {
+            media::pin(url, cx);
+        }
     }
 
     /// Back to the top (rail re-click, the floating whisper): the notes
@@ -508,53 +589,17 @@ impl Render for ProfileView {
             .as_ref()
             .is_some_and(|(addr, v)| addr == &nip05 && matches!(v, Some(true)));
         let media = media::Snapshot::new(cx);
-        // Evicted media comes back on render — the profile header avatar,
-        // known-author avatars, and the notes' pictures (fetch is a silent
-        // no-op for entries the cache holds).
-        let viewer = cx.entity_id();
-        if let Some(p) = self.profile.as_ref() {
-            media::fetch(&self.core, p.picture.clone(), viewer, cx);
-            media::fetch(&self.core, p.banner.clone(), viewer, cx);
-            // NIP-92: the banner's blurhash placeholder decodes locally
-            // (virtual key, no network).
-            if let Some(h) = &p.banner_blurhash {
-                media::fetch(&self.core, crate::poster::blurhash_key(h), viewer, cx);
-            }
-        }
-        for p in self.profiles.values() {
-            media::fetch(&self.core, p.picture.clone(), viewer, cx);
-        }
-        for ev in &self.notes {
-            for url in content::media_urls_cached(ev).iter().cloned() {
-                media::fetch(&self.core, url, viewer, cx);
-            }
-        }
-        // The same set pins: a profile idles open (reading the notes),
-        // renders stop, only renders touch — the next landing burst took
-        // the banner, the avatar, the note pictures (thread.rs render,
-        // the same discipline).
-        let mut painted: Vec<String> = Vec::new();
-        if let Some(p) = self.profile.as_ref() {
-            painted.push(p.picture.clone());
-            painted.push(p.banner.clone());
-            if let Some(h) = &p.banner_blurhash {
-                painted.push(crate::poster::blurhash_key(h));
-            }
-        }
-        for p in self.profiles.values() {
-            if !p.picture.is_empty() && !painted.contains(&p.picture) {
-                painted.push(p.picture.clone());
-            }
-        }
-        for ev in &self.notes {
-            for url in content::media_urls_cached(ev).iter().cloned() {
-                if !url.is_empty() && !painted.contains(&url) {
-                    painted.push(url);
-                }
-            }
-        }
-        media::unpin(&self.pinned, cx);
-        self.pinned = painted;
+        // The profile's media discipline is ONE place (pin_window): the
+        // header identity plus the VISIBLE strip tiles, fetched AND pinned.
+        // The window matters in both directions — the old render swept and
+        // pinned EVERY note's media: a photo-heavy profile queued its whole
+        // scroll history through the six-slot gate (scrolling starved
+        // behind the queue — the "images won't load while scrolling"
+        // report) and held every decoded 24MP picture past the caps (the
+        // valve skips pins when picking victims). The item closures fetch
+        // their rows on scroll; this is the landing-time backstop, and
+        // fetch is a silent no-op for entries the cache holds.
+        self.pin_window(cx);
         let profiles = self.profiles.clone();
         // The about block's token context: about text never embeds quotes —
         // an empty map satisfies Body.

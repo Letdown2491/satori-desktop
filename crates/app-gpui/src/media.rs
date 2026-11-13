@@ -278,17 +278,18 @@ impl Cache {
             // over-class entry IS that class's oldest; a fresh one means
             // the whole class is fresh (a landing burst between two
             // renders must not evict painted images — skip the class).
-            // Desperation ignores the grace.
+            // Desperation ignores the grace. Pinned entries are skipped
+            // FIRST (on screen for the session — the rail avatar's touch
+            // freezes while the shell idles), but tracked as a fallback:
+            // under DESPERATION, if no unpinned candidate exists, the
+            // oldest pinned entry dies — a flash on screen beats unbounded
+            // memory (a photo-heavy profile's window pins could still
+            // outgrow the caps on real 24MP files).
             let mut victim: Option<String> = None;
+            let mut pinned_victim: Option<String> = None;
             {
                 let order = self.order.borrow();
                 for url in order.iter() {
-                    if self.pinned.borrow().contains(url) {
-                        // Pinned: on screen for the session, never a victim
-                        // (the rail avatar's touch freezes while the shell
-                        // idles — the grace window can't protect it).
-                        continue;
-                    }
                     let class = {
                         let map = self.map.borrow();
                         match map.get(url) {
@@ -305,6 +306,12 @@ impl Cache {
                     let over = if big { big_over } else { small_over };
                     if !over {
                         continue; // this class has room — its entries stay
+                    }
+                    if self.pinned.borrow().contains(url) {
+                        if pinned_victim.is_none() {
+                            pinned_victim = Some(url.clone());
+                        }
+                        continue;
                     }
                     if !desperate
                         && self
@@ -323,7 +330,11 @@ impl Cache {
                     break;
                 }
             }
-            let Some(url) = victim else {
+            let Some(url) = (if desperate {
+                victim.or(pinned_victim)
+            } else {
+                victim
+            }) else {
                 break;
             };
             // The victim may sit mid-deque (an over class's front behind
@@ -891,6 +902,31 @@ mod tests {
         let dropped = cache.evict();
         assert!(!dropped.is_empty(), "desperation must still evict");
         assert!(cache.map.borrow().contains_key("e0"), "pinned survives");
+    }
+
+    /// The valve's LAST resort: when every over-budget candidate is
+    /// pinned, the oldest pinned entry dies (a flash on screen beats
+    /// unbounded memory). Pins still lose to no unpinned candidate — a
+    /// normal desperate sweep takes the unpinned victims first.
+    #[test]
+    fn desperate_eviction_takes_pinned_only_as_last_resort() {
+        let cache = Cache::default();
+        for i in 0..6 {
+            insert(&cache, &format!("e{i}"), 3000, 3000, Duration::from_secs(1));
+        } // 216MB = over the 192MB desperation line
+        for i in 0..6 {
+            cache.pinned.borrow_mut().insert(format!("e{i}"));
+        }
+        let dropped = cache.evict();
+        assert!(!dropped.is_empty(), "the valve must fire even all-pinned");
+        assert!(
+            !cache.map.borrow().contains_key("e0"),
+            "the OLDEST pinned entry is the fallback victim"
+        );
+        assert!(
+            cache.map.borrow().contains_key("e5"),
+            "newer pinned entries outlive the oldest"
+        );
     }
 
     /// Unpin releases the guard: url AND its disc-thumb key leave the
