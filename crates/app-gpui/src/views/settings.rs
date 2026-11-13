@@ -172,7 +172,10 @@ impl SettingsView {
                 cx.background_executor()
                     .timer(Duration::from_secs(30))
                     .await;
-                let _ = this.update(cx, |_this, cx| cx.notify());
+                // Dead pane: stop ticking (the timer had no exit at all).
+                if this.update(cx, |_this, cx| cx.notify()).is_err() {
+                    break;
+                }
             }
         })
         .detach();
@@ -212,10 +215,15 @@ impl SettingsView {
             loop {
                 match rx.recv().await {
                     Ok(wallet::WalletEvent::Status(s)) => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.wallet = s;
-                            cx.notify();
-                        });
+                        if this
+                            .update(cx, |this, cx| {
+                                this.wallet = s;
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break; // dead pane
+                        }
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

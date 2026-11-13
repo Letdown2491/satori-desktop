@@ -8,6 +8,7 @@
 //! a plain append under the data dir, rotated at startup past 1 MiB.
 
 use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 
 use crate::config;
 
@@ -48,6 +49,11 @@ pub fn log(args: std::fmt::Arguments) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
+        // 0600 at creation (audit security: the only state file that
+        // wasn't). The mirror carries no secrets by policy now — probe
+        // logs are method-name-only — but 0644 by umask default is one
+        // future omission away from being wrong.
+        .mode(0o600)
         .open(path())
     {
         let _ = writeln!(f, "{secs} {args}");

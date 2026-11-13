@@ -257,22 +257,33 @@ impl Feed {
             loop {
                 match live_rx.recv().await {
                     Ok(Live::Post) => {
-                        let _ = this.update(cx, |feed, cx| {
-                            // A follow's fresh post needn't carry this
-                            // hashtag — no new-notes pill on hashtag feeds.
-                            // Author feeds likewise: the pill would sit
-                            // under the profile's own header, noise. The
-                            // Library's bookmarks (D38) too: a follow's
-                            // post is not a new bookmark.
-                            if matches!(
-                                feed.mode,
-                                FeedMode::Hashtag(_) | FeedMode::Profile(_) | FeedMode::Bookmarks
-                            ) {
-                                return;
-                            }
-                            feed.live_new += 1;
-                            cx.notify();
-                        });
+                        // A dead pane (popped) must not leave the pump
+                        // looping forever: update() failing IS the exit
+                        // (audit memory: detached pumps used to ignore it
+                        // and tick every broadcast for the process's life).
+                        if this
+                            .update(cx, |feed, cx| {
+                                // A follow's fresh post needn't carry this
+                                // hashtag — no new-notes pill on hashtag feeds.
+                                // Author feeds likewise: the pill would sit
+                                // under the profile's own header, noise. The
+                                // Library's bookmarks (D38) too: a follow's
+                                // post is not a new bookmark.
+                                if matches!(
+                                    feed.mode,
+                                    FeedMode::Hashtag(_)
+                                        | FeedMode::Profile(_)
+                                        | FeedMode::Bookmarks
+                                ) {
+                                    return;
+                                }
+                                feed.live_new += 1;
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                     // WS2: engagement on a viewport note arrived live —
                     // the event is in the store (the SDK saves on
@@ -280,7 +291,9 @@ impl Feed {
                     // repaint. No new rendering path: this is the same
                     // snapshot invalidation every data change rides.
                     Ok(Live::Engagement) => {
-                        let _ = this.update(cx, |feed, cx| feed.on_engagement(cx));
+                        if this.update(cx, |feed, cx| feed.on_engagement(cx)).is_err() {
+                            break;
+                        }
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -297,7 +310,9 @@ impl Feed {
             loop {
                 match wallet_rx.recv().await {
                     Ok(ev) => {
-                        let _ = this.update(cx, |feed, cx| feed.on_wallet(ev, cx));
+                        if this.update(cx, |feed, cx| feed.on_wallet(ev, cx)).is_err() {
+                            break;
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(_) => continue, // lagged: the next event re-syncs
@@ -599,7 +614,7 @@ impl Feed {
             // if the boosted kind has no card here, the row never renders
             // (a kind-6 payload is the original event's JSON; raw text
             // would leak it).
-            if u16::from(note.kind) == 6 && content::repost_inner(&note).is_none() {
+            if u16::from(note.kind) == 6 && content::repost_inner_cached(&note).is_none() {
                 continue;
             }
             if self.note_ids.contains(&note.id) {
@@ -1506,7 +1521,7 @@ fn card_media_urls(ev: &Event, profiles: &HashMap<String, Profile>) -> Vec<Strin
     let mut urls: Vec<String> = Vec::new();
     if u16::from(ev.kind) == 6 {
         one(ev, profiles, &mut urls);
-        if let Some(inner) = content::repost_inner(ev) {
+        if let Some(inner) = content::repost_inner_cached(ev) {
             one(&inner, profiles, &mut urls);
         }
     } else {
@@ -1537,7 +1552,7 @@ fn repost_card(
         .get(&key)
         .map(|p| p.picture.clone())
         .unwrap_or_default();
-    let inner = content::repost_inner(ev);
+    let inner = content::repost_inner_cached(ev);
     let open = inner.clone();
     let open_handle = handle.clone();
     inner.map_or_else(
@@ -1588,7 +1603,7 @@ fn repost_card(
                             let note = open.clone().expect("inner held");
                             open_handle.update(cx, |_feed, cx| {
                                 if is_article {
-                                    cx.emit(Nav::OpenArticle(note.clone()));
+                                    cx.emit(Nav::OpenArticle((*note).clone()));
                                 } else {
                                     let root = satori_core::nip::nip10::reply_root(&note)
                                         .and_then(|(id, _)| EventId::from_hex(&id).ok())

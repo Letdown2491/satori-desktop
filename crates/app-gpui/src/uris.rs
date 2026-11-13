@@ -120,13 +120,27 @@ pub fn acquire(uri: Option<&str>) -> Instance {
             for stream in listener.incoming().flatten() {
                 // One connection = one message: the peer writes its URI and
                 // exits, so EOF completes the read. An empty message is a
-                // bare "activate" from a URI-less launch.
+                // bare "activate" from a URI-less launch. The read is capped
+                // (audit security): the socket's only boundary is the 0700
+                // runtime dir, and read_to_string let any local process
+                // feed gigabytes into the primary before EOF. A URI (or a
+                // truncated one) past the cap parses as unhandled and dies
+                // in route's ignore line — noisy at worst.
                 let mut stream = stream;
-                let mut buf = String::new();
-                let msg = match stream.read_to_string(&mut buf) {
-                    Ok(_) => buf,
-                    Err(_) => String::new(),
-                };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if buf.len() > 64 * 1024 {
+                                break; // beyond any legitimate URI
+                            }
+                        }
+                    }
+                }
+                let msg = String::from_utf8_lossy(&buf).into_owned();
                 if tx.send(msg).is_err() {
                     break; // the app side is gone; stop serving
                 }

@@ -117,6 +117,32 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
     // Video::new blocks up to ~5s (playbin state + caps) — the background
     // executor, never the UI thread.
     cx.spawn(async move |cx| {
+        // Dial-time screen (audit security): the playbin dials whatever gst
+        // resolves, with its own redirect chain and no SafeResolver inside.
+        // Pre-check the host against the one IP authority (D57) and degrade
+        // to the browser link when the name rebinds private. A DNS miss is
+        // weather — gst reports it on its own; only the guard speaking
+        // (NonPublic) refuses.
+        let host = parsed.host_str().map(str::to_string);
+        let allowed = match host.as_deref() {
+            Some(h) => match satori_core::net_guard::resolve_pinned_public(h, 443).await {
+                Ok(_) => true,
+                Err(satori_core::net_guard::NetGuardError::Resolve(_)) => true,
+                Err(satori_core::net_guard::NetGuardError::NonPublic(_)) => false,
+            },
+            None => false,
+        };
+        if !allowed {
+            cx.update(|cx| {
+                if let Ok(mut g) = OPENING.write()
+                    && g.as_deref() == Some(&url)
+                {
+                    *g = None;
+                }
+                cx.open_url(&url);
+            });
+            return;
+        }
         let res = cx
             .background_executor()
             .spawn(async move { Video::new(&parsed) })
