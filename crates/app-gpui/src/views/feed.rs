@@ -657,7 +657,10 @@ impl Feed {
     /// Pin the visible window's media urls, release the previous
     /// window's. Called when the window moves (the list's scroll stream)
     /// and when data lands (absorb) — the two moments the on-screen set
-    /// can change.
+    /// can change. The set is EVERYTHING the visible cards paint
+    /// (card_media_urls: avatars, body pictures, repost inners) — an
+    /// idle feed stops rendering, and only renders touch, so a missing
+    /// avatar here was the timeline's disappearing-image report.
     fn pin_window(&mut self, cx: &mut Context<Self>) {
         let start = self.cursor.min(self.notes.len());
         // Before the first scroll event the end is still 0: pin the top
@@ -665,7 +668,7 @@ impl Feed {
         let end = self.last_visible_end.max(start + 8).min(self.notes.len());
         let mut urls: Vec<String> = Vec::new();
         for note in &self.notes[start..end] {
-            urls.extend(content::media_urls(note));
+            urls.extend(card_media_urls(note, &self.profiles));
         }
         media::unpin(&self.pinned, cx);
         self.pinned = urls;
@@ -731,6 +734,10 @@ impl Feed {
             self.want_avatar(&p, cx);
             self.profiles.insert(p.pubkey.clone(), p);
         }
+        // A landing can change a visible row's avatar URL (the picture
+        // arrived after the note): re-pin so the new URL rides the
+        // pinned set, not just this render's fetch.
+        self.pin_window(cx);
     }
 
     /// Queue core fetches for every media URL we haven't got yet. Results

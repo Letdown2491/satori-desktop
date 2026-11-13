@@ -56,6 +56,11 @@ pub struct ThreadView {
     /// the data changed.
     snap: Option<ThreadSnap>,
     snap_dirty: bool,
+    /// The pinned set (media.rs): everything the render paints — a thread
+    /// is read idly for minutes, renders stop, and only renders touch;
+    /// without pins the next landing burst took exactly the images on
+    /// screen (the timeline's disappearing-image report, one pane over).
+    pinned: Vec<String>,
 }
 
 /// The render-time snapshot: everything the item closure reads, rebuilt
@@ -124,6 +129,7 @@ impl ThreadView {
             parents: HashMap::new(),
             parents_asked: HashSet::new(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
+            pinned: vec![],
             engagement,
             snap: None,
             snap_dirty: true,
@@ -610,20 +616,37 @@ impl Render for ThreadView {
         // Evicted media comes back on render — a thread is bounded content,
         // so sweep everything it paints (Ready/not-media URLs are silent
         // no-ops in fetch; only a landing notifies, so no render loop).
+        // The same set PINS against eviction: a thread is read idly for
+        // minutes, renders stop, only renders touch — without pins the
+        // next landing burst took exactly the images on screen.
         let viewer = cx.entity_id();
+        let mut painted: Vec<String> = Vec::new();
         for p in self.profiles.values() {
             media::fetch(&self.core, p.picture.clone(), viewer, cx);
+            if !p.picture.is_empty() && !painted.contains(&p.picture) {
+                painted.push(p.picture.clone());
+            }
         }
         for a in self.anchor.as_ref().into_iter() {
             for url in content::media_urls_cached(a).iter().cloned() {
-                media::fetch(&self.core, url, viewer, cx);
+                let fresh = !painted.contains(&url);
+                media::fetch(&self.core, url.clone(), viewer, cx);
+                if fresh {
+                    painted.push(url);
+                }
             }
         }
         for (ev, _) in &self.replies {
             for url in content::media_urls_cached(ev).iter().cloned() {
-                media::fetch(&self.core, url, viewer, cx);
+                let fresh = !painted.contains(&url);
+                media::fetch(&self.core, url.clone(), viewer, cx);
+                if fresh {
+                    painted.push(url);
+                }
             }
         }
+        media::unpin(&self.pinned, cx);
+        self.pinned = painted;
         // Rebuild the render snapshot only when the DATA changed (any
         // mutation sets snap_dirty): the reply tree, profiles, quotes and
         // the engagement mirrors used to deep-clone per repaint (the

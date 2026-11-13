@@ -532,11 +532,17 @@ impl Render for ArticleView {
         // expires, and foreign landings evict exactly the images on
         // screen. Pin this render's set, release the previous one's
         // (the feed's window discipline): the set is fixed per article,
-        // so after the first render every pin is a no-op.
+        // so after the first render every pin is a no-op. EVERYTHING the
+        // pane paints pins: the byline avatar rode unpinned once (the
+        // render fetched it, the idle fetch never came, the burst took
+        // it) — the articles page's disappearing image.
         let mut painted: Vec<String> = content::media_urls_cached(&self.ev)
             .iter()
             .cloned()
             .collect();
+        if !author_pic.is_empty() {
+            painted.push(author_pic.clone());
+        }
         if let Some(c) = &cover
             && !c.is_empty()
             && !painted.contains(c)
@@ -549,6 +555,22 @@ impl Render for ArticleView {
                 && !painted.contains(url)
             {
                 painted.push(url.clone());
+            }
+        }
+        // The comments section's avatars: fetched here (a silent no-op
+        // once ready; the landing notifies the view) and pinned with the
+        // rest — an idle read outlives any grace window.
+        for c in &self.comments {
+            let pic = self
+                .profiles
+                .get(&c.pubkey.to_string())
+                .map(|p| p.picture.clone())
+                .unwrap_or_default();
+            if !pic.is_empty() {
+                media::fetch(&self.core, pic.clone(), cx.entity_id(), cx);
+                if !painted.contains(&pic) {
+                    painted.push(pic);
+                }
             }
         }
         media::unpin(&self.pinned, cx);

@@ -86,6 +86,10 @@ pub struct ProfileView {
     /// clears it (login.rs's copied pattern).
     copied: Option<&'static str>,
     list: ListState,
+    /// The pinned set (media.rs): everything the render paints — the pane
+    /// idles open (renders stop, only renders touch) and the next landing
+    /// burst took exactly the images on screen.
+    pinned: Vec<String>,
 }
 
 impl EventEmitter<Nav> for ProfileView {}
@@ -126,6 +130,7 @@ impl ProfileView {
             nip05_memo: None,
             copied: None,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
+            pinned: vec![],
             core,
         };
         // Endless scroll for the strips (the feed's pattern): the list's
@@ -524,6 +529,32 @@ impl Render for ProfileView {
                 media::fetch(&self.core, url, viewer, cx);
             }
         }
+        // The same set pins: a profile idles open (reading the notes),
+        // renders stop, only renders touch — the next landing burst took
+        // the banner, the avatar, the note pictures (thread.rs render,
+        // the same discipline).
+        let mut painted: Vec<String> = Vec::new();
+        if let Some(p) = self.profile.as_ref() {
+            painted.push(p.picture.clone());
+            painted.push(p.banner.clone());
+            if let Some(h) = &p.banner_blurhash {
+                painted.push(crate::poster::blurhash_key(h));
+            }
+        }
+        for p in self.profiles.values() {
+            if !p.picture.is_empty() && !painted.contains(&p.picture) {
+                painted.push(p.picture.clone());
+            }
+        }
+        for ev in &self.notes {
+            for url in content::media_urls_cached(ev).iter().cloned() {
+                if !url.is_empty() && !painted.contains(&url) {
+                    painted.push(url);
+                }
+            }
+        }
+        media::unpin(&self.pinned, cx);
+        self.pinned = painted;
         let profiles = self.profiles.clone();
         // The about block's token context: about text never embeds quotes —
         // an empty map satisfies Body.
