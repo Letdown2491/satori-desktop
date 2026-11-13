@@ -124,31 +124,11 @@ impl Shell {
         crate::theme::watch(cx); // repaint on theme change
         crate::video::watch(cx); // repaint on player open/toggle/close
         let feed = cx.new(|cx| Feed::new(core.clone(), cx));
-        cx.subscribe(&feed, |this, _feed, ev: &Nav, cx| match ev {
-            Nav::OpenThread(id) => this.open_thread(*id, cx),
-            Nav::OpenProfile(who) => this.open_profile(*who, cx),
-            Nav::OpenEditProfile(me) => this.open_edit_profile(*me, cx),
-            Nav::OpenHashtag(tag) => this.open_hashtag(tag.clone(), cx),
-            Nav::OpenReply(ev) => this.open_reply_sheet(ev.clone(), cx),
-            Nav::OpenDraft(text, attachments, reply, quote) => this.open_draft(
-                text,
-                attachments.clone(),
-                reply.as_deref().cloned(),
-                quote.as_deref().cloned(),
-                cx,
-            ),
-            Nav::OpenQuote(ev) => this.open_composer(None, Some(ev.clone()), cx),
-            Nav::OpenArticle(ev) => this.open_article(ev.clone(), cx),
-            Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
-            Nav::OpenVideo(url, mime) => this.open_video(url.clone(), mime.clone(), cx),
-            Nav::OpenZapSheet(ev) => this.open_zap_sheet(ev.clone(), cx),
-            Nav::OpenWallet => this.open_wallet(cx),
-            Nav::PaneDeep => cx.notify(), // whisper re-reads the pane at render
-            Nav::Pop => this.back(cx),
-            Nav::SetTheme(dark) => this.set_theme(*dark, cx),
-            Nav::SignOut => this.sign_out(cx),
-        })
-        .detach();
+        // The base pane rides the same Nav dispatch as every stacked one
+        // (subscribe_nav below) — the hand-written match that used to live
+        // here was the forgot-one-copy trap: the next Nav variant would
+        // have worked on every pane except the feed. The subscribe is
+        // rebuilt below the literal, where `self` methods are borrowable.
         let mut shell = Self {
             core,
             focus: cx.focus_handle(),
@@ -165,7 +145,11 @@ impl Shell {
             me: None,
             me_profile: None,
         };
-        shell.stack.push(Pane::Feed(feed));
+        shell.stack.push(Pane::Feed(feed.clone()));
+        // The base pane's Nav dispatch: the same one every stacked pane
+        // gets (audit DRY — Shell::new hand-wrote a second copy of this
+        // match, the forgot-one-copy trap for the next Nav variant).
+        shell.subscribe_nav(&feed, cx);
         // The rail avatar: session pubkey synchronously, profile via the
         // usual ensure_profiles pump (name/picture arrive from the store or
         // the relays a beat later).
@@ -429,7 +413,13 @@ impl Shell {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(900))
                     .await;
-                let _ = this.update(cx, |shell, cx| shell.check_notif_dot(cx));
+                // Dead shell (sign-out): stop ticking (no exit at all before).
+                if this
+                    .update(cx, |shell, cx| shell.check_notif_dot(cx))
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();
@@ -441,7 +431,9 @@ impl Shell {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(30))
                     .await;
-                let _ = this.update(cx, |shell, cx| shell.check_outbox(cx));
+                if this.update(cx, |shell, cx| shell.check_outbox(cx)).is_err() {
+                    break;
+                }
             }
         })
         .detach();
@@ -451,22 +443,32 @@ impl Shell {
             loop {
                 match live_rx.recv().await {
                     Ok(satori_core::manager::Live::Mention) => {
-                        let _ = this.update(cx, |shell, cx| {
-                            shell.notif_unread = true;
-                            cx.notify();
-                        });
+                        if this
+                            .update(cx, |shell, cx| {
+                                shell.notif_unread = true;
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break; // dead shell
+                        }
                     }
                     Ok(satori_core::manager::Live::PrefsSynced) => {
                         // NIP-78 login sync landed and remote prefs won —
                         // re-read what the shell renders live (the theme).
                         // Not a user action: no publish, no echo.
-                        let _ = this.update(cx, |_shell, cx| {
-                            if let Some(dark) = crate::prefs::load().dark {
-                                theme::select(if dark { theme::DARK } else { theme::LIGHT });
-                                cx.set_global(theme::ThemeSignal);
-                            }
-                            cx.notify();
-                        });
+                        if this
+                            .update(cx, |_shell, cx| {
+                                if let Some(dark) = crate::prefs::load().dark {
+                                    theme::select(if dark { theme::DARK } else { theme::LIGHT });
+                                    cx.set_global(theme::ThemeSignal);
+                                }
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break; // dead shell
+                        }
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -485,16 +487,21 @@ impl Shell {
                     Ok(PublishEvent::Held {
                         token, hold_secs, ..
                     }) => {
-                        let _ = this.update(cx, |shell, cx| {
-                            shell.hold = Some(HoldToast {
-                                token,
-                                deadline: std::time::Instant::now()
-                                    + std::time::Duration::from_secs(hold_secs),
-                                undone: false,
-                                err: None,
-                            });
-                            cx.notify();
-                        });
+                        if this
+                            .update(cx, |shell, cx| {
+                                shell.hold = Some(HoldToast {
+                                    token,
+                                    deadline: std::time::Instant::now()
+                                        + std::time::Duration::from_secs(hold_secs),
+                                    undone: false,
+                                    err: None,
+                                });
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break; // dead shell
+                        }
                         // One tick a second keeps the countdown honest; it
                         // dies when the toast resolves.
                         let weak = this.clone();
@@ -523,18 +530,28 @@ impl Shell {
                         .detach();
                     }
                     Ok(PublishEvent::Committed { .. }) => {
-                        let _ = this.update(cx, |shell, cx| {
-                            shell.hold = None;
-                            shell.check_outbox(cx);
-                        });
+                        if this
+                            .update(cx, |shell, cx| {
+                                shell.hold = None;
+                                shell.check_outbox(cx);
+                            })
+                            .is_err()
+                        {
+                            break; // dead shell
+                        }
                     }
                     Ok(PublishEvent::Undone { .. }) => {
-                        let _ = this.update(cx, |shell, cx| {
-                            if let Some(h) = shell.hold.as_mut() {
-                                h.undone = true;
-                            }
-                            cx.notify();
-                        });
+                        if this
+                            .update(cx, |shell, cx| {
+                                if let Some(h) = shell.hold.as_mut() {
+                                    h.undone = true;
+                                }
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break; // dead shell
+                        }
                         // The undone whisper clears itself.
                         let weak = this.clone();
                         cx.spawn(async move |cx| {
@@ -551,21 +568,26 @@ impl Shell {
                         .detach();
                     }
                     Ok(PublishEvent::Failed { error, .. }) => {
-                        let _ = this.update(cx, |shell, cx| {
-                            match shell.hold.as_mut() {
-                                Some(h) => h.err = Some(error),
-                                None => {
-                                    shell.hold = Some(HoldToast {
-                                        token: 0,
-                                        deadline: std::time::Instant::now(),
-                                        undone: false,
-                                        err: Some(error),
-                                    })
+                        if this
+                            .update(cx, |shell, cx| {
+                                match shell.hold.as_mut() {
+                                    Some(h) => h.err = Some(error),
+                                    None => {
+                                        shell.hold = Some(HoldToast {
+                                            token: 0,
+                                            deadline: std::time::Instant::now(),
+                                            undone: false,
+                                            err: Some(error),
+                                        })
+                                    }
                                 }
-                            }
-                            // Zero-accept publishes keep their outbox item.
-                            shell.check_outbox(cx);
-                        });
+                                // Zero-accept publishes keep their outbox item.
+                                shell.check_outbox(cx);
+                            })
+                            .is_err()
+                        {
+                            break; // dead shell
+                        }
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

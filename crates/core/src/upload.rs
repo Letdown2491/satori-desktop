@@ -21,6 +21,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::media;
+use crate::net_guard;
 
 /// Your media server list kind (BUD-02): `server` tags, newest event wins.
 pub const KIND_BLOSSOM_LIST: u16 = 10063;
@@ -54,6 +55,13 @@ fn http() -> &'static reqwest::Client {
             )
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(300))
+            // Same authority as the fetch client (media.rs): reqwest dials
+            // WHATEVER resolution returns, so every connection — first
+            // party, every redirect hop, every retry — re-walks SafeResolver.
+            // Without it a blossom host that rebinds between paste screening
+            // and upload dials the private network carrying a signed BUD-02
+            // bearer event (TOCTOU the string guard cannot see).
+            .dns_resolver(std::sync::Arc::new(net_guard::SafeResolver))
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if attempt.previous().len() > 5 || !media::is_safe_media_url(attempt.url().as_str())
                 {

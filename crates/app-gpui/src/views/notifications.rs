@@ -62,8 +62,32 @@ fn notif_type(ev: &Event) -> NotifType {
 
 /// The verb and, for zaps, the emphasized tail: the amount IS the news
 /// (it rides the header line set in ink, next to the actor's name).
+///
+/// Memoized per event (audit perf: the Zap arm runs a full NIP-44
+/// signature verify inside parse_zap_receipt — a pure function of the
+/// event, but the item closure used to sweep it per visible row per
+/// frame, a millisecond of cryptography on the UI thread for a page of
+/// zap receipts). Bounded, oldest-dropped at 4096 events. The verb for
+/// everything else is a constant.
 fn action_parts(t: NotifType, ev: &Event) -> (&'static str, Option<String>) {
-    match t {
+    const CAP: usize = 4096;
+    struct PartsMemo {
+        map: HashMap<String, (&'static str, Option<String>)>,
+        order: std::collections::VecDeque<String>,
+    }
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<PartsMemo>> = std::sync::OnceLock::new();
+    let memo = MEMO.get_or_init(|| {
+        std::sync::Mutex::new(PartsMemo {
+            map: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        })
+    });
+    let key = ev.id.to_string();
+    let mut memo = memo.lock().unwrap();
+    if let Some(parts) = memo.map.get(&key) {
+        return parts.clone();
+    }
+    let parts = match t {
         NotifType::Reply => ("replied", None),
         NotifType::Mention => ("mentioned you", None),
         NotifType::Reaction => ("reacted", None),
@@ -78,7 +102,15 @@ fn action_parts(t: NotifType, ev: &Event) -> (&'static str, Option<String>) {
                 ("zapped", Some(format!("{} sats", info.sats)))
             }
         }
+    };
+    if memo.map.len() >= CAP {
+        if let Some(oldest) = memo.order.pop_front() {
+            memo.map.remove(&oldest);
+        }
     }
+    memo.order.push_back(key.clone());
+    memo.map.insert(key, parts.clone());
+    parts
 }
 
 /// One list row: a section label (New / Earlier) or a notification card.
@@ -188,7 +220,10 @@ impl NotificationsView {
             loop {
                 match wallet_rx.recv().await {
                     Ok(ev) => {
-                        let _ = this.update(cx, |view, cx| view.on_wallet(ev, cx));
+                        // Dead pane (popped): the pump's exit is update() failing.
+                        if this.update(cx, |view, cx| view.on_wallet(ev, cx)).is_err() {
+                            break;
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(_) => continue, // lagged: the next event re-syncs
@@ -411,7 +446,7 @@ fn notif_parent_id(ev: &Event) -> Option<String> {
             .iter()
             .find(|t| t.as_slice().first().map(String::as_str) == Some("e"))
             .and_then(|t| t.as_slice().get(1).cloned())
-            .or_else(|| content::repost_inner(ev).map(|n| n.id.to_string())),
+            .or_else(|| content::repost_inner_cached(ev).map(|n| n.id.to_string())),
         _ => None,
     }
 }

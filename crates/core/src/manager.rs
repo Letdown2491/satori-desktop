@@ -1731,6 +1731,15 @@ impl Core {
     /// Abandon an in-flight bunker connect (best-effort shutdown).
     pub fn cancel_login(&self) {
         self.login_seq.fetch_add(1, Ordering::SeqCst);
+        self.retire_pending();
+    }
+
+    /// Drop the pending handshake's transport with a best-effort shutdown.
+    /// A merely-dropped NostrConnect leaves its relay socket and its
+    /// kind-24133 subscription alive for the process's remaining life
+    /// (zombie dials, phantom approval prompts — see shutdown()'s bill);
+    /// every replace of `pending` retires the old transport first.
+    fn retire_pending(&self) {
         if let Some(pending) = self.pending.lock().unwrap().take() {
             self.rt
                 .spawn(async move { Arc::unwrap_or_clone(pending).shutdown().await });
@@ -1781,6 +1790,7 @@ impl Core {
             "bunker: client built over {} relay(s); awaiting approval",
             relays.len()
         );
+        self.retire_pending();
         *self.pending.lock().unwrap() = Some(Arc::clone(&connect));
 
         let pk = match connect.get_public_key_async().await {
@@ -1920,6 +1930,7 @@ impl Core {
                 .map_err(|e| LoginError::Connect(e.to_string()))?,
         );
         crate::dlog!("nostrconnect: client built, awaiting signer…");
+        self.retire_pending();
         *self.pending.lock().unwrap() = Some(Arc::clone(&connect));
 
         // The probe: a bare diagnostic client riding the same relay,
@@ -2019,6 +2030,7 @@ impl Core {
             .limit(0);
         let Ok(output) = probe.subscribe(vec![filter]).await else {
             crate::dlog!("nostrconnect probe: subscribe failed");
+            let _ = probe.shutdown().await;
             return;
         };
         crate::dlog!("nostrconnect probe: subscribed for responses");
@@ -2034,6 +2046,7 @@ impl Core {
                 n = notifications.next() => {
                     let Some(n) = n else {
                         crate::dlog!("nostrconnect probe: notification stream ended");
+                        let _ = probe.shutdown().await;
                         return;
                     };
                     match n {
@@ -2052,16 +2065,18 @@ impl Core {
                             ) {
                                 Ok(json) => {
                                     match serde_json::from_str::<serde_json::Value>(&json) {
+                                        // Method name only: `result` carries
+                                        // the URI's one-time secret (on
+                                        // connect) and signature material
+                                        // (on sign) — none of that belongs
+                                        // in a log file.
                                         Ok(v) => crate::dlog!(
-                                            "nostrconnect probe: response type={:?} result={:?} error={:?}",
-                                            v.get("type"),
-                                            v.get("result"),
-                                            v.get("error"),
+                                            "nostrconnect probe: response method={:?}",
+                                            v.get("method").or_else(|| v.get("type")),
                                         ),
-                                        Err(_) => crate::dlog!(
-                                            "nostrconnect probe: undecodable response: {}…",
-                                            json.chars().take(120).collect::<String>()
-                                        ),
+                                        Err(_) => {
+                                            crate::dlog!("nostrconnect probe: undecodable response");
+                                        }
                                     }
                                 }
                                 Err(e) => {

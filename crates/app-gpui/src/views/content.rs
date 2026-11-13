@@ -717,6 +717,41 @@ pub(crate) fn repost_inner(ev: &Event) -> Option<Event> {
     (inner.kind == Kind::TextNote || super::cards::is_feed_kind(inner.kind)).then_some(inner)
 }
 
+/// `repost_inner`, memoized per event (audit perf: a repost's content IS
+/// the boosted event's full JSON, and the feed's item closure re-parsed
+/// it twice per visible repost row per frame — card_media_urls and
+/// repost_card — with notifications adding a third sweep. Pure function
+/// of the event; bounded, oldest-dropped at 4096). Callers get an
+/// `Arc<Event>`: render paths share one bump instead of re-parsing.
+pub(crate) fn repost_inner_cached(ev: &Event) -> Option<std::sync::Arc<Event>> {
+    const CAP: usize = 4096;
+    struct RepostMemo {
+        map: HashMap<String, Option<std::sync::Arc<Event>>>,
+        order: std::collections::VecDeque<String>,
+    }
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<RepostMemo>> = std::sync::OnceLock::new();
+    let memo = MEMO.get_or_init(|| {
+        std::sync::Mutex::new(RepostMemo {
+            map: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        })
+    });
+    let key = ev.id.to_string();
+    let mut memo = memo.lock().unwrap();
+    if let Some(inner) = memo.map.get(&key) {
+        return inner.clone();
+    }
+    let inner = repost_inner(ev).map(std::sync::Arc::new);
+    if memo.map.len() >= CAP {
+        if let Some(oldest) = memo.order.pop_front() {
+            memo.map.remove(&oldest);
+        }
+    }
+    memo.order.push_back(key.clone());
+    memo.map.insert(key, inner.clone());
+    inner
+}
+
 /// Render a note body: word-flow paragraphs, media gallery section, quote
 /// embeds. Media fetches ride the shared cache (`media::Snapshot`); the view
 /// queues them via `content::media_urls` + `media::fetch`.

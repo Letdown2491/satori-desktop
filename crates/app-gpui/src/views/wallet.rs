@@ -64,17 +64,27 @@ impl WalletView {
             loop {
                 match rx.recv().await {
                     Ok(wallet::WalletEvent::Status(s)) => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.status = s;
-                            this.err = None;
-                            cx.notify();
-                        });
+                        if this
+                            .update(cx, |this, cx| {
+                                this.status = s;
+                                this.err = None;
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break; // dead pane
+                        }
                     }
                     Ok(wallet::WalletEvent::ConnectFailed(e)) => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.err = Some(e);
-                            cx.notify();
-                        });
+                        if this
+                            .update(cx, |this, cx| {
+                                this.err = Some(e);
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break; // dead pane
+                        }
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

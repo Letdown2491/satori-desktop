@@ -149,6 +149,11 @@ impl Root {
     /// what stranded every post-sign-out login on the doors).
     fn watch_login(login: &Entity<LoginView>, cx: &mut Context<Self>) {
         cx.subscribe(login, |this, _, _: &Login, cx| {
+            // Stand down any sibling handshake (bunker paste while the QR
+            // flow ran): a no-op for the flow that won — pending was cleared
+            // via ptr-eq on resolve — and a shutdown for the one that lost,
+            // instead of a zombie socket subscribed to 24133 forever.
+            this.core.cancel_login();
             this.login = None;
             let shell = cx.new(|cx| Shell::new(this.core.clone(), cx));
             Self::watch_shell(shell.clone(), cx);

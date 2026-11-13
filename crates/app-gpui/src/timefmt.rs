@@ -77,6 +77,9 @@ impl gpui::Global for Bridge {}
 /// per timestamp per window, not a wake storm.
 const RETRY_COOL_OFF: Duration = Duration::from_secs(300);
 
+/// The per-timestamp dedup set's bound (audit memory L-3).
+const ASKED_CAP: usize = 20_000;
+
 /// Install the bridge (main.rs — one core, one bridge).
 pub fn init(core: Arc<Core>, cx: &mut gpui::App) {
     cx.set_global(Bridge {
@@ -155,6 +158,14 @@ pub fn ensure(secs: u64, cx: &mut gpui::App) {
             return;
         }
         bridge.failed.remove(&secs);
+        // Bound the dedup set (audit memory: successful asks never
+        // removed their entry, so Block-mode sessions grew it forever).
+        // Exact heights short-circuit above regardless, so clearing is
+        // free of re-ask storms; 20k timestamps is ~160KB, well past a
+        // session's worth of scrolling.
+        if bridge.asked.len() >= ASKED_CAP {
+            bridge.asked.clear();
+        }
         if !bridge.asked.insert(secs) {
             return;
         }

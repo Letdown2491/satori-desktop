@@ -194,7 +194,10 @@ impl ThreadView {
             loop {
                 match wallet_rx.recv().await {
                     Ok(ev) => {
-                        let _ = this.update(cx, |view, cx| view.on_wallet(ev, cx));
+                        // Dead pane (popped): the pump's exit is update() failing.
+                        if this.update(cx, |view, cx| view.on_wallet(ev, cx)).is_err() {
+                            break;
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(_) => continue, // lagged: the next event re-syncs
