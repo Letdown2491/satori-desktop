@@ -29,9 +29,10 @@ pub struct WalletView {
     /// The last connect failure (cleared on the next status change).
     err: Option<String>,
     /// Paste-time relay screening refused a private relay (issue #11):
-    /// the banner line + the hosts the "allow" affordance consents to.
+    /// the full verdicts — the banner line and the hosts the "allow"
+    /// affordance consents to derive from them (review Tier 2.5).
     /// Cleared on the next status change or allow-and-retry.
-    screened: Option<(String, Vec<String>)>,
+    screened: Option<Vec<satori_core::net_guard::RelayVerdict>>,
 }
 
 impl Focusable for WalletView {

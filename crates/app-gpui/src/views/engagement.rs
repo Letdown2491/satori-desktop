@@ -89,6 +89,10 @@ pub fn on_wallet<H: Host>(host: &mut H, ev: WalletEvent, cx: &mut Context<H>) {
         WalletEvent::Status(s) => {
             host.engagement().wallet_ready = matches!(s, Status::Ready(_));
         }
+        WalletEvent::RelayScreened { .. } => {
+            // The wallet pane's concern (its dialog derives the banner
+            // and the allow list); the mirrors keep their glyph states.
+        }
         WalletEvent::ZapPaid { note, .. } => {
             let e = host.engagement();
             e.zap_pending.remove(&note);

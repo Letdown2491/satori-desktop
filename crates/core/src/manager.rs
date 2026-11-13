@@ -51,9 +51,6 @@ pub enum ConnectEvent {
     /// NIP-46; the signer scans it and approves.
     Uri(String),
     Approved(PublicKey),
-    /// Paste-time screening refused a private relay (issue #11): the
-    /// refused hosts, for the login dialog's allow-and-retry button. The
-    /// banner line rides the following `Failed`.
     /// Paste-time relay screening refused a private relay (issue #11):
     /// the full verdicts, for the login dialog's allow-and-retry
     /// affordance (review Tier 2.5). Terminal, like `Failed`: the banner
