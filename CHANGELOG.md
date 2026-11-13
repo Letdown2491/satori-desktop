@@ -35,7 +35,9 @@ profiles. The pin registry is owner-keyed with a per-owner byte cap, so
 no surface can hold the whole photo budget hostage, and closing a pane
 releases its pins. The reader caps comment fetches and windows their
 avatars. Big pictures load now: the media path's total-request timeout
-is gone in favor of connect and idle-read bounds.
+is gone in favor of connect and idle-read bounds. The flatpak now
+carries the PulseAudio permission, so inline video plays its sound (the
+audio socket was masked, so inline video played silently).
 
 Under the hood: the pre-release five-lens audit (performance, system
 usage, memory, security, duplication) fixed its verified findings, the

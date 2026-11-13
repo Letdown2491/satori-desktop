@@ -5,10 +5,13 @@ command=satori-desktop
 
 [Context]
 # wayland primary, x11 fallback, dri for Vulkan (gpui renders through a
-# Vulkan driver), network for relays, media, and the wallet. The XDG
+# Vulkan driver), network for relays, media, and the wallet, and the
+# PulseAudio/PipeWire socket for the inline player's audio branch (playbin
+# mutes nothing: a masked pulse socket fails the audio branch and the
+# video plays silent). The XDG
 # data dir maps to ~/.var/app/<id> inside the sandbox automatically;
 # no filesystem grants (nothing reads or writes user files today).
-sockets=x11;wayland;
+sockets=x11;wayland;pulseaudio;
 devices=dri;
 shared=network;
 
