@@ -2230,9 +2230,15 @@ impl Core {
                 a.undo.set_seconds(seconds);
             }
         }
+        // These ARE the local values (the caller just wrote + stamped
+        // them); the overlay echo is a no-op either way.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         write_prefs_overlay(&[
-            ("undo_enabled".to_string(), enabled.into()),
-            ("undo_seconds".to_string(), seconds.into()),
+            ("undo_enabled".to_string(), enabled.into(), now),
+            ("undo_seconds".to_string(), seconds.into(), now),
         ]);
         // Fire and forget — sync needs no feedback surface.
         self.publish_app_data("undo_enabled", serde_json::Value::Bool(enabled));
@@ -6956,14 +6962,26 @@ fn parse_list_event(plain: &str) -> Vec<String> {
 /// Read-modify-write prefs.json (0600): overlay `pairs` onto the existing
 /// object, preserving app-owned keys. Core's single prefs write path —
 /// set_undo and the NIP-78 sync both land here.
-fn write_prefs_overlay(pairs: &[(String, serde_json::Value)]) {
+fn write_prefs_overlay(pairs: &[(String, serde_json::Value, u64)]) {
     let path = crate::config::state_file(crate::config::files::PREFS);
     let mut value = std::fs::read_to_string(&path)
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
     if let Some(obj) = value.as_object_mut() {
-        for (k, v) in pairs {
+        for (k, v, updated) in pairs {
+            // The recency stamp (`{key}_at`, written by every local
+            // toggle): a NEWER local edit means the remote slot is stale
+            // (its publish lost the relay LWW) — the local value stands
+            // and the next local toggle republishes forward. No stamp
+            // (fresh install, restore target) → the remote applies.
+            let local_at = obj
+                .get(format!("{k}_at").as_str())
+                .and_then(|s| s.as_u64())
+                .unwrap_or(0);
+            if *updated <= local_at {
+                continue;
+            }
             obj.insert(k.clone(), v.clone());
         }
     }
@@ -6996,7 +7014,7 @@ async fn sync_app_data(
         Ok(set) => set.into_iter().collect::<Vec<_>>(),
         Err(_) => return,
     };
-    let mut pairs: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut pairs: Vec<(String, serde_json::Value, u64)> = Vec::new();
     for slot in nip78::group_latest(&events) {
         if !nip78::synced_key(&slot.key) || slot.content.is_empty() {
             continue;
@@ -7007,7 +7025,7 @@ async fn sync_app_data(
         let Some(value) = nip78::parse_payload(&plain) else {
             continue;
         };
-        pairs.push((slot.key, value));
+        pairs.push((slot.key, value, slot.updated));
     }
     if pairs.is_empty() {
         return;
@@ -7852,5 +7870,62 @@ mod tests {
         assert_eq!(parent_in_set(&nested, &ids), None);
         // A bare mention (p-tag only, no e) is nothing's child.
         assert_eq!(parent_in_set(&mention, &ids), None);
+    }
+
+    /// The NIP-78 login overlay must defer to a NEWER local edit: the
+    /// feed's hidden-kinds list was eaten by a stale relay slot (an
+    /// unpublished local curation lost the relay's last-write-wins, and
+    /// every login re-applied "nothing hidden" — all kinds checked).
+    /// Three timelines against a slot updated at t=1000: local stamp
+    /// newer → local stands; stamp older → remote applies; no stamp
+    /// (fresh install / restore) → remote applies.
+    #[test]
+    fn prefs_overlay_defers_to_a_newer_local_edit() {
+        let env = crate::test_env::EnvGuard::new("prefs-overlay");
+        let _ = env;
+        let path = crate::config::state_file(crate::config::files::PREFS);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "content_hidden": [20, 1068],
+                "content_hidden_at": 2000,
+                "machine_notes_hidden": true,
+                "machine_notes_hidden_at": 500
+            })
+            .to_string(),
+        )
+        .unwrap();
+        write_prefs_overlay(&[
+            // Stale slot: the local curation (stamp 2000) stands.
+            ("content_hidden".into(), serde_json::json!([]), 1000),
+            // Fresh slot: the local edit (stamp 500) is older — remote wins.
+            (
+                "machine_notes_hidden".into(),
+                serde_json::Value::Bool(false),
+                1000,
+            ),
+            // No local stamp: a fresh install — remote applies.
+            ("dark".into(), serde_json::Value::Bool(true), 1000),
+        ]);
+        let got: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            got.get("content_hidden").unwrap(),
+            &serde_json::json!([20, 1068]),
+            "a newer local edit must not be clobbered by a stale slot"
+        );
+        assert_eq!(
+            got.get("machine_notes_hidden").unwrap(),
+            &serde_json::Value::Bool(false),
+            "an older local edit loses to a fresh slot"
+        );
+        assert_eq!(
+            got.get("dark").unwrap(),
+            &serde_json::Value::Bool(true),
+            "no stamp = fresh install, remote applies"
+        );
     }
 }

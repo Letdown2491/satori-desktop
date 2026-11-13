@@ -88,6 +88,27 @@ pub fn get_bool(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// A local-edit recency stamp (`{key}_at`, unix secs): every local pref
+/// change stamps its key so the NIP-78 login overlay can tell a stale
+/// relay slot from a NEWER local edit. Without it, a slot that won the
+/// relay's last-write-wins while the local write failed to publish (or a
+/// slot from before a curation) re-applied at every login and silently
+/// reverted the user's toggles — the feed's hidden-kinds list was eaten
+/// exactly this way.
+pub fn stamp(key: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut value = read_value(config::files::PREFS);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(format!("{key}_at"), serde_json::json!(now));
+    }
+    if let Ok(body) = serde_json::to_string_pretty(&value) {
+        write_state(config::files::PREFS, &body);
+    }
+}
+
 /// A top-level bool pref that defaults ON when missing (the WoT gates:
 /// `notif_wot_tier`, `thread_collapse`, `profile_badge` — issue #2's
 /// posture makes the tier default-on; core reads the same keys via
