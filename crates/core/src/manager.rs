@@ -4900,7 +4900,9 @@ impl Core {
                         // decision; removal rides the debounced flusher).
                         let _ = active.pool.store.save(&p.event).await;
                         crate::outbox_queue::enqueue(&p.event);
-                        let targets = crate::outbox_queue::targets(&active.write_relays);
+                        let targets =
+                            crate::routing::targets(&active.pool, &active.write_relays, &p.event)
+                                .await;
                         let report = active.pool.publish(&p.event, &targets).await;
                         for r in &report.ok {
                             crate::relay_latency::record_write_result(r, true);
@@ -5513,7 +5515,7 @@ impl Core {
     ) -> Result<()> {
         let _ = active.pool.store.save(event).await;
         crate::outbox_queue::enqueue(event);
-        let targets = crate::outbox_queue::targets(&active.write_relays);
+        let targets = crate::routing::targets(&active.pool, &active.write_relays, event).await;
         let report = active.pool.publish(event, &targets).await;
         for r in &report.ok {
             crate::relay_latency::record_write_result(r, true);
@@ -5561,7 +5563,8 @@ impl Core {
                     );
                     continue;
                 };
-                let targets = crate::outbox_queue::targets(&active.write_relays);
+                let targets =
+                    crate::routing::targets(&active.pool, &active.write_relays, &item.event).await;
                 let report = active.pool.publish(&item.event, &targets).await;
                 for r in &report.ok {
                     crate::relay_latency::record_write_result(r, true);
