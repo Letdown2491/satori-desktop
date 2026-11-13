@@ -140,7 +140,7 @@ fn video_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
     if !title.is_empty() {
         card = card.child(serif_title(&title, 15.0));
     }
-    card.child(content::body(ev, ctx, feed.clone()))
+    card.child(content::body_with(ev, ctx, feed.clone(), !title.is_empty()))
 }
 
 // --- podcast (kind 54) ----------------------------------------------------
