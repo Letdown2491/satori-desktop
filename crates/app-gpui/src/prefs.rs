@@ -141,6 +141,22 @@ pub fn set_bool(key: &str, on: bool) {
     }
 }
 
+/// A top-level string pref (local view chrome — the notifications strip's
+/// remembered timeframe; NOT the NIP-78 sync, so no recency stamp).
+pub fn get_string(key: &str) -> Option<String> {
+    config::prefs().and_then(|v| v.get(key).and_then(|s| s.as_str()).map(String::from))
+}
+
+pub fn set_string(key: &str, val: &str) {
+    let mut value = read_value(config::files::PREFS);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(key.into(), val.into());
+    }
+    if let Ok(body) = serde_json::to_string_pretty(&value) {
+        write_state(config::files::PREFS, &body);
+    }
+}
+
 fn read_value(file: &str) -> serde_json::Value {
     // Parsed once per file change (mtime + size key — the core config.rs
     // prefs() pattern): the feed projection reads prefs per visible card

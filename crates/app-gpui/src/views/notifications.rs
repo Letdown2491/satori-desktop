@@ -13,7 +13,7 @@ use gpui::{
     ListState, Render, SharedString, Window, div, img, list, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, FeedRx, NotifClass, NotifCount, ParentNote, Profile};
+use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile};
 use satori_core::nip::{comment, nip10};
 use satori_core::notifications::parse_zap_receipt;
 use satori_core::wallet::WalletEvent;
@@ -32,6 +32,20 @@ enum NotifType {
     Quote,
     PollVote,
     Zap,
+}
+
+impl NotifType {
+    /// Chip order (the strip's left-to-right): conversational first,
+    /// money last.
+    const ALL: [NotifType; 7] = [
+        Self::Reply,
+        Self::Mention,
+        Self::Reaction,
+        Self::Repost,
+        Self::Quote,
+        Self::PollVote,
+        Self::Zap,
+    ];
 }
 
 fn notif_type(ev: &Event) -> NotifType {
@@ -60,18 +74,43 @@ fn notif_type(ev: &Event) -> NotifType {
     }
 }
 
-/// The NIP-45 tally classes map 1:1 onto the row classes (the manager's
-/// filters mirror `notif_type`'s split, so a chip's tap-filter and its
-/// count mean the same thing).
-fn class_type(c: NotifClass) -> NotifType {
-    match c {
-        NotifClass::Reply => NotifType::Reply,
-        NotifClass::Mention => NotifType::Mention,
-        NotifClass::Reaction => NotifType::Reaction,
-        NotifClass::Repost => NotifType::Repost,
-        NotifClass::Quote => NotifType::Quote,
-        NotifClass::PollVote => NotifType::PollVote,
-        NotifClass::Zap => NotifType::Zap,
+/// The strip's timeframe dropdown: chips AND rows scope to it, so a
+/// chip's count and its tap's row list agree by construction (client
+/// counts over the same classified rows — relay COUNT can't see the
+/// gates: WoT tier, mutes, the per-class caps, quote classification).
+/// The choice persists in prefs.json — local chrome, not NIP-78 sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotifWindow {
+    Hours24,
+    Days7,
+    Days30,
+}
+
+impl NotifWindow {
+    const ALL: [NotifWindow; 3] = [Self::Hours24, Self::Days7, Self::Days30];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Hours24 => "24h",
+            Self::Days7 => "7d",
+            Self::Days30 => "30d",
+        }
+    }
+
+    fn secs(self) -> u64 {
+        match self {
+            Self::Hours24 => 86400,
+            Self::Days7 => 7 * 86400,
+            Self::Days30 => 30 * 86400,
+        }
+    }
+
+    fn from_label(s: &str) -> Self {
+        match s {
+            "24h" => Self::Hours24,
+            "30d" => Self::Days30,
+            _ => Self::Days7,
+        }
     }
 }
 
@@ -150,11 +189,16 @@ enum Row {
 pub struct NotificationsView {
     core: Arc<Core>,
     rows: Vec<Row>,
-    /// NIP-45 COUNT tallies (one per class any relay answered) + the
-    /// chip the reader tapped (tap again to clear): the strip filters
-    /// the rows client-side.
-    counts: Vec<NotifCount>,
+    /// The chip the reader tapped (tap again to clear): the strip
+    /// filters the rows client-side. Counts are client-side too —
+    /// computed from the same classified rows the list renders, so a
+    /// chip and its tap always agree.
     class_filter: Option<NotifType>,
+    /// The strip's timeframe (the dropdown's choice; persists in
+    /// prefs.json). Scopes the chips AND the rows.
+    window: NotifWindow,
+    /// The dropdown open?
+    window_open: bool,
     profiles: HashMap<String, Profile>,
     quotes: content::Quotes,
     /// What each notification answers (feed.rs's same resolver): id →
@@ -208,8 +252,11 @@ impl NotificationsView {
         let view = Self {
             core,
             rows: vec![],
-            counts: vec![],
             class_filter: None,
+            window: NotifWindow::from_label(
+                &crate::prefs::get_string("notifCountWindow").unwrap_or_default(),
+            ),
+            window_open: false,
             profiles: HashMap::new(),
             quotes: HashMap::new(),
             parents: HashMap::new(),
@@ -227,7 +274,6 @@ impl NotificationsView {
             last_visible_end: 0,
         };
         view.pump_at(prev, cx);
-        view.pump_counts(cx);
         // Deep-scroll whisper: same threshold and emission shape as the
         // feed's (feed.rs set_scroll_handler) — emit on change only. The
         // threshold is shallow (three rows): the button should arrive
@@ -291,31 +337,42 @@ impl NotificationsView {
         .detach();
     }
 
-    /// The NIP-45 COUNT tallies (one shot per pane build — a 7-day
-    /// window's chips don't rot in a session): the strip hides until
-    /// these land, then chips filter the rows.
-    fn pump_counts(&self, cx: &mut Context<Self>) {
-        let mut rx = self.core.notif_counts();
-        cx.spawn(async move |this, cx| {
-            while let Some(ev) = rx.recv().await {
-                let _ = this.update(cx, |this, cx| this.on_event(ev, 0, cx));
-            }
-        })
-        .detach();
-    }
-
     /// The rows after the chip filter (None: all of them). Section
     /// labels survive — a filtered page keeps its New/Earlier rails.
     fn visible_rows(&self) -> Vec<Row> {
-        match self.class_filter {
-            None => self.rows.clone(),
-            Some(f) => self
-                .rows
-                .iter()
-                .filter(|r| matches!(r, Row::Note(_, t) if *t == f))
-                .cloned()
-                .collect(),
+        // The window scopes the rows too (the chips count exactly this
+        // set): a row older than the cutoff is out, whatever classified
+        // it. The class chip filters on top.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let cutoff = now.saturating_sub(self.window.secs());
+        let filtered: Vec<Row> = self
+            .rows
+            .iter()
+            .filter(|r| match r {
+                Row::Label(_) => true,
+                Row::Note(ev, t) => {
+                    ev.created_at.as_secs() >= cutoff && self.class_filter.is_none_or(|f| *t == f)
+                }
+            })
+            .cloned()
+            .collect();
+        // Drop a section label whose notes all filtered out — an orphan
+        // "New" header promises rows that aren't there.
+        let mut out = Vec::with_capacity(filtered.len());
+        for (i, r) in filtered.iter().enumerate() {
+            match r {
+                Row::Label(_) => {
+                    if filtered[i..].iter().any(|q| matches!(q, Row::Note(..))) {
+                        out.push(r.clone());
+                    }
+                }
+                _ => out.push(r.clone()),
+            }
         }
+        out
     }
 
     /// Ask the core to resolve the notes these notifications answer
@@ -373,12 +430,6 @@ impl NotificationsView {
                 self.status.clear();
                 self.error = None;
             }
-            FeedEvent::NotifCounts(counts) => {
-                // The tallies landed: paint the chips (hidden until now —
-                // an all-relays-refused session just never shows them).
-                self.counts = counts;
-                self.list.reset(self.visible_rows().len());
-            }
             FeedEvent::Parents(p) => {
                 // The resolver's answer (store-first, relay for misses) —
                 // whispers fill in as these land.
@@ -434,64 +485,156 @@ impl NotificationsView {
         }
     }
 
-    /// The NIP-45 tally chips: per-class counts over the read relays,
-    /// merged per the NIP. Hidden until they land (a session where no
-    /// relay answers COUNT shows nothing — the strip is decoration); the
-    /// active chip inverts. A "~" prefixes a relay-flagged approximate
-    /// count: the NIP-45 HLL merge is an estimate, not an invoice.
+    /// The tally strip: the timeframe dropdown (scopes chips AND rows)
+    /// plus one count chip per class with anything in the window. The
+    /// counts are CLIENT-SIDE — computed here from the same classified
+    /// rows the list renders, so a chip's number and its tap's row list
+    /// agree by construction, instantly, with no network (relay COUNT
+    /// can't see the row gates: WoT tier, mutes, the per-class caps —
+    /// its numbers would phantom against this list). The dropdown
+    /// expands in-flow (no popover, no clip traps) and the choice
+    /// persists in prefs.json.
     fn counts_strip(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if self.counts.is_empty() {
+        // Count each class over the WINDOW's rows (the same rows the
+        // list shows — visible_rows applies class on top of this).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let cutoff = now.saturating_sub(self.window.secs());
+        let mut tallies = [0usize; 7];
+        let mut in_window = 0usize;
+        for row in &self.rows {
+            let Row::Note(ev, t) = row else { continue };
+            if ev.created_at.as_secs() >= cutoff {
+                tallies[*t as usize] += 1;
+                in_window += 1;
+            }
+        }
+        if in_window == 0 {
             return None;
         }
+        // The dropdown button: the selected window's label. Open expands
+        // the option menu right below (in the strip's own column — the
+        // pane never loses its list to a clip-fighting popover).
+        let button = div()
+            .id("notif-window-button")
+            .cursor_pointer()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded(px(theme::R_EMBED))
+            .border_1()
+            .border_color(rgb(theme::hairline()))
+            .text_size(px(theme::T_SMALL))
+            .text_color(rgb(theme::ink()))
+            // The clock says "this scopes time" at a glance (the chevron
+            // alone read as a sort control).
+            .child(icons::clock_icon(theme::muted()))
+            .child(format!(
+                "{} {}",
+                self.window.label(),
+                if self.window_open { "▴" } else { "▾" }
+            ))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.window_open = !this.window_open;
+                cx.notify();
+            }));
+        let menu = self.window_open.then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .mt_1()
+                .rounded(px(theme::R_EMBED))
+                .border_1()
+                .border_color(rgb(theme::hairline()))
+                .bg(rgb(theme::panel()))
+                .overflow_hidden()
+                .children(NotifWindow::ALL.map(|w| {
+                    let active = self.window == w;
+                    div()
+                        .id(SharedString::from(format!("notif-window-{}", w.label())))
+                        .cursor_pointer()
+                        .px_3()
+                        .py_1()
+                        .text_size(px(theme::T_SMALL))
+                        .when(active, |d| {
+                            d.bg(rgb(theme::ink())).text_color(rgb(theme::washi()))
+                        })
+                        .when(!active, |d| d.text_color(rgb(theme::muted())))
+                        .child(w.label().to_string())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.window_open = false;
+                            if this.window != w {
+                                this.window = w;
+                                crate::prefs::set_string("notifCountWindow", w.label());
+                                this.list.reset(this.visible_rows().len());
+                                this.list.scroll_to(ListOffset {
+                                    item_ix: 0,
+                                    offset_in_item: px(0.),
+                                });
+                            }
+                            cx.notify();
+                        }))
+                }))
+        });
         let strip = div()
             .flex()
-            .flex_wrap()
-            .gap_2()
+            .flex_col()
             .w_full()
             .max_w(px(content::COL_W))
             .px_4()
             .py_2()
-            .children(self.counts.iter().map(|c| {
-                let t = class_type(c.class);
-                let label = chip_label(t);
-                let active = self.class_filter == Some(t);
-                let tally = if c.approximate {
-                    format!("~{}", c.count)
-                } else {
-                    format!("{}", c.count)
-                };
-                let chip = div()
-                    .id(SharedString::from(format!("notif-chip-{label}")))
-                    .cursor_pointer()
-                    .px_2()
-                    .py_1()
-                    .rounded(px(theme::R_EMBED))
-                    .border_1()
-                    .text_size(px(theme::T_SMALL))
-                    .when(active, |d| {
-                        d.bg(rgb(theme::ink()))
-                            .text_color(rgb(theme::washi()))
-                            .border_color(rgb(theme::ink()))
-                    })
-                    .when(!active, |d| {
-                        d.border_color(rgb(theme::hairline()))
-                            .text_color(rgb(theme::muted()))
-                    })
-                    .child(format!("{label} {tally}"));
-                chip.on_click(cx.listener(move |this, _, _, cx| {
-                    this.class_filter = if this.class_filter == Some(t) {
-                        None
-                    } else {
-                        Some(t)
-                    };
-                    this.list.reset(this.visible_rows().len());
-                    this.list.scroll_to(ListOffset {
-                        item_ix: 0,
-                        offset_in_item: px(0.),
-                    });
-                    cx.notify();
-                }))
-            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(button)
+                    .children(NotifType::ALL.iter().filter_map(|t| {
+                        let count = tallies[*t as usize];
+                        if count == 0 {
+                            return None; // an empty class is not a chip
+                        }
+                        let label = chip_label(*t);
+                        let active = self.class_filter == Some(*t);
+                        let chip = div()
+                            .id(SharedString::from(format!("notif-chip-{label}")))
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(theme::R_EMBED))
+                            .border_1()
+                            .text_size(px(theme::T_SMALL))
+                            .when(active, |d| {
+                                d.bg(rgb(theme::ink()))
+                                    .text_color(rgb(theme::washi()))
+                                    .border_color(rgb(theme::ink()))
+                            })
+                            .when(!active, |d| {
+                                d.border_color(rgb(theme::hairline()))
+                                    .text_color(rgb(theme::muted()))
+                            })
+                            .child(format!("{label} {count}"));
+                        Some(chip.on_click(cx.listener(move |this, _, _, cx| {
+                            this.class_filter = if this.class_filter == Some(*t) {
+                                None
+                            } else {
+                                Some(*t)
+                            };
+                            this.list.reset(this.visible_rows().len());
+                            this.list.scroll_to(ListOffset {
+                                item_ix: 0,
+                                offset_in_item: px(0.),
+                            });
+                            cx.notify();
+                        })))
+                    })),
+            )
+            .children(menu)
             .into_any_element();
         Some(strip)
     }
@@ -1001,6 +1144,12 @@ impl Render for NotificationsView {
             .font_family(theme::SANS)
             .flex()
             .flex_col()
+            // The NIP-45 tally chips: their own strip ABOVE the list (a
+            // filter bar reads top-down; the bottom is the receipts')
+            // — NOT inside the centering row below (the chips stretched
+            // to the pane's full height there, and the list sat beside
+            // them in a sliver).
+            .children(self.counts_strip(cx))
             .child(
                 div()
                     .flex_1()
@@ -1024,9 +1173,6 @@ impl Render for NotificationsView {
                             }),
                         )))
                     })
-                    // The NIP-45 tally chips, under the error strip: absent
-                    // until the counts land, a tap filters the rows.
-                    .children(self.counts_strip(cx))
                     .child(if empty {
                         div()
                             .w_full()
@@ -1176,7 +1322,6 @@ impl Render for NotificationsView {
                                                     view.core.show_suppressed_author(&hex);
                                                     let prev = view.prev;
                                                     view.pump_at(prev, cx);
-                                                    view.pump_counts(cx);
                                                     cx.notify();
                                                 });
                                             }

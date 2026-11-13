@@ -108,6 +108,15 @@ fn check(b: &mut PathBuilder, g: &Grid) {
     b.line_to(g.p(4.5, 11.5));
 }
 
+// The timeframe clock: a face + hands (feather clock) — the notifications
+// strip's window dropdown marks that its scope is TIME.
+fn clock(b: &mut PathBuilder, g: &Grid) {
+    circle(b, g, 12.0, 12.0, 9.0);
+    b.move_to(g.p(12.0, 6.5));
+    b.line_to(g.p(12.0, 12.0));
+    b.line_to(g.p(15.5, 14.0));
+}
+
 // NIP-18: the quote — a doubled quotation mark, bowl and tail, outline.
 fn quote(b: &mut PathBuilder, g: &Grid) {
     // left mark: bowl (three sides) + tail sweeping down-left
@@ -190,6 +199,11 @@ pub fn at_icon(color: u32) -> impl IntoElement {
 
 pub fn check_icon(color: u32) -> impl IntoElement {
     icon(check, color, 18.0)
+}
+
+/// The timeframe clock (the notifications strip's window dropdown).
+pub fn clock_icon(color: u32) -> impl IntoElement {
+    icon(clock, color, 14.0)
 }
 
 /// Rail glyphs at rail size (icons.rs rail pass — the sidebar icons).

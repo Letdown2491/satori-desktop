@@ -68,28 +68,6 @@ pub type WalletResultRx = mpsc::UnboundedReceiver<WalletEvent>;
 /// message, not a crash).
 type ZapFlow = std::result::Result<(), WalletEvent>;
 
-/// Which notification class a NIP-45 count chip stands for — the same
-/// classes the rows classify into (notifications.rs `notif_type`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotifClass {
-    Reply,
-    Mention,
-    Reaction,
-    Repost,
-    Quote,
-    PollVote,
-    Zap,
-}
-
-/// One class's merged tally: the count plus whether a relay flagged it
-/// probabilistic (`approximate` — an HLL merge is approximate by nature).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct NotifCount {
-    pub class: NotifClass,
-    pub count: u64,
-    pub approximate: bool,
-}
-
 /// Stream of feed/write results for the UI.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -100,9 +78,6 @@ pub enum FeedEvent {
     Replies(Vec<Event>, Vec<Profile>),
     /// Notifications (replies + mentions; reactions stay off by default).
     Notifications(Vec<Event>, Vec<Profile>),
-    /// NIP-45 COUNT tallies for the notifications strip (one per class
-    /// that any relay answered).
-    NotifCounts(Vec<NotifCount>),
     /// Whether the bell should light (unread past high-water).
     NotifDot(bool),
     /// NIP-50 search results (notes).
@@ -3495,118 +3470,6 @@ impl Core {
                 Err(e) => {
                     let _ = tx.send(FeedEvent::Failed(e.to_string()));
                 }
-            }
-        });
-        rx
-    }
-
-    /// NIP-45 COUNT tallies for the notifications strip: one COUNT per
-    /// class over the read relays, merged per the NIP (HLL register max
-    /// when two or more relays send registers, else the max plain count).
-    /// The windows and filters mirror the notifications fetch (7 days, my
-    /// 500 most recent notes; reactions ride their pref). Classes overlap
-    /// the way relay filters must: a note that both replies and mentions
-    /// bumps both chips — the chips navigate, they don't invoice. No
-    /// answer (no COUNT support anywhere, no ids, nothing in window):
-    /// no event, the strip just never shows.
-    pub fn notif_counts(self: &Arc<Self>) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let Ok(active) = this.active().await else {
-                return;
-            };
-            let me = active.me();
-            let my_notes = active
-                .pool
-                .store
-                .feed_page(&[me], None, 500)
-                .await
-                .unwrap_or_default();
-            let ids: Vec<EventId> = my_notes.iter().map(|e| e.id).collect();
-            let since = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-                .saturating_sub(7 * 86400);
-            let ts = Timestamp::from(since);
-
-            // One canonical query per class (the NIP's common-filter
-            // shapes, widened to the row classes: comments ride #e too,
-            // kinds 1+1111 everywhere kind 1 rides alone). COUNT needs no
-            // LIMIT: the relay counts, we never fetch.
-            let mut replies = Filter::new()
-                .kinds([Kind::TextNote, Kind::Custom(1111)])
-                .since(ts);
-            let mut reposts = Filter::new()
-                .kinds([Kind::Repost, Kind::Custom(16)])
-                .since(ts);
-            let mut quotes = Filter::new()
-                .kinds([Kind::TextNote, Kind::Custom(1111)])
-                .since(ts);
-            for id in &ids {
-                replies = replies.event(*id);
-                reposts = reposts.event(*id);
-                quotes = quotes.custom_tags(SingleLetterTag::LOWERCASE_Q, [id.to_string()]);
-            }
-            let reaction_on = this.reaction_notifs();
-            let reaction = Filter::new()
-                .kind(Kind::Reaction)
-                .since(ts)
-                .events(ids.clone());
-            let mention = Filter::new()
-                .kinds([Kind::TextNote, Kind::Custom(1111)])
-                .pubkeys([me])
-                .since(ts);
-            let poll_ids: Vec<EventId> = my_notes
-                .iter()
-                .filter(|e| u16::from(e.kind) == 1068)
-                .map(|e| e.id)
-                .collect();
-            let mut votes = Filter::new().kind(Kind::Custom(1018)).since(ts);
-            for id in &poll_ids {
-                votes = votes.event(*id);
-            }
-            let zap = Filter::new()
-                .kind(Kind::Custom(9735))
-                .pubkeys([me])
-                .since(ts);
-
-            let (replies, mentions, reactions, reposts, quotes, votes, zaps) = tokio::join!(
-                active.pool.count(replies),
-                active.pool.count(mention),
-                async {
-                    if reaction_on {
-                        active.pool.count(reaction).await
-                    } else {
-                        (0, false)
-                    }
-                },
-                active.pool.count(reposts),
-                active.pool.count(quotes),
-                active.pool.count(votes),
-                active.pool.count(zap),
-            );
-            let tallies = [
-                (NotifClass::Reply, replies),
-                (NotifClass::Mention, mentions),
-                (NotifClass::Reaction, reactions),
-                (NotifClass::Repost, reposts),
-                (NotifClass::Quote, quotes),
-                (NotifClass::PollVote, votes),
-                (NotifClass::Zap, zaps),
-            ];
-            let counts: Vec<NotifCount> = tallies
-                .into_iter()
-                .filter(|(_, (c, _))| *c > 0)
-                .map(|(class, (count, approximate))| NotifCount {
-                    class,
-                    count,
-                    approximate,
-                })
-                .collect();
-            if !counts.is_empty() {
-                let _ = tx.send(FeedEvent::NotifCounts(counts));
             }
         });
         rx
