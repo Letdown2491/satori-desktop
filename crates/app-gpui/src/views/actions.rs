@@ -14,7 +14,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{AnimationExt, Context, Div, Entity, EventEmitter, SharedString, div, prelude::*};
+use gpui::{
+    AnimationExt, Context, Div, Entity, EventEmitter, SharedString, div, prelude::*, px, rgb,
+};
 use nostr::prelude::*;
 
 use super::nav::Nav;
@@ -44,6 +46,8 @@ pub struct ActionState {
     pub zapping: bool,
     /// No wallet behind the tap → the dim glyph opens the wallet pane.
     pub wallet_ready: bool,
+    /// Comment/reply count for the bubble (0 = bare glyph).
+    pub replies: usize,
     pub reduced_motion: bool,
 }
 
@@ -88,7 +92,16 @@ pub(crate) fn action_row<H: ActionHost>(
                     });
                 })
                 .hover(|s| s.bg(theme::hover_wash()))
-                .child(icons::bubble_icon(theme::muted())),
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(icons::bubble_icon(theme::muted()))
+                .children((st.replies > 0).then(|| {
+                    div()
+                        .text_size(px(theme::T_SMALL))
+                        .text_color(rgb(theme::muted()))
+                        .child(st.replies.to_string())
+                })),
         )
         .child(
             div()

@@ -890,6 +890,8 @@ impl Render for NotificationsView {
                                         zapped: zapped.contains(&id_hex),
                                         zapping: zap_pending.contains(&id_hex),
                                         wallet_ready,
+                                        // The notification IS the reply.
+                                        replies: 0,
                                         reduced_motion,
                                     };
                                     notif_card(

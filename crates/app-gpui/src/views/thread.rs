@@ -656,6 +656,9 @@ impl Render for ThreadView {
             zapped: eng.zapped.contains(&note.id.to_string()),
             zapping: eng.zap_pending.contains(&note.id.to_string()),
             wallet_ready: eng.wallet_ready,
+            // The thread pane shows the conversation itself; a count on
+            // the bubble would repeat what the pane already renders.
+            replies: 0,
             reduced_motion,
         };
         // The WS3 collapse line's click target (the list closure moves its
