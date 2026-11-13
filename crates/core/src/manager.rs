@@ -964,6 +964,7 @@ impl Core {
         session::clear();
         secrets::delete(secrets::NSEC);
         secrets::delete(secrets::BUNKER_CLIENT_SECRET);
+        secrets::delete(secrets::BUNKER_PAIRING_SECRET);
         // The tombstone store outlives sessions (it is keyed by
         // deleter, not by follows) — nothing to clear at logout.
         // The live sub is armed per session: the epoch bump makes the old
@@ -1036,6 +1037,7 @@ impl Core {
         self.teardown_session();
         session::clear();
         secrets::delete(secrets::BUNKER_CLIENT_SECRET);
+        secrets::delete(secrets::BUNKER_PAIRING_SECRET);
         secrets::delete(secrets::NSEC);
         eprintln!("[core] logout");
     }
@@ -1744,6 +1746,17 @@ impl Core {
         let parsed = NostrConnectUri::parse(uri.trim())
             .map_err(|e| LoginError::InvalidBunkerUri(e.to_string()))?;
 
+        // The pairing secret rides the keyring so RESUMED sessions can
+        // carry it back on the reconnect handshake (some signers demand
+        // it on every connect). A paste without one clears any stale
+        // value: a secret from a different pairing is worse than none.
+        if let NostrConnectUri::Bunker { secret, .. } = &parsed {
+            match secret {
+                Some(s) => secrets::store(secrets::BUNKER_PAIRING_SECRET, s).await?,
+                None => secrets::delete(secrets::BUNKER_PAIRING_SECRET),
+            }
+        }
+
         // bunker://<remote>?relay=... (client:// initiation is out of scope).
         let remote = match &parsed {
             NostrConnectUri::Bunker {
@@ -1885,6 +1898,12 @@ impl Core {
         );
         if let NostrConnectUri::Client { metadata, .. } = &mut uri {
             metadata.description = Some("A quiet Nostr reader.".to_string());
+        }
+        // The pairing secret is generated INSIDE the client URI. Persist
+        // it now: a resumed session's reconnect handshake carries it back
+        // (some signers demand the pairing secret on every connect).
+        if let NostrConnectUri::Client { secret, .. } = &uri {
+            secrets::store(secrets::BUNKER_PAIRING_SECRET, secret).await?;
         }
         // The SDK emits the client identity as a metadata= JSON blob (the
         // pre-2025 NIP-46 draft); the current spec spells flat query params
@@ -2070,11 +2089,25 @@ impl Core {
                     .await?
                     .ok_or(LoginError::CredentialGone("transport secret"))?;
                 let client_keys = signer::client_keys_from_secret(&secret)?;
+                // The pairing secret goes back into the URI: the reconnect
+                // handshake carries it, which strict signers (kumaOS's
+                // panel) demand on every connect. Lenient signers answer
+                // "ack" to a replayed secret per the spec's SHOULD, so
+                // carrying it is correct against both. No stored secret
+                // (pre-pairing-secret sessions) stays secretless: the
+                // reconnect then relies on the signer's leniency.
+                let pairing = secrets::load(secrets::BUNKER_PAIRING_SECRET).await?;
                 // Repeated relays join with & (query params, not extra ?s).
                 let mut uri = format!("bunker://{remote}");
                 if !relays.is_empty() {
                     uri.push_str("?relay=");
                     uri.push_str(&relays.join("&relay="));
+                }
+                if let Some(p) = pairing.filter(|p| !p.is_empty()) {
+                    let sep = if uri.contains('?') { '&' } else { '?' };
+                    uri.push(sep);
+                    uri.push_str("secret=");
+                    uri.push_str(&p);
                 }
                 let parsed =
                     NostrConnectUri::parse(&uri).map_err(|e| LoginError::Resume(e.to_string()))?;

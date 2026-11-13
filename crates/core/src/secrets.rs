@@ -21,6 +21,16 @@ const SERVICE: &str = "io.github.Letdown2491.satori";
 /// each slot as it copies it across.
 const LEGACY_SERVICE: &str = "io.github.Letdown2491.Satori";
 pub const BUNKER_CLIENT_SECRET: &str = "bunker-client-secret";
+/// The NIP-46 pairing secret: the one the pairing URI carried (generated
+/// client-side in the nostrconnect flow, taken from the bunker:// URI in
+/// the paste flow). Stored so a resumed session's reconnect handshake can
+/// carry it back: some signers (kumaOS's panel) require it on EVERY
+/// connect, refusing a secretless reconnect from the paired client key
+/// ("the connect did not carry the secret the pairing URI carries"). The
+/// spec says signers SHOULD ignore replayed old secrets, so carrying it
+/// is correct against both lenient (ack) and strict (echo-validate)
+/// signers.
+pub const BUNKER_PAIRING_SECRET: &str = "bunker-pairing-secret";
 pub const NSEC: &str = "nsec";
 /// The NWC wallet's connection secret (NIP-47). D20: a separate, revocable
 /// wallet credential — NOT identity material (D17 is untouched).
