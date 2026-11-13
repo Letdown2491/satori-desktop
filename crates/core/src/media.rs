@@ -38,6 +38,25 @@ use url::Url;
 use crate::config;
 use crate::net_guard::SafeResolver;
 
+/// Connect + per-read idle bounds for the guarded client. There is NO
+/// total-request timeout on the media path: a hard 20s total killed
+/// exactly the biggest legitimate files (hodlbod's 2–5.5MB article
+/// covers) whenever the link ran slow — each attempt raced the clock
+/// whole, failed as Transient, and the covers never landed while every
+/// small avatar sailed through (the "some images won't load" report).
+/// A flowing download now finishes no matter how slow; a STALLED one
+/// dies in READ_IDLE via the per-chunk read timeout, and the byte cap
+/// still bounds the transfer itself.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const READ_IDLE: Duration = Duration::from_secs(15);
+/// One fetch attempt's total budget — generous (20MB at ~170KB/s clears
+/// it), so only a genuinely stalled server spends it. The retry ladder
+/// (RETRY_ATTEMPTS here, the app's backoff above) converges after.
+pub const ATTEMPT_BUDGET: Duration = Duration::from_secs(120);
+/// JSON surfaces (oEmbed, LNURL) are small and user-facing: keep the
+/// snappy total the media path can't afford.
+pub const JSON_BUDGET: Duration = Duration::from_secs(20);
+
 #[derive(Debug)]
 pub struct DecodedImage {
     pub width: u32,
@@ -109,10 +128,12 @@ fn gate() -> &'static tokio::sync::Semaphore {
 /// One shared client for every fetch in this module. Three hard rules baked
 /// in: a browser-style User-Agent (CDNs — Cloudflare in front of the
 /// blossoms especially — 403 requests with no UA, and those 403s read as
-/// verdicts, so avatars died permanently), connect/total timeouts (a
-/// hung fetch used to pin the cache entry Loading forever, joining every
-/// later waiter onto a corpse — the avatar that never loads all session),
-/// and a per-hop SSRF re-validation policy (below).
+/// verdicts, so avatars died permanently), connect + read-idle timeouts
+/// (a hung fetch used to pin the cache entry Loading forever, joining
+/// every later waiter onto a corpse — the avatar that never loads all
+/// session; the READ_IDLE floor keeps that protection without the total
+/// cap that starved big files), and a per-hop SSRF re-validation policy
+/// (below).
 fn http() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -121,8 +142,8 @@ fn http() -> &'static reqwest::Client {
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
                  (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
             )
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(20))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_IDLE)
             // Issue #3 WS4 (the media.rs TODO): the resolver is the last
             // guard — reqwest dials WHATEVER it returns, so the address
             // list is filtered to global IPs (see SafeResolver). Every
@@ -164,6 +185,7 @@ pub(crate) fn client() -> &'static reqwest::Client {
 async fn guarded_get(url: &str) -> Result<reqwest::Response, MediaError> {
     let res = http()
         .get(url)
+        .timeout(ATTEMPT_BUDGET)
         .send()
         .await
         // Timeouts, connect failures, TLS hiccups: all weather, all transient.
@@ -227,7 +249,12 @@ async fn fetch_capped(url: &str, cap: usize) -> Result<Vec<u8>, MediaError> {
 /// failure text reaches the user (the zap sheet shows it), so statuses keep
 /// their own honest wording instead of media verdicts.
 async fn json_get(url: &str) -> Result<reqwest::Response, String> {
-    let res = http().get(url).send().await.map_err(|e| e.to_string())?;
+    let res = http()
+        .get(url)
+        .timeout(JSON_BUDGET)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     let status = res.status();
     if !status.is_success() {
         return Err(format!("HTTP {status}"));
