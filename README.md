@@ -27,13 +27,16 @@ Satori is a daily-driver desktop client, in active development.
   reposts (NIP-18), polls (NIP-88, vote and compose), long-form articles
   (NIP-23), hashtag timelines; a pill counts new notes that arrive
   while you read and loads them on click
-- Threads: NIP-10 reply trees, NIP-22 comments, reply-to-root routing
+- Threads: NIP-10 reply trees, NIP-22 comments (on articles too, with
+  reply affordance and counts), reply-to-root routing
 - Composer: tabs for note, picture (NIP-68), video (NIP-71 kind 22),
   poll, and article; an undo window on every publish kind, draft restore,
   scheduled posts, Blossom attachments, @-mentions, quote cards
 - Zaps: NIP-57 with verified receipts, paid through a connected NWC
-  wallet (NIP-47)
-- Notifications: replies, comments, zaps, poll votes; reactions behind a pref
+  wallet (NIP-47); wallet and bunker URIs are screened at paste time
+  (private-address relays ask first, consents revocable in settings)
+- Notifications: replies, comments, zaps, poll votes; reactions behind a pref;
+  an accurate tally strip scoped by a timeframe dropdown (24h/7d/30d)
 - Profiles: banner and avatar header, NIP-05 verification badge,
   click-to-copy npub and Lightning address, notes rendered exactly as
   the timeline renders them, endless photos/videos media strips

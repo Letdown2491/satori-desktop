@@ -6,6 +6,44 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
+## 0.7.0 - 2026-11-13
+
+The interoperability release: NIP-faithful surfaces where the client was
+thin, each landed against real published-event fixtures. Comments became
+a surface: kind-1111 threads render and compose on articles (the reader
+grew a comments section with a reply affordance), comment counts ride
+the feed bubble, and the core preserves roots and addressable targets
+through nested fetches. Replies reach who they're for: publishes now
+additionally target the parent author's and tagged users' inbox relays
+(their kind-10002 read sets) and where the parent was recently seen, so
+a reply no longer vanishes for an author who shares no relay with us.
+The notifications pane gained an accurate tally strip: counts come from
+the classified rows themselves, so a chip's number and its tap's row
+list agree by construction, scoped by a 24h/7d/30d dropdown that
+remembers its choice.
+
+The wallet got paste-time protection (a merged outside contribution):
+relays inside nostr+walletconnect:// and bunker:// URIs are screened
+before any socket opens, private-address relays ask first, consents
+live in the settings pane for revocation, and the wallet client is shut
+down properly when a second URI replaces it. Cleartext ws:// relays are
+refused outright.
+
+Media discipline: every pane pins exactly what is on screen, so images
+stop disappearing while a page idles and RAM stops ballooning on photo
+profiles. The pin registry is owner-keyed with a per-owner byte cap, so
+no surface can hold the whole photo budget hostage, and closing a pane
+releases its pins. The reader caps comment fetches and windows their
+avatars. Big pictures load now: the media path's total-request timeout
+is gone in favor of connect and idle-read bounds.
+
+Under the hood: the pre-release five-lens audit (performance, system
+usage, memory, security, duplication) fixed its verified findings, the
+consent ledger is written atomically with 0600 permissions, preferences
+sync defers to newer local edits (feed settings no longer revert at
+login), the engagement engine lives in one implementation, and clicking
+a user in a thread opens their profile.
+
 ## 0.6.0 - 2026-11-12
 
 The replies-and-repairs release. Replies became surfaces, not a page: the
