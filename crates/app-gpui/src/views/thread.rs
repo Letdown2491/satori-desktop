@@ -517,6 +517,8 @@ fn reply_row(
     let ev_for_click = ev.clone();
     let open_handle = handle.clone();
     let body_handle = handle.clone();
+    let who_handle = handle.clone();
+    let who = ev.pubkey;
     // thread.rs comment-children: 20px for the first level, 14px deeper.
     let indent = if depth == 0 {
         0.0
@@ -546,10 +548,19 @@ fn reply_row(
                 .items_center()
                 .justify_between()
                 .child(
+                    // The identity opens the profile (the feed's
+                    // actor-header discipline): avatar AND name are one
+                    // click target — the user report was "clicking a user
+                    // in a thread does nothing".
                     div()
+                        .id(SharedString::from(format!("reply-who-{idx}")))
                         .flex()
                         .items_center()
                         .gap_2()
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            who_handle.update(cx, |_, cx| cx.emit(Nav::OpenProfile(who)));
+                        })
                         .child(media::avatar(media, &picture, &name, 24.0))
                         .child(
                             div()
@@ -740,10 +751,24 @@ impl Render for ThreadView {
                                 .gap_2()
                                 .p_4()
                                 .child(
+                                    // The identity opens the profile (the
+                                    // reply rows wear the same click): one
+                                    // avatar+name target, the user report.
                                     div()
+                                        .id(SharedString::from("thread-who"))
                                         .flex()
                                         .items_center()
                                         .gap_2()
+                                        .cursor_pointer()
+                                        .on_click({
+                                            let handle = handle.clone();
+                                            let who = note.pubkey;
+                                            move |_, _, cx| {
+                                                handle.update(cx, |_, cx| {
+                                                    cx.emit(Nav::OpenProfile(who))
+                                                })
+                                            }
+                                        })
                                         .child(media::avatar(
                                             &media,
                                             &self
