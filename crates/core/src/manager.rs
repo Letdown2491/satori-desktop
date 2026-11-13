@@ -91,6 +91,9 @@ pub enum FeedEvent {
     PollVotes(Vec<(String, u32)>),
     /// Comments on a target, oldest first + profiles.
     Comments(Vec<Event>, Vec<Profile>),
+    /// Per-note comment counts (the bubble): (note id, count) for the
+    /// notes that HAVE replies/comments.
+    CommentCounts(Vec<(EventId, u32)>),
     /// Reply-presence faces: (note id, up to 3 replier pubkeys).
     Faces(Vec<(EventId, Vec<PublicKey>)>),
     /// Profiles resolved reactively (cards patch themselves).
@@ -2227,9 +2230,15 @@ impl Core {
                 a.undo.set_seconds(seconds);
             }
         }
+        // These ARE the local values (the caller just wrote + stamped
+        // them); the overlay echo is a no-op either way.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         write_prefs_overlay(&[
-            ("undo_enabled".to_string(), enabled.into()),
-            ("undo_seconds".to_string(), seconds.into()),
+            ("undo_enabled".to_string(), enabled.into(), now),
+            ("undo_seconds".to_string(), seconds.into(), now),
         ]);
         // Fire and forget — sync needs no feedback surface.
         self.publish_app_data("undo_enabled", serde_json::Value::Bool(enabled));
@@ -3531,6 +3540,48 @@ impl Core {
             match res {
                 Ok(faces) => {
                     let _ = tx.send(FeedEvent::Faces(faces));
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
+    /// Comment counts per note (the action row's bubble): how many
+    /// kind-1 replies + kind-1111 comments name the note as their parent.
+    /// One batched relay round (reply_faces' shape — the REQ also
+    /// hydrates the store for later thread opens), parent = the last `e`
+    /// tag within the requested set (a reply-to-a-reply counts for the
+    /// reply, not the note — the same parent rule the faces use).
+    /// Addressable parents (pictures with a d tag, articles) are keyed by
+    /// ADDRESS, not event id — their counts ride the address-carrying
+    /// path, not this one (#32's notifications-door item).
+    pub fn comment_counts(self: &Arc<Self>, ids: Vec<EventId>) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<Vec<(EventId, u32)>> = async {
+                let active = this.active().await?;
+                let filter = Filter::new()
+                    .kinds([Kind::TextNote, Kind::Custom(1111)])
+                    .events(ids.clone())
+                    .limit(1000);
+                let id_set: std::collections::HashSet<EventId> = ids.iter().copied().collect();
+                let mut per_note: std::collections::HashMap<EventId, u32> =
+                    std::collections::HashMap::new();
+                for r in active.pool.get(filter).await.unwrap_or_default() {
+                    if let Some(pid) = parent_in_set(&r, &id_set) {
+                        *per_note.entry(pid).or_default() += 1;
+                    }
+                }
+                Ok(per_note.into_iter().collect())
+            }
+            .await;
+            match res {
+                Ok(counts) => {
+                    let _ = tx.send(FeedEvent::CommentCounts(counts));
                 }
                 Err(e) => {
                     let _ = tx.send(FeedEvent::Failed(e.to_string()));
@@ -6911,14 +6962,26 @@ fn parse_list_event(plain: &str) -> Vec<String> {
 /// Read-modify-write prefs.json (0600): overlay `pairs` onto the existing
 /// object, preserving app-owned keys. Core's single prefs write path —
 /// set_undo and the NIP-78 sync both land here.
-fn write_prefs_overlay(pairs: &[(String, serde_json::Value)]) {
+fn write_prefs_overlay(pairs: &[(String, serde_json::Value, u64)]) {
     let path = crate::config::state_file(crate::config::files::PREFS);
     let mut value = std::fs::read_to_string(&path)
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
     if let Some(obj) = value.as_object_mut() {
-        for (k, v) in pairs {
+        for (k, v, updated) in pairs {
+            // The recency stamp (`{key}_at`, written by every local
+            // toggle): a NEWER local edit means the remote slot is stale
+            // (its publish lost the relay LWW) — the local value stands
+            // and the next local toggle republishes forward. No stamp
+            // (fresh install, restore target) → the remote applies.
+            let local_at = obj
+                .get(format!("{k}_at").as_str())
+                .and_then(|s| s.as_u64())
+                .unwrap_or(0);
+            if *updated <= local_at {
+                continue;
+            }
             obj.insert(k.clone(), v.clone());
         }
     }
@@ -6951,7 +7014,7 @@ async fn sync_app_data(
         Ok(set) => set.into_iter().collect::<Vec<_>>(),
         Err(_) => return,
     };
-    let mut pairs: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut pairs: Vec<(String, serde_json::Value, u64)> = Vec::new();
     for slot in nip78::group_latest(&events) {
         if !nip78::synced_key(&slot.key) || slot.content.is_empty() {
             continue;
@@ -6962,7 +7025,7 @@ async fn sync_app_data(
         let Some(value) = nip78::parse_payload(&plain) else {
             continue;
         };
-        pairs.push((slot.key, value));
+        pairs.push((slot.key, value, slot.updated));
     }
     if pairs.is_empty() {
         return;
@@ -7298,6 +7361,20 @@ pub fn apply_profile_patch(stored: &str, patch: &ProfileEdit) -> String {
     serde_json::to_string(&obj).unwrap_or_default()
 }
 
+/// A reply/comment's parent within the requested set: the last `e` tag
+/// naming one of `ids` (NIP-10 writes the parent LAST in the e-chain;
+/// NIP-22's lowercase parent `e` is the only event id a top-level comment
+/// carries). A parent OUTSIDE the set (a reply-to-a-reply's parent is
+/// another reply) means "not this note's direct child" — counts and faces
+/// alike attribute to the note the conversation hangs off, one level only.
+fn parent_in_set(ev: &Event, ids: &std::collections::HashSet<EventId>) -> Option<EventId> {
+    ev.tags
+        .clone()
+        .event_ids()
+        .last()
+        .filter(|pid| ids.contains(pid))
+}
+
 #[cfg(test)]
 /// Test-only local-key login — the user-facing nsec door is gone (D17: the
 /// app never handles the master key), but the logout/re-login flow tests
@@ -7599,8 +7676,7 @@ mod tests {
         let me = Keys::generate();
         let follow = Keys::generate();
         let outsider = Keys::generate();
-        crate::wot::set_identity(me.public_key(), &[follow.public_key()]);
-        // kind3(follow → outsider): seen, sub-threshold → NotInNetwork.
+        crate::wot::set_identity(me.public_key(), &[follow.public_key()]); // kind3(follow → outsider): seen, sub-threshold → NotInNetwork.
         // Fresh list (now_secs): stale lists contribute nothing (D41b).
         let mut tags = Tags::new();
         tags.push(Tag::public_key(outsider.public_key()));
@@ -7725,5 +7801,131 @@ mod tests {
         crate::rate::clear();
         assert!(!crate::rate::reply_flooded(&mule.public_key(), 1000));
         crate::wot::clear_identity();
+    }
+
+    /// The bubble's counting rule (D59 fixture shape): a NIP-10 kind-1
+    /// reply and a NIP-22 top-level comment both attribute to the note;
+    /// a NESTED comment (parent = another comment) and a bare mention do
+    /// not. The tag sets are the ones Amethyst publishes.
+    #[test]
+    fn comment_counts_attribute_to_the_note() {
+        use crate::nip::comment::CommentTarget;
+        let author = Keys::generate();
+        let signer = |k: &Keys, kind: Kind, tags: Tags| {
+            k.sign_event(UnsignedEvent::new(
+                k.public_key(),
+                Timestamp::now(),
+                kind,
+                tags,
+                String::new(),
+            ))
+            .unwrap()
+        };
+        let note = signer(&author, Kind::TextNote, Tags::new());
+
+        // A kind-1 reply (e names the note, NIP-10 parent-last order:
+        // a mention e rides BEFORE the parent e and must not win).
+        let other = Keys::generate();
+        let mention = signer(
+            &other,
+            Kind::TextNote,
+            Tags::from_list(vec![Tag::public_key(other.public_key())]),
+        );
+        let reply = signer(
+            &other,
+            Kind::TextNote,
+            Tags::from_list(vec![Tag::event(mention.id), Tag::event(note.id)]),
+        );
+
+        // A top-level NIP-22 comment (parent e = the note).
+        let comment = signer(
+            &other,
+            Kind::Custom(1111),
+            Tags::from_list(
+                CommentTarget::Event {
+                    id: note.id,
+                    kind: 1,
+                    author: author.public_key(),
+                }
+                .root_tags(),
+            ),
+        );
+        // A nested reply to THAT comment (root E = the note, parent e =
+        // the comment): attributed to the comment, not the note.
+        let nested = signer(
+            &author,
+            Kind::Custom(1111),
+            Tags::from_list(crate::nip::comment::reply_tags(
+                &comment,
+                &CommentTarget::for_event(&comment),
+            )),
+        );
+
+        let ids = std::collections::HashSet::from([note.id]);
+        // The reply's parent is the note (last e in the set — the mention
+        // e-tag BEFORE it loses).
+        assert_eq!(parent_in_set(&reply, &ids), Some(note.id));
+        assert_eq!(parent_in_set(&comment, &ids), Some(note.id));
+        // The nested reply hangs off the comment — not the note's count.
+        assert_eq!(parent_in_set(&nested, &ids), None);
+        // A bare mention (p-tag only, no e) is nothing's child.
+        assert_eq!(parent_in_set(&mention, &ids), None);
+    }
+
+    /// The NIP-78 login overlay must defer to a NEWER local edit: the
+    /// feed's hidden-kinds list was eaten by a stale relay slot (an
+    /// unpublished local curation lost the relay's last-write-wins, and
+    /// every login re-applied "nothing hidden" — all kinds checked).
+    /// Three timelines against a slot updated at t=1000: local stamp
+    /// newer → local stands; stamp older → remote applies; no stamp
+    /// (fresh install / restore) → remote applies.
+    #[test]
+    fn prefs_overlay_defers_to_a_newer_local_edit() {
+        let env = crate::test_env::EnvGuard::new("prefs-overlay");
+        let _ = env;
+        let path = crate::config::state_file(crate::config::files::PREFS);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "content_hidden": [20, 1068],
+                "content_hidden_at": 2000,
+                "machine_notes_hidden": true,
+                "machine_notes_hidden_at": 500
+            })
+            .to_string(),
+        )
+        .unwrap();
+        write_prefs_overlay(&[
+            // Stale slot: the local curation (stamp 2000) stands.
+            ("content_hidden".into(), serde_json::json!([]), 1000),
+            // Fresh slot: the local edit (stamp 500) is older — remote wins.
+            (
+                "machine_notes_hidden".into(),
+                serde_json::Value::Bool(false),
+                1000,
+            ),
+            // No local stamp: a fresh install — remote applies.
+            ("dark".into(), serde_json::Value::Bool(true), 1000),
+        ]);
+        let got: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            got.get("content_hidden").unwrap(),
+            &serde_json::json!([20, 1068]),
+            "a newer local edit must not be clobbered by a stale slot"
+        );
+        assert_eq!(
+            got.get("machine_notes_hidden").unwrap(),
+            &serde_json::Value::Bool(false),
+            "an older local edit loses to a fresh slot"
+        );
+        assert_eq!(
+            got.get("dark").unwrap(),
+            &serde_json::Value::Bool(true),
+            "no stamp = fresh install, remote applies"
+        );
     }
 }

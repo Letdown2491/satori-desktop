@@ -237,6 +237,7 @@ impl Shell {
         cx.notify();
         // NIP-78: sync the theme slot (Phase 2 §4.1) — fire and forget.
         if changed {
+            crate::prefs::stamp("dark");
             self.core
                 .publish_app_data("dark", serde_json::Value::Bool(dark));
         }

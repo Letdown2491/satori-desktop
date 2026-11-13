@@ -149,6 +149,10 @@ pub struct NotificationsView {
     /// notifications page carries the timeline's affordances.
     engagement: engagement::Engagement,
     list: ListState,
+    /// The pinned set (media.rs): everything the render paints — the page
+    /// idles open (renders stop, only renders touch) and the next landing
+    /// burst took exactly the images on screen.
+    pinned: Vec<String>,
 }
 
 impl EventEmitter<Nav> for NotificationsView {}
@@ -179,6 +183,7 @@ impl NotificationsView {
             receipts_open: false,
             engagement,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
+            pinned: vec![],
         };
         view.pump_at(prev, cx);
         // Deep-scroll whisper: same threshold and emission shape as the
@@ -770,15 +775,39 @@ impl Render for NotificationsView {
         // entries the cache holds; only a landing notifies, so this can't
         // loop a render.
         let viewer = cx.entity_id();
+        let mut painted: Vec<String> = Vec::new();
         for p in self.profiles.values() {
             media::fetch(&self.core, p.picture.clone(), viewer, cx);
+            if !p.picture.is_empty() && !painted.contains(&p.picture) {
+                painted.push(p.picture.clone());
+            }
         }
         for row in &self.rows {
             if let Row::Note(ev, _) = row {
                 for url in content::media_urls_cached(ev).iter().cloned() {
-                    media::fetch(&self.core, url, viewer, cx);
+                    if url.is_empty() {
+                        continue;
+                    }
+                    let fresh = !painted.contains(&url);
+                    media::fetch(&self.core, url.clone(), viewer, cx);
+                    if fresh {
+                        painted.push(url);
+                    }
                 }
             }
+        }
+        // The sweep matters: want_media only runs at rebuild, and once the
+        // cache evicted a note's image under feed-photo pressure NOTHING
+        // asked again — the tile went dark mid-session (owner: the image
+        // "first loads, then disappears"). fetch is a silent no-op for
+        // entries the cache holds; only a landing notifies, so this can't
+        // loop a render. The PIN keeps the page's images through idle
+        // stretches: a bell page sits open, renders stop, only renders
+        // touch (thread.rs render, same discipline).
+        media::unpin(&self.pinned, cx);
+        self.pinned = painted;
+        for url in &self.pinned {
+            media::pin(url, cx);
         }
         let quotes = self.quotes.clone();
         let parents = self.parents.clone();
@@ -890,6 +919,8 @@ impl Render for NotificationsView {
                                         zapped: zapped.contains(&id_hex),
                                         zapping: zap_pending.contains(&id_hex),
                                         wallet_ready,
+                                        // The notification IS the reply.
+                                        replies: 0,
                                         reduced_motion,
                                     };
                                     notif_card(

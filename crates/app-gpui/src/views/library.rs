@@ -30,6 +30,10 @@ pub(crate) struct LibraryView {
     /// Mirror of the child feed's deep-scroll state (profile.rs's pattern —
     /// the shell reads the pane view's field for the back-to-top whisper).
     pub(crate) deep: bool,
+    /// The pinned set (media.rs): the open list's member avatars — the
+    /// detail idles open (renders stop, only renders touch), and the
+    /// next landing burst took exactly the avatars on screen.
+    pinned: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -62,6 +66,7 @@ impl LibraryView {
             open_list: None,
             members: HashMap::new(),
             deep: false,
+            pinned: vec![],
         }
     }
 
@@ -538,8 +543,20 @@ impl LibraryView {
     fn list_detail(&mut self, l: &NostrList, cx: &mut Context<Self>) -> AnyElement {
         let media = media::Snapshot::new(cx);
         let viewer = cx.entity_id();
+        let mut painted: Vec<String> = Vec::new();
         for p in self.members.values() {
             media::fetch(&self.core, p.picture.clone(), viewer, cx);
+            if !p.picture.is_empty() && !painted.contains(&p.picture) {
+                painted.push(p.picture.clone());
+            }
+        }
+        // Pin the avatars this detail paints: the pane idles open (renders
+        // stop, only renders touch), so the next landing burst took the
+        // avatars on screen (thread.rs render, the same discipline).
+        media::unpin(&self.pinned, cx);
+        self.pinned = painted;
+        for url in &self.pinned {
+            media::pin(url, cx);
         }
         let name = l.display();
         let count = l.members.len();

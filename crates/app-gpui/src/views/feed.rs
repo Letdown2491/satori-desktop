@@ -61,6 +61,10 @@ pub struct Feed {
     /// author + snippet. `parents_asked` keeps misses from re-requesting.
     parents: HashMap<String, ParentNote>,
     parents_asked: HashSet<String>,
+    /// Comment counts for the bubbles (CommentCounts landings), and the
+    /// asked-set that keeps a paging feed from re-asking per page.
+    counts: HashMap<String, usize>,
+    counts_asked: HashSet<String>,
     /// Push signals since the last load (the live subscription): the
     /// new-notes pill's count. Nothing moves until the reader clicks.
     live_new: usize,
@@ -128,6 +132,8 @@ struct FeedSnap {
     notes: std::sync::Arc<Vec<Event>>,
     profiles: std::sync::Arc<HashMap<String, Profile>>,
     parents: std::sync::Arc<HashMap<String, ParentNote>>,
+    /// Note id → comment count (the bubbles).
+    counts: std::sync::Arc<HashMap<String, usize>>,
     engagement: std::sync::Arc<engagement::Engagement>,
     quotes: std::sync::Arc<content::Quotes>,
     cards: std::sync::Arc<cards::CardState>,
@@ -175,6 +181,8 @@ impl Feed {
             profiles: HashMap::new(),
             parents: HashMap::new(),
             parents_asked: HashSet::new(),
+            counts: HashMap::new(),
+            counts_asked: HashSet::new(),
             live_new: 0,
             quotes: HashMap::new(),
             poll_tallies: HashMap::new(),
@@ -486,6 +494,7 @@ impl Feed {
             FeedEvent::Loaded(page) => {
                 self.absorb(page.notes, page.profiles, cx);
                 self.want_parents(cx);
+                self.want_counts(cx);
                 self.status.clear();
                 self.error = None;
                 // The bookmark list is finite (D38) — never page it.
@@ -497,6 +506,7 @@ impl Feed {
                 let old = self.notes.len();
                 self.absorb(page.notes, page.profiles, cx);
                 self.want_parents(cx);
+                self.want_counts(cx);
                 if self.notes.len() > old {
                     // Appends keep the reader's place: reset() clears the
                     // scroll anchor and would yank the pane to the top,
@@ -517,6 +527,14 @@ impl Feed {
                 }
             }
             FeedEvent::Profiles(profiles) => self.absorb_profiles(profiles, cx),
+            FeedEvent::CommentCounts(counts) => {
+                // The bubble count: same-height patch (a digit appears in
+                // an existing row slot) — no reflow, the anchor survives.
+                for (id, n) in counts {
+                    self.counts.insert(id.to_string(), n as usize);
+                }
+                cx.notify();
+            }
             FeedEvent::Parents(p) => {
                 // Height-changing patches (the whisper appears) — the list
                 // re-measures; no reset, the anchor survives small shifts.
@@ -639,7 +657,10 @@ impl Feed {
     /// Pin the visible window's media urls, release the previous
     /// window's. Called when the window moves (the list's scroll stream)
     /// and when data lands (absorb) — the two moments the on-screen set
-    /// can change.
+    /// can change. The set is EVERYTHING the visible cards paint
+    /// (card_media_urls: avatars, body pictures, repost inners) — an
+    /// idle feed stops rendering, and only renders touch, so a missing
+    /// avatar here was the timeline's disappearing-image report.
     fn pin_window(&mut self, cx: &mut Context<Self>) {
         let start = self.cursor.min(self.notes.len());
         // Before the first scroll event the end is still 0: pin the top
@@ -647,13 +668,28 @@ impl Feed {
         let end = self.last_visible_end.max(start + 8).min(self.notes.len());
         let mut urls: Vec<String> = Vec::new();
         for note in &self.notes[start..end] {
-            urls.extend(content::media_urls(note));
+            urls.extend(card_media_urls(note, &self.profiles));
         }
         media::unpin(&self.pinned, cx);
         self.pinned = urls;
         for url in &self.pinned {
             media::pin(url, cx);
         }
+    }
+
+    /// The bubbles' comment counts (one batched round per page of notes).
+    fn want_counts(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<EventId> = self
+            .notes
+            .iter()
+            .filter(|n| self.counts_asked.insert(n.id.to_string()))
+            .map(|n| n.id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let rx = self.core.comment_counts(ids);
+        self.pump(rx, cx);
     }
 
     /// Collect the page's unresolved reply parents and ask core for them
@@ -698,6 +734,10 @@ impl Feed {
             self.want_avatar(&p, cx);
             self.profiles.insert(p.pubkey.clone(), p);
         }
+        // A landing can change a visible row's avatar URL (the picture
+        // arrived after the note): re-pin so the new URL rides the
+        // pinned set, not just this render's fetch.
+        self.pin_window(cx);
     }
 
     /// Queue core fetches for every media URL we haven't got yet. Results
@@ -1007,6 +1047,8 @@ fn note_card(
     // The display timestamp under the current timefmt mode (the item
     // closure computes it — this fn has no cx to read the mode with).
     time: String,
+    // The row's comment count (the bubble), from the Feed's counts map.
+    replies: usize,
     handle: Entity<Feed>,
 ) -> impl IntoElement {
     // TODO(port): note_card.rs layout — P0 minimal card; name fallback chain
@@ -1131,6 +1173,7 @@ fn note_card(
                 zapped,
                 zapping,
                 wallet_ready: eng.wallet_ready,
+                replies,
                 reduced_motion,
             },
             handle,
@@ -1154,6 +1197,7 @@ impl Render for Feed {
                 notes: std::sync::Arc::new(self.notes.clone()),
                 profiles: std::sync::Arc::new(self.profiles.clone()),
                 parents: std::sync::Arc::new(self.parents.clone()),
+                counts: std::sync::Arc::new(self.counts.clone()),
                 engagement: std::sync::Arc::new(self.engagement.clone()),
                 quotes: std::sync::Arc::new(self.quotes.clone()),
                 cards: std::sync::Arc::new(cards::CardState {
@@ -1283,6 +1327,7 @@ impl Render for Feed {
                         let notes = snap.notes.clone();
                         let profiles = snap.profiles.clone();
                         let parents = snap.parents.clone();
+                        let counts = snap.counts.clone();
                         let eng = snap.engagement.clone();
                         let quotes = snap.quotes.clone();
                         let cards = snap.cards.clone();
@@ -1327,6 +1372,8 @@ impl Render for Feed {
                                     let time = crate::timefmt::stamp(secs, cx);
                                     crate::timefmt::ensure(secs, cx);
                                     let eng = eng.clone();
+                                    let replies =
+                                        counts.get(&ev.id.to_string()).copied().unwrap_or(0);
                                     note_card(
                                         idx,
                                         ev,
@@ -1338,6 +1385,7 @@ impl Render for Feed {
                                         &quotes,
                                         &cards,
                                         time,
+                                        replies,
                                         handle.clone(),
                                     )
                                     .into_any_element()

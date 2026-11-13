@@ -455,6 +455,8 @@ impl SettingsView {
         p.undo_enabled = Some(enabled);
         p.undo_seconds = Some(self.undo_secs_val);
         prefs::save(&p);
+        prefs::stamp("undo_enabled");
+        prefs::stamp("undo_seconds");
         self.core.set_undo(enabled, self.undo_secs_val);
         cx.notify();
     }
@@ -476,6 +478,8 @@ impl SettingsView {
     fn toggle_machine_notes(&mut self, cx: &mut Context<Self>) {
         self.machine_hidden = !self.machine_hidden;
         prefs::set_bool("machine_notes_hidden", self.machine_hidden);
+        // Local recency first (the NIP-78 login overlay defers to it).
+        prefs::stamp("machine_notes_hidden");
         // NIP-78: sync (Phase 2 §4.1).
         self.core
             .publish_app_data("machine_notes_hidden", self.machine_hidden.into());
@@ -485,6 +489,7 @@ impl SettingsView {
     fn toggle_reaction_notifs(&mut self, cx: &mut Context<Self>) {
         self.reaction_notifs = !self.reaction_notifs;
         prefs::set_bool("reactionNotifs", self.reaction_notifs);
+        prefs::stamp("reactionNotifs");
         // NIP-78: sync (Phase 2 §4.1).
         self.core
             .publish_app_data("reactionNotifs", self.reaction_notifs.into());
@@ -504,6 +509,10 @@ impl SettingsView {
         let hidden_now = kinds.iter().any(|k| self.hidden_kinds.contains(k));
         prefs::set_kinds_hidden(kinds, !hidden_now);
         self.hidden_kinds = prefs::content_hidden();
+        // Local recency first (the NIP-78 login overlay defers to it) —
+        // a lost publish must not resurrect a stale slot next login and
+        // silently revert the toggles (the all-kinds-checked report).
+        prefs::stamp("content_hidden");
         // NIP-78: sync (Phase 2 §4.1).
         self.core
             .publish_app_data("content_hidden", serde_json::json!(self.hidden_kinds));
