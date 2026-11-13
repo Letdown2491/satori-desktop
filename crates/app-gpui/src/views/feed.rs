@@ -17,11 +17,9 @@ use gpui::{
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Live, ParentNote, Profile, PublishEvent};
 use satori_core::nip::nip10;
-use satori_core::wallet::{Status, WalletEvent};
+use satori_core::wallet::WalletEvent;
 
-use crate::prefs;
-
-use super::{actions, cards, content, nav::Nav, states};
+use super::{actions, cards, content, engagement, nav::Nav, states};
 use crate::{icons, media, theme};
 
 /// Which surface a feed pane carries: the timeline (the visible catalog),
@@ -66,15 +64,9 @@ pub struct Feed {
     /// Push signals since the last load (the live subscription): the
     /// new-notes pill's count. Nothing moves until the reader clicks.
     live_new: usize,
-    liked: HashSet<String>,
-    bookmarked: HashSet<String>,
-    reposted: HashSet<String>,
-    /// Own zaps (D20): note id → settled (the ledger mirrors in core) and
-    /// note id → in flight (optimistic — the amber bolt).
-    zapped: HashSet<String>,
-    zap_pending: HashSet<String>,
-    /// Whether the NWC wallet answers (the dim-bolt affordance).
-    wallet_ready: bool,
+    /// The optimistic engagement mirrors (engagement.rs): the action row's
+    /// glyph state, seeded from core's persisted sets, mutated optimistically.
+    engagement: engagement::Engagement,
     quotes: content::Quotes,
     // Rich-card interaction state (cards.rs): poll tallies + ballots, and
     // my RSVP per calendar event.
@@ -136,12 +128,7 @@ struct FeedSnap {
     notes: std::sync::Arc<Vec<Event>>,
     profiles: std::sync::Arc<HashMap<String, Profile>>,
     parents: std::sync::Arc<HashMap<String, ParentNote>>,
-    liked: std::sync::Arc<HashSet<String>>,
-    bookmarked: std::sync::Arc<HashSet<String>>,
-    reposted: std::sync::Arc<HashSet<String>>,
-    zapped: std::sync::Arc<HashSet<String>>,
-    zap_pending: std::sync::Arc<HashSet<String>>,
-    wallet_ready: bool,
+    engagement: std::sync::Arc<engagement::Engagement>,
     quotes: std::sync::Arc<content::Quotes>,
     cards: std::sync::Arc<cards::CardState>,
 }
@@ -182,12 +169,7 @@ impl Feed {
 
     fn with_mode(core: Arc<Core>, mode: FeedMode, cx: &mut Context<Self>) -> Self {
         let feed = Self {
-            liked: core.liked_set(),
-            bookmarked: core.bookmarked_set(),
-            reposted: core.reposted_set(),
-            zapped: core.zapped_set(),
-            zap_pending: HashSet::new(),
-            wallet_ready: core.wallet().is_ready(),
+            engagement: engagement::Engagement::new(&core),
             core,
             notes: vec![],
             profiles: HashMap::new(),
@@ -883,23 +865,6 @@ impl Feed {
         media::fetch(&self.core, url, cx.entity_id(), cx);
     }
 
-    /// The bolt's tap: 21 sats, no dialog — the money rule. No wallet
-    /// behind it? The dim glyph opens the wallet pane instead. Errors and
-    /// settle flow back on the wallet broadcast (on_wallet).
-    fn zap_tap(&mut self, ev: &Event, cx: &mut Context<Self>) {
-        if !self.wallet_ready {
-            cx.emit(Nav::OpenWallet);
-            return;
-        }
-        // One zap in flight per note (the Feather rule; core enforces too).
-        if !self.zap_pending.insert(ev.id.to_string()) {
-            return;
-        }
-        self.touch();
-        self.core.zap(ev.clone(), super::zap::TAP_SATS * 1000);
-        cx.notify();
-    }
-
     /// WS2 (viewport.rs): the settled viewport pulse. The scroll stream
     /// calls this on every wheel tick and every landing; only the LAST
     /// pulse inside the settle window reaches core (the generation guard
@@ -949,137 +914,14 @@ impl Feed {
     /// repaint. The same snapshot invalidation every data change rides —
     /// no new rendering path.
     fn on_engagement(&mut self, cx: &mut Context<Self>) {
-        self.liked = self.core.liked_set();
-        self.reposted = self.core.reposted_set();
-        self.zapped = self.core.zapped_set();
-        self.touch();
+        engagement::reseed(self);
         cx.notify();
     }
 
-    /// The wallet broadcast → glyph states + the quiet status whisper.
+    /// The wallet broadcast → glyph states + the quiet status whisper
+    /// (engagement.rs's engine; the with_mode pump calls this).
     fn on_wallet(&mut self, ev: WalletEvent, cx: &mut Context<Self>) {
-        match ev {
-            WalletEvent::Status(s) => {
-                self.wallet_ready = matches!(s, Status::Ready(_));
-            }
-            WalletEvent::ZapPaid { note, .. } => {
-                self.zap_pending.remove(&note);
-                self.zapped.insert(note);
-            }
-            WalletEvent::ZapUncertain { note, .. } => {
-                self.zap_pending.remove(&note);
-                self.status = "zap state unknown, check your wallet before retrying".into();
-            }
-            WalletEvent::ZapFailed { note, reason } => {
-                self.zap_pending.remove(&note);
-                self.status = format!("zap didn't go through: {reason}");
-            }
-            WalletEvent::ZapReceipt { note, .. } => {
-                self.zapped.insert(note);
-            }
-            WalletEvent::ConnectFailed(_) => {} // the wallet pane's concern
-        }
-        self.touch();
-        cx.notify();
-    }
-
-    /// Optimistic like, per §1.2: mutate state first (glyph flips vermilion
-    /// now), reconcile against core's publish events later.
-    fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>) {
-        let id = ev.id.to_string();
-        if !self.liked.insert(id) {
-            return;
-        }
-        self.touch();
-        let mut rx = self.core.react(ev);
-        cx.spawn(async move |_, _| while rx.recv().await.is_some() {})
-            .detach();
-    }
-
-    /// Optimistic repost (NIP-18 kind 6): the glyph flips vermilion now, the
-    /// event waits out the undo window in core (the shell's toast carries
-    /// Undo), and a failure — or an undo — rolls the glyph back.
-    fn toggle_repost(&mut self, ev: &Event, cx: &mut Context<Self>) {
-        let id = ev.id.to_string();
-        if !self.reposted.insert(id.clone()) {
-            return;
-        }
-        self.touch();
-        let mut rx = self.core.repost(ev);
-        cx.spawn(async move |this, cx| {
-            while let Some(pv) = rx.recv().await {
-                match pv {
-                    PublishEvent::Failed { .. } | PublishEvent::Undone { .. } => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.reposted.remove(&id);
-                            this.status = "repost didn't go through, try again".into();
-                            this.touch();
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// Bookmark toggle (D38): a real toggle now. The star fills for either
-    /// list (private 10003 / public 30001 — the settings pref picks which
-    /// one a star WRITES); a second click unbookmarks through the RMW that
-    /// clears both. Optimistic, with rollback (the old add-only star made
-    /// a second click a no-op).
-    fn toggle_bookmark(&mut self, ev: &Event, cx: &mut Context<Self>) {
-        let id = ev.id.to_string();
-        let ev_id = ev.id;
-        let adding = self.bookmarked.insert(id.clone());
-        if !adding {
-            self.bookmarked.remove(&id);
-        }
-        // The scope read rides the click: a mid-session pref flip applies
-        // to the NEXT star, the running one keeps its list (prefs.rs's
-        // mtime cache makes this a file stat).
-        let public = prefs::get_bool("bookmarkPublic");
-        self.touch();
-        let mut rx = if adding {
-            self.core.bookmark(ev, public)
-        } else {
-            self.core.unbookmark(ev_id)
-        };
-        cx.spawn(async move |this, cx| {
-            while let Some(pv) = rx.recv().await {
-                match pv {
-                    PublishEvent::Failed { .. } => {
-                        let _ = this.update(cx, |this, cx| {
-                            if adding {
-                                this.bookmarked.remove(&id);
-                            } else {
-                                this.bookmarked.insert(id.clone());
-                            }
-                            this.status = "bookmark didn't go through, try again".into();
-                            this.touch();
-                            cx.notify();
-                        });
-                    }
-                    PublishEvent::Committed { .. } if !adding => {
-                        // Unbookmarking from the Library's list drops the
-                        // row (D38); everywhere else only the star unfills.
-                        let _ = this.update(cx, |this, cx| {
-                            if matches!(this.mode, FeedMode::Bookmarks) {
-                                this.notes.retain(|n| n.id != ev_id);
-                                this.note_ids.remove(&ev_id);
-                                this.list.reset(this.list_len());
-                                this.touch();
-                                cx.notify();
-                            }
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .detach();
+        engagement::on_wallet(self, ev, cx);
     }
 }
 
@@ -1093,19 +935,46 @@ impl Drop for Feed {
 }
 
 /// The row's toggles land here (actions.rs): Feed's optimistic mirrors ARE
-/// the implementation the timeline has always had — the trait just names it.
+/// the implementation the timeline has always had — the trait just names
+/// it. The behavior itself lives in engagement.rs (the extracted engine);
+/// Feed's Host impl carries its two deltas: touch() invalidation and the
+/// Bookmarks row-drop.
+impl engagement::Host for Feed {
+    fn engagement(&mut self) -> &mut engagement::Engagement {
+        &mut self.engagement
+    }
+    fn core(&self) -> &Arc<Core> {
+        &self.core
+    }
+    fn whisper(&mut self, msg: String) {
+        self.status = msg;
+    }
+    fn touched(&mut self) {
+        self.touch();
+    }
+    fn unbookmark_committed(&mut self, ev_id: EventId, cx: &mut Context<Self>) {
+        if matches!(self.mode, FeedMode::Bookmarks) {
+            self.notes.retain(|n| n.id != ev_id);
+            self.note_ids.remove(&ev_id);
+            self.list.reset(self.list_len());
+            self.touch();
+            cx.notify();
+        }
+    }
+}
+
 impl actions::ActionHost for Feed {
     fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>) {
-        self.toggle_like(ev, cx)
+        engagement::toggle_like(self, ev, cx)
     }
     fn toggle_repost(&mut self, ev: &Event, cx: &mut Context<Self>) {
-        self.toggle_repost(ev, cx)
+        engagement::toggle_repost(self, ev, cx)
     }
     fn toggle_bookmark(&mut self, ev: &Event, cx: &mut Context<Self>) {
-        self.toggle_bookmark(ev, cx)
+        engagement::toggle_bookmark(self, ev, cx)
     }
     fn zap_tap(&mut self, ev: &Event, cx: &mut Context<Self>) {
-        self.zap_tap(ev, cx)
+        engagement::zap_tap(self, ev, cx)
     }
 }
 
@@ -1130,12 +999,7 @@ fn note_card(
     ev: &Event,
     profiles: &HashMap<String, Profile>,
     parents: &HashMap<String, ParentNote>,
-    liked: &HashSet<String>,
-    bookmarked: &HashSet<String>,
-    reposted: &HashSet<String>,
-    zapped: &HashSet<String>,
-    zap_pending: &HashSet<String>,
-    wallet_ready: bool,
+    eng: &engagement::Engagement,
     reduced_motion: bool,
     media: &media::Snapshot,
     quotes: &content::Quotes,
@@ -1159,11 +1023,11 @@ fn note_card(
         .map(|p| p.display())
         .unwrap_or_else(|| format!("{}…", &key[..8]));
     let picture = profile.map(|p| p.picture.clone()).unwrap_or_default();
-    let engaged = liked.contains(&id);
-    let saved = bookmarked.contains(&id);
-    let shared = reposted.contains(&id);
-    let zapped = zapped.contains(&id);
-    let zapping = zap_pending.contains(&id);
+    let engaged = eng.liked.contains(&id);
+    let saved = eng.bookmarked.contains(&id);
+    let shared = eng.reposted.contains(&id);
+    let zapped = eng.zapped.contains(&id);
+    let zapping = eng.zap_pending.contains(&id);
     let ev_for_open = ev.clone();
     let ev_for_profile = ev.clone();
     let handle_open = handle.clone();
@@ -1266,7 +1130,7 @@ fn note_card(
                 bookmarked: saved,
                 zapped,
                 zapping,
-                wallet_ready,
+                wallet_ready: eng.wallet_ready,
                 reduced_motion,
             },
             handle,
@@ -1290,12 +1154,7 @@ impl Render for Feed {
                 notes: std::sync::Arc::new(self.notes.clone()),
                 profiles: std::sync::Arc::new(self.profiles.clone()),
                 parents: std::sync::Arc::new(self.parents.clone()),
-                liked: std::sync::Arc::new(self.liked.clone()),
-                bookmarked: std::sync::Arc::new(self.bookmarked.clone()),
-                reposted: std::sync::Arc::new(self.reposted.clone()),
-                zapped: std::sync::Arc::new(self.zapped.clone()),
-                zap_pending: std::sync::Arc::new(self.zap_pending.clone()),
-                wallet_ready: self.wallet_ready,
+                engagement: std::sync::Arc::new(self.engagement.clone()),
                 quotes: std::sync::Arc::new(self.quotes.clone()),
                 cards: std::sync::Arc::new(cards::CardState {
                     poll_tallies: self.poll_tallies.clone(),
@@ -1424,12 +1283,7 @@ impl Render for Feed {
                         let notes = snap.notes.clone();
                         let profiles = snap.profiles.clone();
                         let parents = snap.parents.clone();
-                        let liked = snap.liked.clone();
-                        let reposted = snap.reposted.clone();
-                        let bookmarked = snap.bookmarked.clone();
-                        let zapped = snap.zapped.clone();
-                        let zap_pending = snap.zap_pending.clone();
-                        let wallet_ready = snap.wallet_ready;
+                        let eng = snap.engagement.clone();
                         let quotes = snap.quotes.clone();
                         let cards = snap.cards.clone();
                         let media = media.clone();
@@ -1472,17 +1326,13 @@ impl Render for Feed {
                                     let secs = ev.created_at.as_secs();
                                     let time = crate::timefmt::stamp(secs, cx);
                                     crate::timefmt::ensure(secs, cx);
+                                    let eng = eng.clone();
                                     note_card(
                                         idx,
                                         ev,
                                         &profiles,
                                         &parents,
-                                        &liked,
-                                        &bookmarked,
-                                        &reposted,
-                                        &zapped,
-                                        &zap_pending,
-                                        wallet_ready,
+                                        &eng,
                                         reduced_motion,
                                         &media,
                                         &quotes,
