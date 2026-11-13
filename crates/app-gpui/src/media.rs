@@ -460,6 +460,18 @@ pub fn unpin(urls: &[String], cx: &mut gpui::App) {
     cx.global_mut::<Cache>().unpin_urls(urls);
 }
 
+/// The window swap (D60's verb): unpin the previous set, adopt the new,
+/// pin it. The ORDER is the discipline — unpin must precede the assign,
+/// or the unpin wipes the new window's pins and everything on screen
+/// becomes evictable (the flicker D60 exists to kill).
+pub fn repin(pinned: &mut Vec<String>, urls: Vec<String>, cx: &mut gpui::App) {
+    unpin(pinned, cx);
+    *pinned = urls;
+    for url in pinned.iter() {
+        pin(url, cx);
+    }
+}
+
 pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) {
     if url.is_empty() {
         return;

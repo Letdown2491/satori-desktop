@@ -466,15 +466,11 @@ impl Wallet {
         // toggle instead. Nothing is stored on a refusal.
         let relay_urls: Vec<String> = parsed.relays.iter().map(|r| r.to_string()).collect();
         let verdicts = net_guard::screen_uri_relays(relay_urls.iter().map(String::as_str)).await;
-        let refused: Vec<&net_guard::RelayVerdict> = verdicts
-            .iter()
-            .filter(|v| matches!(v.screen, net_guard::RelayScreen::Refused(_)))
-            .collect();
+        let refused = net_guard::refused_verdicts(&verdicts);
         if !refused.is_empty() {
-            let owned: Vec<net_guard::RelayVerdict> = refused.into_iter().cloned().collect();
             let _ = self
                 .events
-                .send(WalletEvent::RelayScreened { verdicts: owned });
+                .send(WalletEvent::RelayScreened { verdicts: refused });
             return;
         }
         let conn = Conn {
@@ -506,7 +502,13 @@ impl Wallet {
         );
         match probe(&client).await {
             Ok(info) => {
-                *self.client.lock().unwrap() = Some(client);
+                // A live client (wallet B pasted while A is Ready, or a
+                // double connect) must be shut down, not just dropped:
+                // drop does not stop its relay sockets or pumps.
+                let old = self.client.lock().unwrap().replace(client);
+                if let Some(c) = old {
+                    c.shutdown().await;
+                }
                 self.set_status(Status::Ready(info));
             }
             Err(e) => {
@@ -535,14 +537,9 @@ impl Wallet {
         // snapshot of its addresses — a name that now resolves into
         // private space fails the resume loudly, with the same affordance
         // the connect path offers (issue #11; review Tier 2.4).
-        for host in &conn.direct {
-            net_guard::allow_direct_relay(host);
-        }
+        net_guard::allow_direct_relays(conn.direct.iter().map(String::as_str));
         let verdicts = net_guard::screen_uri_relays(conn.relays.iter().map(String::as_str)).await;
-        let refused: Vec<net_guard::RelayVerdict> = verdicts
-            .into_iter()
-            .filter(|v| matches!(v.screen, net_guard::RelayScreen::Refused(_)))
-            .collect();
+        let refused = net_guard::refused_verdicts(&verdicts);
         if !refused.is_empty() {
             let _ = self
                 .events
@@ -576,12 +573,21 @@ impl Wallet {
         );
         match probe(&client).await {
             Ok(info) => {
-                *self.client.lock().unwrap() = Some(client);
+                // A live client (wallet B pasted while A is Ready, or a
+                // double connect) must be shut down, not just dropped:
+                // drop does not stop its relay sockets or pumps.
+                let old = self.client.lock().unwrap().replace(client);
+                if let Some(c) = old {
+                    c.shutdown().await;
+                }
                 self.set_status(Status::Ready(info));
             }
             Err(e) => {
                 client.shutdown().await;
-                eprintln!("[core] wallet resume failed: {e}");
+                eprintln!(
+                    "[core] wallet resume failed: {}",
+                    crate::pool::clean_reason(&e.to_string())
+                );
                 self.set_status(Status::Disconnected);
             }
         }

@@ -169,9 +169,15 @@ impl CommentTarget {
         }
     }
 
-    /// Filters for fetching this target's comments (#e / #a exact matches).
+    /// Filters for fetching this target's comments (#e / #a exact
+    /// matches). Capped: a viral target's whole comment history must not
+    /// come back whole into the reader pane (audit-memory: the pane also
+    /// pinned every fetched comment's avatar before windowing).
     pub fn fetch_filters(&self) -> Vec<Filter> {
-        let kind_filter = Filter::new().kind(Kind::Custom(1111));
+        const COMMENTS_FETCH_LIMIT: usize = 500;
+        let kind_filter = Filter::new()
+            .kind(Kind::Custom(1111))
+            .limit(COMMENTS_FETCH_LIMIT);
         match self {
             CommentTarget::Event { id, .. } => {
                 vec![kind_filter.custom_tag(SingleLetterTag::LOWERCASE_E, id.to_string())]

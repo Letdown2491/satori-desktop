@@ -94,11 +94,23 @@ pub struct ProfileView {
     /// idles open (renders stop, only renders touch) and the next landing
     /// burst took exactly the images on screen.
     pinned: Vec<String>,
+    /// The strips' URL projections, rebuilt once per DATA change (the
+    /// notes vec), not per scroll tick or render: photo_urls/video_urls
+    /// used to re-parse every note's imeta + tags (uncached media_assets
+    /// over the WHOLE paged history) on every wheel event — O(total
+    /// notes) tag parsing on the UI thread to slice ~9 tiles.
+    photo_cache: Vec<String>,
+    video_cache: Vec<VidTile>,
 }
 
 impl EventEmitter<Nav> for ProfileView {}
 
 impl ProfileView {
+    /// The pane's pin set, taken on close (shell.back): pins must not
+    /// outlive the pane, or the registry ratchets — D60's invariant.
+    pub(crate) fn take_pinned(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pinned)
+    }
     pub fn new(core: Arc<Core>, who: PublicKey, is_me: bool, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
@@ -136,6 +148,8 @@ impl ProfileView {
             copied: None,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             pinned: vec![],
+            photo_cache: vec![],
+            video_cache: vec![],
             core,
         };
         // Endless scroll for the strips (the feed's pattern): the list's
@@ -230,11 +244,7 @@ impl ProfileView {
             }
             ProfileTab::Notes => {}
         }
-        media::unpin(&self.pinned, cx);
-        self.pinned = painted;
-        for url in &self.pinned {
-            media::pin(url, cx);
-        }
+        media::repin(&mut self.pinned, painted, cx);
     }
 
     /// Back to the top (rail re-click, the floating whisper): the notes
@@ -283,6 +293,7 @@ impl ProfileView {
                 self.notes = page.notes;
                 self.note_ids = self.notes.iter().map(|n| n.id).collect();
                 self.oldest_ts = self.notes.last().map(|n| n.created_at.as_secs());
+                self.refresh_strips();
                 for note in self.notes.clone() {
                     self.want_media(&note, cx);
                 }
@@ -308,6 +319,7 @@ impl ProfileView {
                     }
                 }
                 self.oldest_ts = self.notes.last().map(|n| n.created_at.as_secs());
+                self.refresh_strips();
                 self.status.clear();
                 if self.has_more {
                     self.maybe_older(self.last_visible_end, cx);
@@ -325,10 +337,11 @@ impl ProfileView {
 
     // --- the strips' projections (Phase 2 §4.3) -------------------------------
 
-    /// The Photos strip: every picture URL in timeline order (kind 20 +
-    /// imeta-bearing kind 1), flat — the grid chunks it into threes.
-    fn photo_urls(&self) -> Vec<String> {
-        self.notes
+    /// Rebuild the strips' URL projections (once per notes change — see
+    /// the field comment).
+    fn refresh_strips(&mut self) {
+        self.photo_cache = self
+            .notes
             .iter()
             .filter(|n| u16::from(n.kind) == 20 || n.kind == Kind::TextNote)
             .flat_map(content::media_assets)
@@ -336,16 +349,9 @@ impl ProfileView {
                 content::MediaAsset::Picture { url } => Some(url),
                 _ => None,
             })
-            .collect()
-    }
-
-    /// The Videos strip: every video asset in timeline order (kind 21/22,
-    /// plus imeta/link videos on kind 1) — url + poster + blurhash + imeta
-    /// mime. All of a note's videos, the same way Photos takes all of its
-    /// pictures. Video files themselves are never fetched; the preview is
-    /// the publisher's poster, a blurhash, or a sniffed first frame (D32).
-    fn video_urls(&self) -> Vec<VidTile> {
-        self.notes
+            .collect();
+        self.video_cache = self
+            .notes
             .iter()
             .filter(|n| matches!(u16::from(n.kind), 1 | 21 | 22))
             .flat_map(|n| {
@@ -361,7 +367,22 @@ impl ProfileView {
                         _ => None,
                     })
             })
-            .collect()
+            .collect();
+    }
+
+    /// The Photos strip: every picture URL in timeline order (kind 20 +
+    /// imeta-bearing kind 1), flat — the grid chunks it into threes.
+    fn photo_urls(&self) -> &[String] {
+        &self.photo_cache
+    }
+
+    /// The Videos strip: every video asset in timeline order (kind 21/22,
+    /// plus imeta/link videos on kind 1) — url + poster + blurhash + imeta
+    /// mime. All of a note's videos, the same way Photos takes all of its
+    /// pictures. Video files themselves are never fetched; the preview is
+    /// the publisher's poster, a blurhash, or a sniffed first frame (D32).
+    fn video_urls(&self) -> &[VidTile] {
+        &self.video_cache
     }
 
     /// The active tab's list-row count (list.reset wants it at event time).
@@ -575,8 +596,9 @@ impl Render for ProfileView {
                 .map(|chunk| Row::Vids(chunk.to_vec()))
                 .collect(),
         };
-        // The Photos strip's lightbox list (tile taps index into it).
-        let pics_all = self.photo_urls();
+        // The Photos strip's lightbox list (tile taps index into it) —
+        // owned: it escapes into the list closure, past pin_window's &mut.
+        let pics_all = self.photo_urls().to_vec();
         let empty = rows.is_empty();
         let following = self.following;
         let muted = self.muted;

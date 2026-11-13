@@ -446,9 +446,9 @@ impl Render for LoginView {
                                             .text_color(rgb(theme::vermilion()))
                                             .child("Allow private host & retry")
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                for h in &hosts {
-                                                    satori_core::net_guard::allow_direct_relay(h);
-                                                }
+                                                satori_core::net_guard::allow_direct_relays(
+                                                    hosts.iter().map(String::as_str),
+                                                );
                                                 this.screened = None;
                                                 this.error.clear();
                                                 this.connect_bunker(cx);

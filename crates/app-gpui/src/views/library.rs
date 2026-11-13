@@ -434,6 +434,12 @@ impl LibraryView {
             }))
             .into_any_element()
     }
+
+    /// The pane's pin set, taken on close (shell.back): pins must not
+    /// outlive the pane, or the registry ratchets — D60's invariant.
+    pub(crate) fn take_pinned(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pinned)
+    }
 }
 
 impl Render for LibraryView {
@@ -544,20 +550,17 @@ impl LibraryView {
         let media = media::Snapshot::new(cx);
         let viewer = cx.entity_id();
         let mut painted: Vec<String> = Vec::new();
+        let mut painted_set = std::collections::HashSet::new();
         for p in self.members.values() {
             media::fetch(&self.core, p.picture.clone(), viewer, cx);
-            if !p.picture.is_empty() && !painted.contains(&p.picture) {
+            if !p.picture.is_empty() && painted_set.insert(p.picture.clone()) {
                 painted.push(p.picture.clone());
             }
         }
         // Pin the avatars this detail paints: the pane idles open (renders
         // stop, only renders touch), so the next landing burst took the
         // avatars on screen (thread.rs render, the same discipline).
-        media::unpin(&self.pinned, cx);
-        self.pinned = painted;
-        for url in &self.pinned {
-            media::pin(url, cx);
-        }
+        media::repin(&mut self.pinned, painted, cx);
         let name = l.display();
         let count = l.members.len();
         div()

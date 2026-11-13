@@ -5,10 +5,11 @@
 //! with DIFFERENT strictness; they are one module now, so they cannot
 //! drift apart again):
 //!
-//! - paste-time URI screens ([`routable_relay`] → [`screen_nwc_uri`] /
-//!   [`screen_bunker_uri`], issue #11: the wallet (nwc) and bunker
-//!   (nostr-connect) clients build their own transports, outside the
-//!   pool's screens; their relay URLs are user-supplied at paste time),
+//! - paste-time URI screens ([`screen_uri_relays`], issue #11: the
+//!   wallet (nwc) and bunker (nostr-connect) clients build their own
+//!   transports, outside the pool's screens; their relay URLs are
+//!   user-supplied at paste time — wss-only, then resolved and
+//!   address-classed concurrently),
 //! - dial-time resolution pinning ([`SafeResolver`], moved here from
 //!   media.rs; [`resolve_pinned_public`] for the screening transport).
 //!
@@ -150,46 +151,6 @@ pub fn routable_relay(url: &str) -> bool {
     }
 }
 
-/// The refusal verdict a screened-out URI's relay gets: names the relay
-/// so the dialog shows WHAT was refused, not just that something was.
-fn relay_refused(url: &str) -> String {
-    format!("the URI's relay {url} is not connectable: private addresses are refused")
-}
-
-/// Paste-time screen for a `nostr+walletconnect://` URI (issue #11): every
-/// relay it asks the wallet transport to dial must pass the same
-/// `routable_relay` screen the pool's routing uses. Err carries the
-/// human-readable verdict for the connect dialog.
-pub fn screen_nwc_uri(uri: &str) -> Result<(), String> {
-    let parsed = nostr::nips::nip47::NostrWalletConnectUri::parse(uri.trim())
-        .map_err(|e| format!("not a valid nostr+walletconnect:// URI: {e}"))?;
-    for relay in &parsed.relays {
-        let url = relay.as_str();
-        if !routable_relay(url) {
-            return Err(relay_refused(url));
-        }
-    }
-    Ok(())
-}
-
-/// Paste-time screen for a `bunker://` URI (issue #11): same screen, the
-/// relay list the nostrconnect transport would dial. nostrconnect:// is
-/// deliberately not ours (D27: kumaOS owns that verb).
-pub fn screen_bunker_uri(uri: &str) -> Result<(), String> {
-    let parsed = nostr::prelude::NostrConnectUri::parse(uri.trim())
-        .map_err(|e| format!("not a valid bunker:// URI: {e}"))?;
-    let NostrConnectUri::Bunker { relays, .. } = &parsed else {
-        return Err("expected bunker:// URI".into());
-    };
-    for relay in relays {
-        let url = relay.as_str();
-        if !routable_relay(url) {
-            return Err(relay_refused(url));
-        }
-    }
-    Ok(())
-}
-
 // --- dial-time resolution pinning (WP1) ------------------------------------
 
 /// The DNS-rebinding-safe resolver (issue #3 WS4). The URL guard checks
@@ -326,17 +287,30 @@ fn write_ledger_file(set: &HashSet<String>) {
     let mut hosts: Vec<&String> = set.iter().collect();
     hosts.sort();
     let body = json!(hosts).to_string();
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let _ = std::fs::create_dir_all(crate::config::data_dir());
-        let _ = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(ledger_path())
-            .and_then(|mut f| f.write_all(body.as_bytes()));
+    // House convention (secrets.rs, the audit-L3 shape): temp sibling +
+    // rename. Plain create() FOLLOWS a pre-planted symlink, and the mode
+    // flag is a no-op on an existing file.
+    let _ = std::fs::create_dir_all(crate::config::data_dir());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tmp = ledger_path().with_extension(format!("tmp-{}-{nanos}", std::process::id()));
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+    else {
+        return;
+    };
+    if f.write_all(body.as_bytes()).is_ok() {
+        drop(f);
+        let _ = std::fs::rename(&tmp, ledger_path());
+    } else {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -348,17 +322,47 @@ pub fn direct_relays() -> Vec<String> {
     hosts
 }
 
-/// Exempt a relay host from the screening path (lowercase host, no
-/// port, no trailing dot — `relay_key`-adjacent normalization).
-pub fn allow_direct_relay(host: &str) {
-    let host = normalize_host(host);
-    // Sentinel "hosts" from unparseable verdicts must never reach the
-    // ledger, whatever the UI does (review Tier 2.6).
-    if host.is_empty() || host.starts_with('(') {
-        return;
+/// Exempt relay hosts from the screening path (bulk): the SAME ledger,
+/// ONE file write for the batch — the wallet resume re-seed and the
+/// dialogs' allow-and-retry all land here, so the write-amplification
+/// and the allow-loop copies die with it. Sentinel "hosts" from
+/// unparseable verdicts must never reach the ledger, whatever the UI
+/// does (review Tier 2.6).
+pub fn allow_direct_relays<'a, I>(hosts: I)
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut dirty = false;
+    {
+        let mut set = direct_hosts().write().unwrap();
+        for host in hosts {
+            let host = normalize_host(host);
+            if host.is_empty() || host.starts_with('(') {
+                continue;
+            }
+            dirty |= set.insert(host);
+        }
     }
-    direct_hosts().write().unwrap().insert(host.clone());
-    write_ledger_file(&direct_hosts().read().unwrap().clone());
+    if dirty {
+        write_ledger_file(&direct_hosts().read().unwrap().clone());
+    }
+}
+
+/// Exempt a relay host from the screening path (single host — the bulk
+/// form's degenerate case, one write).
+pub fn allow_direct_relay(host: &str) {
+    allow_direct_relays([host]);
+}
+
+/// The refused half of a screening round: the one home for what counts
+/// as a refusal, so the three screening callers (bunker connect, NWC
+/// connect, NWC resume) can never disagree on the classification.
+pub fn refused_verdicts(verdicts: &[RelayVerdict]) -> Vec<RelayVerdict> {
+    verdicts
+        .iter()
+        .filter(|v| matches!(v.screen, RelayScreen::Refused(_)))
+        .cloned()
+        .collect()
 }
 
 /// Drop an exemption (relay retired from the session's lists).
@@ -447,34 +451,51 @@ pub async fn screen_uri_relays<'a, I>(urls: I) -> Vec<RelayVerdict>
 where
     I: IntoIterator<Item = &'a str>,
 {
+    // Phase 1, sync: parse and exempt-check everything. Unparseable
+    // inside an already-parsed URI: refuse shut.
     let mut verdicts = Vec::new();
+    let mut to_resolve: Vec<(String, url::Url)> = Vec::new();
     for url in urls {
-        let parsed = match url::Url::parse(url) {
-            Ok(p) => p,
-            Err(_) => {
-                // Unparseable inside an already-parsed URI: refuse shut.
-                verdicts.push(RelayVerdict::refused(url, "(unparseable)", Vec::new()));
-                continue;
+        match url::Url::parse(url) {
+            Ok(parsed) => {
+                let host = parsed.host_str().map(normalize_host);
+                if user_chosen_relay(url) {
+                    verdicts.push(RelayVerdict {
+                        url: url.to_string(),
+                        host: host.unwrap_or_default(),
+                        screen: RelayScreen::Exempted,
+                    });
+                } else {
+                    to_resolve.push((url.to_string(), parsed));
+                }
             }
-        };
+            Err(_) => verdicts.push(RelayVerdict::refused(url, "(unparseable)", Vec::new())),
+        }
+    }
+    // Phase 2, concurrent: resolve all names with a per-lookup timeout —
+    // N URI relays cost the slowest lookup, not the sum, and a dead name
+    // cannot park the connect dialog for the OS resolver's full patience.
+    let futs = to_resolve.into_iter().map(|(url, parsed)| async move {
         let Some(host) = parsed.host_str() else {
-            verdicts.push(RelayVerdict::refused(url, "(no host)", Vec::new()));
-            continue;
+            return RelayVerdict::refused(&url, "(no host)", Vec::new());
         };
         let key = normalize_host(host);
-        if user_chosen_relay(url) {
-            verdicts.push(RelayVerdict {
-                url: url.to_string(),
-                host: key,
-                screen: RelayScreen::Exempted,
-            });
-            continue;
+        // One ruleset: only wss dials (D51's routable_relay check 3). A
+        // pasted ws:// relay would otherwise hand the wallet/bunker
+        // transport a cleartext socket the IP screen never sees.
+        if parsed.scheme() != "wss" {
+            return RelayVerdict::refused(&url, "(not wss)", Vec::new());
         }
         // Resolve the normalized key: `host_str` keeps the brackets on
         // IPv6 literals, and `lookup_host` wants them bare — and the
         // ledger compares against the same normalized form.
-        let screen = match tokio::net::lookup_host((key.as_str(), 0)).await {
-            Ok(addrs) => {
+        let screen = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::net::lookup_host((key.as_str(), 0)),
+        )
+        .await
+        {
+            Ok(Ok(addrs)) => {
                 let refused: Vec<IpAddr> = addrs
                     .map(|a| a.ip())
                     .filter(|ip| !is_public_ip(ip))
@@ -487,15 +508,17 @@ where
                     RelayScreen::Refused(refused)
                 }
             }
-            // No answer / resolver down: dial weather, not a refusal.
-            Err(_) => RelayScreen::Public,
+            // No answer / resolver down / too slow: dial weather, not a
+            // refusal.
+            _ => RelayScreen::Public,
         };
-        verdicts.push(RelayVerdict {
-            url: url.to_string(),
+        RelayVerdict {
+            url,
             host: key,
             screen,
-        });
-    }
+        }
+    });
+    verdicts.extend(futures_util::future::join_all(futs).await);
     verdicts
 }
 
@@ -613,7 +636,7 @@ mod tests {
     #[test]
     fn uri_screens_refuse_private_relays() {
         // The hostile spellings the routable screen catches, carried by a
-        // real NIP-47 URI — the D51 list, plus the transition-mechanism
+        // real URI relay — the D51 list, plus the transition-mechanism
         // literals the loose screen used to let through (their embedded
         // IPv4 is internal; the authority sees it).
         let hostile = [
@@ -636,30 +659,59 @@ mod tests {
             "[2001:0:c0a8:101::1]", // Teredo server 192.168.1.1
         ];
         for host in hostile {
-            let uri = format!(
-                "nostr+walletconnect://b889ff5b1513b641e2a139f661a661364979c5beee91842f8f0ef42ab558e9d4?secret=71a8c14c1407c113601079c4302dab36460f0ccd0ad506f1f2dc73b5100e4f3c&relay=wss%3A%2F%2F{host}"
+            assert!(
+                !routable_relay(&format!("wss://{host}")),
+                "host {host} must not be connectable"
             );
-            let err = screen_nwc_uri(&uri).unwrap_err();
-            assert!(err.contains("not connectable"), "host {host}: {err}");
         }
     }
 
     #[test]
     fn uri_screens_pass_public_relays() {
-        // The stock test URI (relay.damus.io) passes; a public IP literal
-        // passes too, and a transition mechanism with a PUBLIC embedded
-        // leg passes — the authority screens the embedded v4, not the
-        // prefix.
-        let uri = "nostr+walletconnect://b889ff5b1513b641e2a139f661a661364979c5beee91842f8f0ef42ab558e9d4?secret=71a8c14c1407c113601079c4302dab36460f0ccd0ad506f1f2dc73b5100e4f3c&relay=wss%3A%2F%2Frelay.damus.io";
-        assert!(screen_nwc_uri(uri).is_ok());
-        let uri = "nostr+walletconnect://b889ff5b1513b641e2a139f661a661364979c5beee91842f8f0ef42ab558e9d4?secret=71a8c14c1407c113601079c4302dab36460f0ccd0ad506f1f2dc73b5100e4f3c&relay=wss%3A%2F%2F%5B64%3Aff9b%3A%3A8.8.8.8%5D";
-        assert!(screen_nwc_uri(uri).is_ok());
+        // A public name passes; a transition mechanism with a PUBLIC
+        // embedded leg passes — the authority screens the embedded v4,
+        // not the prefix.
+        assert!(routable_relay("wss://relay.damus.io"));
+        assert!(routable_relay("wss://[64:ff9b::8.8.8.8]"));
+    }
+
+    // --- the paste-time async screen (screen_uri_relays) --------------------
+
+    #[tokio::test]
+    async fn uri_screen_refuses_cleartext_and_unparseable() {
+        // One ruleset means the scheme too: a pasted ws:// relay would
+        // hand the wallet transport a cleartext socket the IP screen
+        // never sees.
+        let verdicts = screen_uri_relays(["ws://relay.example", "ftp://relay.example"]).await;
+        assert_eq!(verdicts.len(), 2);
+        for v in &verdicts {
+            assert!(matches!(v.screen, RelayScreen::Refused(_)), "{v:?}");
+            assert_eq!(v.host, "(not wss)");
+        }
+        let verdicts = screen_uri_relays(["not a url \\ ia"]).await;
+        assert_eq!(verdicts.len(), 1);
+        assert_eq!(verdicts[0].host, "(unparseable)");
+        assert!(matches!(verdicts[0].screen, RelayScreen::Refused(_)));
     }
 
     #[test]
-    fn uri_screens_reject_garbage() {
-        assert!(screen_nwc_uri("nostr+walletconnect://nope").is_err());
-        assert!(screen_bunker_uri("nostrconnect://not-ours").is_err());
+    fn refused_partition_is_the_one_home() {
+        let verdicts = vec![
+            RelayVerdict::refused("ws://a", "(not wss)", Vec::new()),
+            RelayVerdict {
+                url: "wss://b".into(),
+                host: "b".into(),
+                screen: RelayScreen::Public,
+            },
+            RelayVerdict {
+                url: "wss://c".into(),
+                host: "c".into(),
+                screen: RelayScreen::Exempted,
+            },
+        ];
+        let refused = refused_verdicts(&verdicts);
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].host, "(not wss)");
     }
 
     // --- dial-time resolution pinning --------------------------------------

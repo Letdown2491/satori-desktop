@@ -11,8 +11,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use gpui::{
-    AnyElement, Context, Div, Entity, EventEmitter, FontWeight, ListAlignment, ListState, Render,
-    SharedString, Window, div, img, list, prelude::*, px, relative, rgb,
+    AnyElement, Context, Div, Entity, EventEmitter, FontWeight, ListAlignment, ListScrollEvent,
+    ListState, Render, SharedString, Window, div, img, list, prelude::*, px, relative, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
@@ -34,14 +34,25 @@ pub struct ArticleView {
     /// idle-pane flash): a long read outlives the grace window — renders
     /// stop while the reader sits on the article, so foreign landings
     /// would evict exactly the images on screen. Released wholesale on
-    /// the next render; the set is fixed per article, so after the first
-    /// render every pin is a no-op.
+    /// the next render; the article images are bounded content (one
+    /// article), the comment avatars ride the scroll window.
     pinned: Vec<String>,
+    /// The comments list's visible range (the scroll handler), so the
+    /// avatar fetch/pin window follows the scroll — the whole comment
+    /// set must never pin (D60: a viral article's 5000 avatars would
+    /// ratchet the registry and starve the gate).
+    vis_start: usize,
+    vis_end: usize,
 }
 
 impl EventEmitter<Nav> for ArticleView {}
 
 impl ArticleView {
+    /// The pane's pin set, taken on close (shell.back): pins must not
+    /// outlive the pane, or the registry ratchets — D60's invariant.
+    pub(crate) fn take_pinned(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pinned)
+    }
     pub fn new(core: Arc<Core>, ev: Event, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
@@ -60,12 +71,26 @@ impl ArticleView {
             comments: vec![],
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             pinned: vec![],
+            vis_start: 0,
+            vis_end: 0,
         };
         // Mentions in the body resolve to @names, same as the feed and
         // thread panes (TODO(port): content.ts mentionPubkeys) — and the
         // author, for the byline.
         view.want_names(cx);
         view.want_media(cx);
+        // The comment rows' avatar fetch/pin window: track the visible
+        // range (notifications.rs set_scroll_handler, same shape) and let
+        // render pin exactly those avatars.
+        let this = cx.entity().downgrade();
+        view.list
+            .set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
+                let _ = this.update(cx, |r, cx| {
+                    r.vis_start = ev.visible_range.start;
+                    r.vis_end = ev.visible_range.end;
+                    cx.notify();
+                });
+            });
         // The comments section (NIP-22): the article is an addressable
         // root — its d tag IS the thread's address (CommentTarget::Address;
         // reply_tags preserves it for nested replies). No d tag (blank
@@ -513,6 +538,12 @@ impl Render for ArticleView {
         // per render).
         let cover = content::article_cover(&self.ev);
         let blocks = markdown::blocks(&self.ev.content);
+        let block_count = blocks.len();
+        // Head items (title, byline, cover), one per markdown block, then
+        // the comments section: a header (count + the reply affordance)
+        // and one row per comment.
+        let head_count = 2 + cover.is_some() as usize;
+        let comments_base = head_count + block_count;
         if !author_pic.is_empty() {
             media::fetch(&self.core, author_pic.clone(), cx.entity_id(), cx);
         }
@@ -559,8 +590,16 @@ impl Render for ArticleView {
         }
         // The comments section's avatars: fetched here (a silent no-op
         // once ready; the landing notifies the view) and pinned with the
-        // rest — an idle read outlives any grace window.
-        for c in &self.comments {
+        // rest — but ONLY the visible rows' avatars (D60 windowing; the
+        // scroll handler feeds vis_start/vis_end). A viral article's
+        // whole comment set used to pin: 5000 avatars ratchet the
+        // registry forever and starve the media gate on open.
+        let av_lo = self.vis_start.saturating_sub(comments_base + 1);
+        let av_hi = self
+            .vis_end
+            .saturating_sub(comments_base + 1)
+            .min(self.comments.len());
+        for c in self.comments[av_lo..av_hi.max(av_lo)].iter() {
             let pic = self
                 .profiles
                 .get(&c.pubkey.to_string())
@@ -573,11 +612,7 @@ impl Render for ArticleView {
                 }
             }
         }
-        media::unpin(&self.pinned, cx);
-        self.pinned = painted;
-        for url in &self.pinned {
-            media::pin(url, cx);
-        }
+        media::repin(&mut self.pinned, painted, cx);
         // Mode-aware stamp; ensure refines Block mode from the bridge
         // (render-path spawns are silent no-ops when cached — media.rs's
         // eviction re-request is the same pattern).
@@ -589,13 +624,7 @@ impl Render for ArticleView {
         let minutes = self.ev.content.split_whitespace().count() / 220 + 1;
         let profiles = self.profiles.clone();
         let media = media_snap;
-        let block_count = blocks.len();
 
-        // Head items (title, byline, cover), one per markdown block, then
-        // the comments section: a header (count + the reply affordance)
-        // and one row per comment.
-        let head_count = 2 + cover.is_some() as usize;
-        let comments_base = head_count + block_count;
         let item_count = comments_base + 1 + self.comments.len();
         if self.list.item_count() != item_count {
             self.list.reset(item_count);

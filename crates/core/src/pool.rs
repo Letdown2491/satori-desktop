@@ -912,7 +912,7 @@ pub(crate) fn gate_publish_and_tombstone(
 
 /// Relay-supplied text is hostile input: strip control chars (a message
 /// carrying `\n` could forge log lines) and cap the length.
-fn clean_reason(s: &str) -> String {
+pub(crate) fn clean_reason(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).take(120).collect()
 }
 

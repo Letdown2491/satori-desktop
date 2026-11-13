@@ -111,6 +111,11 @@ impl engagement::Host for ThreadView {
 }
 
 impl ThreadView {
+    /// The pane's pin set, taken on close (shell.back): pins must not
+    /// outlive the pane, or the registry ratchets — D60's invariant.
+    pub(crate) fn take_pinned(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pinned)
+    }
     pub fn new(core: Arc<Core>, id: EventId, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
@@ -656,8 +661,7 @@ impl Render for ThreadView {
                 }
             }
         }
-        media::unpin(&self.pinned, cx);
-        self.pinned = painted;
+        media::repin(&mut self.pinned, painted, cx);
         // Rebuild the render snapshot only when the DATA changed (any
         // mutation sets snap_dirty): the reply tree, profiles, quotes and
         // the engagement mirrors used to deep-clone per repaint (the

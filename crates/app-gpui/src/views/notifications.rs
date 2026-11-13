@@ -239,6 +239,11 @@ pub struct NotificationsView {
 impl EventEmitter<Nav> for NotificationsView {}
 
 impl NotificationsView {
+    /// The pane's pin set, taken on close (shell.back): pins must not
+    /// outlive the pane, or the registry ratchets — D60's invariant.
+    pub(crate) fn take_pinned(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pinned)
+    }
     /// Fetched at construction — a GPUI pane is built when shown, so this is
     /// the GTK page's fetch-on-show hook. Opening also marks seen: the
     /// pre-visit high-water splits the page into New / Earlier.
@@ -291,7 +296,8 @@ impl NotificationsView {
                     }
                     // The window moved: re-pin its media (the rows' fetches
                     // ride the item closures).
-                    n.pin_window(cx);
+                    let rows = n.visible_rows();
+                    n.pin_window(&rows, cx);
                 });
             });
         // The wallet broadcast (D20): the rows' bolts follow every zap,
@@ -337,27 +343,40 @@ impl NotificationsView {
         .detach();
     }
 
+    /// The window's cutoff — rows AND chip tallies scope to this ONE
+    /// number. The chip-vs-tap agreement ("a chip's count and its tap's
+    /// row list agree by construction") holds only if both sides read
+    /// the same cutoff, so it lives here, not at each site.
+    fn window_cutoff(&self) -> u64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        now.saturating_sub(self.window.secs())
+    }
+
+    fn in_window(&self, created: u64, cutoff: u64) -> bool {
+        created >= cutoff
+    }
+
     /// The rows after the chip filter (None: all of them). Section
     /// labels survive — a filtered page keeps its New/Earlier rails.
     fn visible_rows(&self) -> Vec<Row> {
         // The window scopes the rows too (the chips count exactly this
         // set): a row older than the cutoff is out, whatever classified
-        // it. The class chip filters on top.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let cutoff = now.saturating_sub(self.window.secs());
-        let filtered: Vec<Row> = self
+        // it. The class chip filters on top. ONE pass, no intermediate:
+        // each surviving row clones once.
+        let cutoff = self.window_cutoff();
+        let filtered: Vec<&Row> = self
             .rows
             .iter()
             .filter(|r| match r {
                 Row::Label(_) => true,
                 Row::Note(ev, t) => {
-                    ev.created_at.as_secs() >= cutoff && self.class_filter.is_none_or(|f| *t == f)
+                    self.in_window(ev.created_at.as_secs(), cutoff)
+                        && self.class_filter.is_none_or(|f| *t == f)
                 }
             })
-            .cloned()
             .collect();
         // Drop a section label whose notes all filtered out — an orphan
         // "New" header promises rows that aren't there.
@@ -366,13 +385,29 @@ impl NotificationsView {
             match r {
                 Row::Label(_) => {
                     if filtered[i..].iter().any(|q| matches!(q, Row::Note(..))) {
-                        out.push(r.clone());
+                        out.push((*r).clone());
                     }
                 }
-                _ => out.push(r.clone()),
+                _ => out.push((*r).clone()),
             }
         }
         out
+    }
+
+    /// The visible row count WITHOUT cloning the rows (the reset/scroll
+    /// sites only need the length).
+    fn visible_row_count(&self) -> usize {
+        let cutoff = self.window_cutoff();
+        self.rows
+            .iter()
+            .filter(|r| match r {
+                Row::Label(_) => true,
+                Row::Note(ev, t) => {
+                    self.in_window(ev.created_at.as_secs(), cutoff)
+                        && self.class_filter.is_none_or(|f| *t == f)
+                }
+            })
+            .count()
     }
 
     /// Ask the core to resolve the notes these notifications answer
@@ -442,7 +477,7 @@ impl NotificationsView {
             }
             _ => {}
         }
-        self.list.reset(self.visible_rows().len());
+        self.list.reset(self.visible_row_count());
         cx.notify();
     }
 
@@ -458,9 +493,10 @@ impl NotificationsView {
     /// set is everything the visible rows paint: each row's author avatar
     /// plus the note's own media. The item closures fetch their rows on
     /// scroll (notif_card); this keeps the PIN matching what's on screen so
-    /// an idle page survives landing bursts.
-    fn pin_window(&mut self, cx: &mut Context<Self>) {
-        let visible = self.visible_rows();
+    /// an idle page survives landing bursts. `visible` is the caller's
+    /// already-filtered rows (render computed them for the list; the scroll
+    /// handler builds the window itself).
+    fn pin_window(&mut self, visible: &[Row], cx: &mut Context<Self>) {
         let win_start = self.first_visible_start.min(visible.len());
         let win_end = self.last_visible_end.max(win_start + 8).min(visible.len());
         let mut painted: Vec<String> = Vec::new();
@@ -478,11 +514,7 @@ impl NotificationsView {
                 }
             }
         }
-        media::unpin(&self.pinned, cx);
-        self.pinned = painted;
-        for url in &self.pinned {
-            media::pin(url, cx);
-        }
+        media::repin(&mut self.pinned, painted, cx);
     }
 
     /// The tally strip: the timeframe dropdown (scopes chips AND rows)
@@ -496,12 +528,10 @@ impl NotificationsView {
     /// persists in prefs.json.
     fn counts_strip(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         // Count each class over the WINDOW's rows (the same rows the
-        // list shows — visible_rows applies class on top of this).
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let cutoff = now.saturating_sub(self.window.secs());
+        // list shows — visible_rows applies class on top of this). The
+        // cutoff comes from the shared fn: chip counts and the tap's row
+        // list cannot disagree about the window edge.
+        let cutoff = self.window_cutoff();
         let mut tallies = [0usize; 7];
         let mut in_window = 0usize;
         for row in &self.rows {
@@ -570,7 +600,7 @@ impl NotificationsView {
                             if this.window != w {
                                 this.window = w;
                                 crate::prefs::set_string("notifCountWindow", w.label());
-                                this.list.reset(this.visible_rows().len());
+                                this.list.reset(this.visible_row_count());
                                 this.list.scroll_to(ListOffset {
                                     item_ix: 0,
                                     offset_in_item: px(0.),
@@ -1098,7 +1128,7 @@ impl Render for NotificationsView {
         // The item closures fetch their own rows on scroll (notif_card), so
         // this is the landing-time backstop; fetch is a silent no-op for
         // entries the cache holds, so this can't loop a render.
-        self.pin_window(cx);
+        self.pin_window(&rows, cx);
         let quotes = self.quotes.clone();
         let parents = self.parents.clone();
         let me = self.me.clone();

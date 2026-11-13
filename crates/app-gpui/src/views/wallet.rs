@@ -247,9 +247,9 @@ impl Render for WalletView {
                             .text_color(rgb(theme::vermilion()))
                             .child("Allow & retry")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                for v in &verdicts {
-                                    satori_core::net_guard::allow_direct_relay(&v.host);
-                                }
+                                satori_core::net_guard::allow_direct_relays(
+                                    verdicts.iter().map(|v| v.host.as_str()),
+                                );
                                 this.screened = None;
                                 this.err = None;
                                 this.connect(cx);

@@ -670,11 +670,7 @@ impl Feed {
         for note in &self.notes[start..end] {
             urls.extend(card_media_urls(note, &self.profiles));
         }
-        media::unpin(&self.pinned, cx);
-        self.pinned = urls;
-        for url in &self.pinned {
-            media::pin(url, cx);
-        }
+        media::repin(&mut self.pinned, urls, cx);
     }
 
     /// The bubbles' comment counts (one batched round per page of notes).
@@ -962,6 +958,13 @@ impl Feed {
     /// (engagement.rs's engine; the with_mode pump calls this).
     fn on_wallet(&mut self, ev: WalletEvent, cx: &mut Context<Self>) {
         engagement::on_wallet(self, ev, cx);
+    }
+
+    /// The pane's pin set, taken on close (shell.back): pins must not
+    /// outlive the pane, or the registry ratchets (closed panes' entries
+    /// skip every eviction sweep — D60's invariant).
+    pub(crate) fn take_pinned(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pinned)
     }
 }
 

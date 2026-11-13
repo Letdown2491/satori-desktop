@@ -35,6 +35,31 @@ use super::{
 };
 use crate::{icons, media, theme};
 
+impl Pane {
+    /// Release the pane's media pins (shell.back: the pane is about to
+    /// drop — its pin set must drop with it; D60's close path).
+    fn release_media(&self, cx: &mut Context<Shell>) {
+        let released = match self {
+            Pane::Feed(e) | Pane::Articles(e) | Pane::Hashtag(e) => {
+                e.update(cx, |v, _| v.take_pinned())
+            }
+            Pane::Thread(e) => e.update(cx, |v, _| v.take_pinned()),
+            Pane::Profile(e) => e.update(cx, |v, _| v.take_pinned()),
+            Pane::Library(e) => e.update(cx, |v, _| v.take_pinned()),
+            Pane::Notifications(e) => e.update(cx, |v, _| v.take_pinned()),
+            Pane::Search(e) => e.update(cx, |v, _| v.take_pinned()),
+            Pane::Article(e) => e.update(cx, |v, _| v.take_pinned()),
+            // Panes that pin nothing.
+            Pane::EditProfile(_) | Pane::Settings(_) | Pane::Composer(_) | Pane::Wallet(_) => {
+                return;
+            }
+        };
+        if !released.is_empty() {
+            media::unpin(&released, cx);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum Pane {
     Feed(Entity<Feed>),
@@ -750,6 +775,10 @@ impl Shell {
                 })
                 .detach();
             }
+            // D60: the outgoing pane's media pins release with it — the
+            // registry is global, so a popped pane's set would ratchet
+            // (its entries skip every eviction sweep) for the session.
+            self.stack.last().inspect(|pane| pane.release_media(cx));
             self.stack.pop();
             self.refocus = true;
             cx.notify();

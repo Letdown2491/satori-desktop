@@ -1794,11 +1794,7 @@ impl Core {
         let relay_urls: Vec<String> = parsed.relays().iter().map(|r| r.to_string()).collect();
         let verdicts =
             crate::net_guard::screen_uri_relays(relay_urls.iter().map(String::as_str)).await;
-        let refused: Vec<crate::net_guard::RelayVerdict> = verdicts
-            .iter()
-            .filter(|v| matches!(v.screen, crate::net_guard::RelayScreen::Refused(_)))
-            .cloned()
-            .collect();
+        let refused = crate::net_guard::refused_verdicts(&verdicts);
         if !refused.is_empty() {
             return Err(LoginError::RelayScreened(refused));
         }
@@ -7388,11 +7384,7 @@ pub fn apply_profile_patch(stored: &str, patch: &ProfileEdit) -> String {
 /// another reply) means "not this note's direct child" — counts and faces
 /// alike attribute to the note the conversation hangs off, one level only.
 fn parent_in_set(ev: &Event, ids: &std::collections::HashSet<EventId>) -> Option<EventId> {
-    ev.tags
-        .clone()
-        .event_ids()
-        .last()
-        .filter(|pid| ids.contains(pid))
+    ev.tags.event_ids().last().filter(|pid| ids.contains(pid))
 }
 
 #[cfg(test)]

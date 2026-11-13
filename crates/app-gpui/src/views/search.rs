@@ -64,6 +64,11 @@ pub struct SearchView {
 impl EventEmitter<Nav> for SearchView {}
 
 impl SearchView {
+    /// The pane's pin set, taken on close (shell.back): pins must not
+    /// outlive the pane, or the registry ratchets — D60's invariant.
+    pub(crate) fn take_pinned(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pinned)
+    }
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
@@ -151,16 +156,16 @@ impl SearchView {
         // too (the clean-answer rule). The rows are on screen while the
         // pane idles — render touches stop with rendering, so the rows'
         // thumbs get pinned (and the previous query's released).
-        media::unpin(&self.pinned, cx);
+        let mut painted: Vec<String> = Vec::new();
         self.people.clear();
         for p in self.core.search_people(&q) {
             if !p.picture.is_empty() {
-                media::pin(&p.picture, cx);
-                self.pinned.push(p.picture.clone());
+                painted.push(p.picture.clone());
             }
             self.profiles.insert(p.pubkey.clone(), p.clone());
             self.people.push(p.pubkey);
         }
+        media::repin(&mut self.pinned, painted, cx);
         self.target = uris::uri_target(&q);
         let mut rx = self.core.search(q);
         cx.spawn(async move |this, cx| {

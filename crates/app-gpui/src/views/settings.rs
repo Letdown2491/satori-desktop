@@ -1201,13 +1201,15 @@ impl SettingsView {
             // --- Direct-relay exemptions (issue #11, review Tier 2.1) ------
             // Consent granted from a pasted URI's screening dialog: these
             // hosts dial directly, bypassing screening, for every relay
-            // use. The pane is the revocation surface.
+            // use. The pane is the revocation surface. The field, not the
+            // global: the render body would otherwise clone+sort the set
+            // 2-3 times per paint.
             .child(
                 group(
                     "Direct-relay exemptions",
-                    "Hosts you allowed from a wallet or bunker URI's private-address                      warning. They dial directly, bypassing relay screening, for every                      use. Revoke to screen them again.",
+                    "Hosts you allowed from a wallet or bunker URI's private-address warning. They dial directly, bypassing relay screening, for every use. Revoke to screen them again.",
                 )
-                .when(satori_core::net_guard::direct_relays().is_empty(), |d| {
+                .when(self.direct_relays.is_empty(), |d| {
                     d.child(
                         div()
                             .text_size(px(theme::T_SMALL))
@@ -1215,7 +1217,7 @@ impl SettingsView {
                             .child("none"),
                     )
                 })
-                .children(satori_core::net_guard::direct_relays().iter().map(|host| {
+                .children(self.direct_relays.iter().map(|host| {
                     let host_rm = host.clone();
                     div()
                         .w_full()
