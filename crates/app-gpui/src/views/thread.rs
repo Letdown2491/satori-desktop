@@ -56,11 +56,6 @@ pub struct ThreadView {
     /// the data changed.
     snap: Option<ThreadSnap>,
     snap_dirty: bool,
-    /// The pinned set (media.rs): everything the render paints — a thread
-    /// is read idly for minutes, renders stop, and only renders touch;
-    /// without pins the next landing burst took exactly the images on
-    /// screen (the timeline's disappearing-image report, one pane over).
-    pinned: Vec<String>,
 }
 
 /// The render-time snapshot: everything the item closure reads, rebuilt
@@ -111,11 +106,6 @@ impl engagement::Host for ThreadView {
 }
 
 impl ThreadView {
-    /// The pane's pin set, taken on close (shell.back): pins must not
-    /// outlive the pane, or the registry ratchets — D60's invariant.
-    pub(crate) fn take_pinned(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.pinned)
-    }
     pub fn new(core: Arc<Core>, id: EventId, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
@@ -134,7 +124,6 @@ impl ThreadView {
             parents: HashMap::new(),
             parents_asked: HashSet::new(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
-            pinned: vec![],
             engagement,
             snap: None,
             snap_dirty: true,
@@ -661,7 +650,7 @@ impl Render for ThreadView {
                 }
             }
         }
-        media::repin(&mut self.pinned, painted, cx);
+        media::repin(cx.entity_id(), painted, cx);
         // Rebuild the render snapshot only when the DATA changed (any
         // mutation sets snap_dirty): the reply tree, profiles, quotes and
         // the engagement mirrors used to deep-clone per repaint (the

@@ -225,10 +225,6 @@ pub struct NotificationsView {
     /// notifications page carries the timeline's affordances.
     engagement: engagement::Engagement,
     list: ListState,
-    /// The pinned set (media.rs): everything the render paints — the page
-    /// idles open (renders stop, only renders touch) and the next landing
-    /// burst took exactly the images on screen.
-    pinned: Vec<String>,
     /// The scroll stream's visible window: the fetch/pin sweep covers only
     /// these rows (the feed's window discipline — a full-page sweep queued
     /// every row's media through the six-slot gate).
@@ -239,11 +235,6 @@ pub struct NotificationsView {
 impl EventEmitter<Nav> for NotificationsView {}
 
 impl NotificationsView {
-    /// The pane's pin set, taken on close (shell.back): pins must not
-    /// outlive the pane, or the registry ratchets — D60's invariant.
-    pub(crate) fn take_pinned(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.pinned)
-    }
     /// Fetched at construction — a GPUI pane is built when shown, so this is
     /// the GTK page's fetch-on-show hook. Opening also marks seen: the
     /// pre-visit high-water splits the page into New / Earlier.
@@ -274,7 +265,6 @@ impl NotificationsView {
             receipts_open: false,
             engagement,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
-            pinned: vec![],
             first_visible_start: 0,
             last_visible_end: 0,
         };
@@ -514,7 +504,7 @@ impl NotificationsView {
                 }
             }
         }
-        media::repin(&mut self.pinned, painted, cx);
+        media::repin(cx.entity_id(), painted, cx);
     }
 
     /// The tally strip: the timeframe dropdown (scopes chips AND rows)

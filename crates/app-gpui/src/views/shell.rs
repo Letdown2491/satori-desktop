@@ -37,26 +37,24 @@ use crate::{icons, media, theme};
 
 impl Pane {
     /// Release the pane's media pins (shell.back: the pane is about to
-    /// drop — its pin set must drop with it; D60's close path).
+    /// drop — its pin set must drop with it; D60's close path). The
+    /// registry is owner-keyed (D62), so the release is the owner key —
+    /// urls still pinned by another surface ride on.
     fn release_media(&self, cx: &mut Context<Shell>) {
-        let released = match self {
-            Pane::Feed(e) | Pane::Articles(e) | Pane::Hashtag(e) => {
-                e.update(cx, |v, _| v.take_pinned())
-            }
-            Pane::Thread(e) => e.update(cx, |v, _| v.take_pinned()),
-            Pane::Profile(e) => e.update(cx, |v, _| v.take_pinned()),
-            Pane::Library(e) => e.update(cx, |v, _| v.take_pinned()),
-            Pane::Notifications(e) => e.update(cx, |v, _| v.take_pinned()),
-            Pane::Search(e) => e.update(cx, |v, _| v.take_pinned()),
-            Pane::Article(e) => e.update(cx, |v, _| v.take_pinned()),
-            // Panes that pin nothing.
-            Pane::EditProfile(_) | Pane::Settings(_) | Pane::Composer(_) | Pane::Wallet(_) => {
-                return;
-            }
+        let id = match self {
+            Pane::Feed(e) | Pane::Articles(e) | Pane::Hashtag(e) => e.entity_id(),
+            Pane::Thread(e) => e.entity_id(),
+            Pane::Profile(e) => e.entity_id(),
+            Pane::Library(e) => e.entity_id(),
+            Pane::Notifications(e) => e.entity_id(),
+            Pane::Search(e) => e.entity_id(),
+            Pane::Article(e) => e.entity_id(),
+            Pane::EditProfile(e) => e.entity_id(),
+            Pane::Settings(e) => e.entity_id(),
+            Pane::Composer(e) => e.entity_id(),
+            Pane::Wallet(e) => e.entity_id(),
         };
-        if !released.is_empty() {
-            media::unpin(&released, cx);
-        }
+        media::release(id, cx);
     }
 }
 
@@ -928,7 +926,9 @@ impl Shell {
         // Pinned, eviction skips it for the session.
         if !me_pic.is_empty() {
             media::fetch(&self.core, me_pic.clone(), cx.entity_id(), cx);
-            media::pin(&me_pic, cx);
+            // repin, not pin: the rail's owner set is exactly THIS avatar
+            // (a profile-picture change must release the old one).
+            media::repin(cx.entity_id(), vec![me_pic.clone()], cx);
         }
         let me_avatar = media::avatar(rail_snap.as_ref(), &me_pic, &me_name, 26.0);
 

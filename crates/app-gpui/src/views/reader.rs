@@ -30,13 +30,6 @@ pub struct ArticleView {
     /// manager::comments's order), pumped in as they land.
     comments: Vec<Event>,
     list: ListState,
-    /// This render's media urls, pinned against eviction (media.rs's
-    /// idle-pane flash): a long read outlives the grace window — renders
-    /// stop while the reader sits on the article, so foreign landings
-    /// would evict exactly the images on screen. Released wholesale on
-    /// the next render; the article images are bounded content (one
-    /// article), the comment avatars ride the scroll window.
-    pinned: Vec<String>,
     /// The comments list's visible range (the scroll handler), so the
     /// avatar fetch/pin window follows the scroll — the whole comment
     /// set must never pin (D60: a viral article's 5000 avatars would
@@ -48,11 +41,6 @@ pub struct ArticleView {
 impl EventEmitter<Nav> for ArticleView {}
 
 impl ArticleView {
-    /// The pane's pin set, taken on close (shell.back): pins must not
-    /// outlive the pane, or the registry ratchets — D60's invariant.
-    pub(crate) fn take_pinned(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.pinned)
-    }
     pub fn new(core: Arc<Core>, ev: Event, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
@@ -70,7 +58,6 @@ impl ArticleView {
             profiles: HashMap::new(),
             comments: vec![],
             list: ListState::new(0, ListAlignment::Top, px(400.)),
-            pinned: vec![],
             vis_start: 0,
             vis_end: 0,
         };
@@ -612,7 +599,7 @@ impl Render for ArticleView {
                 }
             }
         }
-        media::repin(&mut self.pinned, painted, cx);
+        media::repin(cx.entity_id(), painted, cx);
         // Mode-aware stamp; ensure refines Block mode from the bridge
         // (render-path spawns are silent no-ops when cached — media.rs's
         // eviction re-request is the same pattern).

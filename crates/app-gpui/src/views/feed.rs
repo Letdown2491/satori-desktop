@@ -110,14 +110,6 @@ pub struct Feed {
     pub(crate) deep: bool,
     /// j/k's row cursor (key_nav); the scroll handler re-anchors it.
     cursor: usize,
-    /// The visible window's media urls, pinned against eviction while
-    /// they are on screen (the rail avatar's discipline): an idle pane's
-    /// renders stop, and only renders touch — so past the grace window
-    /// foreign landings evict exactly the images the reader is looking
-    /// at, the articles-feed flash (a cover blanks and re-decodes back).
-    /// Released wholesale when the window moves (search.rs's People-row
-    /// discipline), so the set stays bounded by what is on screen.
-    pinned: Vec<String>,
     /// WS2 viewport debounce: bumps on every scroll/nav/landing; the
     /// spawned push only fires if the pulse_id is still current (fast
     /// scrolling coalesces into ONE core.set_viewport per settle).
@@ -202,7 +194,6 @@ impl Feed {
             // j/k's row cursor (feed.rs key_nav) — re-anchored by every
             // scroll event, so mouse and keys never disagree for long.
             cursor: 0,
-            pinned: vec![],
             viewport_gen: 0,
             deep: false,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
@@ -670,7 +661,7 @@ impl Feed {
         for note in &self.notes[start..end] {
             urls.extend(card_media_urls(note, &self.profiles));
         }
-        media::repin(&mut self.pinned, urls, cx);
+        media::repin(cx.entity_id(), urls, cx);
     }
 
     /// The bubbles' comment counts (one batched round per page of notes).
@@ -958,13 +949,6 @@ impl Feed {
     /// (engagement.rs's engine; the with_mode pump calls this).
     fn on_wallet(&mut self, ev: WalletEvent, cx: &mut Context<Self>) {
         engagement::on_wallet(self, ev, cx);
-    }
-
-    /// The pane's pin set, taken on close (shell.back): pins must not
-    /// outlive the pane, or the registry ratchets (closed panes' entries
-    /// skip every eviction sweep — D60's invariant).
-    pub(crate) fn take_pinned(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.pinned)
     }
 }
 

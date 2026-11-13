@@ -90,10 +90,6 @@ pub struct ProfileView {
     /// clears it (login.rs's copied pattern).
     copied: Option<&'static str>,
     list: ListState,
-    /// The pinned set (media.rs): everything the render paints — the pane
-    /// idles open (renders stop, only renders touch) and the next landing
-    /// burst took exactly the images on screen.
-    pinned: Vec<String>,
     /// The strips' URL projections, rebuilt once per DATA change (the
     /// notes vec), not per scroll tick or render: photo_urls/video_urls
     /// used to re-parse every note's imeta + tags (uncached media_assets
@@ -106,11 +102,6 @@ pub struct ProfileView {
 impl EventEmitter<Nav> for ProfileView {}
 
 impl ProfileView {
-    /// The pane's pin set, taken on close (shell.back): pins must not
-    /// outlive the pane, or the registry ratchets — D60's invariant.
-    pub(crate) fn take_pinned(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.pinned)
-    }
     pub fn new(core: Arc<Core>, who: PublicKey, is_me: bool, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
@@ -147,7 +138,6 @@ impl ProfileView {
             nip05_memo: None,
             copied: None,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
-            pinned: vec![],
             photo_cache: vec![],
             video_cache: vec![],
             core,
@@ -244,7 +234,7 @@ impl ProfileView {
             }
             ProfileTab::Notes => {}
         }
-        media::repin(&mut self.pinned, painted, cx);
+        media::repin(cx.entity_id(), painted, cx);
     }
 
     /// Back to the top (rail re-click, the floating whisper): the notes

@@ -19,8 +19,12 @@
 //!   exactly where their conversation lives.
 //! - seen-on is author-keyed (the parent author's recent relays); the
 //!   per-event provenance sidecar stays on #32 as its own schema change.
-//! - every foreign relay rides `routable_relay` (the SSRF screen) and the
-//!   indexers are never publish targets; the total set is capped.
+//! - every foreign relay rides `routable_relay` and the
+//!   indexers are never publish targets; the total set is capped. Note
+//!   the screen's honest reach (D61's watch item): for IP literals it is
+//!   a full SSRF screen, for DOMAINS it is a string-level screen (the
+//!   dial-time TOCTOU on resolution is D58's residual, WP2's resolved-IP
+//!   pinning).
 //!
 //! Routing derives from the signed event's OWN tags (p-tag authors, e/q
 //! presence), so the outbox drainer and the scheduled sweep route RETRIES

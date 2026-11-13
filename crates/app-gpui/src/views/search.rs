@@ -47,12 +47,6 @@ pub struct SearchView {
     people: Vec<String>,
     target: Option<uris::UriTarget>,
     tab: SearchTab,
-    /// The picture urls pinned for THIS query's People rows. The pane
-    /// stops rendering while idle, render touches stop with it, and
-    /// small-class pressure then evicts the on-screen thumbs — the
-    /// blinking avatar. Pinned rows never evict; the next run unpins
-    /// these before pinning its own, so the set stays bounded.
-    pinned: Vec<String>,
     /// Each run invalidates the previous pump — a slow answer to an old
     /// question must not overwrite the new one. Also the "never searched"
     /// flag (0 = the empty state's cue).
@@ -64,11 +58,6 @@ pub struct SearchView {
 impl EventEmitter<Nav> for SearchView {}
 
 impl SearchView {
-    /// The pane's pin set, taken on close (shell.back): pins must not
-    /// outlive the pane, or the registry ratchets — D60's invariant.
-    pub(crate) fn take_pinned(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.pinned)
-    }
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
@@ -92,7 +81,6 @@ impl SearchView {
             people: vec![],
             target: None,
             tab: SearchTab::Notes,
-            pinned: vec![],
             generation: 0,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             autofocused: false,
@@ -165,7 +153,7 @@ impl SearchView {
             self.profiles.insert(p.pubkey.clone(), p.clone());
             self.people.push(p.pubkey);
         }
-        media::repin(&mut self.pinned, painted, cx);
+        media::repin(cx.entity_id(), painted, cx);
         self.target = uris::uri_target(&q);
         let mut rx = self.core.search(q);
         cx.spawn(async move |this, cx| {

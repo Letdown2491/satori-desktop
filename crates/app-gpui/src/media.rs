@@ -155,6 +155,13 @@ pub struct Cache {
     /// so its grace expires and photo pressure flashed it initial →
     /// photo → initial for the whole scroll. Pinned entries survive every
     /// sweep, desperate included; they are thumb-class by policy.
+    ///
+    /// OWNER-KEYED (D62): the truth is per-owner (`pins`), the flat set is
+    /// the derived union. A URL stays pinned while ANY living owner holds
+    /// it — two panes sharing an avatar no longer fight (the old flat set
+    /// let the first repin unpin the other pane's copy), and a pane's
+    /// release is one owner key, not a url diff.
+    pins: std::cell::RefCell<HashMap<u64, Vec<String>>>,
     pinned: std::cell::RefCell<std::collections::HashSet<String>>,
     bytes: std::cell::Cell<u64>,
     epoch: std::cell::Cell<u64>,
@@ -170,6 +177,7 @@ impl Default for Cache {
             map: std::cell::RefCell::new(HashMap::new()),
             order: std::cell::RefCell::new(std::collections::VecDeque::new()),
             touched: std::cell::RefCell::new(HashMap::new()),
+            pins: std::cell::RefCell::new(HashMap::new()),
             pinned: std::cell::RefCell::new(std::collections::HashSet::new()),
             bytes: std::cell::Cell::new(0),
             epoch: std::cell::Cell::new(0),
@@ -193,6 +201,17 @@ const BIG_MAX_BYTES: u64 = 96 * 1024 * 1024;
 const SMALL_DECODED_MAX: u64 = 256 * 1024;
 const SMALL_MAX_ENTRIES: usize = 1024;
 const SMALL_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// One owner's pinned-byte budget (D62): no single surface may pin more
+/// decoded RGBA than the whole BIG class budget. This is the watch item
+/// D61 closed — the whole-thread exception pinned by COUNT, so a photo
+/// thread (the 2-5.5MB-publisher stress case decodes ~96MB each) held
+/// hundreds of MB outside every eviction sweep, and pinned pressure
+/// starved every other surface of the photo budget. Over the cap, the
+/// list TAIL (the deepest replies — the anchor stays) stops pinning and
+/// rides normal eviction: fetch-on-scroll-back still works, a flash
+/// beats unbounded memory (D60's own tradeoff).
+const PIN_OWNER_MAX_BYTES: u64 = BIG_MAX_BYTES;
 
 /// Eviction grace: entries fetched/touched within this window are
 /// immune, even over budget. Eviction runs INSIDE a landing's update —
@@ -238,13 +257,57 @@ impl Cache {
         snap
     }
 
-    /// Unpin urls (and their disc-thumb keys) — `unpin`'s App-less core.
-    fn unpin_urls(&self, urls: &[String]) {
-        let mut pinned = self.pinned.borrow_mut();
-        for url in urls {
-            pinned.remove(url.as_str());
-            pinned.remove(&thumb_key(url));
+    /// Set an owner's pinned list (and each url's disc-thumb key): the
+    /// derived flat set gains what no other owner holds, loses what only
+    /// this owner did. Enforces the per-owner byte cap over the KNOWN
+    /// sizes (Ready entries); urls not landed yet count 0 — the next
+    /// repin (every render) re-caps once they land.
+    fn pin_set(&self, owner: u64, urls: Vec<String>) {
+        let mut kept: Vec<String> = Vec::with_capacity(urls.len());
+        {
+            let map = self.map.borrow();
+            let mut budget = PIN_OWNER_MAX_BYTES;
+            for url in urls {
+                let size = match map.get(&url) {
+                    Some(Entry::Ready(c)) => {
+                        let (w, h) = c.size;
+                        w as u64 * h as u64 * 4
+                    }
+                    // Unknown (loading/failed/gone): pin it — its landing
+                    // re-renders, and the next repin sees the real size.
+                    _ => 0,
+                };
+                if size > budget {
+                    continue; // over cap: this one rides normal eviction
+                }
+                budget -= size;
+                kept.push(url);
+            }
         }
+        self.pins.borrow_mut().insert(owner, kept);
+        self.rebuild_pinned();
+    }
+
+    /// Drop an owner's pins entirely (pane close): urls only it held
+    /// become evictable; urls still held elsewhere stay pinned.
+    fn release(&self, owner: u64) {
+        self.pins.borrow_mut().remove(&owner);
+        self.rebuild_pinned();
+    }
+
+    /// The derived flat set: every owner's urls plus their disc-thumb
+    /// keys. Rebuilt on each pin-set change — pin sets number in the
+    /// tens, not thousands (the cap bounds per owner), so the rebuild is
+    /// noise next to the eviction sweep it feeds.
+    fn rebuild_pinned(&self) {
+        let mut set = std::collections::HashSet::new();
+        for urls in self.pins.borrow().values() {
+            for u in urls {
+                set.insert(u.clone());
+                set.insert(thumb_key(u));
+            }
+        }
+        *self.pinned.borrow_mut() = set;
     }
 
     /// Least-recently-used-first eviction past the caps, per size class.
@@ -434,42 +497,19 @@ const THUMB_DIMS: (u32, u32) = (128, 128);
 /// An evicted URL re-enters through the disk cache — a cheap background
 /// re-decode. (Eviction is the RAM budget working; THIS is what brings
 /// evicted avatars and pictures back when they're seen again.)
-/// Pin an always-on-screen image (and its disc thumb) against eviction.
-/// For the rail avatar: the shell only re-renders on events, so while you
-/// idle or scroll the feed its LRU touch freezes, the 10s grace expires,
-/// and timeline photo pressure evicted it — remove_asset flashing it to
-/// the ink initial, the next sweep fetching it back, repeating. Pinned
-/// urls skip every eviction sweep.
-pub fn pin(url: &str, cx: &mut gpui::App) {
-    if url.is_empty() {
-        return;
-    }
-    let cache = cx.global_mut::<Cache>();
-    let mut pinned = cache.pinned.borrow_mut();
-    pinned.insert(url.to_string());
-    pinned.insert(thumb_key(url));
+/// The window swap (D60's verb), owner-keyed (D62): the owner's pin set
+/// becomes `urls` — urls only it held are released, shared urls ride on.
+/// Under the per-owner byte cap the list TAIL stops pinning first (the
+/// anchor stays), bounding what one surface can hold outside eviction.
+pub fn repin(owner: EntityId, urls: Vec<String>, cx: &mut gpui::App) {
+    cx.global_mut::<Cache>().pin_set(owner.as_u64(), urls);
 }
 
-/// Release pins (the inverse of `pin`): a surface handing its visible
-/// rows to a new set unpins the old first, so the pinned set stays
-/// bounded by what is actually on screen.
-pub fn unpin(urls: &[String], cx: &mut gpui::App) {
-    if urls.is_empty() {
-        return;
-    }
-    cx.global_mut::<Cache>().unpin_urls(urls);
-}
-
-/// The window swap (D60's verb): unpin the previous set, adopt the new,
-/// pin it. The ORDER is the discipline — unpin must precede the assign,
-/// or the unpin wipes the new window's pins and everything on screen
-/// becomes evictable (the flicker D60 exists to kill).
-pub fn repin(pinned: &mut Vec<String>, urls: Vec<String>, cx: &mut gpui::App) {
-    unpin(pinned, cx);
-    *pinned = urls;
-    for url in pinned.iter() {
-        pin(url, cx);
-    }
+/// Drop an owner's pins (pane close — `Pane::release_media`): the pin
+/// registry cannot ratchet behind popped panes, and no url diff is
+/// needed — the owner key IS the release.
+pub fn release(owner: EntityId, cx: &mut gpui::App) {
+    cx.global_mut::<Cache>().release(owner.as_u64());
 }
 
 pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) {
@@ -910,7 +950,7 @@ mod tests {
         for i in 0..6 {
             insert(&cache, &format!("e{i}"), 3000, 3000, Duration::from_secs(1));
         } // 216MB = over the 192MB desperation line
-        cache.pinned.borrow_mut().insert("e0".to_string());
+        cache.pin_set(1, vec!["e0".to_string()]); // 36MB — under the owner cap
         let dropped = cache.evict();
         assert!(!dropped.is_empty(), "desperation must still evict");
         assert!(cache.map.borrow().contains_key("e0"), "pinned survives");
@@ -926,8 +966,11 @@ mod tests {
         for i in 0..6 {
             insert(&cache, &format!("e{i}"), 3000, 3000, Duration::from_secs(1));
         } // 216MB = over the 192MB desperation line
-        for i in 0..6 {
-            cache.pinned.borrow_mut().insert(format!("e{i}"));
+        // Three owners (the refcount reality), two photos each — every
+        // owner under the 96MB pin cap, the union over the class budget,
+        // every candidate pinned.
+        for (owner, pair) in [(1, 0u8), (2, 2), (3, 4)] {
+            cache.pin_set(owner, vec![format!("e{}", pair), format!("e{}", pair + 1)]);
         }
         let dropped = cache.evict();
         assert!(!dropped.is_empty(), "the valve must fire even all-pinned");
@@ -941,25 +984,60 @@ mod tests {
         );
     }
 
-    /// Unpin releases the guard: url AND its disc-thumb key leave the
-    /// set, so a pane's old rows become evictable when the next query
-    /// lands — pinned stays bounded by what is on screen.
+    /// The refcount (D62): a url shared by two owners stays pinned while
+    /// EITHER lives; releasing both frees it. The old flat set let the
+    /// first repin unpin the other pane's copy.
     #[test]
-    fn unpin_releases_url_and_thumb_key() {
+    fn shared_url_pinned_until_every_owner_releases() {
         let cache = Cache::default();
-        cache
-            .pinned
-            .borrow_mut()
-            .insert("https://x/a.png".to_string());
-        cache
-            .pinned
-            .borrow_mut()
-            .insert(thumb_key("https://x/a.png").to_string());
-        cache.unpin_urls(&["https://x/a.png".to_string()]);
+        cache.pin_set(1, vec!["shared".to_string()]);
+        cache.pin_set(2, vec!["shared".to_string()]);
+        cache.release(1);
         assert!(
-            cache.pinned.borrow().is_empty(),
-            "url and thumb key both go"
+            cache.pinned.borrow().contains("shared"),
+            "owner 2 still holds it"
         );
+        cache.release(2);
+        assert!(
+            !cache.pinned.borrow().contains("shared"),
+            "no owner left — evictable again"
+        );
+    }
+
+    /// The per-owner byte cap (D62): a surface's pin set may never hold
+    /// the whole photo budget. The list TAIL stops pinning first (the
+    /// head — a thread's anchor — stays); over-cap urls ride normal
+    /// eviction and come back on scroll.
+    #[test]
+    fn owner_pin_set_capped_by_decoded_bytes() {
+        let cache = Cache::default();
+        // Four 36MB photos: 144MB, well over the 96MB owner cap.
+        for i in 0..4 {
+            insert(&cache, &format!("p{i}"), 3000, 3000, Duration::from_secs(1));
+        }
+        cache.pin_set(1, vec!["p0".into(), "p1".into(), "p2".into(), "p3".into()]);
+        let pinned = cache.pinned.borrow();
+        assert!(pinned.contains("p0"), "the head stays pinned");
+        assert!(pinned.contains("p1"), "two photos (72MB) fit the cap");
+        assert!(!pinned.contains("p2"), "the over-cap tail stops pinning");
+        assert!(!pinned.contains("p3"));
+        // And the thumb keys follow their url in and out.
+        assert!(pinned.contains(thumb_key("p0").as_str()));
+        assert!(!pinned.contains(thumb_key("p2").as_str()));
+    }
+
+    /// Releasing an owner frees only its urls — another owner's pins are
+    /// untouched by the rebuild.
+    #[test]
+    fn release_is_owner_scoped() {
+        let cache = Cache::default();
+        cache.pin_set(1, vec!["mine".to_string()]);
+        cache.pin_set(2, vec!["theirs".to_string()]);
+        cache.release(1);
+        let pinned = cache.pinned.borrow();
+        assert!(!pinned.contains("mine"));
+        assert!(!pinned.contains(thumb_key("mine").as_str()));
+        assert!(pinned.contains("theirs"));
     }
 
     /// The articles-feed flash: a VISIBLE cover whose pane idles — GPUI
@@ -984,7 +1062,7 @@ mod tests {
             3000,
             EVICT_GRACE + Duration::from_secs(1),
         );
-        cache.pinned.borrow_mut().insert("cover".to_string());
+        cache.pin_set(7, vec!["cover".to_string()]);
         // Foreign landings: a burst of fresh bigs over the budget.
         for i in 0..5 {
             insert(&cache, &format!("f{i}"), 3000, 3000, Duration::from_secs(1));

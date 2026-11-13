@@ -30,10 +30,6 @@ pub(crate) struct LibraryView {
     /// Mirror of the child feed's deep-scroll state (profile.rs's pattern —
     /// the shell reads the pane view's field for the back-to-top whisper).
     pub(crate) deep: bool,
-    /// The pinned set (media.rs): the open list's member avatars — the
-    /// detail idles open (renders stop, only renders touch), and the
-    /// next landing burst took exactly the avatars on screen.
-    pinned: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -66,7 +62,6 @@ impl LibraryView {
             open_list: None,
             members: HashMap::new(),
             deep: false,
-            pinned: vec![],
         }
     }
 
@@ -434,12 +429,6 @@ impl LibraryView {
             }))
             .into_any_element()
     }
-
-    /// The pane's pin set, taken on close (shell.back): pins must not
-    /// outlive the pane, or the registry ratchets — D60's invariant.
-    pub(crate) fn take_pinned(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.pinned)
-    }
 }
 
 impl Render for LibraryView {
@@ -560,7 +549,7 @@ impl LibraryView {
         // Pin the avatars this detail paints: the pane idles open (renders
         // stop, only renders touch), so the next landing burst took the
         // avatars on screen (thread.rs render, the same discipline).
-        media::repin(&mut self.pinned, painted, cx);
+        media::repin(cx.entity_id(), painted, cx);
         let name = l.display();
         let count = l.members.len();
         div()
