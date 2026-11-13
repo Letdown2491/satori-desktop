@@ -22,6 +22,7 @@ pub mod manager;
 pub mod net_guard;
 pub mod nip11;
 pub mod nip40;
+pub mod nip45;
 pub mod privacy;
 pub mod profiles;
 pub mod read_state;

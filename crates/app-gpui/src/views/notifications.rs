@@ -13,7 +13,7 @@ use gpui::{
     ListState, Render, SharedString, Window, div, img, list, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile};
+use satori_core::manager::{Core, FeedEvent, FeedRx, NotifClass, NotifCount, ParentNote, Profile};
 use satori_core::nip::{comment, nip10};
 use satori_core::notifications::parse_zap_receipt;
 use satori_core::wallet::WalletEvent;
@@ -57,6 +57,33 @@ fn notif_type(ev: &Event) -> NotifType {
                 NotifType::Mention
             }
         }
+    }
+}
+
+/// The NIP-45 tally classes map 1:1 onto the row classes (the manager's
+/// filters mirror `notif_type`'s split, so a chip's tap-filter and its
+/// count mean the same thing).
+fn class_type(c: NotifClass) -> NotifType {
+    match c {
+        NotifClass::Reply => NotifType::Reply,
+        NotifClass::Mention => NotifType::Mention,
+        NotifClass::Reaction => NotifType::Reaction,
+        NotifClass::Repost => NotifType::Repost,
+        NotifClass::Quote => NotifType::Quote,
+        NotifClass::PollVote => NotifType::PollVote,
+        NotifClass::Zap => NotifType::Zap,
+    }
+}
+
+fn chip_label(t: NotifType) -> &'static str {
+    match t {
+        NotifType::Reply => "Replies",
+        NotifType::Mention => "Mentions",
+        NotifType::Reaction => "Reactions",
+        NotifType::Repost => "Reposts",
+        NotifType::Quote => "Quotes",
+        NotifType::PollVote => "Polls",
+        NotifType::Zap => "Zaps",
     }
 }
 
@@ -123,6 +150,11 @@ enum Row {
 pub struct NotificationsView {
     core: Arc<Core>,
     rows: Vec<Row>,
+    /// NIP-45 COUNT tallies (one per class any relay answered) + the
+    /// chip the reader tapped (tap again to clear): the strip filters
+    /// the rows client-side.
+    counts: Vec<NotifCount>,
+    class_filter: Option<NotifType>,
     profiles: HashMap<String, Profile>,
     quotes: content::Quotes,
     /// What each notification answers (feed.rs's same resolver): id →
@@ -176,6 +208,8 @@ impl NotificationsView {
         let view = Self {
             core,
             rows: vec![],
+            counts: vec![],
+            class_filter: None,
             profiles: HashMap::new(),
             quotes: HashMap::new(),
             parents: HashMap::new(),
@@ -193,6 +227,7 @@ impl NotificationsView {
             last_visible_end: 0,
         };
         view.pump_at(prev, cx);
+        view.pump_counts(cx);
         // Deep-scroll whisper: same threshold and emission shape as the
         // feed's (feed.rs set_scroll_handler) — emit on change only. The
         // threshold is shallow (three rows): the button should arrive
@@ -256,6 +291,33 @@ impl NotificationsView {
         .detach();
     }
 
+    /// The NIP-45 COUNT tallies (one shot per pane build — a 7-day
+    /// window's chips don't rot in a session): the strip hides until
+    /// these land, then chips filter the rows.
+    fn pump_counts(&self, cx: &mut Context<Self>) {
+        let mut rx = self.core.notif_counts();
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| this.on_event(ev, 0, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// The rows after the chip filter (None: all of them). Section
+    /// labels survive — a filtered page keeps its New/Earlier rails.
+    fn visible_rows(&self) -> Vec<Row> {
+        match self.class_filter {
+            None => self.rows.clone(),
+            Some(f) => self
+                .rows
+                .iter()
+                .filter(|r| matches!(r, Row::Note(_, t) if *t == f))
+                .cloned()
+                .collect(),
+        }
+    }
+
     /// Ask the core to resolve the notes these notifications answer
     /// (feed.rs want_parents: store first, one relay round trip for
     /// misses, asked-set keeps it from looping).
@@ -311,6 +373,12 @@ impl NotificationsView {
                 self.status.clear();
                 self.error = None;
             }
+            FeedEvent::NotifCounts(counts) => {
+                // The tallies landed: paint the chips (hidden until now —
+                // an all-relays-refused session just never shows them).
+                self.counts = counts;
+                self.list.reset(self.visible_rows().len());
+            }
             FeedEvent::Parents(p) => {
                 // The resolver's answer (store-first, relay for misses) —
                 // whispers fill in as these land.
@@ -323,7 +391,7 @@ impl NotificationsView {
             }
             _ => {}
         }
-        self.list.reset(self.rows.len());
+        self.list.reset(self.visible_rows().len());
         cx.notify();
     }
 
@@ -341,13 +409,11 @@ impl NotificationsView {
     /// scroll (notif_card); this keeps the PIN matching what's on screen so
     /// an idle page survives landing bursts.
     fn pin_window(&mut self, cx: &mut Context<Self>) {
-        let win_start = self.first_visible_start.min(self.rows.len());
-        let win_end = self
-            .last_visible_end
-            .max(win_start + 8)
-            .min(self.rows.len());
+        let visible = self.visible_rows();
+        let win_start = self.first_visible_start.min(visible.len());
+        let win_end = self.last_visible_end.max(win_start + 8).min(visible.len());
         let mut painted: Vec<String> = Vec::new();
-        for row in &self.rows[win_start..win_end] {
+        for row in visible[win_start..win_end].iter() {
             let Row::Note(ev, _) = row else { continue };
             if let Some(p) = self.profiles.get(&ev.pubkey.to_string())
                 && !p.picture.is_empty()
@@ -366,6 +432,68 @@ impl NotificationsView {
         for url in &self.pinned {
             media::pin(url, cx);
         }
+    }
+
+    /// The NIP-45 tally chips: per-class counts over the read relays,
+    /// merged per the NIP. Hidden until they land (a session where no
+    /// relay answers COUNT shows nothing — the strip is decoration); the
+    /// active chip inverts. A "~" prefixes a relay-flagged approximate
+    /// count: the NIP-45 HLL merge is an estimate, not an invoice.
+    fn counts_strip(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.counts.is_empty() {
+            return None;
+        }
+        let strip = div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .w_full()
+            .max_w(px(content::COL_W))
+            .px_4()
+            .py_2()
+            .children(self.counts.iter().map(|c| {
+                let t = class_type(c.class);
+                let label = chip_label(t);
+                let active = self.class_filter == Some(t);
+                let tally = if c.approximate {
+                    format!("~{}", c.count)
+                } else {
+                    format!("{}", c.count)
+                };
+                let chip = div()
+                    .id(SharedString::from(format!("notif-chip-{label}")))
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(theme::R_EMBED))
+                    .border_1()
+                    .text_size(px(theme::T_SMALL))
+                    .when(active, |d| {
+                        d.bg(rgb(theme::ink()))
+                            .text_color(rgb(theme::washi()))
+                            .border_color(rgb(theme::ink()))
+                    })
+                    .when(!active, |d| {
+                        d.border_color(rgb(theme::hairline()))
+                            .text_color(rgb(theme::muted()))
+                    })
+                    .child(format!("{label} {tally}"));
+                chip.on_click(cx.listener(move |this, _, _, cx| {
+                    this.class_filter = if this.class_filter == Some(t) {
+                        None
+                    } else {
+                        Some(t)
+                    };
+                    this.list.reset(this.visible_rows().len());
+                    this.list.scroll_to(ListOffset {
+                        item_ix: 0,
+                        offset_in_item: px(0.),
+                    });
+                    cx.notify();
+                }))
+            }))
+            .into_any_element();
+        Some(strip)
     }
 
     /// WS4 receipts: resolve the suppressed authors' names so the audit
@@ -809,7 +937,7 @@ impl Render for NotificationsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let handle = cx.entity();
         let status = self.status.clone();
-        let rows = self.rows.clone();
+        let rows = self.visible_rows();
         let profiles = self.profiles.clone();
         let media = media::Snapshot::new(cx);
         // Evicted media comes back on render — a notifications page is
@@ -896,16 +1024,23 @@ impl Render for NotificationsView {
                             }),
                         )))
                     })
+                    // The NIP-45 tally chips, under the error strip: absent
+                    // until the counts land, a tap filters the rows.
+                    .children(self.counts_strip(cx))
                     .child(if empty {
                         div()
                             .w_full()
                             .max_w(px(content::COL_W))
                             .p_8()
                             .text_color(rgb(theme::muted()))
-                            .child(if status.is_empty() {
-                                "Nothing new. Sit quietly.".to_string()
+                            .child(if !self.class_filter.is_some() {
+                                if status.is_empty() {
+                                    "Nothing new. Sit quietly.".to_string()
+                                } else {
+                                    status
+                                }
                             } else {
-                                status
+                                "Nothing in this filter.".to_string()
                             })
                             .into_any_element()
                     } else {
@@ -1041,6 +1176,7 @@ impl Render for NotificationsView {
                                                     view.core.show_suppressed_author(&hex);
                                                     let prev = view.prev;
                                                     view.pump_at(prev, cx);
+                                                    view.pump_counts(cx);
                                                     cx.notify();
                                                 });
                                             }

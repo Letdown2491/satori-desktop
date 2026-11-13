@@ -5326,6 +5326,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tokio-socks",
+ "tokio-tungstenite",
  "url",
 ]
 

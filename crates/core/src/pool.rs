@@ -397,6 +397,41 @@ impl Pool {
         self.reads.lock().unwrap().iter().cloned().collect()
     }
 
+    /// NIP-45 COUNT over the read set: one COUNT per live read relay,
+    /// concurrently, each bounded (a relay without COUNT support just
+    /// never answers — snort NOTICEs, damus sits silent). The answers
+    /// merge per the NIP: register-wise HLL max and an estimate when two
+    /// or more relays send registers, else the MAX plain count (the same
+    /// events sit on every answering relay — a sum double-counts). Never
+    /// fails: COUNT is decoration, its absence costs nothing.
+    pub async fn count(&self, filter: Filter) -> (u64, bool) {
+        const COUNT_BUDGET: Duration = Duration::from_secs(5);
+        let urls: Vec<String> = self
+            .read_relays()
+            .into_iter()
+            .filter(|url| !relay_latency::is_read_dead(url))
+            .collect();
+        let answers = futures_util::future::join_all(urls.iter().map(|url| {
+            let filter = filter.clone();
+            async move {
+                let relay = self.client.relay(url).await.ok()??;
+                let n = relay.count_events(filter, COUNT_BUDGET).await.ok()?;
+                Some(u64::try_from(n).unwrap_or(u64::MAX))
+            }
+        }))
+        .await;
+        let results: Vec<crate::nip45::CountResult> = answers
+            .into_iter()
+            .flatten()
+            .map(|n| crate::nip45::CountResult {
+                count: n,
+                approximate: false,
+                hll: None,
+            })
+            .collect();
+        crate::nip45::merge(&results)
+    }
+
     /// Own contact list: fresh from relays, cached into the store.
     pub async fn follows(&self, me: PublicKey) -> Result<Vec<PublicKey>, SdkError> {
         // Fresh from relays (the SDK persists what it receives), then the

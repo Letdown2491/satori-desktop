@@ -25,3 +25,8 @@ sha2 = { workspace = true }
 url = { workspace = true }
 base64 = { workspace = true }
 bech32 = { workspace = true }
+
+[dev-dependencies]
+# The NIP-45 fixture probe only: raw COUNT frames to a live relay (the SDK's
+# count_events returns a bare usize; fixtures need the wire JSON).
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
