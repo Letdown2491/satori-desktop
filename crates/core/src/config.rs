@@ -51,6 +51,7 @@ pub mod files {
     /// Bitcoin timestamp→height table (blocktime, Phase 2 §4.4) — permanent,
     /// tiny, seeded from a compiled-in anchor.
     pub const BLOCKTIME: &str = "blocktime.json";
+    pub const DIRECT_RELAYS: &str = "direct-relays.json";
 }
 
 fn home() -> Option<PathBuf> {

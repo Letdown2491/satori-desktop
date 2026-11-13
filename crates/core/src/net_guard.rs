@@ -29,7 +29,9 @@
 //! check, so they cannot pose as names.
 
 use nostr::prelude::*;
-use std::net::ToSocketAddrs;
+use serde_json::json;
+use std::collections::HashSet;
+use std::net::{IpAddr, ToSocketAddrs};
 
 /// Public unicast only — THE authority. Strict side: a block is asserted
 /// only when the address is demonstrably not globally reachable, so a
@@ -303,17 +305,60 @@ fn direct_hosts() -> &'static std::sync::RwLock<std::collections::HashSet<String
     use std::collections::HashSet;
     use std::sync::{OnceLock, RwLock};
     static SET: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
-    SET.get_or_init(|| RwLock::new(HashSet::new()))
+    // Consent persists across restarts (review Tier 2.1): the ledger file
+    // is the one source, reloaded lazily on first access.
+    SET.get_or_init(|| RwLock::new(read_ledger_file()))
+}
+
+fn ledger_path() -> std::path::PathBuf {
+    crate::config::state_file(crate::config::files::DIRECT_RELAYS)
+}
+
+fn read_ledger_file() -> HashSet<String> {
+    std::fs::read_to_string(ledger_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .map(|hosts| hosts.into_iter().collect())
+        .unwrap_or_default()
+}
+
+fn write_ledger_file(set: &HashSet<String>) {
+    let mut hosts: Vec<&String> = set.iter().collect();
+    hosts.sort();
+    let body = json!(hosts).to_string();
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::create_dir_all(crate::config::data_dir());
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(ledger_path())
+            .and_then(|mut f| f.write_all(body.as_bytes()));
+    }
+}
+
+/// Snapshot of the exempted hosts, sorted — the relay settings pane's
+/// revocation list (review Tier 2.1).
+pub fn direct_relays() -> Vec<String> {
+    let mut hosts: Vec<String> = direct_hosts().read().unwrap().iter().cloned().collect();
+    hosts.sort();
+    hosts
 }
 
 /// Exempt a relay host from the screening path (lowercase host, no
 /// port, no trailing dot — `relay_key`-adjacent normalization).
 pub fn allow_direct_relay(host: &str) {
     let host = normalize_host(host);
-    if host.is_empty() {
+    // Sentinel "hosts" from unparseable verdicts must never reach the
+    // ledger, whatever the UI does (review Tier 2.6).
+    if host.is_empty() || host.starts_with('(') {
         return;
     }
-    direct_hosts().write().unwrap().insert(host);
+    direct_hosts().write().unwrap().insert(host.clone());
+    write_ledger_file(&direct_hosts().read().unwrap().clone());
 }
 
 /// Drop an exemption (relay retired from the session's lists).
@@ -322,6 +367,7 @@ pub fn disallow_direct_relay(host: &str) {
         .write()
         .unwrap()
         .remove(&normalize_host(host));
+    write_ledger_file(&direct_hosts().read().unwrap().clone());
 }
 
 /// Does this relay URL belong to the user-chosen set (direct dial)?
@@ -453,9 +499,11 @@ where
     verdicts
 }
 
-/// The connect dialog's banner line for refused relays (issue #11): names
-/// the host and the internal address it answered with. Empty when nothing
-/// was refused.
+/// The connect dialog's banner line for refused relays (issue #11;
+/// review Tier 2.2/2.3): names the relay by scheme+host, the address it
+/// answered with, and the scope of the consent — allowing exempts the
+/// host for every relay dial, not just this URI. House rule: no em
+/// dashes in UI copy. Empty when nothing was refused.
 pub fn relay_screen_notice(verdicts: &[RelayVerdict]) -> String {
     let mut lines = Vec::new();
     for v in verdicts {
@@ -464,19 +512,30 @@ pub fn relay_screen_notice(verdicts: &[RelayVerdict]) -> String {
                 .first()
                 .map(|a| a.to_string())
                 .unwrap_or_else(|| "a non-public address".into());
-            if v.host == shown {
-                lines.push(format!(
-                    "this URI wants to talk to {shown} — a private address. Allow it?"
-                ));
+            let target = scheme_host(&v.url).unwrap_or_else(|| v.url.clone());
+            let host_part = if v.host == shown {
+                target
             } else {
-                lines.push(format!(
-                    "this URI wants to talk to {} ({shown}) — a private address. Allow it?",
-                    v.host
-                ));
-            }
+                format!("{target} ({})", v.host)
+            };
+            lines.push(format!(
+                "URI relay {host_part} resolves to {shown}, a private address. Allowing exempts it from relay screening for every dial."
+            ));
         }
     }
     lines.join(" ")
+}
+
+/// scheme://host[:port] of a relay URL — the notice names the relay
+/// without its path noise.
+fn scheme_host(url: &str) -> Option<String> {
+    let u = url::Url::parse(url).ok()?;
+    let host = u.host_str()?;
+    let mut s = format!("{}://{}", u.scheme(), host);
+    if let Some(port) = u.port() {
+        s.push_str(&format!(":{port}"));
+    }
+    Some(s)
 }
 
 #[cfg(test)]
@@ -650,6 +709,7 @@ mod tests {
 
     #[test]
     fn user_relay_exemption_roundtrip() {
+        let _env = crate::test_env::EnvGuard::new("netguard");
         let url = "wss://umbrel.local:7777";
         assert!(!user_chosen_relay(url));
         allow_direct_relay("UMBREL.local");
@@ -699,6 +759,7 @@ mod tests {
 
     #[test]
     fn uri_relay_screen_honors_the_consent_ledger() {
+        let _env = crate::test_env::EnvGuard::new("netguard");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -721,21 +782,56 @@ mod tests {
         let vs = vec![RelayVerdict::refused(
             "wss://home-lan.example:7777",
             "home-lan.example",
-            vec!["192.168.1.10".parse().unwrap()],
+            vec!["192.168.1.1".parse().unwrap()],
         )];
         let n = relay_screen_notice(&vs);
-        assert!(n.contains("home-lan.example"));
-        assert!(n.contains("192.168.1.10"));
-        assert!(n.contains("Allow it?"));
-        // An IP-literal host doesn't repeat itself.
+        // Tier 2.3: the notice carries the relay (scheme+host), not just
+        // the host; Tier 2.2: the pool-wide scope, one clause, no em dash.
+        assert!(n.contains("wss://home-lan.example:7777"), "{n}");
+        assert!(n.contains("home-lan.example"), "{n}");
+        assert!(n.contains("192.168.1.1"), "{n}");
+        assert!(n.contains("every dial"), "{n}");
+        assert!(!n.contains('\u{2014}'), "no em dashes in UI copy: {n}");
+        // An IP-literal target doesn't repeat itself.
         let vs = vec![RelayVerdict::refused(
             "wss://192.168.1.10",
             "192.168.1.10",
             vec!["192.168.1.10".parse().unwrap()],
         )];
         let n = relay_screen_notice(&vs);
-        assert_eq!(n.matches("192.168.1.10").count(), 1);
-        // Nothing refused → empty notice.
+        assert!(n.contains("wss://192.168.1.10"), "{n}");
+        // An IP-literal host gets no redundant "(ip)" parenthetical.
+        assert!(!n.contains("(192.168.1.10)"), "{n}");
+        // Nothing refused -> empty notice.
         assert_eq!(relay_screen_notice(&[]), "");
+    }
+
+    #[test]
+    fn ledger_persists_and_lists() {
+        let _env = crate::test_env::EnvGuard::new("netguard");
+        // The in-memory set is process-global (OnceLock) and other tests
+        // hold ENV_LOCK while mutating it, so assert on OUR host only.
+        assert!(!direct_relays().iter().any(|h| h == "persist-test.local"));
+        allow_direct_relay("persist-test.local");
+        assert!(direct_relays().iter().any(|h| h == "persist-test.local"));
+        // The file is the persistence: the same host is on disk.
+        let hosts = read_ledger_file();
+        assert!(hosts.contains("persist-test.local"));
+        disallow_direct_relay("persist-test.local");
+        assert!(!direct_relays().iter().any(|h| h == "persist-test.local"));
+        assert!(!read_ledger_file().contains("persist-test.local"));
+    }
+
+    #[test]
+    fn allow_refuses_sentinel_hosts() {
+        let _env = crate::test_env::EnvGuard::new("netguard");
+        allow_direct_relay("(unparseable)");
+        allow_direct_relay("(no host)");
+        allow_direct_relay("");
+        assert!(
+            !direct_relays().iter().any(|h| h.starts_with('(')),
+            "sentinels must not be written"
+        );
+        assert!(!read_ledger_file().iter().any(|h| h.starts_with('(')));
     }
 }
