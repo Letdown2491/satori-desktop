@@ -226,9 +226,10 @@ impl Render for WalletView {
                 // writes the SAME ledger the relay allowlist uses, then
                 // retries (the input still holds the URI).
                 .when(self.screened.is_some(), |d| {
-                    let Some((notice, hosts)) = self.screened.clone() else {
+                    let Some(verdicts) = self.screened.clone() else {
                         return d;
                     };
+                    let notice = satori_core::net_guard::relay_screen_notice(&verdicts);
                     d.child(
                         div()
                             .text_size(px(theme::T_SMALL))
@@ -245,8 +246,8 @@ impl Render for WalletView {
                             .text_color(rgb(theme::vermilion()))
                             .child("Allow & retry")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                for h in &hosts {
-                                    satori_core::net_guard::allow_direct_relay(h);
+                                for v in &verdicts {
+                                    satori_core::net_guard::allow_direct_relay(&v.host);
                                 }
                                 this.screened = None;
                                 this.err = None;

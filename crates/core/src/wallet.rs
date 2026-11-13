@@ -465,15 +465,16 @@ impl Wallet {
         // refused BEFORE anything opens — the dialog offers the consent
         // toggle instead. Nothing is stored on a refusal.
         let relay_urls: Vec<String> = parsed.relays.iter().map(|r| r.to_string()).collect();
-        let verdicts =
-            net_guard::screen_uri_relays(relay_urls.iter().map(String::as_str)).await;
+        let verdicts = net_guard::screen_uri_relays(relay_urls.iter().map(String::as_str)).await;
         let refused: Vec<&net_guard::RelayVerdict> = verdicts
             .iter()
             .filter(|v| matches!(v.screen, net_guard::RelayScreen::Refused(_)))
             .collect();
         if !refused.is_empty() {
             let owned: Vec<net_guard::RelayVerdict> = refused.into_iter().cloned().collect();
-            let _ = self.events.send(WalletEvent::RelayScreened { verdicts: owned });
+            let _ = self
+                .events
+                .send(WalletEvent::RelayScreened { verdicts: owned });
             return;
         }
         let conn = Conn {
@@ -537,14 +538,15 @@ impl Wallet {
         for host in &conn.direct {
             net_guard::allow_direct_relay(host);
         }
-        let verdicts =
-            net_guard::screen_uri_relays(conn.relays.iter().map(String::as_str)).await;
+        let verdicts = net_guard::screen_uri_relays(conn.relays.iter().map(String::as_str)).await;
         let refused: Vec<net_guard::RelayVerdict> = verdicts
             .into_iter()
             .filter(|v| matches!(v.screen, net_guard::RelayScreen::Refused(_)))
             .collect();
         if !refused.is_empty() {
-            let _ = self.events.send(WalletEvent::RelayScreened { verdicts: refused });
+            let _ = self
+                .events
+                .send(WalletEvent::RelayScreened { verdicts: refused });
             self.set_status(Status::Disconnected);
             return;
         }

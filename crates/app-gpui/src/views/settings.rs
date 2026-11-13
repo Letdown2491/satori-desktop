@@ -30,6 +30,9 @@ pub struct SettingsView {
     focus: FocusHandle,
     // Relays (the NIP-65 editor): local edits; Publish commits as kind 10002.
     relays: Vec<RelayEntry>,
+    /// Hosts the user allowed onto private space via a pasted URI's
+    /// screen (issue #11) — the revocation surface (review Tier 2.1).
+    direct_relays: Vec<String>,
     add_relay: Entity<Input>,
     relay_read: bool,
     relay_write: bool,
@@ -139,6 +142,7 @@ impl SettingsView {
             core: core.clone(),
             focus: cx.focus_handle(),
             relays: relay_rows(core.current_relays()),
+            direct_relays: satori_core::net_guard::direct_relays(),
             add_relay: cx.new(|cx| single_line("wss://…", cx)),
             relay_read: true,
             relay_write: true,
@@ -397,6 +401,12 @@ impl SettingsView {
 
     fn remove_server(&mut self, url: &str, cx: &mut Context<Self>) {
         self.servers.retain(|s| s != url);
+        cx.notify();
+    }
+
+    fn revoke_direct_relay(&mut self, host: &str, cx: &mut Context<Self>) {
+        satori_core::net_guard::disallow_direct_relay(host);
+        self.direct_relays = satori_core::net_guard::direct_relays();
         cx.notify();
     }
 
@@ -1187,6 +1197,56 @@ impl SettingsView {
                         }),
                     ),
                 )),
+            )
+            // --- Direct-relay exemptions (issue #11, review Tier 2.1) ------
+            // Consent granted from a pasted URI's screening dialog: these
+            // hosts dial directly, bypassing screening, for every relay
+            // use. The pane is the revocation surface.
+            .child(
+                group(
+                    "Direct-relay exemptions",
+                    "Hosts you allowed from a wallet or bunker URI's private-address                      warning. They dial directly, bypassing relay screening, for every                      use. Revoke to screen them again.",
+                )
+                .when(satori_core::net_guard::direct_relays().is_empty(), |d| {
+                    d.child(
+                        div()
+                            .text_size(px(theme::T_SMALL))
+                            .text_color(rgb(theme::muted()))
+                            .child("none"),
+                    )
+                })
+                .children(satori_core::net_guard::direct_relays().iter().map(|host| {
+                    let host_rm = host.clone();
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_0p5()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child(host.clone()),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!(
+                                    "direct-revoke-{}",
+                                    host
+                                )))
+                                .cursor_pointer()
+                                .px_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::muted()))
+                                .child("revoke")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.revoke_direct_relay(&host_rm, cx);
+                                })),
+                        )
+                })),
             )
             // --- Relay health (D33/D36 learned state, WS1's last item) ------
             .child(self.relay_health_group(cx))

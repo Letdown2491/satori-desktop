@@ -52,7 +52,7 @@ pub struct LoginView {
     /// Paste-time screening refused a private relay in the pasted bunker
     /// URI (issue #11): the hosts the "allow & retry" chip consents to.
     /// Cleared on the next attempt or cancel.
-    screened: Option<Vec<String>>,
+    screened: Option<Vec<satori_core::net_guard::RelayVerdict>>,
     autofocused: bool,
 }
 
@@ -183,12 +183,17 @@ impl LoginView {
                 cx.emit(Login::Approved);
                 return false;
             }
-            ConnectEvent::RelayScreened(hosts) => {
-                dlog!("[login] relay screening refused {} host(s)", hosts.len());
-                // The banner line rides the following Failed; this arms
-                // the allow-and-retry chip under it.
-                self.screened = Some(hosts);
-                return true; // keep pumping — the notice is next
+            ConnectEvent::RelayScreened(verdicts) => {
+                dlog!("[login] relay screening refused {} host(s)", verdicts.len());
+                // Terminal: the banner comes from the verdicts (review
+                // Tier 2.5), the chip under it offers allow-and-retry.
+                self.screened = Some(verdicts.clone());
+                self.error = satori_core::net_guard::relay_screen_notice(&verdicts);
+                self.error_is_notice = false; // a real refusal — red banner
+                self.waiting = None;
+                self.connecting = false;
+                self.core.cancel_login();
+                return false;
             }
             ConnectEvent::Failed(msg) => {
                 dlog!("[login] failed: {msg}");
@@ -420,7 +425,15 @@ impl Render for LoginView {
                             // retry re-runs the (still-filled) URI.
                             div()
                                 .when(self.screened.is_some(), |d| {
-                                    let Some(hosts) = self.screened.clone() else {
+                                    let Some(hosts) = self
+                                        .screened
+                                        .clone()
+                                        .map(|vs| {
+                                            vs.iter()
+                                                .map(|v| v.host.clone())
+                                                .collect::<Vec<String>>()
+                                        })
+                                    else {
                                         return d;
                                     };
                                     d.child(
