@@ -29,6 +29,13 @@
   <launchable type="desktop-id">io.github.Letdown2491.satori.desktop</launchable>
   <url type="homepage">https://github.com/Letdown2491/satori-desktop</url>
   <releases>
+    <release version="0.6.0" date="2026-11-12">
+      <description>
+        <p>The replies-and-repairs release. Replies became surfaces, not a page: the composer sheet opens from any action row, thread included (the full form with attachments, alt text, preview and schedule in a card over the current pane), and the zap sheet became a proper overlay with its own card. Notifications wear their glyph anatomy: a reaction leads with its emoji, and reposts and quotes join the pane. Follow and Mute sit grouped on the profile, and the undo toast tells the truth past its deadline.</p>
+        <p>Signing got its biggest reliability pass yet: the first sign after login works against strict signers, the first sign after a restart carries the pairing secret the URI issued, and signing out and back in no longer strands the app on the login doors.</p>
+        <p>Under the hood: net_guard is the one IP authority, and the pre-release audit fixed ten verified findings: no more per-frame signature verification on zap rows, no resident tasks behind closed panes, the upload client and video player respect the IP authority, signer responses log method names only (the log file is 0600), and the single-instance socket read is capped.</p>
+      </description>
+    </release>
     <release version="0.5.0" date="2026-11-11">
       <description>
         <p>An iteration release with no theme: the composer grew a Video tab (a deliberate video post is its own NIP-71 event, instant or scheduled, videos only), thread notes now carry the full action row the timeline has (reactions, repost, quote, reply, delete, zap), and the gallery carousel's arrows and position dots page the gallery instead of opening the thread.</p>

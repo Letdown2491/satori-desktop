@@ -6,20 +6,35 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
-## Unreleased
+## 0.6.0 - 2026-11-12
 
-- Replies open the composer sheet from any action row, thread included:
-  the full form (attachments, alt text, preview, schedule) in a card over
-  the current pane, replying-to line and post snippet on top. Publishing
-  closes the card; the pane underneath stays where it is.
-- The zap sheet became a proper overlay with its own card, like replies.
-- The toast that rides the publish undo window tells the truth past its
-  deadline ("sending…" instead of a fake "publishing in 1s"), and its Undo
-  button centers its label.
-- Follow and Mute sit grouped on the profile, not flung to opposite ends
-  of the identity row.
-- Fixed a flaky web-of-trust test (test cleanup was wiping shared state
-  mid-assert).
+The replies-and-repairs release. Replies became surfaces, not a page: the
+composer sheet opens from any action row, thread included (the full form
+with attachments, alt text, preview and schedule in a card over the
+current pane, replying-to line and post snippet on top), and the zap
+sheet became a proper overlay with its own card. Notifications wear
+their glyph anatomy: a reaction leads with its emoji, and reposts and
+quotes join the pane. Follow and Mute sit grouped on the profile, and
+the undo toast tells the truth past its deadline.
+
+Signing got its biggest reliability pass yet: the first sign after login
+works against strict signers (the session wears the handshake-completed
+client), the first sign after a restart carries the pairing secret the
+URI issued, and signing out and back in no longer strands the app on
+the login doors (the shell swap now has its listener attached to every
+login screen, not just the startup one).
+
+Under the hood: net_guard is the one IP authority (M5 WP1, decision
+D57). The pre-release four-lens audit (performance, resources, memory,
+security) fixed ten verified findings: zap receipts no longer run a
+signature verification per visible row per frame, repost payloads are
+parsed once and shared, a closed pane leaves no resident pump tasks
+behind, abandoned signer transports are shut down instead of dropped,
+the upload client and the video player respect the IP authority,
+signer responses log method names only (the log file is now 0600), the
+single-instance socket read is capped, and the shell's navigation
+dispatch lives in one place. A flaky web-of-trust test stopped wiping
+shared state mid-assert.
 
 ## 0.5.0 - 2026-11-11
 
