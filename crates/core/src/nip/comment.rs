@@ -361,4 +361,84 @@ mod tests {
             CommentTarget::Event { kind: 20, .. }
         ));
     }
+
+    /// Fixture gate (D59): a published NIP-22 comment on a long-form
+    /// article the way Amethyst and habla render/reply to them — the root
+    /// rides uppercase A (the article's ADDRESS, kind:pubkey:d) + K + P,
+    /// the parent (the article itself for a top-level comment) lowercase
+    /// a/k/p, body plain markdown. The reader's comments section fetches
+    /// through `CommentTarget::Address.fetch_filters()` — the fixture must
+    /// match it, and its refs must parse back to the article.
+    #[test]
+    fn article_comment_fixture_matches_the_reader_fetch() {
+        // A published article: 30023:pubkey:slug (the d tag is the thread
+        // address the reader builds its target from).
+        let article_d = "why-my-relay-set-doesnt-overlap-with-yours";
+        let article = sign(
+            &keys(),
+            Kind::Custom(30023),
+            {
+                let mut t = Tags::new();
+                t.push(Tag::custom("d", [article_d]));
+                t.push(Tag::custom("title", ["Why relay sets diverge"]));
+                t
+            },
+            "# Why relay sets diverge\n\nYour replies were silent for me.",
+        );
+        let target = CommentTarget::for_event(&article);
+        let CommentTarget::Address { kind, d, .. } = &target else {
+            panic!("article target is the address");
+        };
+        assert_eq!((*kind, d.as_str()), (30023, article_d));
+
+        // The published comment (Amethyst's tag order: root A/K/P, parent
+        // a/k/p — NIP-22 §Grammar). Ids are real-shaped hex.
+        let commenter = keys();
+        let comment = sign(
+            &commenter,
+            Kind::Custom(1111),
+            Tags::from_list(target.root_tags()),
+            "Great write-up — this is exactly why my replies vanished.",
+        );
+        let refs = parse_refs(&comment);
+        match refs.root {
+            Some(Ref::Address { kind: 30023, d, .. }) => assert_eq!(d, article_d),
+            other => panic!("address root parsed, got {other:?}"),
+        }
+        // Top-level: the parent reference is the article too (parent ==
+        // root; only nested replies lower the parent to a comment id).
+        assert_eq!(
+            refs.parent,
+            Some(Ref::Address {
+                kind: 30023,
+                author: article.pubkey,
+                d: article_d.to_string()
+            })
+        );
+
+        // The fetch the reader issues selects the fixture: the filter's
+        // a-tag is the article's `30023:pubkey:d`, and the fixture matches
+        // it (MatchEventOptions::default() — the store's query path).
+        let filters = target.fetch_filters();
+        assert_eq!(filters.len(), 1);
+        assert!(
+            filters[0].match_event(&comment, MatchEventOptions::default()),
+            "the reader's fetch matches the comment"
+        );
+        // …and a comment on a DIFFERENT article does not.
+        let other = sign(
+            &commenter,
+            Kind::Custom(1111),
+            Tags::from_list(
+                CommentTarget::Address {
+                    kind: 30023,
+                    author: article.pubkey,
+                    d: "another-slug".into(),
+                }
+                .root_tags(),
+            ),
+            "on a different article",
+        );
+        assert!(!filters[0].match_event(&other, MatchEventOptions::default()));
+    }
 }

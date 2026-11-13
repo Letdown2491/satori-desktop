@@ -26,6 +26,9 @@ pub struct ArticleView {
     ev: Event,
     data: article::ArticleData,
     profiles: HashMap<String, Profile>,
+    /// The NIP-22 comments on this article (kind 1111, oldest first —
+    /// manager::comments's order), pumped in as they land.
+    comments: Vec<Event>,
     list: ListState,
     /// This render's media urls, pinned against eviction (media.rs's
     /// idle-pane flash): a long read outlives the grace window — renders
@@ -54,6 +57,7 @@ impl ArticleView {
             ev,
             data,
             profiles: HashMap::new(),
+            comments: vec![],
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             pinned: vec![],
         };
@@ -62,7 +66,32 @@ impl ArticleView {
         // author, for the byline.
         view.want_names(cx);
         view.want_media(cx);
+        // The comments section (NIP-22): the article is an addressable
+        // root — its d tag IS the thread's address (CommentTarget::Address;
+        // reply_tags preserves it for nested replies). No d tag (blank
+        // identifier is a publish-time invention) → no address → no
+        // fetch; the section stays empty rather than hanging off air.
+        if let Some(target) = view.comment_target() {
+            view.pump(view.core.comments(target), cx);
+        }
         view
+    }
+
+    /// The article's comment root: kind 30023 + author + d tag. None
+    /// without a d tag (the address is what other clients hang the
+    /// thread off — an id-based target would fork it).
+    fn comment_target(&self) -> Option<satori_core::nip::comment::CommentTarget> {
+        let d = self
+            .ev
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(String::as_str) == Some("d"))
+            .and_then(|t| t.as_slice().get(1).cloned())?;
+        Some(satori_core::nip::comment::CommentTarget::Address {
+            kind: 30023,
+            author: self.ev.pubkey,
+            d,
+        })
     }
 
     /// Hydrate names for the byline + mentioned pubkeys — otherwise the
@@ -111,11 +140,21 @@ impl ArticleView {
     }
 
     fn on_event(&mut self, ev: FeedEvent, cx: &mut Context<Self>) {
-        if let FeedEvent::Profiles(profiles) = ev {
-            for p in profiles {
-                self.profiles.insert(p.pubkey.clone(), p);
+        match ev {
+            FeedEvent::Profiles(profiles) => {
+                for p in profiles {
+                    self.profiles.insert(p.pubkey.clone(), p);
+                }
+                cx.notify();
             }
-            cx.notify();
+            FeedEvent::Comments(comments, profiles) => {
+                for p in profiles {
+                    self.profiles.insert(p.pubkey.clone(), p);
+                }
+                self.comments = comments;
+                cx.notify();
+            }
+            _ => {}
         }
     }
 
@@ -530,12 +569,35 @@ impl Render for ArticleView {
         let media = media_snap;
         let block_count = blocks.len();
 
-        // Head items (title, byline, cover) then one per markdown block.
+        // Head items (title, byline, cover), one per markdown block, then
+        // the comments section: a header (count + the reply affordance)
+        // and one row per comment.
         let head_count = 2 + cover.is_some() as usize;
-        let item_count = head_count + block_count;
+        let comments_base = head_count + block_count;
+        let item_count = comments_base + 1 + self.comments.len();
         if self.list.item_count() != item_count {
             self.list.reset(item_count);
         }
+        // Comment-row snapshot data (AnyElement isn't Clone — the block
+        // closure rebuilds per row): names, avatars, timestamps (mode
+        // ensured + stamped at render, like the byline).
+        let comments: Vec<Event> = self.comments.clone();
+        let comment_rows: Vec<(String, String, String)> = comments
+            .iter()
+            .map(|c| {
+                let ts = c.created_at.as_secs();
+                crate::timefmt::ensure(ts, cx);
+                (
+                    self.name_for(&c.pubkey),
+                    self.profiles
+                        .get(&c.pubkey.to_string())
+                        .map(|p| p.picture.clone())
+                        .unwrap_or_default(),
+                    crate::timefmt::stamp(ts, cx),
+                )
+            })
+            .collect();
+        let reply_ev = self.ev.clone();
 
         div()
             .flex_1()
@@ -609,6 +671,101 @@ impl Render for ArticleView {
                                 theme::S5,
                             )
                             .into_any_element(),
+                            i if i == comments_base => block_item(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::T_UI))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(theme::ink()))
+                                            .child(format!("Comments · {}", comments.len())),
+                                    )
+                                    .child(
+                                        // The reply affordance: opens the
+                                        // composer on the ARTICLE — the
+                                        // composer routes kind≠1 parents to
+                                        // core.comment (kind 1111), whose
+                                        // tags name this address as root.
+                                        div()
+                                            .id("comments-reply")
+                                            .cursor_pointer()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded(px(theme::R_INPUT))
+                                            .border_1()
+                                            .border_color(rgb(theme::hairline()))
+                                            .text_size(px(theme::T_SMALL))
+                                            .text_color(rgb(theme::muted()))
+                                            .hover(|s| s.text_color(rgb(theme::ink())))
+                                            .on_click({
+                                                let reply_ev = reply_ev.clone();
+                                                let handle = handle.clone();
+                                                move |_, _, cx| {
+                                                    let ev = reply_ev.clone();
+                                                    handle.update(cx, |_, cx| {
+                                                        cx.emit(Nav::OpenReply(ev))
+                                                    });
+                                                }
+                                            })
+                                            .child("Reply"),
+                                    ),
+                                theme::S5,
+                            )
+                            .into_any_element(),
+                            i if i > comments_base => {
+                                let ci = i - comments_base - 1;
+                                let (name, picture, time) = comment_rows[ci].clone();
+                                let ev = comments[ci].clone();
+                                block_item(
+                                    div()
+                                        .w_full()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .child(media::avatar(
+                                                            &media, &picture, &name, 20.0,
+                                                        ))
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(theme::T_SMALL))
+                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                .text_color(rgb(theme::ink()))
+                                                                .child(name),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "comment-time-{ci}"
+                                                        )))
+                                                        .cursor_pointer()
+                                                        .text_size(px(theme::T_SMALL))
+                                                        .text_color(rgb(theme::muted()))
+                                                        .on_click(|_, _, cx| {
+                                                            crate::timefmt::cycle(cx)
+                                                        })
+                                                        .child(time),
+                                                ),
+                                        )
+                                        .child(content::body(&ev, &body_ctx, handle.clone())),
+                                    theme::S3,
+                                )
+                                .into_any_element()
+                            }
                             i => render_block(
                                 blocks[i - head_count].clone(),
                                 i - head_count,

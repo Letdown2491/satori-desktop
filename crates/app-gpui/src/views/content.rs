@@ -756,6 +756,19 @@ pub(crate) fn repost_inner_cached(ev: &Event) -> Option<std::sync::Arc<Event>> {
 /// embeds. Media fetches ride the shared cache (`media::Snapshot`); the view
 /// queues them via `content::media_urls` + `media::fetch`.
 pub fn body<V: EventEmitter<Nav> + 'static>(ev: &Event, ctx: &Body, handle: Entity<V>) -> Div {
+    body_with(ev, ctx, handle, false)
+}
+
+/// The body with the first content line dropped (`skip_title_line`): a
+/// card that already renders that line as its serif header (video cards,
+/// NIP-71's "title is the first line") would otherwise paint the title —
+/// and any hashtags riding it — twice.
+pub fn body_with<V: EventEmitter<Nav> + 'static>(
+    ev: &Event,
+    ctx: &Body,
+    handle: Entity<V>,
+    skip_title_line: bool,
+) -> Div {
     let mut body = div().w_full().flex().flex_col().gap_2();
 
     let parsed = body_parse_cached(ev);
@@ -765,6 +778,18 @@ pub fn body<V: EventEmitter<Nav> + 'static>(ev: &Event, ctx: &Body, handle: Enti
     // flow skips their URLs (a media URL never renders twice).
     let assets = &parsed.assets;
     let media_links = &parsed.media_links;
+
+    // The text flow's source: the media parse above always sees the FULL
+    // content (imeta-tagged media needs every line); only the TEXT drops
+    // the title line.
+    let text: &str = if skip_title_line {
+        ev.content
+            .split_once('\n')
+            .map(|(_, rest)| rest)
+            .unwrap_or("")
+    } else {
+        &ev.content
+    };
 
     // Paragraph rhythm follows the TS renderer's pre-wrap semantics
     // (TODO(port): src/render/content.ts — `.content` is pre-wrap): a single
@@ -778,7 +803,7 @@ pub fn body<V: EventEmitter<Nav> + 'static>(ev: &Event, ctx: &Body, handle: Enti
             _ => body.child(div().w_full().flex().flex_col().children(run.drain(..))),
         }
     }
-    for para in ev.content.split('\n') {
+    for para in text.split('\n') {
         let trimmed = para.trim();
         if trimmed.is_empty() {
             body = push_block(body, &mut run);
