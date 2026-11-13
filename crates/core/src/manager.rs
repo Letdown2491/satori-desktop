@@ -54,7 +54,11 @@ pub enum ConnectEvent {
     /// Paste-time screening refused a private relay (issue #11): the
     /// refused hosts, for the login dialog's allow-and-retry button. The
     /// banner line rides the following `Failed`.
-    RelayScreened(Vec<String>),
+    /// Paste-time relay screening refused a private relay (issue #11):
+    /// the full verdicts, for the login dialog's allow-and-retry
+    /// affordance (review Tier 2.5). Terminal, like `Failed`: the banner
+    /// line is derived from the verdicts, nothing was dialed.
+    RelayScreened(Vec<crate::net_guard::RelayVerdict>),
     Failed(String),
 }
 
@@ -1726,12 +1730,9 @@ impl Core {
                     crate::dlog!("bunker: approved for {pk}");
                     let _ = tx.send(ConnectEvent::Approved(pk));
                 }
-                Err(LoginError::RelayScreened(notice, hosts)) => {
-                    crate::dlog!("bunker: relay screening refused {}", hosts.len());
-                    // Ordered: the hosts land first, the banner line last
-                    // (the pump paints the affordance, then the notice).
-                    let _ = tx.send(ConnectEvent::RelayScreened(hosts));
-                    let _ = tx.send(ConnectEvent::Failed(notice));
+                Err(LoginError::RelayScreened(verdicts)) => {
+                    crate::dlog!("bunker: relay screening refused {}", verdicts.len());
+                    let _ = tx.send(ConnectEvent::RelayScreened(verdicts));
                 }
                 Err(e) => {
                     crate::dlog!("bunker: failed: {e}");
@@ -1761,11 +1762,6 @@ impl Core {
     }
 
     async fn connect_bunker_inner(&self, uri: &str, seq: u64) -> Result<PublicKey> {
-        // Paste-time transport screen (issue #11): the URI's relays are the
-        // bunker transport's dials, outside the pool's screens — the same
-        // ruleset screens them before the nostrconnect client is built.
-        crate::net_guard::screen_bunker_uri(uri).map_err(LoginError::InvalidBunkerUri)?;
-
         let parsed = NostrConnectUri::parse(uri.trim())
             .map_err(|e| LoginError::InvalidBunkerUri(e.to_string()))?;
 
@@ -1807,11 +1803,7 @@ impl Core {
             .cloned()
             .collect();
         if !refused.is_empty() {
-            let hosts = refused.iter().map(|v| v.host.clone()).collect();
-            return Err(LoginError::RelayScreened(
-                crate::net_guard::relay_screen_notice(&refused),
-                hosts,
-            ));
+            return Err(LoginError::RelayScreened(refused));
         }
 
         let client_keys = Keys::generate();
