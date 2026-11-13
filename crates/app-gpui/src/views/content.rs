@@ -742,10 +742,10 @@ pub(crate) fn repost_inner_cached(ev: &Event) -> Option<std::sync::Arc<Event>> {
         return inner.clone();
     }
     let inner = repost_inner(ev).map(std::sync::Arc::new);
-    if memo.map.len() >= CAP {
-        if let Some(oldest) = memo.order.pop_front() {
-            memo.map.remove(&oldest);
-        }
+    if memo.map.len() >= CAP
+        && let Some(oldest) = memo.order.pop_front()
+    {
+        memo.map.remove(&oldest);
     }
     memo.order.push_back(key.clone());
     memo.map.insert(key, inner.clone());

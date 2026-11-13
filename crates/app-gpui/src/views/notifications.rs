@@ -103,10 +103,10 @@ fn action_parts(t: NotifType, ev: &Event) -> (&'static str, Option<String>) {
             }
         }
     };
-    if memo.map.len() >= CAP {
-        if let Some(oldest) = memo.order.pop_front() {
-            memo.map.remove(&oldest);
-        }
+    if memo.map.len() >= CAP
+        && let Some(oldest) = memo.order.pop_front()
+    {
+        memo.map.remove(&oldest);
     }
     memo.order.push_back(key.clone());
     memo.map.insert(key, parts.clone());
