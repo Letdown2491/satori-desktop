@@ -4528,6 +4528,37 @@ impl Core {
                 for ev in active.pool.get(comment_filter).await.unwrap_or_default() {
                     replies.push(ev);
                 }
+                // NIP-22 nesting (comment-on-comment): a nested reply's
+                // lowercase e names its parent COMMENT while the thread
+                // root rides uppercase E — the anchor's #e filters above
+                // only reach top-level comments. One extra round: the
+                // store's comment set for the ids in hand, then a relay
+                // top-up on those ids (capped; 200 rows already bound the
+                // set).
+                let comment_ids: Vec<EventId> = replies
+                    .iter()
+                    .filter(|e| u16::from(e.kind) == 1111)
+                    .map(|e| e.id)
+                    .take(100)
+                    .collect();
+                if !comment_ids.is_empty() {
+                    for ev in active
+                        .pool
+                        .store
+                        .comments_of(comment_ids.clone())
+                        .await
+                        .unwrap_or_default()
+                    {
+                        replies.push(ev);
+                    }
+                    let mut nest_filter = Filter::new().kind(Kind::Custom(1111)).limit(200);
+                    for cid in comment_ids.iter() {
+                        nest_filter = nest_filter.event(*cid);
+                    }
+                    for ev in active.pool.get(nest_filter).await.unwrap_or_default() {
+                        replies.push(ev);
+                    }
+                }
                 // Deletions (NIP-09), targeted by id — replies come from
                 // beyond the follows, so the sync can't cover them. The
                 // chokepoint consumes the kind:5s it fetches (records
