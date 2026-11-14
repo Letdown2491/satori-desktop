@@ -2055,7 +2055,11 @@ impl Shell {
                                         .id(SharedString::from(format!("col-x-{i}")))
                                         .cursor_pointer()
                                         .text_size(px(theme::T_UI))
-                                        .text_color(rgb(theme::muted()))
+                                        // Ink, not muted: an affordance you
+                                        // can't see is a broken affordance
+                                        // (user report); the hover keeps
+                                        // vermilion as the destructive tint.
+                                        .text_color(rgb(theme::ink()))
                                         .hover(|s| s.text_color(rgb(theme::vermilion())))
                                         .on_click(cx.listener(move |shell, _, _, cx| {
                                             cx.stop_propagation();
@@ -2105,12 +2109,15 @@ impl Shell {
                             .size(px(32.0))
                             .rounded(px(theme::R_EMBED))
                             .border_1()
-                            .border_color(rgb(theme::hairline()))
+                            // The ring tints with the text: ink at rest
+                            // (muted was invisible on washi — user report),
+                            // vermilion on hover.
+                            .border_color(rgb(theme::muted()))
                             .flex()
                             .items_center()
                             .justify_center()
                             .text_size(px(theme::T_UI))
-                            .text_color(rgb(theme::muted()))
+                            .text_color(rgb(theme::ink()))
                             .hover(|s| {
                                 s.border_color(rgb(theme::vermilion()))
                                     .text_color(rgb(theme::vermilion()))
