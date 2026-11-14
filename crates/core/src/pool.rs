@@ -37,6 +37,7 @@ use crate::nip40;
 use crate::outbox::{self, RelayList, Route};
 use crate::relay_latency;
 use crate::seen;
+use crate::seen_event;
 use crate::signer::Signer;
 use crate::store::Store;
 
@@ -656,6 +657,9 @@ impl Pool {
             relay_latency::record(&url, elapsed.as_millis() as u64, truncated, events.len());
             for ev in &events {
                 seen::record(&ev.pubkey, &[url.as_str()]);
+                // Per-event provenance (the phase-2 sidecar): which relay
+                // carried THIS event — the deletion sweep's targeted ask.
+                seen_event::record(&ev.id, url.as_str());
                 // Author-keyed relay hints (WS1, RelayHintStore.kt):
                 // provenance + e/p-tag relay urls, feeding the
                 // no-kind-10002 routing fallback (get_routed /
@@ -713,6 +717,9 @@ impl Pool {
             relay_latency::record(&url, elapsed.as_millis() as u64, truncated, events.len());
             for ev in &events {
                 seen::record(&ev.pubkey, &[url.as_str()]);
+                // Per-event provenance (the phase-2 sidecar), same as
+                // fetch_route.
+                seen_event::record(&ev.id, url.as_str());
                 // Same hint feed as fetch_route (WS1).
                 hints::observe(ev, url.as_str());
             }

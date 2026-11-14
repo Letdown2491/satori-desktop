@@ -47,6 +47,7 @@ pub mod relay_latency;
 pub mod routing;
 pub mod scheduled;
 pub mod seen;
+pub mod seen_event;
 pub mod store;
 pub mod tor;
 pub mod upload;

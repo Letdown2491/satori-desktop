@@ -24,6 +24,7 @@ pub mod files {
     pub const DM_READ: &str = "dm-read.json";
     pub const RELAYS_CACHE: &str = "relays-cache.json";
     pub const SEEN_RELAYS: &str = "seen-relays.json";
+    pub const SEEN_EVENT: &str = "seen-event.json";
     pub const RELAY_HINTS: &str = "relay-hints.json";
     pub const WOT_SOURCES: &str = "wot-sources.json";
     /// D48: the anti-spam ledgers — dedup's spammers + recent duplicate
