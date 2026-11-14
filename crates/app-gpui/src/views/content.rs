@@ -19,8 +19,7 @@ use gpui::{
 };
 use nostr::prelude::*;
 use satori_core::manager::Profile;
-use satori_core::nip::article;
-use satori_core::nip::imeta;
+use satori_core::nip::{article, fields, imeta};
 
 use super::nav::Nav;
 use crate::{media, theme};
@@ -49,6 +48,11 @@ pub struct Body<'a> {
     pub media: &'a media::Snapshot,
     pub quotes: &'a Quotes,
     pub profiles: &'a HashMap<String, Profile>,
+    /// The event's NIP-30 emoji map (shortcode → url): `:code:` tokens in
+    /// the body resolve here. The urls also ride `media_urls`, so every
+    /// view's media sweep fetches them and the thumb replaces the bare
+    /// code when the bytes land.
+    pub emoji: HashMap<String, String>,
 }
 
 /// Deterministic element id — RandomState would re-hash every render, and a
@@ -236,7 +240,7 @@ fn media_assets_with(parsed: Option<&article::ArticleData>, ev: &Event) -> Vec<M
 /// stays bare. A cache may still hold a sniff from before the switch —
 /// painting already-fetched bytes breaks no new ground.
 pub fn media_urls(ev: &Event) -> Vec<String> {
-    media_assets(ev)
+    let mut out: Vec<String> = media_assets(ev)
         .into_iter()
         .flat_map(|a| match a {
             MediaAsset::Picture { url } => vec![url],
@@ -262,7 +266,12 @@ pub fn media_urls(ev: &Event) -> Vec<String> {
                 },
             },
         })
-        .collect()
+        .collect();
+    // NIP-30: the emoji tags' urls ride the fetch sweeps too (the body
+    // renders them inline; the gallery does NOT — assets don't carry
+    // them, so an emoji image is never a media tile).
+    out.extend(fields::emoji_tags(ev).into_iter().map(|(_, url)| url));
+    out
 }
 
 /// `media_urls`, memoized per event. The parse (imeta + the content's
@@ -386,6 +395,9 @@ pub(crate) enum Tok {
     Url(String),
     /// A #hashtag — opens the hashtag timeline (Phase 2 §4.2).
     Hashtag(String),
+    /// A bare `:shortcode:` (NIP-30) — resolves through the event's own
+    /// emoji tags to an inline image.
+    Emoji(String),
     Word(String),
 }
 
@@ -480,6 +492,23 @@ pub(crate) fn token_el<V: EventEmitter<Nav> + 'static>(
             format!("{w}{punct}")
         })
         .into_any_element(),
+        Tok::Emoji(code) => {
+            // NIP-30: the shortcode resolves through the event's own emoji
+            // tags (reaction_glyph's shape in notifications.rs). The fetch
+            // rides the view's media sweep (the urls are in media_urls),
+            // so a thumb not ready yet shows the bare code and the image
+            // replaces it when the bytes land.
+            match ctx.emoji.get(&code) {
+                Some(url) => match ctx.media.thumb(url) {
+                    Some(png) => img(png)
+                        .size(px(20.0))
+                        .object_fit(ObjectFit::Contain)
+                        .into_any_element(),
+                    None => word(format!(":{code}:")).into_any_element(),
+                },
+                None => word(format!(":{code}:")).into_any_element(),
+            }
+        }
         Tok::Url(url) => {
             let label = display_url(&url);
             let openable = web_url(&url);
@@ -564,6 +593,27 @@ fn with_punct(el: impl IntoElement, punct: &str) -> AnyElement {
 /// and refs become clickable anywhere in the text, which the GTK markup
 /// pipeline got from rich runs and GPUI's div tree gets from flex-wrap.
 /// Also the profile page's about block (profile.rs `about_flow`).
+/// A bare `:shortcode:` token (NIP-30): colon-wrapped, non-empty, no
+/// inner colons or whitespace. Runs on the RAW token — split_trailing
+/// would eat the closing colon and hand classify_token a dead `:name`.
+fn emoji_shortcode(token: &str) -> Option<String> {
+    token
+        .strip_prefix(':')
+        .and_then(|t| t.strip_suffix(':'))
+        .filter(|c| !c.is_empty() && !c.contains(':') && !c.contains(char::is_whitespace))
+        .map(String::from)
+}
+
+/// The event's NIP-30 emoji map (Body.emoji): shortcode → url, first tag
+/// wins.
+pub fn emoji_map(ev: &Event) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for (code, url) in fields::emoji_tags(ev) {
+        map.entry(code).or_insert(url);
+    }
+    map
+}
+
 pub(crate) fn word_flow<V: EventEmitter<Nav> + 'static>(
     para: &str,
     skip: &[String],
@@ -572,6 +622,12 @@ pub(crate) fn word_flow<V: EventEmitter<Nav> + 'static>(
 ) -> Div {
     let mut flow = div().w_full().flex().flex_wrap().gap_1();
     for (n, token) in para.split_whitespace().enumerate() {
+        // The emoji check runs on the RAW token (split_trailing would eat
+        // the closing colon); everything else classifies after the split.
+        if let Some(code) = emoji_shortcode(token) {
+            flow = flow.child(token_el(Tok::Emoji(code), "", n, ctx, handle));
+            continue;
+        }
         let (core, punct) = split_trailing(token);
         if core.is_empty() {
             continue;
@@ -1667,6 +1723,7 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
         media,
         quotes,
         profiles,
+        emoji: emoji_map(ev),
     };
 
     div()
@@ -1761,5 +1818,47 @@ mod tests {
             ]
         );
         assert!(matches!(assets[0], MediaAsset::Picture { .. }));
+    }
+
+    #[test]
+    fn emoji_shortcode_is_bare_colon_wrapped() {
+        assert_eq!(emoji_shortcode(":sox:"), Some("sox".into()));
+        assert_eq!(emoji_shortcode(":sox"), None);
+        assert_eq!(emoji_shortcode("sox:"), None);
+        assert_eq!(emoji_shortcode("::"), None);
+        assert_eq!(
+            emoji_shortcode(":a:b:"),
+            None,
+            "inner colon is not one code"
+        );
+        assert_eq!(emoji_shortcode(":so x:"), None);
+        // Mid-text tokens arrive word-split, so punctuation hugs fail the
+        // bare shape (NIP-30 shortcodes are whitespace-delimited).
+        assert_eq!(emoji_shortcode("(:sox:)"), None);
+    }
+
+    #[test]
+    fn emoji_urls_ride_the_fetch_list_but_not_the_gallery() {
+        let keys = Keys::generate();
+        let unsigned = UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::from_secs(1),
+            Kind::TextNote,
+            [Tag::custom(
+                "emoji",
+                ["sox".to_string(), "https://a/sox.png".to_string()],
+            )],
+            "hi :sox:",
+        );
+        let ev = keys.sign_event(unsigned).unwrap();
+        // The sweep fetches it...
+        assert!(media_urls(&ev).contains(&"https://a/sox.png".to_string()));
+        // ...the gallery never tiles it...
+        assert!(media_assets(&ev).is_empty());
+        // ...and the body's map resolves the code.
+        assert_eq!(
+            emoji_map(&ev).get("sox").map(String::as_str),
+            Some("https://a/sox.png")
+        );
     }
 }

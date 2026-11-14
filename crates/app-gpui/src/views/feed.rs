@@ -78,6 +78,8 @@ pub struct Feed {
     poll_sel: HashMap<EventId, Vec<String>>,
     voted: HashSet<EventId>,
     rsvped: HashMap<EventId, String>,
+    /// NIP-36 warnings revealed this session (veil_card taps Show).
+    revealed: HashSet<EventId>,
     status: String,
     /// §4.3: the pane's kinded error — the strip replaces the old raw
     /// `format!("… {e}")` status-line dump (deficiency 8).
@@ -181,6 +183,7 @@ impl Feed {
             poll_sel: HashMap::new(),
             voted: HashSet::new(),
             rsvped: HashMap::new(),
+            revealed: HashSet::new(),
             status: "connecting to the relays…".into(),
             error: None,
             has_more: true,
@@ -458,6 +461,13 @@ impl Feed {
         self.snap_dirty = true;
     }
 
+    /// NIP-36: reveal a warned row (veil_card's Show seal). Stays for the
+    /// session — a re-render never re-veils what was revealed.
+    pub(crate) fn reveal(&mut self, id: EventId) {
+        self.revealed.insert(id);
+        self.touch();
+    }
+
     /// §4.3 Retry: re-ask what this pane asks on open, per mode. The strip's
     /// Retry action only re-runs a relay round trip — it never pages.
     fn retry_load(&mut self, cx: &mut Context<Self>) {
@@ -598,7 +608,15 @@ impl Feed {
             let ts = note.created_at.as_secs();
             self.oldest_ts = Some(self.oldest_ts.map_or(ts, |o: u64| o.min(ts)));
             // Registry kinds render as rich cards (cards.rs card_for port).
-            if note.kind != Kind::TextNote && !cards::is_feed_kind(note.kind) {
+            // NIP-31's exception: an unknown kind whose `alt` tag says
+            // what it is renders the fallback card instead of vanishing —
+            // EXCEPT engagement noise (viewport's kinds): a reaction with
+            // an alt tag is still a reaction, and alt is attacker-writable.
+            if note.kind != Kind::TextNote
+                && !cards::is_feed_kind(note.kind)
+                && !satori_core::viewport::ENGAGEMENT_KINDS.contains(&u16::from(note.kind))
+                && satori_core::nip::fields::alt_description(&note).is_none()
+            {
                 continue;
             }
             // Amethyst's repost guard: a repost is not content of its own —
@@ -1145,6 +1163,7 @@ fn note_card(
                         media,
                         quotes,
                         profiles,
+                        emoji: content::emoji_map(&ev),
                     },
                     &handle,
                     cards,
@@ -1192,6 +1211,7 @@ impl Render for Feed {
                     poll_sel: self.poll_sel.clone(),
                     voted: self.voted.clone(),
                     rsvped: self.rsvped.clone(),
+                    revealed: self.revealed.clone(),
                 }),
             });
             self.snap_dirty = false;
@@ -1503,6 +1523,7 @@ fn repost_card(
                                 media,
                                 quotes,
                                 profiles,
+                                emoji: content::emoji_map(&note),
                             },
                             &handle,
                             cards,

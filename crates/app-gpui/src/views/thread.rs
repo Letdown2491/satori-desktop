@@ -600,6 +600,7 @@ fn reply_row(
                         media,
                         quotes,
                         profiles,
+                        emoji: content::emoji_map(ev),
                     },
                     body_handle,
                 )),
@@ -792,6 +793,7 @@ impl Render for ThreadView {
                                         media: &media,
                                         quotes: &quotes,
                                         profiles: &profiles,
+                                        emoji: content::emoji_map(note),
                                     },
                                     handle.clone(),
                                 ))

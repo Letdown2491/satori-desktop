@@ -625,6 +625,7 @@ impl Render for ArticleView {
         // closure rebuilds per row): names, avatars, timestamps (mode
         // ensured + stamped at render, like the byline).
         let comments: Vec<Event> = self.comments.clone();
+        let anchor_emoji = content::emoji_map(&self.ev);
         let comment_rows: Vec<(String, String, String)> = comments
             .iter()
             .map(|c| {
@@ -658,6 +659,10 @@ impl Render for ArticleView {
                             media: &media,
                             quotes: &quotes,
                             profiles: &profiles,
+                            // The article's own emoji map (the anchor's
+                            // tags); the comment rows below resolve their
+                            // per-comment maps in their arm.
+                            emoji: anchor_emoji.clone(),
                         };
                         match idx {
                             0 => block_item(
@@ -804,7 +809,16 @@ impl Render for ArticleView {
                                                         .child(time),
                                                 ),
                                         )
-                                        .child(content::body(&ev, &body_ctx, handle.clone())),
+                                        .child(content::body(
+                                            &ev,
+                                            &content::Body {
+                                                media: &media,
+                                                quotes: &quotes,
+                                                profiles: &profiles,
+                                                emoji: content::emoji_map(&ev),
+                                            },
+                                            handle.clone(),
+                                        )),
                                     theme::S3,
                                 )
                                 .into_any_element()
