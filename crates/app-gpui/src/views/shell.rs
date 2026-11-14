@@ -1991,8 +1991,13 @@ impl Shell {
             // The columns keep their measure and the row scrolls
             // horizontally (the owner's amendment to D68's collapse
             // fork): no narrow columns, TweetDeck's own answer.
+            // restrict_scroll_to_axis is load-bearing: without it gpui's
+            // wheel handler applies the VERTICAL delta to this row's x
+            // offset (its "single-axis fallback"), so scrolling a column
+            // also slid the row sideways (user report).
             .overflow_x_scroll()
-            .track_scroll(&self.row_scroll);
+            .track_scroll(&self.row_scroll)
+            .restrict_scroll_to_axis();
         if self.columns.is_empty() {
             // The unpinned extreme: a quiet word, the + slot beside it.
             row = row.child(
