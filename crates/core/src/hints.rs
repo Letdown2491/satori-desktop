@@ -11,13 +11,13 @@
 //!     relay URLs at index 2 of `e`/`p` tags — publishers point at the
 //!     relay carrying the referenced event / the mentioned author's home.
 //!
-//! Persisted like `seen.rs` (the D33 sidecar discipline): 0600 JSON,
-//! temp-sibling + rename, debounced flusher thread on `park_timeout` + a
-//! dirty flag. Bounded: `MAX_HINTS_PER_AUTHOR` relays per author (the
-//! Kotlin store's 5-hint cap), `MAX_AUTHORS` LRU in memory, the newest
-//! `PERSISTED_AUTHORS` written out on flush. Core-clean: no UI deps.
+//! Persisted like `seen.rs` on the `sidecar` kernel (the D33 discipline):
+//! 0600 JSON, temp-sibling + rename, debounced flusher thread on
+//! `park_timeout` + a dirty flag. Bounded: `MAX_HINTS_PER_AUTHOR` relays
+//! per author (the Kotlin store's 5-hint cap), `MAX_AUTHORS` LRU in
+//! memory, the newest `PERSISTED_AUTHORS` written out on flush.
+//! Core-clean: no UI deps.
 
-use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -26,7 +26,7 @@ use std::str::FromStr;
 use nostr::prelude::*;
 
 use crate::config;
-use crate::outbox;
+use crate::sidecar;
 
 /// Relays kept per author (RelayHintStore.kt: capped at 5 hints/pubkey).
 const MAX_HINTS_PER_AUTHOR: usize = 5;
@@ -35,58 +35,21 @@ const MAX_AUTHORS: usize = 5000;
 /// The persisted file keeps the newest slice of the LRU
 /// (RelayHintStore.kt: 2000 persisted).
 const PERSISTED_AUTHORS: usize = 2000;
-/// Flush cadence (the seen.rs discipline: 10s debounce).
-const FLUSH_SECS: u64 = 10;
 
-/// pubkey hex → relay urls, recency-ordered (most recent LAST, matching
-/// seen.rs's insertion-order convention); the order vec is the author LRU.
-struct Hints {
-    map: HashMap<String, Vec<String>>,
-    order: VecDeque<String>,
-}
-
-static HINTS: OnceLock<Mutex<Hints>> = OnceLock::new();
+static HINTS: OnceLock<Mutex<sidecar::RelayLru>> = OnceLock::new();
 static DIRTY: AtomicBool = AtomicBool::new(false);
 
-fn hints() -> &'static Mutex<Hints> {
+fn hints() -> &'static Mutex<sidecar::RelayLru> {
     HINTS.get_or_init(|| {
-        let mut h = Hints {
-            map: HashMap::new(),
-            order: VecDeque::new(),
-        };
-        let disk = read_disk();
-        // Hydrate honoring the per-author cap (newest tail wins), then the
-        // global LRU cap: drop OLDEST authors first.
-        for (pk, relays) in disk {
-            let tail: Vec<String> = relays
-                .iter()
-                .rev()
-                .take(MAX_HINTS_PER_AUTHOR)
-                .rev()
-                .cloned()
-                .collect();
-            if !tail.is_empty() {
-                h.map.insert(pk.clone(), tail);
-                h.order.push_back(pk);
-            }
-        }
-        while h.order.len() > MAX_AUTHORS {
-            if let Some(old) = h.order.pop_front() {
-                h.map.remove(&old);
-            }
-        }
-        spawn_flusher();
-        Mutex::new(h)
+        let mut lru = sidecar::RelayLru::new();
+        lru.hydrate(
+            sidecar::read_relay_pairs(config::files::RELAY_HINTS),
+            MAX_HINTS_PER_AUTHOR,
+            MAX_AUTHORS,
+        );
+        sidecar::spawn_flusher("hints-flush", &DIRTY, write_disk);
+        Mutex::new(lru)
     })
-}
-
-fn read_disk() -> Vec<(String, Vec<String>)> {
-    let Ok(raw) = std::fs::read_to_string(config::state_file(config::files::RELAY_HINTS)) else {
-        return Vec::new();
-    };
-    serde_json::from_str::<HashMap<String, Vec<String>>>(&raw)
-        .map(|m| m.into_iter().collect())
-        .unwrap_or_default()
 }
 
 fn write_disk() {
@@ -94,94 +57,33 @@ fn write_disk() {
     // Persist only the newest PERSISTED_AUTHORS (LRU order: the front is
     // the oldest — skip it).
     let skip = held.order.len().saturating_sub(PERSISTED_AUTHORS);
-    let mut out = serde_json::Map::new();
-    for pk in held.order.iter().skip(skip) {
-        if let Some(relays) = held.map.get(pk) {
-            out.insert(pk.clone(), serde_json::to_value(relays).unwrap_or_default());
-        }
-    }
+    let entries: Vec<(String, Vec<String>)> = held
+        .order
+        .iter()
+        .skip(skip)
+        .filter_map(|pk| held.map.get(pk).map(|r| (pk.clone(), r.clone())))
+        .collect();
     drop(held);
-    // Temp sibling + rename, 0600 — the state-file discipline (seen.rs,
-    // read_state, secrets): never rewrite in place, never follow a
-    // planted link.
-    let path = config::state_file(config::files::RELAY_HINTS);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    let tmp = path.with_extension(format!("tmp-{}-{nanos}", std::process::id()));
-    let body = serde_json::Value::Object(out).to_string();
-    use std::os::unix::fs::OpenOptionsExt;
-    let Ok(mut f) = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)
-    else {
+    sidecar::write_atomic(
+        config::state_file(config::files::RELAY_HINTS),
+        &sidecar::relay_json(entries),
+    );
+}
+
+/// The common recording path (RelayHintStore.kt addHint): indexers and
+/// non-routable urls are skipped by the kernel's screen (indexers are
+/// queried on every fetch anyway; a persisted hint must never teach the
+/// client a loopback/LAN relay).
+fn add(pk: &str, url: &str) {
+    let Some(key) = sidecar::screen_relay(url) else {
         return;
     };
-    use std::io::Write as _;
-    if f.write_all(body.as_bytes()).is_ok() {
-        drop(f);
-        let _ = std::fs::rename(&tmp, &path);
-    } else {
-        let _ = std::fs::remove_file(&tmp);
+    {
+        let mut held = hints().lock().unwrap();
+        held.touch(pk, MAX_AUTHORS);
+        held.push_relay(pk, key, MAX_HINTS_PER_AUTHOR);
     }
-}
-
-/// The flusher thread: park_timeout wakeups scanning the dirty flag —
-/// identical to seen.rs's (no runtime dependency, no timer churn).
-fn spawn_flusher() {
-    std::thread::Builder::new()
-        .name("hints-flush".into())
-        .spawn(|| {
-            loop {
-                std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
-                if DIRTY.swap(false, Ordering::Relaxed) {
-                    write_disk();
-                }
-            }
-        })
-        .ok();
-}
-
-/// The common recording path (RelayHintStore.kt addHint): indexers are
-/// skipped (they're queried on every fetch anyway — recording them would
-/// only crowd out the interesting relays under the cap), and so are
-/// non-routable urls: since hints PERSIST + REPLAY into future routed
-/// fetches, one must never teach the client a loopback/LAN relay
-/// (outbox::routable_relay is the same screen routed queries pass).
-fn add(pk: &str, url: &str) {
-    let key = outbox::relay_key(url);
-    if !outbox::routable_relay(&key) || indexer(&key) {
-        return;
-    }
-    let mut held = hints().lock().unwrap();
-    held.order.retain(|k| k != pk);
-    let set = held.map.entry(pk.to_string()).or_default();
-    set.retain(|x| x != &key);
-    set.push(key); // most recent last
-    while set.len() > MAX_HINTS_PER_AUTHOR {
-        set.remove(0); // drop oldest hint
-    }
-    held.order.push_back(pk.to_string());
-    while held.order.len() > MAX_AUTHORS {
-        let old = held.order.pop_front();
-        if let Some(old) = old {
-            held.map.remove(&old);
-        }
-    }
-    drop(held);
     DIRTY.store(true, Ordering::Relaxed);
-}
-
-fn indexer(key: &str) -> bool {
-    crate::pool::INDEXERS
-        .iter()
-        .any(|i| outbox::relay_key(i) == key)
 }
 
 /// Provenance (RelayHintStore.kt addAuthorRelay): `relay_url` delivered an
