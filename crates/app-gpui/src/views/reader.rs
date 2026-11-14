@@ -36,6 +36,9 @@ pub struct ArticleView {
     /// ratchet the registry and starve the gate).
     vis_start: usize,
     vis_end: usize,
+    /// The full body's markdown blocks, computed once (#31's rich-card
+    /// rider): render re-blocked the whole article per repaint.
+    blocks: std::sync::Arc<[markdown::Block]>,
 }
 
 impl EventEmitter<Nav> for ArticleView {}
@@ -51,6 +54,7 @@ impl ArticleView {
             published_at: None,
             slug: String::new(),
         });
+        let blocks: std::sync::Arc<[markdown::Block]> = markdown::blocks(&ev.content).into();
         let view = Self {
             core,
             ev,
@@ -60,6 +64,7 @@ impl ArticleView {
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             vis_start: 0,
             vis_end: 0,
+            blocks,
         };
         // Mentions in the body resolve to @names, same as the feed and
         // thread panes (TODO(port): content.ts mentionPubkeys) — and the
@@ -132,9 +137,9 @@ impl ArticleView {
         if let Some(image) = &self.data.image {
             urls.push(image.clone());
         }
-        for block in markdown::blocks(&self.ev.content) {
+        for block in self.blocks.iter() {
             if let markdown::Block::Image { url } = block {
-                urls.push(url);
+                urls.push(url.clone());
             }
         }
         for url in urls {
@@ -520,11 +525,11 @@ impl Render for ArticleView {
         // the cover, and every body image. A long read outlives the
         // cache's photo budget; without the sweep an evicted mid-article
         // image stayed dark for good (want_media only ran at construction).
-        // The markdown parses ONCE: the sweep and the render list share
-        // the same blocks (the double parse ran the full block scan twice
-        // per render).
+        // The markdown parses once, at construction: the sweep and the
+        // render list share the `blocks` field (render used to re-block
+        // the whole article per repaint, and the sweep re-ran the scan).
         let cover = content::article_cover(&self.ev);
-        let blocks = markdown::blocks(&self.ev.content);
+        let blocks = std::sync::Arc::clone(&self.blocks);
         let block_count = blocks.len();
         // Head items (title, byline, cover), one per markdown block, then
         // the comments section: a header (count + the reply affordance)
@@ -540,7 +545,7 @@ impl Render for ArticleView {
         for url in content::media_urls_cached(&self.ev).iter().cloned() {
             media::fetch(&self.core, url, cx.entity_id(), cx);
         }
-        for block in &blocks {
+        for block in blocks.iter() {
             if let markdown::Block::Image { url } = block {
                 media::fetch(&self.core, url.clone(), cx.entity_id(), cx);
             }
@@ -567,7 +572,7 @@ impl Render for ArticleView {
         {
             painted.push(c.clone());
         }
-        for block in &blocks {
+        for block in blocks.iter() {
             if let markdown::Block::Image { url } = block
                 && !url.is_empty()
                 && !painted.contains(url)

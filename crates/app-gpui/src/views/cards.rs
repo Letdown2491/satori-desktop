@@ -15,9 +15,7 @@ use gpui::{
     ClipboardItem, Div, Entity, FontWeight, SharedString, div, prelude::*, px, relative, rgb,
 };
 use nostr::prelude::*;
-use satori_core::nip::{
-    article, calendar, classified, highlight, imeta, podcast, poll, repo, wiki,
-};
+use satori_core::nip::{calendar, classified, highlight, podcast, poll, repo, wiki};
 
 use super::content::{self, Body};
 use super::feed::Feed;
@@ -313,7 +311,9 @@ fn poll_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> Div
 // --- article (NIP-23 kind 30023) ------------------------------------------
 
 fn article_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) -> Div {
-    let Some(data) = article::parse(ev) else {
+    // The memoized parse (content::article_data_cached): article::parse
+    // clones the whole tag vec, and this ran per visible card per frame.
+    let Some(data) = content::article_data_cached(ev) else {
         return fallback(ev, ctx, feed);
     };
     let mut card = div().w_full().flex().flex_col().gap_2();
@@ -409,20 +409,15 @@ fn classified_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState)
         card = card.child(meta_line(line.join(" · ")));
     }
     if !data.images.is_empty() {
-        let dims: HashMap<String, Option<(u32, u32)>> = imeta::parse(ev)
-            .into_iter()
-            .filter_map(|m| m.dim.map(|d| (m.url, Some(d))))
-            .collect();
+        // The body memo's dims/alts (content::body_parse): this ran
+        // imeta::parse twice per card per frame (once per map).
+        let body = content::body_parse(ev);
         let assets: Vec<content::MediaAsset> = data
             .images
             .iter()
             .map(|u| content::MediaAsset::Picture { url: u.clone() })
             .collect();
-        let gallery_alts: HashMap<String, String> = imeta::parse(ev)
-            .into_iter()
-            .filter_map(|m| m.alt.map(|a| (m.url, a)))
-            .collect();
-        if let Some(gallery) = content::media_section(&assets, &dims, &gallery_alts, ctx, feed) {
+        if let Some(gallery) = content::media_section(&assets, &body.dims, &body.alts, ctx, feed) {
             card = card.child(gallery);
         }
     }
