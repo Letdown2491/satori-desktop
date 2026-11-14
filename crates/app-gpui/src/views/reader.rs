@@ -625,7 +625,7 @@ impl Render for ArticleView {
         // closure rebuilds per row): names, avatars, timestamps (mode
         // ensured + stamped at render, like the byline).
         let comments: Vec<Event> = self.comments.clone();
-        let anchor_emoji = content::emoji_map(&self.ev);
+        let anchor_emoji = content::body_parse(&self.ev).emoji.clone();
         let comment_rows: Vec<(String, String, String)> = comments
             .iter()
             .map(|c| {
@@ -815,7 +815,7 @@ impl Render for ArticleView {
                                                 media: &media,
                                                 quotes: &quotes,
                                                 profiles: &profiles,
-                                                emoji: content::emoji_map(&ev),
+                                                emoji: content::body_parse(&ev).emoji.clone(),
                                             },
                                             handle.clone(),
                                         )),

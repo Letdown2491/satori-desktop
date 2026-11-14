@@ -6,11 +6,17 @@
 
 use nostr::prelude::*;
 
-fn tag_value(ev: &Event, name: &str) -> Option<String> {
+/// The one tag-value kernel (audit dup: three drifted copies —
+/// notifications' filtered empty, fields'/goal's raw). Returns the tag's
+/// first value slot, trimmed; the EMPTY-VALUE policy belongs to the call
+/// site (alt filters it out, a coordinate treats it as absent) so one
+/// helper can serve both.
+pub(crate) fn tag_value(ev: &Event, name: &str) -> Option<String> {
     ev.tags
         .iter()
         .find(|t| t.as_slice().first().map(String::as_str) == Some(name))
         .and_then(|t| t.as_slice().get(1).cloned())
+        .map(|v| v.trim().to_string())
 }
 
 /// NIP-36: the content warning's reason (the tag's value may be absent
@@ -37,9 +43,7 @@ pub fn content_warning(ev: &Event) -> Option<String> {
 /// what the event is, written by its author for clients that don't
 /// implement the kind. Empty values are no description.
 pub fn alt_description(ev: &Event) -> Option<String> {
-    tag_value(ev, "alt")
-        .map(|a| a.trim().to_string())
-        .filter(|a| !a.is_empty())
+    tag_value(ev, "alt").filter(|a| !a.is_empty())
 }
 
 /// NIP-14 (and NIP-24's carryover): a kind-1 subject line. `subject` is
@@ -49,7 +53,6 @@ pub fn alt_description(ev: &Event) -> Option<String> {
 pub fn subject_title(ev: &Event) -> Option<String> {
     tag_value(ev, "subject")
         .or_else(|| tag_value(ev, "title"))
-        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 

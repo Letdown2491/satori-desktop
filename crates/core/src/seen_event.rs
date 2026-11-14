@@ -133,30 +133,45 @@ fn spawn_flusher() {
         .ok();
 }
 
+/// The indexer keys, parsed once (the per-event screen runs on every
+/// ingested event; re-lowercasing five constants per event was the
+/// audit's arithmetic waste).
+fn indexer_keys() -> &'static std::collections::HashSet<String> {
+    static KEYS: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        crate::pool::INDEXERS
+            .iter()
+            .map(|i| outbox::relay_key(i))
+            .collect()
+    })
+}
+
 /// Record that `id` arrived from `relay_url` (the chokepoints: pool
 /// fetch_route / get_from and the live drains — every site that already
 /// records the author-keyed seen-on with attribution in hand). Indexers
 /// and non-routable urls never record (the seen.rs screen, same reason).
 pub fn record(id: &EventId, relay_url: &str) {
     let relay = outbox::relay_key(relay_url);
-    if !outbox::routable_relay(&relay)
-        || crate::pool::INDEXERS
-            .iter()
-            .any(|i| outbox::relay_key(i) == relay)
-    {
+    if !outbox::routable_relay(&relay) || indexer_keys().contains(&relay) {
         return;
     }
     let ekey = id.to_string();
     let mut held = seen_event().lock().unwrap();
-    // Re-insert the event most-recently-used.
-    held.order.retain(|k| k != &ekey);
-    let set = held.map.entry(ekey.clone()).or_default();
+    // FIFO eviction (audit): no MRU retain — the per-event O(cap) scan
+    // under this mutex cost a page load millions of string compares,
+    // and the consumer (the deletion sweep's targeted ask) doesn't
+    // care WHICH capped events stay. The per-event relay list still
+    // reorders (retain + push below).
+    if !held.map.contains_key(&ekey) {
+        held.order.push_back(ekey.clone());
+    }
+    let set = held.map.entry(ekey).or_default();
     set.retain(|x| x != &relay);
     set.push(relay); // most recent last
     while set.len() > MAX_PER_EVENT {
         set.remove(0); // drop oldest relay
     }
-    held.order.push_back(ekey);
     while held.order.len() > MAX_EVENTS {
         let old = held.order.pop_front();
         if let Some(old) = old {

@@ -7,17 +7,11 @@
 
 use nostr::prelude::*;
 
+use crate::nip::fields::tag_value;
 use crate::notifications::parse_zap_receipt;
 
 /// The goal kind (NIP-75): addressable, replaceable.
 pub const KIND: u16 = 9041;
-
-fn tag_value(ev: &Event, name: &str) -> Option<String> {
-    ev.tags
-        .iter()
-        .find(|t| t.as_slice().first().map(String::as_str) == Some(name))
-        .and_then(|t| t.as_slice().get(1).cloned())
-}
 
 /// The goal's own tags, validated (a goal without an amount is not one).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -38,10 +32,12 @@ pub fn parse(ev: &Event) -> Option<GoalData> {
 
 /// The goal's coordinate ("9041:author:d") — what zap requests and
 /// receipts carry in their `a` tag to name this goal. `None` without a
-/// `d` tag: the event isn't addressable and can't be zapped AS a goal.
+/// `d` tag (or with an EMPTY one — an empty coordinate is not
+/// addressable; the notifications side always treated it as absent, the
+/// audit's one-kernel policy): the event can't be zapped AS a goal.
 pub fn coordinate(ev: &Event) -> Option<String> {
     let d = tag_value(ev, "d")?;
-    Some(format!("{KIND}:{}:{d}", ev.pubkey))
+    (!d.is_empty()).then(|| format!("{KIND}:{}:{d}", ev.pubkey))
 }
 
 /// Raised so far, in msat: every receipt naming THIS goal (its `a` tag),
@@ -55,8 +51,12 @@ pub fn raised_msat(goal: &Event, receipts: &[Event]) -> u64 {
     receipts
         .iter()
         .filter(|r| tag_value(r, "a").as_deref() == Some(coord.as_str()))
-        .map(|r| parse_zap_receipt(r).sats * 1000)
-        .sum()
+        // Saturating (audit): a forged bolt11 claims any amount, and a
+        // wrapping u64 sum would show nonsense (or panic the pump in
+        // debug) instead of just "a lot".
+        .fold(0u64, |acc, r| {
+            acc.saturating_add(parse_zap_receipt(r).sats * 1000)
+        })
 }
 
 #[cfg(test)]
@@ -134,6 +134,17 @@ mod tests {
                 KIND,
                 vec![Tag::custom("amount", ["1"])],
                 "no d"
+            ))
+            .is_none()
+        );
+        // An EMPTY d tag is equally not addressable (the audit's
+        // empty-value policy: an empty coordinate matches nothing).
+        assert!(
+            coordinate(&sign(
+                &author,
+                KIND,
+                vec![Tag::custom("d", [""]), Tag::custom("amount", ["1"])],
+                "empty d"
             ))
             .is_none()
         );

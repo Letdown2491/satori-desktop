@@ -701,6 +701,14 @@ pub struct ZapSplit {
 /// receivers. The author is NOT implicitly among them — a split note's
 /// recipients are exactly its tags. Junk tags (bad hex) drop out; weights
 /// parse as f64, non-finite or negative treated as absent.
+/// The split receiver ceiling (audit hardening): the `zap` tags are
+/// ATTACKER-WRITABLE on any note, and each receiver costs a signed 9734,
+/// an LNURL fetch, an invoice fetch and an NWC pay — an uncapped fan-out
+/// stretched one 21-sat tap into hundreds of sequential round trips.
+/// The first N in tag order win (NIP-57 lists receivers in tag order);
+/// beyond that the split fails closed. Amethyst's planner caps lower.
+pub const MAX_SPLIT_RECEIVERS: usize = 16;
+
 pub fn zap_splits(ev: &Event) -> Vec<ZapSplit> {
     ev.tags
         .iter()
@@ -718,6 +726,7 @@ pub fn zap_splits(ev: &Event) -> Vec<ZapSplit> {
                 weight,
             })
         })
+        .take(MAX_SPLIT_RECEIVERS)
         .collect()
 }
 
@@ -1060,6 +1069,25 @@ mod tests {
         assert_eq!(splits.len(), 2);
         assert_eq!(splits[1].weight, Some(2.0));
         assert_eq!(splits[1].relay.as_deref(), Some("wss://b"));
+    }
+
+    /// The receiver ceiling (audit hardening): an attacker note with
+    /// hundreds of zap tags stops at MAX_SPLIT_RECEIVERS, in tag order.
+    #[test]
+    fn split_receivers_are_capped() {
+        let mut lines = Vec::new();
+        for n in 1..=40 {
+            // Distinct hex receivers 01.., one per line.
+            lines.push(format!("zap|{n:064x}|wss://r|1"));
+        }
+        let ev = split_event(&lines.iter().map(String::as_str).collect::<Vec<_>>());
+        let splits = zap_splits(&ev);
+        assert_eq!(splits.len(), MAX_SPLIT_RECEIVERS);
+        assert_eq!(splits[0].pk.to_string(), format!("{:064x}", 1));
+        assert_eq!(
+            splits[MAX_SPLIT_RECEIVERS - 1].pk.to_string(),
+            format!("{:064x}", MAX_SPLIT_RECEIVERS)
+        );
     }
 
     #[test]

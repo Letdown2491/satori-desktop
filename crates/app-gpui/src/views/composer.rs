@@ -2828,7 +2828,7 @@ impl Composer {
             media: &snap,
             quotes: &quotes,
             profiles: &profiles,
-            emoji: HashMap::new(),
+            emoji: std::sync::Arc::default(),
         };
         let handle = cx.entity();
 
@@ -3117,7 +3117,7 @@ impl Composer {
                     media: &snap,
                     quotes: &quotes,
                     profiles: &profiles,
-                    emoji: content::emoji_map(&ev),
+                    emoji: content::body_parse(&ev).emoji.clone(),
                 };
                 card = card.child(content::body(&ev, &body_ctx, cx.entity()));
             }

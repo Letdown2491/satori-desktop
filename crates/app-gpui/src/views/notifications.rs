@@ -917,7 +917,7 @@ fn notif_card(
         media,
         quotes,
         profiles,
-        emoji: content::emoji_map(ev),
+        emoji: content::body_parse(ev).emoji.clone(),
     };
     // The verb rides the header (the Dark Wisp anatomy): glyph, actor,
     // "name verb", time — one line, the news at a glance. Zap sats set

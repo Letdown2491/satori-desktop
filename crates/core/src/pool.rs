@@ -250,6 +250,11 @@ pub struct Pool {
     /// attempt. Targets always come from the caller's list, so a relay
     /// the user dropped simply stops being targeted.
     writes: Mutex<BTreeSet<String>>,
+    /// Foreign relays currently holding an in-flight one-shot publish,
+    /// per url (audit): the second publish to the same inbox reuses the
+    /// socket; only the LAST publisher out force-removes it. Without
+    /// the refcount, a concurrent publish's send was severed mid-OK.
+    foreign_inflight: Mutex<HashMap<String, usize>>,
 }
 
 impl Pool {
@@ -291,11 +296,7 @@ impl Pool {
         // The house indexers are constants the app chose — same trust
         // class as user entries; they dial direct, as they always have.
         for indexer in INDEXERS {
-            if let Ok(parsed) = url::Url::parse(indexer)
-                && let Some(host) = parsed.host_str()
-            {
-                crate::net_guard::allow_direct_relay(host);
-            }
+            crate::net_guard::allow_direct_url(indexer);
         }
         Ok(Self {
             client,
@@ -304,6 +305,7 @@ impl Pool {
             routed: Mutex::new(HashMap::new()),
             reads: Mutex::new(BTreeSet::new()),
             writes: Mutex::new(BTreeSet::new()),
+            foreign_inflight: Mutex::new(HashMap::new()),
             screening: Some(screening),
         })
     }
@@ -353,21 +355,30 @@ impl Pool {
             }
         }
         for url in &retired_reads {
-            if let Ok(parsed) = url::Url::parse(url)
-                && let Some(host) = parsed.host_str()
-            {
-                crate::net_guard::disallow_direct_relay(host);
+            // Only strip the exemption when NO surviving relay still
+            // uses the host (audit): an own WRITE relay sharing it would
+            // silently downgrade to the SOCKS transport, and publish
+            // never re-allows an already-registered relay's host.
+            let host_still_used = url::Url::parse(url).ok().and_then(|p| {
+                p.host_str().map(|h| {
+                    let reg = self.writes.lock().unwrap();
+                    let reads = self.reads.lock().unwrap();
+                    reg.iter()
+                        .chain(reads.iter())
+                        .filter_map(|u| url::Url::parse(u).ok())
+                        .filter_map(|p| p.host_str().map(str::to_string))
+                        .any(|uh| uh == h)
+                })
+            });
+            if host_still_used != Some(true) {
+                crate::net_guard::disallow_direct_url(url);
             }
             let _ = self.client.remove_relay(url).force().await;
         }
         let mut urls: Vec<String> = INDEXERS.iter().map(|s| s.to_string()).collect();
         urls.extend(own_reads.iter().cloned());
         for url in own_reads {
-            if let Ok(parsed) = url::Url::parse(url)
-                && let Some(host) = parsed.host_str()
-            {
-                crate::net_guard::allow_direct_relay(host);
-            }
+            crate::net_guard::allow_direct_url(url);
         }
         for url in urls {
             self.reads.lock().unwrap().insert(url.clone());
@@ -861,31 +872,43 @@ impl Pool {
         // only when something new joined; sends to already-connected
         // relays are unaffected.
         //
-        // NIP-65 phase 2 socketing: a KNOWN target (own write relays,
-        // own reads — user-chosen, the exemption ledger is theirs)
-        // joins the pool as before. A FOREIGN target (a routing inbox
-        // from someone else's kind-10002) is EPHEMERAL: added WRITE for
-        // this one send — the one-shot shape, connect → publish → ack →
-        // remove, no direct-dial exemption (a foreign relay is NOT
-        // user-chosen: phase 1 granted it one, and each grant persisted
-        // into the ledger uncapped) — then force-removed, so no
-        // process-lifetime socket, no writes-reg entry, and a retry
-        // one-shots again. The screens still ride: routing checked
-        // routable_relay, and the pool's proxy screens everything not
-        // user-chosen through the screening transport.
-        let (known, foreign): (Vec<String>, Vec<String>) = {
+        // NIP-65 phase 2 socketing, with the audit's three-way split:
+        // a KNOWN target (own write relays, own reads — user-chosen,
+        // the exemption ledger is theirs) joins the pool as before. A
+        // ROUTED target (a live routed-read socket from fetch_route /
+        // get_from) is NOT foreign: it gets the WRITE capability upsell
+        // for this send but is neither registered nor removed — the
+        // routed idle trim owns that socket's lifecycle, and a one-shot
+        // force-remove here would sever in-flight routed reads. A
+        // FOREIGN target (a routing inbox from someone else's
+        // kind-10002) is EPHEMERAL: added WRITE for this one send —
+        // the one-shot shape, connect → publish → ack → remove, no
+        // direct-dial exemption (a foreign relay is NOT user-chosen:
+        // phase 1 granted it one, and each grant persisted into the
+        // ledger uncapped) — then refcount-decremented, and only the
+        // LAST concurrent publisher force-removes it, so a second
+        // publish to the same inbox reuses the socket the first is
+        // still draining instead of killing its in-flight OK. The
+        // screens still ride: routing checked routable_relay, and the
+        // pool's proxy screens everything not user-chosen through the
+        // screening transport.
+        let (known, routed_known, foreign): (Vec<String>, Vec<String>, Vec<String>) = {
             let reg = self.writes.lock().unwrap();
             let reads = self.reads.lock().unwrap();
+            let routed = self.routed.lock().unwrap();
             let mut k = Vec::new();
+            let mut r = Vec::new();
             let mut f = Vec::new();
             for t in &targets {
                 if reg.contains(t) || reads.contains(t) {
                     k.push(t.clone());
+                } else if routed.contains_key(t) {
+                    r.push(t.clone());
                 } else {
                     f.push(t.clone());
                 }
             }
-            (k, f)
+            (k, r, f)
         };
         let new_targets: Vec<String> = {
             let reg = self.writes.lock().unwrap();
@@ -898,11 +921,7 @@ impl Pool {
         if !new_targets.is_empty() {
             for url in &new_targets {
                 // Own write relays are user-chosen (NIP-65): dial direct.
-                if let Ok(parsed) = url::Url::parse(url)
-                    && let Some(host) = parsed.host_str()
-                {
-                    crate::net_guard::allow_direct_relay(host);
-                }
+                crate::net_guard::allow_direct_url(url);
                 let _ = self
                     .client
                     .add_relay(url.clone())
@@ -912,14 +931,33 @@ impl Pool {
             }
             self.client.connect().await;
         }
-        for url in &foreign {
+        for url in &routed_known {
+            // Capability upsell only (add_relay merges): this socket
+            // stays registered for its routed reads; publish neither
+            // inserts a writes-reg entry nor removes it afterwards.
             let _ = self
                 .client
                 .add_relay(url.clone())
                 .capabilities(RelayCapabilities::WRITE)
                 .await;
         }
-        if !foreign.is_empty() {
+        for url in &foreign {
+            // Claim an in-flight slot BEFORE the add (audit refcount):
+            // a concurrent publish to the same inbox sees the count and
+            // will not force-remove the socket under this send.
+            *self
+                .foreign_inflight
+                .lock()
+                .unwrap()
+                .entry(url.clone())
+                .or_insert(0) += 1;
+            let _ = self
+                .client
+                .add_relay(url.clone())
+                .capabilities(RelayCapabilities::WRITE)
+                .await;
+        }
+        if !routed_known.is_empty() || !foreign.is_empty() {
             self.client.connect().await;
         }
         let short = &event.id.to_string()[..8];
@@ -960,11 +998,29 @@ impl Pool {
             report.ok.len(),
             report.failed.len()
         );
-        // The one-shot's shutdown half: foreign relays leave the pool
-        // after the send (their write registration was never recorded;
-        // a routed READ socket to the same relay re-joins on next use —
-        // add_routed re-adds unconditionally).
-        for url in &foreign {
+        // The one-shot's shutdown half: each foreign relay's in-flight
+        // count drops by one; the LAST publisher out force-removes it
+        // (their write registration was never recorded; a routed READ
+        // socket to the same relay re-joins on next use — add_routed
+        // re-adds unconditionally, and routed keys were never in
+        // `foreign` to begin with). The lock is dropped before the
+        // await: remove_relay is a pool-wide operation, not one to
+        // hold a mutex across.
+        let to_remove: Vec<String> = {
+            let mut inflight = self.foreign_inflight.lock().unwrap();
+            let mut done = Vec::new();
+            for url in &foreign {
+                if let Some(count) = inflight.get_mut(url) {
+                    *count -= 1;
+                    if *count == 0 {
+                        inflight.remove(url);
+                        done.push(url.clone());
+                    }
+                }
+            }
+            done
+        };
+        for url in &to_remove {
             let _ = self.client.remove_relay(url).force().await;
         }
         report
@@ -1019,8 +1075,10 @@ pub(crate) fn gate_publish_and_tombstone(
 }
 
 /// Relay-supplied text is hostile input: strip control chars (a message
-/// carrying `\n` could forge log lines) and cap the length.
-pub(crate) fn clean_reason(s: &str) -> String {
+/// carrying `\n` could forge log lines) and cap the length. Public: the
+/// app side's log lines over event-borne urls (video pipeline) sanitize
+/// with the same one helper.
+pub fn clean_reason(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).take(120).collect()
 }
 
