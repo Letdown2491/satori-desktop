@@ -359,6 +359,114 @@ mod tests {
         assert!(spawn("https://8.8.8.8/x.mp4".into()).is_ok());
     }
 
+    /// Live-network probe (run: cargo test -p satori-core -- --ignored
+    /// --nocapture). The playback smoke test's socket half: spawn the
+    /// proxy on a real public video origin and GET through the loopback
+    /// door in exactly the shape souphttpsrc sends — an initial GET, then
+    /// a seek's Range re-GET — asserting the 206/Content-Range passthrough
+    /// is verbatim and the bytes match a direct fetch. The gst half
+    /// (playbin actually renders) stays the human click test.
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn range_proxy_serves_a_live_origin_end_to_end() {
+        const ORIGIN: &str = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4";
+
+        // The direct comparison: the same client, same range, no proxy.
+        let direct = crate::media::client()
+            .get(ORIGIN)
+            .header("Range", "bytes=0-65535")
+            .send()
+            .await
+            .expect("direct origin fetch");
+        assert_eq!(direct.status().as_u16(), 206, "origin serves ranges");
+        let direct_bytes = direct.bytes().await.expect("direct body").to_vec();
+        assert_eq!(direct_bytes.len(), 65_536);
+
+        let proxy =
+            crate::video_proxy::spawn(ORIGIN.to_string()).expect("proxy on a domain origin");
+        let uri = proxy.uri();
+        assert!(uri.starts_with("http://127.0.0.1:"), "{uri}");
+
+        // Initial GET, no Range: 200 + a Content-Length the body honors.
+        let (status, headers, body) = get_through(&uri, None).await;
+        assert_eq!(status, 200, "initial GET through the proxy");
+        let len: usize = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, v)| v.parse().ok())
+            .expect("Content-Length passes through");
+        assert_eq!(body.len(), len, "body honors the declared length");
+
+        // The seek: Range re-GET rides verbatim — 206, Content-Range,
+        // and the SAME bytes a direct fetch of that range returns.
+        let (status, headers, body) = get_through(&uri, Some("bytes=0-65535")).await;
+        assert_eq!(status, 206, "Range GET rides upstream verbatim");
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("content-range")
+                    && v.starts_with("bytes 0-65535/")),
+            "Content-Range passes through, got {headers:?}"
+        );
+        assert_eq!(body, direct_bytes, "proxied bytes equal direct bytes");
+
+        // A seek into the middle: byte identity is position-honest.
+        let (_, _, mid) = get_through(&uri, Some("bytes=524288-589823")).await;
+        let direct_mid = crate::media::client()
+            .get(ORIGIN)
+            .header("Range", "bytes=524288-589823")
+            .send()
+            .await
+            .expect("direct mid fetch");
+        assert_eq!(direct_mid.status().as_u16(), 206);
+        assert_eq!(
+            mid,
+            direct_mid.bytes().await.expect("direct mid body").to_vec(),
+            "mid-range bytes equal direct bytes"
+        );
+    }
+
+    /// One plain-HTTP GET through the loopback door (raw TCP: the point
+    /// is the wire contract playbin sees, not a client's interpretation
+    /// of it). Returns status, headers, body.
+    async fn get_through(uri: &str, range: Option<&str>) -> (u16, Vec<(String, String)>, Vec<u8>) {
+        // http://127.0.0.1:<port>/<token>/stream
+        let rest = uri.trim_start_matches("http://");
+        let (authority, path) = rest.split_once('/').expect("uri has a path");
+        let mut req = format!("GET /{path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n");
+        if let Some(r) = range {
+            req.push_str(&format!("Range: {r}\r\n"));
+        }
+        req.push_str("\r\n");
+
+        let mut s = tokio::net::TcpStream::connect(authority)
+            .await
+            .expect("connect to the proxy");
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        s.write_all(req.as_bytes()).await.expect("write request");
+        let mut raw = Vec::new();
+        s.read_to_end(&mut raw).await.expect("read response");
+
+        let header_end = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("response has a head");
+        let head = String::from_utf8_lossy(&raw[..header_end]);
+        let status: u16 = head
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|c| c.parse().ok())
+            .expect("status line");
+        let headers: Vec<(String, String)> = head
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.split_once(": "))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        (status, headers, raw[header_end + 4..].to_vec())
+    }
+
     #[test]
     fn capability_gate_refuses_wrong_token() {
         let proxy = spawn("https://blossom.example.invalid/x.mp4".into()).expect("loopback bind");
