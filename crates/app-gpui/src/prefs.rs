@@ -48,6 +48,51 @@ pub fn save(prefs: &Prefs) {
     write_state(config::files::PREFS, &body);
 }
 
+/// The columns workspace layout (D68 phase 2): whether the mode is on
+/// and which stream columns are pinned, in order, with their widths.
+/// Local-only for now — the NIP-78 login sync rides later polish, so no
+/// stamp here (a relay slot would fight the machine's own layout).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ColumnPref {
+    /// `feed` | `articles` | `notifications` | `search` | `hashtag`.
+    pub kind: String,
+    /// The hashtag column's tag (kind `hashtag` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// Column width px; None = the flexible default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ColumnsPref {
+    #[serde(default)]
+    pub on: bool,
+    #[serde(default)]
+    pub cols: Vec<ColumnPref>,
+}
+
+/// The persisted columns layout; missing key = the default (off).
+pub fn columns_layout() -> ColumnsPref {
+    read_value(config::files::PREFS)
+        .get("columns")
+        .and_then(|c| serde_json::from_value(c.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Merge-save the columns layout (the Prefs::save pattern: the file
+/// holds keys this struct doesn't — clobbering them is the exact bug
+/// the GTK save had).
+pub fn save_columns_layout(layout: &ColumnsPref) {
+    let mut value = read_value(config::files::PREFS);
+    if let (Some(obj), Ok(overlay)) = (value.as_object_mut(), serde_json::to_value(layout)) {
+        obj.insert("columns".into(), overlay);
+    }
+    if let Ok(body) = serde_json::to_string_pretty(&value) {
+        write_state(config::files::PREFS, &body);
+    }
+}
+
 /// Catalog kinds hidden from the feed (`content_hidden` in prefs.json).
 pub fn content_hidden() -> Vec<u16> {
     read_value(config::files::PREFS)

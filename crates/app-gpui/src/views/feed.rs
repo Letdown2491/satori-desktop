@@ -174,6 +174,15 @@ impl Feed {
         Self::with_mode(core, FeedMode::Hashtag(tag), cx)
     }
 
+    /// The hashtag feed's tag (the columns workspace pins it — the drill
+    /// title row's + Column affordance reads it). None on other modes.
+    pub fn tag(&self) -> Option<String> {
+        match &self.mode {
+            FeedMode::Hashtag(tag) => Some(tag.clone()),
+            _ => None,
+        }
+    }
+
     /// One author's notes: the profile page's Notes tab embeds a full Feed,
     /// so its rows ARE the timeline's rows (avatar, media, reactions) with
     /// the same endless scroll — scoped to the author's pubkey.

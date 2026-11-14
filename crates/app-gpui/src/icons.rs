@@ -243,6 +243,10 @@ pub fn columns_icon(color: u32) -> impl IntoElement {
     icon(columns, color, 20.0)
 }
 
+pub fn hash_icon(color: u32) -> impl IntoElement {
+    icon(hash, color, 20.0)
+}
+
 // The ensō — the brush circle with a gap, drawn as a slightly spiralling
 // arc that tapers toward the tail (the brush lifting off). It opens every
 // session: the waiting mark of the login flow.
@@ -393,6 +397,18 @@ fn columns(b: &mut PathBuilder, g: &Grid) {
     for x in [5.0, 12.0, 19.0] {
         b.move_to(g.p(x, 5.0));
         b.line_to(g.p(x, 19.0));
+    }
+}
+
+/// The hashtag column mark (D68 phase 2): the hash.
+fn hash(b: &mut PathBuilder, g: &Grid) {
+    for x in [9.0, 15.0] {
+        b.move_to(g.p(x, 4.5));
+        b.line_to(g.p(x, 19.5));
+    }
+    for y in [8.0, 16.0] {
+        b.move_to(g.p(4.5, y));
+        b.line_to(g.p(19.5, y));
     }
 }
 
