@@ -390,6 +390,54 @@ pub static EMOJI: &[Emoji] = &[
     Emoji { char: "⚪", name: "white_circle", k: &[] },
 ];
 
+/// True when `text` is an emoji run: at least one emoji codepoint, and
+/// every char is emoji-shaping material (the emoji itself, VS16, ZWJ, skin
+/// tones, regional indicators, tag sequences, keycap bases). The paint side
+/// uses this to hand the run to `theme::EMOJI` — see the note there on why
+/// fallback order can't do it.
+pub fn is_emoji_run(text: &str) -> bool {
+    use unicode_properties::UnicodeEmoji;
+
+    if text.is_empty() {
+        return false;
+    }
+    let mut any = false;
+    for c in text.chars() {
+        // Whitespace/control bytes never ride an emoji cluster (tokens are
+        // whitespace-split anyway; this guards labels).
+        if c.is_whitespace() || c.is_control() {
+            return false;
+        }
+        // ASCII only ever joins a keycap cluster ("2️⃣"); alone it is text
+        // and must not mark the run ("2024" stays on the body face).
+        if c.is_ascii() {
+            if matches!(c, '0'..='9' | '#' | '*') {
+                continue;
+            }
+            return false;
+        }
+        if c.is_emoji_char() {
+            any = true;
+            continue;
+        }
+        // The joining material a cluster may carry around its emoji.
+        if c.is_emoji_component()
+            || matches!(
+                c,
+                '\u{FE0E}' | '\u{FE0F}' // text / emoji presentation VS
+                    | '\u{200D}' // ZWJ (family/kiss chains)
+                    | '\u{20E3}' // combining enclosing keycap
+                    | '\u{1F3FB}'..='\u{1F3FF}' // Fitzpatrick skin tones
+                    | '\u{E0020}'..='\u{E007F}' // tag sequences (flag base)
+            )
+        {
+            continue;
+        }
+        return false;
+    }
+    any
+}
+
 /// The typeahead's candidates for a `:token`: name (or keyword) contains the
 /// token, shortest names first when the token is empty (the everyday few
 /// lead). Capped — the strip stays a strip.
@@ -406,6 +454,34 @@ pub fn candidates(token: &str) -> Vec<&'static Emoji> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emoji_runs_match_the_quickset_and_everyday_glyphs() {
+        // The quick-set (actions.rs QUICKSET) — every button must take the
+        // color face.
+        for glyph in ["👍", "❤️", "😂", "😮", "😢"] {
+            assert!(is_emoji_run(glyph), "{glyph} must be an emoji run");
+        }
+        // Sequences: skin tone, ZWJ chain, flag.
+        assert!(is_emoji_run("🙌🏻"));
+        assert!(is_emoji_run("👩‍💻"));
+        assert!(is_emoji_run("🇩🇪"));
+        // Text-presentation pictographics (Adwaita Sans covers ❤ U+2764
+        // without the VS16; the run still belongs to the color face).
+        assert!(is_emoji_run("⚠"));
+    }
+
+    #[test]
+    fn non_emoji_text_stays_on_the_body_face() {
+        assert!(!is_emoji_run(""));
+        assert!(!is_emoji_run("hello"));
+        assert!(!is_emoji_run("2024"));
+        assert!(!is_emoji_run("#*"));
+        // Mixed latin + pictographic is not a run (the body face keeps it).
+        assert!(!is_emoji_run("hi👍"));
+        // Whitespace/control bytes break the run.
+        assert!(!is_emoji_run("👍 \u{7}"));
+    }
 
     #[test]
     fn token_matches_names_and_keywords() {

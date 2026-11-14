@@ -462,6 +462,16 @@ fn addr_label(bech: &str) -> String {
 
 /// Serif text span (the word-flow baseline style).
 fn word(text: String) -> Div {
+    // Emoji runs ride theme::EMOJI as their primary font (see the note
+    // there): through the SERIF face they paint as DejaVu/Adwaita
+    // monochrome outlines. Trailing ASCII punctuation stays on the body
+    // face ("👍." keeps the period typographically serif).
+    if crate::emoji::is_emoji_run(&text) {
+        return word_flow_glyph(text, None);
+    }
+    if let Some((core, punct)) = split_emoji_tail(&text) {
+        return word_flow_glyph(core.to_string(), Some(punct.to_string()));
+    }
     div()
         .font_family(theme::SERIF)
         .text_size(px(theme::T_READER))
@@ -470,6 +480,43 @@ fn word(text: String) -> Div {
         .line_height(relative(1.2))
         .text_color(rgb(theme::ink()))
         .child(text)
+}
+
+/// One emoji-run glyph at the body's size, plus its detached punctuation
+/// (if any) on the body face. Both carry the metrics pin from `word`.
+fn word_flow_glyph(core: String, punct: Option<String>) -> Div {
+    let flow = div().flex().items_baseline().child(
+        div()
+            .font_family(theme::EMOJI)
+            .text_size(px(theme::T_READER))
+            .line_height(relative(1.2))
+            .text_color(rgb(theme::ink()))
+            .child(core),
+    );
+    match punct {
+        Some(p) => flow.child(
+            div()
+                .font_family(theme::SERIF)
+                .text_size(px(theme::T_READER))
+                .line_height(relative(1.2))
+                .text_color(rgb(theme::ink()))
+                .child(p),
+        ),
+        None => flow,
+    }
+}
+
+/// "👍!" → (👍, "!"): an emoji run followed by trailing ASCII punctuation.
+/// None when the token isn't that shape.
+fn split_emoji_tail(text: &str) -> Option<(&str, &str)> {
+    let split = text
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_ascii_punctuation())
+        .map(|(i, _)| i)
+        .last()?;
+    let (core, punct) = text.split_at(split);
+    (!core.is_empty() && crate::emoji::is_emoji_run(core)).then_some((core, punct))
 }
 
 /// One clickable word-flow token (link / mention / ref).

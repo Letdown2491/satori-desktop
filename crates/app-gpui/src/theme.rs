@@ -188,3 +188,15 @@ pub fn watch<V: 'static>(cx: &mut gpui::Context<V>) {
 pub const SANS: &str = "Adwaita Sans";
 pub const SERIF: &str = "C059";
 pub const MONO: &str = "Noto Sans Mono";
+
+/// The color emoji face, set as the PRIMARY font on emoji runs (not as a
+/// fallback). Shaping is primary-font-wins: cosmic-text's fallback chain
+/// (`Noto Sans` → `DejaVu Sans` → … → `Noto Color Emoji` last) only runs on
+/// glyphs the primary font lacks, and the sandbox's DejaVu Sans carries
+/// monochrome outline glyphs for common emoji (😂 😮 😢), while Adwaita Sans
+/// covers ❤ outright. Probed Nov 14 2026 (sandbox e2e): only codepoints no
+/// earlier font in the chain covers (👍 🤣) ever reach the color font. Emoji
+/// text painted with this family shapes the CBDT bitmap face (postscript
+/// `NotoColorEmoji`, the winner of fontdb's identical-family tie) and paints
+/// through gpui's color sprite path.
+pub const EMOJI: &str = "Noto Color Emoji";

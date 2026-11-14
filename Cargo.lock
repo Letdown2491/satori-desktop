@@ -5352,6 +5352,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "unicode-properties",
  "unicode-segmentation",
  "url",
  "zbus 5.19.0",

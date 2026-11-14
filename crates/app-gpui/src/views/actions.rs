@@ -282,6 +282,10 @@ pub(crate) fn action_row<H: ActionHost>(
                         handle.update(cx, |host, cx| host.react_with(&ev, &content, cx));
                     })
                     .text_size(px(theme::T_BODY))
+                    // The color emoji face as the run's primary font (see
+                    // theme::EMOJI): through the UI face these five paint
+                    // as DejaVu/Adwaita monochrome outlines.
+                    .font_family(theme::EMOJI)
                     .child(*glyph),
             );
         }
