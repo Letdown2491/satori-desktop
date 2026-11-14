@@ -210,9 +210,14 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
                     }
                 }
                 // The pipeline failed (missing plugins, dead URL): the honest
-                // fallback is the browser — the pre-Phase-3 behavior.
+                // fallback is the browser — the pre-Phase-3 behavior. The
+                // url is event-borne: sanitized before the log (a \n could
+                // forge lines, an ESC inject terminal escapes).
                 Err(e) => {
-                    eprintln!("[video] pipeline failed for {url}: {e:?}; degrading to browser");
+                    eprintln!(
+                        "[video] pipeline failed for {}: {e:?}; degrading to browser",
+                        satori_core::pool::clean_reason(&url)
+                    );
                     if crate::views::content::web_url(&url) {
                         cx.open_url(&url);
                     }

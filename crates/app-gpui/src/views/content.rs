@@ -51,8 +51,9 @@ pub struct Body<'a> {
     /// The event's NIP-30 emoji map (shortcode → url): `:code:` tokens in
     /// the body resolve here. The urls also ride `media_urls`, so every
     /// view's media sweep fetches them and the thumb replaces the bare
-    /// code when the bytes land.
-    pub emoji: HashMap<String, String>,
+    /// code when the bytes land. Shared from the BodyParse memo (audit:
+    /// a per-row-per-frame HashMap rebuild for a map that never changes).
+    pub emoji: std::sync::Arc<HashMap<String, String>>,
 }
 
 /// Deterministic element id — RandomState would re-hash every render, and a
@@ -240,27 +241,35 @@ fn media_assets_with(parsed: Option<&article::ArticleData>, ev: &Event) -> Vec<M
 /// stays bare. A cache may still hold a sniff from before the switch —
 /// painting already-fetched bytes breaks no new ground.
 pub fn media_urls(ev: &Event) -> Vec<String> {
-    let mut out: Vec<String> = media_assets(ev)
-        .into_iter()
+    media_urls_from(&media_assets(ev), ev)
+}
+
+/// The url projection of ALREADY-PARSED assets (the poster/blurhash/sniff
+/// selection) plus the NIP-30 emoji urls. `media_urls` and the BodyParse
+/// memo share it (audit: the memo had the assets in hand but re-ran the
+/// whole imeta + line-scan parse to get the same urls back).
+fn media_urls_from(assets: &[MediaAsset], ev: &Event) -> Vec<String> {
+    let mut out: Vec<String> = assets
+        .iter()
         .flat_map(|a| match a {
-            MediaAsset::Picture { url } => vec![url],
+            MediaAsset::Picture { url } => vec![url.clone()],
             MediaAsset::Video {
                 url,
                 poster,
                 blurhash,
                 mime,
             } => match poster {
-                Some(p) => vec![p],
+                Some(p) => vec![p.clone()],
                 None => match blurhash {
-                    Some(h) => vec![crate::poster::blurhash_key(&h)],
+                    Some(h) => vec![crate::poster::blurhash_key(h)],
                     None => {
                         // inline_able already refuses the facade (strict
                         // Tor) and YouTube pages (the sniffer would fetch
                         // a web page for nothing) — no sniff for either.
-                        if !crate::video::inline_able(&url, mime.as_deref()) {
+                        if !crate::video::inline_able(url, mime.as_deref()) {
                             vec![]
                         } else {
-                            vec![crate::poster::poster_key(&url)]
+                            vec![crate::poster::poster_key(url)]
                         }
                     }
                 },
@@ -686,10 +695,11 @@ fn body_parse_cached(ev: &Event) -> std::sync::Arc<BodyParse> {
         cover,
         dims,
         alts,
-        murls: media_urls(ev).into(),
+        murls: media_urls_from(&assets, ev).into(),
         assets,
         media_links,
         article: parsed_article,
+        emoji: std::sync::Arc::new(emoji_map(ev)),
     });
     if memo.map.len() >= CAP
         && let Some(oldest) = memo.order.pop_front()
@@ -723,6 +733,10 @@ pub(crate) struct BodyParse {
     assets: Vec<MediaAsset>,
     media_links: Vec<String>,
     article: Option<std::sync::Arc<article::ArticleData>>,
+    /// The NIP-30 emoji map, computed on the memo's miss path and shared
+    /// by every Body built from this parse (the audit's per-frame
+    /// rebuild fix).
+    pub(crate) emoji: std::sync::Arc<HashMap<String, String>>,
 }
 
 pub(crate) fn body_parse(ev: &Event) -> std::sync::Arc<BodyParse> {
@@ -1723,7 +1737,7 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
         media,
         quotes,
         profiles,
-        emoji: emoji_map(ev),
+        emoji: body_parse(ev).emoji.clone(),
     };
 
     div()

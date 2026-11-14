@@ -367,6 +367,26 @@ pub fn allow_direct_relay(host: &str) {
     allow_direct_relays([host]);
 }
 
+/// The url-taking forms (audit dup: five copies of the parse-and-grant
+/// idiom lived across two crates; the exemption ledger is a security
+/// boundary, so its edge lives in ONE place). A junk url does nothing.
+pub fn allow_direct_url(url: &str) {
+    if let Ok(parsed) = url::Url::parse(url)
+        && let Some(host) = parsed.host_str()
+    {
+        allow_direct_relay(host);
+    }
+}
+
+/// Retract the exemption for a url's host (set_reads' retire path).
+pub fn disallow_direct_url(url: &str) {
+    if let Ok(parsed) = url::Url::parse(url)
+        && let Some(host) = parsed.host_str()
+    {
+        disallow_direct_relay(host);
+    }
+}
+
 /// The refused half of a screening round: the one home for what counts
 /// as a refusal, so the three screening callers (bunker connect, NWC
 /// connect, NWC resume) can never disagree on the classification.

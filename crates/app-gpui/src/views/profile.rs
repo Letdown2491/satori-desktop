@@ -644,7 +644,7 @@ impl Render for ProfileView {
             quotes: &quotes,
             profiles: &profiles,
             // A bio is the kind-0 about text — no emoji tags of its own.
-            emoji: HashMap::new(),
+            emoji: std::sync::Arc::default(),
         };
 
         div()

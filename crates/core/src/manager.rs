@@ -2099,11 +2099,7 @@ impl Core {
         // The login relay is user-supplied (typed/QR'd seconds ago):
         // user-chosen class, dials direct like the rest of the
         // exemptions (M5 WP2's policy boundary).
-        if let Ok(parsed) = url::Url::parse(&relay)
-            && let Some(host) = parsed.host_str()
-        {
-            crate::net_guard::allow_direct_relay(host);
-        }
+        crate::net_guard::allow_direct_url(&relay);
         let probe = nostr_sdk::client::ClientBuilder::new().build();
         if let Err(e) = probe.add_relay(&relay).await {
             crate::dlog!("nostrconnect probe: relay add failed: {e}");
@@ -4242,31 +4238,42 @@ impl Core {
                 }
                 // Coordinate misses: one filter per coordinate (they're
                 // rare — only comments on addressable parents land here),
-                // on the indexers.
-                for (kind, author, d) in &coords {
-                    // A store hit already resolved this coordinate.
-                    if events.iter().any(|e| {
-                        u16::from(e.kind) == *kind
-                            && e.pubkey == *author
-                            && e.tags.identifier().as_deref() == Some(d.as_str())
-                    }) {
-                        continue;
-                    }
-                    let k = Kind::from_u16(*kind);
-                    let filter = Filter::new().kind(k).author(*author).identifier(d).limit(1);
-                    let fetched = active
-                        .pool
-                        .get_from(
-                            &INDEXERS.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                            &filter,
-                        )
-                        .await;
-                    // (no explicit save: the SDK persists what it receives)
-                    for ev in fetched {
-                        if !nip40::is_expired(&ev) && !deletions::is_deleted(&ev) {
-                            events.push(ev);
+                // on the indexers. Concurrent (audit: the serial loop was
+                // up to 60 sequential indexer round-trips inside one
+                // spawned task — one comment-heavy thread on addressable
+                // parents stalled the whole ask; the shape count() uses).
+                let misses = futures_util::future::join_all(coords.iter().filter_map(
+                    |(kind, author, d)| {
+                        // A store hit already resolved this coordinate.
+                        if events.iter().any(|e| {
+                            u16::from(e.kind) == *kind
+                                && e.pubkey == *author
+                                && e.tags.identifier().as_deref() == Some(d.as_str())
+                        }) {
+                            return None;
                         }
-                    }
+                        let k = Kind::from_u16(*kind);
+                        let filter = Filter::new().kind(k).author(*author).identifier(d).limit(1);
+                        let pool = &active.pool;
+                        Some(async move {
+                            let fetched = pool
+                                .get_from(
+                                    &INDEXERS.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                                    &filter,
+                                )
+                                .await;
+                            // (no explicit save: the SDK persists what it
+                            // receives)
+                            fetched
+                                .into_iter()
+                                .filter(|ev| !nip40::is_expired(ev) && !deletions::is_deleted(ev))
+                                .collect::<Vec<_>>()
+                        })
+                    },
+                ))
+                .await;
+                for batch in misses {
+                    events.extend(batch);
                 }
                 for ev in &events {
                     let snippet = plain_snippet(&ev.content, 140);
@@ -4455,15 +4462,31 @@ impl Core {
         self.rt.spawn(async move {
             let res: Result<(Option<Event>, Option<Profile>)> = async {
                 let active = this.active().await?;
-                let filter = Filter::new()
-                    .author(author)
-                    .kind(Kind::from_u16(kind))
-                    .identifier(&identifier)
-                    .limit(1);
-                let ev = active.pool.get(filter).await.unwrap_or_default();
-                // Addressable events: newest replaces (NIP-01); take the
-                // greatest (id-ordered BTreeSet ≈ latest seen).
-                let ev = ev.into_iter().next_back();
+                // Store-first (audit: the sibling event_by_id checks the
+                // store before any pool REQ; this bought a full-pool
+                // round trip per address even after the event landed).
+                // NIP-40 + NIP-09 gate the hit — a long-lived store copy
+                // can serve an event that expired mid-retention or was
+                // deleted after it landed.
+                let mut ev = active
+                    .pool
+                    .store
+                    .latest_by_kind_d(author, Kind::from_u16(kind), &identifier)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|e| !nip40::is_expired(e) && !deletions::is_deleted(e));
+                if ev.is_none() {
+                    let filter = Filter::new()
+                        .author(author)
+                        .kind(Kind::from_u16(kind))
+                        .identifier(&identifier)
+                        .limit(1);
+                    let fetched = active.pool.get(filter).await.unwrap_or_default();
+                    // Addressable events: newest replaces (NIP-01); take
+                    // the greatest (id-ordered BTreeSet ≈ latest seen).
+                    ev = fetched.into_iter().next_back();
+                }
                 // (no explicit save: the SDK persists what it receives)
                 let profile = match &ev {
                     Some(ev) => {

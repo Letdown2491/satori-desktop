@@ -223,9 +223,12 @@ async fn serve(stream: tokio::net::TcpStream, state: Arc<State>) {
     let mut res = match req.send().await {
         Ok(res) => res,
         Err(e) => {
+            // The origin is event-borne (attacker-writable): sanitized
+            // before it hits the log (a \n could forge lines, an ESC
+            // could inject terminal escapes — pool::clean_reason).
             eprintln!(
                 "[video] proxy origin fetch failed for {}: {e}",
-                state.origin
+                crate::pool::clean_reason(&state.origin)
             );
             let _ = simple(&mut wr, 502).await;
             return;

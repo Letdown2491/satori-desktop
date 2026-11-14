@@ -13,6 +13,7 @@
 //! ANONYMOUS zap — real sats from the invoice, no name, never a
 //! spoofed identity.
 
+use crate::nip::fields::tag_value;
 use nostr::prelude::*;
 
 /// Who zapped, and how much (sats). `sender: None` = anonymous — the
@@ -21,14 +22,6 @@ use nostr::prelude::*;
 pub struct ZapInfo {
     pub sender: Option<PublicKey>,
     pub sats: u64,
-}
-
-fn tag_value(ev: &Event, name: &str) -> Option<String> {
-    ev.tags
-        .iter()
-        .find(|t| t.as_slice().first().map(String::as_str) == Some(name))
-        .and_then(|t| t.as_slice().get(1).cloned())
-        .filter(|v| !v.is_empty())
 }
 
 /// Millisats from a bolt11 invoice's human-readable part
