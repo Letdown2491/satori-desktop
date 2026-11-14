@@ -6,6 +6,39 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
+## 0.8.0 - 2026-11-14
+
+The interop pass continues on two fronts: what a note can ask for, and
+where a publish goes.
+
+Zaps learned arithmetic. A note with a zap split (NIP-57) now pays every
+receiver: weights are relative, an unweighted receiver on a partially
+weighted note gets nothing, a receiver with no lightning pointer fails
+alone instead of failing the whole split, and a retry replays every
+pending record. Zap goals (NIP-75) render as cards with live progress, a
+raised-of target line, and a closed marker once the ask's deadline
+passes.
+
+Comments learned addresses. A comment on an article, picture, video or
+wiki now whispers "on {name}'s note" in the notifications pane and opens
+the parent by its coordinate (NIP-22): the thread fetches the
+addressable anchor, learns its id, and rides from there; long-form
+parents land in the reader.
+
+The feed grew surfaces for the kinds it already carried: content
+warnings veil until revealed (NIP-36), emoji shortcodes render their
+images (NIP-30), subject lines headline the row (NIP-14/24), and an
+unknown kind that carries an alt tag renders that description instead
+of vanishing (NIP-31). Picture metadata parsing is pinned against real
+client fixtures (NIP-68).
+
+Publishing learned phase 2 of the NIP-65 routing: the app keeps
+per-event seen-on memory, deletion checks ask the relays where the
+original lived, profiles and relay lists publish to every known relay
+so they exist where we only read, personal kinds (mute lists,
+bookmarks, drafts) never broadcast, and a foreign inbox relay visits
+for one publish and leaves instead of joining the pool forever.
+
 ## 0.7.1 - 2026-11-13
 
 The attachment-interop fix, hours after 0.7.0: a note's attached image
