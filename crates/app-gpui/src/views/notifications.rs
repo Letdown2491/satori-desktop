@@ -739,6 +739,10 @@ fn notif_parent_id(ev: &Event) -> Option<String> {
             .or_else(|| q_tag(ev)),
         1111 => match comment::parse_refs(ev).parent {
             Some(comment::Ref::Event(id)) => Some(id.to_string()),
+            // An addressable parent (an article, a picture): the parent
+            // key is its coordinate — load_parents resolves it, the
+            // whisper's click opens the thread by address.
+            parent @ Some(comment::Ref::Address { .. }) => parent.map(|r| r.value()),
             _ => None,
         },
         9735 | 1018 | 16 => ev
@@ -831,8 +835,15 @@ fn notif_whisper<V: EventEmitter<Nav> + 'static>(
             .on_click(move |_, _, cx| {
                 let id = id.clone();
                 handle.update(cx, |_, cx| {
+                    // Hex = the parent's event id; a NIP-33 coordinate
+                    // ("kind:author:d") = an addressable parent — the
+                    // thread opens by address (the NIP-22 door).
                     if let Ok(event_id) = EventId::from_hex(&id) {
                         cx.emit(Nav::OpenThread(event_id));
+                    } else if let Some(comment::Ref::Address { kind, author, d }) =
+                        comment::Ref::from_coordinate(&id)
+                    {
+                        cx.emit(Nav::OpenThreadAddr(kind, author, d));
                     }
                 });
             })
