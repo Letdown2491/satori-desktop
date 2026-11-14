@@ -138,6 +138,54 @@ mod tests {
     }
 
     #[test]
+    fn real_world_picture_tag_parses() {
+        // NIP-68 kind-20 picture form (Amethyst/nostr.build style): m
+        // image/jpeg, a PORTRAIT dim, alt with inner spaces, a blurhash,
+        // and the hash/service keys this parser doesn't need (x, ox,
+        // size, fallback) riding as unknown-but-harmless elements.
+        let m = &parse(&ev(&[
+            "url https://nostr.build/i/9d3ba0b8a4b7ae2b0d5c4b7f8e1a2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b.jpg",
+            "x 9d3ba0b8a4b7ae2b0d5c4b7f8e1a2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b",
+            "size 284773",
+            "m image/jpeg",
+            "dim 810x1440",
+            "alt sunset over the harbor, shot vertical",
+            "blurhash |LEHaA%2tS_3%hRkxaWBj[t7oKWVxuxa}ayRjZof",
+            "fallback https://curl.nostr.build/9d3ba0b8.jpg",
+            "service nostr.build",
+        ]))[0];
+        assert_eq!(m.mime.as_deref(), Some("image/jpeg"));
+        // The portrait dim survives whole: the feed's aspect reservation
+        // leans on it (a vertical must reserve a TALL box, not a wide one).
+        assert_eq!(m.dim, Some((810, 1440)));
+        assert_eq!(
+            m.alt.as_deref(),
+            Some("sunset over the harbor, shot vertical")
+        );
+        assert!(m.blurhash.is_some());
+    }
+
+    #[test]
+    fn multi_picture_note_parses_each_tag() {
+        // NIP-68: a kind-20 event may carry several imeta tags (an album).
+        // They keep tag order and never collapse into one another.
+        let metas = parse(&ev_tags(&[
+            &["url https://c/first.jpg", "m image/jpeg", "dim 810x1440"],
+            &[
+                "url https://c/second.jpg",
+                "m image/png",
+                "dim 1440x810",
+                "alt landscape",
+            ],
+        ]));
+        assert_eq!(metas.len(), 2);
+        assert_eq!(metas[0].url, "https://c/first.jpg");
+        assert_eq!(metas[0].dim, Some((810, 1440)));
+        assert_eq!(metas[1].dim, Some((1440, 810)));
+        assert_eq!(metas[1].alt.as_deref(), Some("landscape"));
+    }
+
+    #[test]
     fn dim_tolerates_decimals_and_rejects_nonpositive() {
         let m = &parse(&ev(&["url https://c/v.mp4", "dim 464.0x848.0"]))[0];
         assert_eq!(m.dim, Some((464, 848)));
