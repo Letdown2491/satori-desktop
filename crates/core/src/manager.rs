@@ -3812,7 +3812,7 @@ impl Core {
                     Timestamp::now(),
                     Kind::Custom(1111),
                     tags,
-                    content,
+                    Self::content_with_media_urls(content, &imetas),
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
                 // Same undo window as notes (the reply toast is the note
@@ -4708,6 +4708,10 @@ impl Core {
     /// is media IN a note, not a picture event (issue #3 WS1).
     /// (pub(crate)-crossing: the composer's preview builds its synthetic
     /// event from the SAME builder — the preview shows what publish signs.)
+    /// A note with attachments is a NOTE (issue #3 WS1): note_tags carries
+    /// the NIP-92 imeta arrays as kind-1 tags (signNote's
+    /// `for (const m of imeta) tags.push(m)`), alongside the reply tags —
+    /// the reply-with-attachment case keeps its thread context.
     pub fn note_tags(
         content: String,
         reply_to: Option<Event>,
@@ -4792,7 +4796,33 @@ impl Core {
                 tags.push(Tag::public_key(who));
             }
         }
-        (content, tags)
+        (Self::content_with_media_urls(content, imetas), tags)
+    }
+
+    /// NIP-92's shape is a URL in the CONTENT plus a matching imeta tag,
+    /// and clients MAY ignore an imeta that matches no content URL — the
+    /// strict parsers (dark-wisp-class) rendered an attached image as
+    /// nothing at all (the Nov 13 2026 interop report: the announcement
+    /// note's screenshot visible in Satori, invisible elsewhere). Each
+    /// imeta's url joins the text on its own trailing line unless the
+    /// author already pasted it; the reader's media pass dedupes it
+    /// against the imeta asset (content.rs media_assets) and the body
+    /// folds the link paragraph into the gallery, so nothing doubles.
+    fn content_with_media_urls(mut content: String, imetas: &[Vec<String>]) -> String {
+        for m in imetas {
+            if m.len() >= 2 && m[0] == "imeta" {
+                for entry in &m[1..] {
+                    if let Some(url) = entry.strip_prefix("url ")
+                        && !url.is_empty()
+                        && !content.contains(url)
+                    {
+                        content.push_str("\n\n");
+                        content.push_str(url);
+                    }
+                }
+            }
+        }
+        content
     }
 
     async fn post_note_inner(
@@ -7488,7 +7518,8 @@ mod tests {
             &[imeta.clone()],
             me,
         );
-        assert_eq!(content, "look at this");
+        // NIP-92: the URL rides the content too (D63's interop report).
+        assert_eq!(content, "look at this\n\nhttps://cdn.example.com/abc.png");
         let imeta_tags: Vec<&Tag> = tags.iter().filter(|t| t.kind() == "imeta").collect();
         assert_eq!(imeta_tags.len(), 1, "one imeta tag rides the kind-1");
         let parts = imeta_tags[0].as_slice();
@@ -7500,6 +7531,53 @@ mod tests {
         let bad = vec!["url https://cdn.example.com/x.png".to_string()];
         let (_, tags) = Core::note_tags("x".into(), None, Vec::new(), None, &[bad], me);
         assert!(tags.iter().all(|t| t.kind() != "imeta"));
+    }
+
+    /// The interop report (Nov 13 2026, D63's tail): a real published
+    /// kind-1 note (20e4d786fc26fc76, "this is how i nostr") carried its
+    /// screenshot ONLY in the imeta tag, so NIP-92-strict clients (dark
+    /// wisp) rendered no image at all — the NIP allows ignoring an imeta
+    /// that matches no content URL. The real event's tag array as the
+    /// fixture: the URL now rides the content on its own line.
+    #[test]
+    fn note_content_carries_the_imeta_url() {
+        let imeta = vec![
+            "imeta".to_string(),
+            "url https://blossom.geektoshi.tech/79bbaad937101fcad8da1fecb8c418ac4abfe83ef47f9aeb65f57b8bd92b3457.png".to_string(),
+            "m image/png".to_string(),
+            "dim 1920x1200".to_string(),
+            "x 79bbaad937101fcad8da1fecb8c418ac4abfe83ef47f9aeb65f57b8bd92b3457".to_string(),
+        ];
+        let me = Keys::generate().public_key();
+        let (content, tags) = Core::note_tags(
+            "this is how i nostr".into(),
+            None,
+            Vec::new(),
+            None,
+            &[imeta],
+            me,
+        );
+        assert_eq!(
+            content,
+            "this is how i nostr\n\nhttps://blossom.geektoshi.tech/79bbaad937101fcad8da1fecb8c418ac4abfe83ef47f9aeb65f57b8bd92b3457.png"
+        );
+        assert_eq!(tags.iter().filter(|t| t.kind() == "imeta").count(), 1);
+    }
+
+    /// An author who pasted the media URL themselves gets no duplicate:
+    /// content-contains wins over the append.
+    #[test]
+    fn pasted_media_url_is_not_appended_twice() {
+        let url = "https://cdn.example.com/abc.png";
+        let content = Core::content_with_media_urls(
+            format!("look at {url}"),
+            &[vec![
+                "imeta".to_string(),
+                format!("url {url}"),
+                "m image/png".to_string(),
+            ]],
+        );
+        assert_eq!(content, format!("look at {url}"));
     }
 
     /// NIP-92 kind-0 adoption: the banner's blurhash arrives only from an

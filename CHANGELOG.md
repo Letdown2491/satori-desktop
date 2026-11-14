@@ -6,6 +6,16 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
+## 0.7.1 - 2026-11-13
+
+The attachment-interop fix, hours after 0.7.0: a note's attached image
+or video now puts its URL in the event content beside the imeta tag.
+NIP-92 lets a client ignore an imeta that matches no content URL, and
+the strict ones did: the attachment showed in Satori and nowhere else.
+Comments get the same treatment, and an author who pastes the URL
+themselves gets no duplicate. Picture and video posts were already
+self-contained by design.
+
 ## 0.7.0 - 2026-11-13
 
 The interoperability release: NIP-faithful surfaces where the client was
