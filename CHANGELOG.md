@@ -62,8 +62,9 @@ columns exactly as you left them. The layout persists across
 restarts: which columns, in what order, how wide. Columns reorder by
 dragging their header and resize from their right edge, the rail
 keeps out of the way, retiring the button of a stream already pinned,
-and h/l hop the focus between columns. A narrow window collapses the
-row to the focused column until it widens again.
+and h/l hop the focus between columns, scrolling the target into
+view. The columns never narrow: the row scrolls horizontally when
+they overflow.
 Two follow-up fixes from the first days with it: repost rows carry
 the boosted note's action bar (the envelope used to render bare), and
 the columns' add and remove buttons read at full ink.
