@@ -2828,6 +2828,7 @@ impl Composer {
             media: &snap,
             quotes: &quotes,
             profiles: &profiles,
+            emoji: HashMap::new(),
         };
         let handle = cx.entity();
 
@@ -3116,6 +3117,7 @@ impl Composer {
                     media: &snap,
                     quotes: &quotes,
                     profiles: &profiles,
+                    emoji: content::emoji_map(&ev),
                 };
                 card = card.child(content::body(&ev, &body_ctx, cx.entity()));
             }

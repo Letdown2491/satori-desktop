@@ -643,6 +643,8 @@ impl Render for ProfileView {
             media: &media,
             quotes: &quotes,
             profiles: &profiles,
+            // A bio is the kind-0 about text — no emoji tags of its own.
+            emoji: HashMap::new(),
         };
 
         div()

@@ -15,7 +15,7 @@ use gpui::{
     ClipboardItem, Div, Entity, FontWeight, SharedString, div, prelude::*, px, relative, rgb,
 };
 use nostr::prelude::*;
-use satori_core::nip::{calendar, classified, highlight, podcast, poll, repo, wiki};
+use satori_core::nip::{calendar, classified, fields, highlight, podcast, poll, repo, wiki};
 
 use super::content::{self, Body};
 use super::feed::Feed;
@@ -30,6 +30,9 @@ pub struct CardState {
     pub poll_sel: HashMap<EventId, Vec<String>>,
     pub voted: HashSet<EventId>,
     pub rsvped: HashMap<EventId, String>,
+    /// NIP-36: warnings the reader has chosen to reveal (the veil
+    /// collapses to this bar; the reveal is a per-feed choice).
+    pub revealed: HashSet<EventId>,
 }
 
 /// Kinds the feed carries beyond text notes (cards.rs `card_for` / the
@@ -48,6 +51,14 @@ pub fn is_feed_kind(kind: Kind) -> bool {
 /// The row body: a rich card for registry kinds, the normal text pipeline
 /// otherwise (cards.rs `card_for`'s `_ => note_card`).
 pub fn row_body(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> Div {
+    // NIP-36: a content warning never renders raw — the row collapses to
+    // a quiet bar (the reason when the author gave one) until revealed.
+    // The veil wraps EVERY kind: a warned picture leaks nothing either.
+    if let Some(reason) = fields::content_warning(ev)
+        && !st.revealed.contains(&ev.id)
+    {
+        return veil_card(ev, &reason, feed);
+    }
     match u16::from(ev.kind) {
         21 | 22 => video_card(ev, ctx, feed),
         54 => podcast_card(ev, ctx, feed),
@@ -58,8 +69,98 @@ pub fn row_body(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> 
         30818 => wiki_card(ev, ctx, feed),
         31922 | 31923 => calendar_card(ev, ctx, feed, st),
         9802 => highlight_card(ev, ctx, feed, st),
-        _ => content::body(ev, ctx, feed.clone()),
+        _ => {
+            // Unknown-but-advertised (NIP-31): an `alt` tag describes the
+            // event in its author's words — render that, muted, no
+            // masquerading as a supported card.
+            if u16::from(ev.kind) != 1
+                && let Some(alt) = fields::alt_description(ev)
+            {
+                return alt_card(ev, &alt);
+            }
+            // NIP-14/NIP-24: a kind-1 subject line rides above the body,
+            // semibold ink — the row's headline when the author gave one.
+            let mut d = div().w_full().flex().flex_col().gap_1();
+            if let Some(sub) = fields::subject_title(ev) {
+                d = d.child(serif_title(&sub, 15.0));
+            }
+            d.child(content::body(ev, ctx, feed.clone()))
+        }
     }
+}
+
+/// NIP-36's veil: the warning stands in for the content — a bordered,
+/// quiet bar naming the reason (or the generic line when the author
+/// sent none) and a Show seal. The reveal is per-feed state
+/// (`CardState.revealed`); the inner click stops propagation so the
+/// row's open-thread handler doesn't fire underneath it.
+fn veil_card(ev: &Event, reason: &str, feed: &Entity<Feed>) -> Div {
+    let label = if reason.is_empty() {
+        "Sensitive content".to_string()
+    } else {
+        format!("Sensitive: {reason}")
+    };
+    let id = ev.id;
+    let feed = feed.clone();
+    div().w_full().flex().flex_col().gap_1().child(
+        div()
+            .w_full()
+            .border_1()
+            .border_color(rgb(theme::hairline()))
+            .rounded(px(theme::R_EMBED))
+            .px_3()
+            .py_2()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(theme::T_SMALL))
+                    .text_color(rgb(theme::muted()))
+                    .child(label),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("veil-{}", id)))
+                    .cursor_pointer()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(theme::hairline()))
+                    .text_size(px(theme::T_SMALL))
+                    .text_color(rgb(theme::muted()))
+                    .hover(|s| s.text_color(rgb(theme::ink())))
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        feed.update(cx, |f, cx| {
+                            f.reveal(id);
+                            cx.notify();
+                        });
+                    })
+                    .child("Show"),
+            ),
+    )
+}
+
+/// NIP-31's fallback: the `alt` tag's one-line description, muted —
+/// "what this is" from the author's own mouth, never a fake card.
+fn alt_card(ev: &Event, alt: &str) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(kicker(&format!("Kind {}", u16::from(ev.kind))))
+        .child(
+            div()
+                .w_full()
+                .text_size(px(theme::T_BODY))
+                .text_color(rgb(theme::muted()))
+                .child(alt.to_string()),
+        )
 }
 
 // --- shared bits ---------------------------------------------------------
