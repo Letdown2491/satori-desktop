@@ -500,12 +500,9 @@ fn article_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) ->
     // Article" between them was noise (owner: "remove the arrow + article
     // thing").
     card = card.child(serif_title(&data.title, 17.0));
-    // Summary, or the first ~140 chars of the body as the stand-in (article.ts).
-    let summary = if data.summary.is_empty() {
-        ev.content.chars().take(140).collect::<String>()
-    } else {
-        data.summary.clone()
-    };
+    // Summary, or the first ~140 chars of the body as the stand-in
+    // (article.ts) — the shared rule (content::article_summary).
+    let summary = content::article_summary(&data, &ev.content);
     card = card.child(
         div()
             .w_full()

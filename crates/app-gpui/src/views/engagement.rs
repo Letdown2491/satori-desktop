@@ -49,6 +49,32 @@ impl Engagement {
             reaction_picker: None,
         }
     }
+
+    /// One row's paint state, from the mirrors (the per-id ActionState
+    /// build the five views had been spelling out by hand — wire.rs and
+    /// notifications.rs verbatim twins born across two releases; the
+    /// D55 lens pulled the kernel at birth's end). `reduced_motion` is
+    /// the paint-time pref, `actions::reduced_motion(cx)` at the call
+    /// site. feed.rs's two rows are NOT this shape (their like/repost
+    /// booleans are computed, not mirror lookups) and stay hand-rolled.
+    pub fn action_state(
+        &self,
+        id: &str,
+        replies: usize,
+        reduced_motion: bool,
+    ) -> super::actions::ActionState {
+        super::actions::ActionState {
+            liked: self.liked.contains(id),
+            reposted: self.reposted.contains(id),
+            bookmarked: self.bookmarked.contains(id),
+            zapped: self.zapped.contains(id),
+            zapping: self.zap_pending.contains(id),
+            wallet_ready: self.wallet_ready,
+            picker_open: self.reaction_picker.as_deref() == Some(id),
+            replies,
+            reduced_motion,
+        }
+    }
 }
 
 /// What the engine needs from its host view. The two optional flourishes

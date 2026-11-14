@@ -151,6 +151,16 @@ pub fn routable_relay(url: &str) -> bool {
     }
 }
 
+/// The relay-URL SHAPE predicate the input fields share (settings' add
+/// field and the columns + menu's wire row): a wss:// or ws:// prefix,
+/// nothing more. What may be DIALED is `routable_relay`'s decision —
+/// this only answers "does this look like a relay URL" so both UIs
+/// correct the reader with one voice (the #58/#61 no-second-ruleset
+/// shape: one predicate, not two drifting prefix checks).
+pub fn is_relay_url(url: &str) -> bool {
+    url.starts_with("wss://") || url.starts_with("ws://")
+}
+
 // --- dial-time resolution pinning (WP1) ------------------------------------
 
 /// The DNS-rebinding-safe resolver (issue #3 WS4). The URL guard checks

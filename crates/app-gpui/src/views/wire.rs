@@ -3,11 +3,14 @@
 //! owner's call). Notes and long-form arrive since launch only: no
 //! history, the column starts empty and fills with what the relay pushes
 //! while it's open. Newest-first, bounded buffer. The receiver's lifetime
-//! IS the subscription: when this view drops, the core task's next send
-//! fails and it unsubscribes — a closed column stops paying for its
-//! socket.
+//! IS the subscription: the pump task exits when the view does (update
+//! failing), the core task notices on its next send or idle tick and
+//! unsubscribes — a closed column stops paying for its socket.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
 
 use gpui::{
     Context, Entity, EventEmitter, ListAlignment, ListOffset, ListScrollEvent, ListState, Render,
@@ -22,6 +25,26 @@ use crate::{media, theme};
 /// The newest-first buffer's cap: a busy relay can outpace reading; the
 /// oldest notes drop past this.
 const WIRE_CAP: usize = 200;
+/// The author mirror's cap (FIFO by first sight): a relay firehose meets
+/// far more authors than the home feed, and nothing else bounded this —
+/// the audit's memory lens. Evicted authors re-resolve on the next note.
+const PROFILE_CAP: usize = 2000;
+/// The quote-mirror's cap (FIFO by first sight, the content.rs memo
+/// convention): dropped rows leave their embeds behind otherwise, and
+/// the wire's ingest rate is relay-paced.
+const QUOTES_CAP: usize = 4096;
+
+/// The render snapshot (feed.rs's FeedSnap discipline, verbatim): the
+/// list closures are 'static, so they capture THIS instead of cloning
+/// the maps per render. Rebuilt only when `snap_dirty` — data changes,
+/// not frames.
+#[derive(Clone)]
+struct WireSnap {
+    rows: Arc<Vec<Arc<Event>>>,
+    profiles: Arc<HashMap<String, Profile>>,
+    quotes: Arc<content::Quotes>,
+    engagement: Arc<engagement::Engagement>,
+}
 
 pub struct WireView {
     core: Arc<Core>,
@@ -29,12 +52,22 @@ pub struct WireView {
     relay: String,
     rows: Vec<Arc<Event>>,
     profiles: HashMap<String, Profile>,
+    /// First-sight ledger for the profile eviction (FIFO, seen.rs's
+    /// convention).
+    profiles_order: VecDeque<String>,
+    /// Authors with a fetch in flight: one ask per author, ever in
+    /// flight — a never-resolving kind-0 must not re-fire per note.
+    pending: HashSet<String>,
     quotes: content::Quotes,
+    quotes_order: VecDeque<String>,
     engagement: engagement::Engagement,
     /// The quiet status whisper (the failure voice).
     status: String,
     list: ListState,
     deep: bool,
+    /// The render snapshot rebuilds on the next render after this.
+    snap_dirty: bool,
+    snap: Option<WireSnap>,
 }
 
 impl EventEmitter<Nav> for WireView {}
@@ -50,11 +83,16 @@ impl WireView {
             relay,
             rows: vec![],
             profiles: HashMap::new(),
+            profiles_order: VecDeque::new(),
+            pending: HashSet::new(),
             quotes: HashMap::new(),
+            quotes_order: VecDeque::new(),
             engagement,
             status: states::loading("Listening…"),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             deep: false,
+            snap_dirty: true,
+            snap: None,
         };
         view.pump(cx);
         // Deep-scroll whisper: notifications.rs's shape — emit on change
@@ -92,7 +130,25 @@ impl WireView {
             loop {
                 match rx.recv().await {
                     Ok(ev) => {
-                        let _ = this.update(cx, |this, cx| this.on_note(ev, cx));
+                        // Batch-drain the backlog: one reset, one repaint
+                        // per burst, not per note (a busy relay would
+                        // otherwise re-measure the list and deep-clone
+                        // the snapshot ten times for ten notes). The
+                        // update FAILING is the pump's exit — the view
+                        // is gone, and holding rx any longer would pin
+                        // the relay subscription open (the ghost-pump
+                        // bug the audit caught: engagement.rs pump_wallet
+                        // is the house shape).
+                        let mut batch = vec![ev];
+                        while let Ok(more) = rx.try_recv() {
+                            batch.push(more);
+                        }
+                        if this
+                            .update(cx, |this, cx| this.on_notes(batch, cx))
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(_) => break,
@@ -102,35 +158,75 @@ impl WireView {
         .detach();
     }
 
-    fn on_note(&mut self, ev: Event, cx: &mut Context<Self>) {
+    fn on_notes(&mut self, notes: Vec<Event>, cx: &mut Context<Self>) {
         self.status.clear();
-        for url in content::media_urls_cached(&ev).iter().cloned() {
-            media::fetch(&self.core, url, cx.entity_id(), cx);
+        self.snap_dirty = true;
+        let mut unknown: Vec<PublicKey> = Vec::new();
+        for ev in notes {
+            for url in content::media_urls_cached(&ev).iter().cloned() {
+                media::fetch(&self.core, url, cx.entity_id(), cx);
+            }
+            // Ledger the refs want_quotes is about to add (new keys only),
+            // then the FIFO trim can evict in insertion order.
+            for bech in content::note_refs(&ev) {
+                if !self.quotes.contains_key(&bech) {
+                    self.quotes_order.push_back(bech);
+                }
+            }
+            quotes::want_quotes(self, &ev, cx);
+            while self.quotes_order.len() > QUOTES_CAP {
+                if let Some(old) = self.quotes_order.pop_front() {
+                    self.quotes.remove(&old);
+                }
+            }
+            let pk = ev.pubkey;
+            self.rows.insert(0, Arc::new(ev));
+            if !self.profiles.contains_key(&pk.to_string()) && self.pending.insert(pk.to_string()) {
+                unknown.push(pk);
+            }
         }
-        quotes::want_quotes(self, &ev, cx);
-        let pk = ev.pubkey;
-        self.rows.insert(0, Arc::new(ev));
         self.rows.truncate(WIRE_CAP);
         self.list.reset(self.rows.len());
-        // The author's face: profiles hydrate as they land (one pump per
-        // unknown author; the channel closes when the service is done).
-        if !self.profiles.contains_key(&pk.to_string()) {
-            let mut rx = self.core.ensure_profiles(vec![pk]);
+        // The authors' faces: ONE pump per batch (per-author pumps had
+        // been ratcheting with the firehose), and the pending set keeps
+        // a never-resolving author from re-firing on every note.
+        if !unknown.is_empty() {
+            let mut rx = self.core.ensure_profiles(unknown);
             cx.spawn(async move |this, cx| {
                 while let Some(fe) = rx.recv().await {
-                    let _ = this.update(cx, |this, cx| {
-                        if let FeedEvent::Profiles(profs) = fe {
-                            for p in profs {
-                                this.profiles.insert(p.pubkey.clone(), p);
-                            }
-                            cx.notify();
-                        }
-                    });
+                    // A failed update ends the pump with the view.
+                    if this
+                        .update(cx, |this, cx| this.on_profiles(fe, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
             })
             .detach();
         }
         cx.notify();
+    }
+
+    fn on_profiles(&mut self, fe: FeedEvent, cx: &mut Context<Self>) {
+        if let FeedEvent::Profiles(profs) = fe {
+            for p in profs {
+                let hex = p.pubkey.clone();
+                self.pending.remove(&hex);
+                if self.profiles.insert(hex.clone(), p).is_none() {
+                    self.profiles_order.push_back(hex);
+                }
+            }
+            // FIFO by first sight: the map must not grow with the
+            // relay's author count (the audit's memory lens).
+            while self.profiles_order.len() > PROFILE_CAP {
+                if let Some(old) = self.profiles_order.pop_front() {
+                    self.profiles.remove(&old);
+                }
+            }
+            self.snap_dirty = true;
+            cx.notify();
+        }
     }
 }
 
@@ -164,6 +260,11 @@ impl engagement::Host for WireView {
     }
     fn whisper(&mut self, msg: String) {
         self.status = msg;
+    }
+    /// The snapshot invalidation: engagement toggles AND quote landings
+    /// both arrive through here (quotes.rs:67, pump_wallet's tail).
+    fn touched(&mut self) {
+        self.snap_dirty = true;
     }
 }
 
@@ -220,22 +321,19 @@ fn wire_card(
     let id_hex = ev.id.to_string();
     match u16::from(ev.kind) {
         // The article card: serif title + summary, the reader opens on
-        // the click (content.rs article_card's compact shape).
+        // the click (cards.rs article_card's compact shape — same
+        // summary rule, one kernel). The title is capped: a relay's
+        // title tag is attacker-written and this renders unthrottled.
         30023 => {
+            const TITLE_CAP: usize = 200;
             let data = content::article_data_cached(ev);
             let title = data
                 .as_ref()
-                .map(|d| d.title.clone())
+                .map(|d| d.title.chars().take(TITLE_CAP).collect::<String>())
                 .unwrap_or_else(|| "Article".into());
             let summary = data
                 .as_ref()
-                .map(|d| {
-                    if d.summary.is_empty() {
-                        ev.content.chars().take(140).collect::<String>()
-                    } else {
-                        d.summary.clone()
-                    }
-                })
+                .map(|d| content::article_summary(d, &ev.content))
                 .unwrap_or_default();
             let ev_open = (**ev).clone();
             let handle_open = handle.clone();
@@ -298,22 +396,24 @@ impl Render for WireView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let handle = cx.entity();
         let status = self.status.clone();
-        let rows = self.rows.clone();
-        let profiles = self.profiles.clone();
         let media_snap = media::Snapshot::new(cx);
-        let quotes = self.quotes.clone();
-        // The action row's glyph states, snapshotted per render
-        // (notifications.rs's inline FeedSnap discipline).
-        let liked = self.engagement.liked.clone();
-        let reposted = self.engagement.reposted.clone();
-        let reaction_picker = self.engagement.reaction_picker.clone();
-        let bookmarked = self.engagement.bookmarked.clone();
-        let zapped = self.engagement.zapped.clone();
-        let zap_pending = self.engagement.zap_pending.clone();
-        let wallet_ready = self.engagement.wallet_ready;
-        let reduced_motion = crate::desktop::Desktop::get(cx).reduced_motion;
-        let empty = rows.is_empty();
+        // The snapshot rebuilds on data change only (feed.rs's
+        // snap_dirty discipline): the wire re-renders per arriving note
+        // and per media landing, and the maps must not deep-clone for
+        // every one of those frames.
+        if self.snap_dirty || self.snap.is_none() {
+            self.snap = Some(WireSnap {
+                rows: Arc::new(self.rows.clone()),
+                profiles: Arc::new(self.profiles.clone()),
+                quotes: Arc::new(self.quotes.clone()),
+                engagement: Arc::new(self.engagement.clone()),
+            });
+            self.snap_dirty = false;
+        }
+        let snap = self.snap.as_ref().unwrap().clone();
+        let empty = snap.rows.is_empty();
         let host = self.relay.clone();
+        let reduced_motion = actions::reduced_motion(cx);
 
         div()
             .flex_1()
@@ -343,35 +443,30 @@ impl Render for WireView {
                             })
                             .into_any_element()
                     } else {
-                        list(self.list.clone(), move |idx, _w, cx| match rows.get(idx) {
-                            Some(ev) => {
-                                let secs = ev.created_at.as_secs();
-                                let time = crate::timefmt::stamp(secs, cx);
-                                crate::timefmt::ensure(secs, cx);
-                                let id_hex = ev.id.to_string();
-                                let st = actions::ActionState {
-                                    liked: liked.contains(&id_hex),
-                                    reposted: reposted.contains(&id_hex),
-                                    bookmarked: bookmarked.contains(&id_hex),
-                                    zapped: zapped.contains(&id_hex),
-                                    zapping: zap_pending.contains(&id_hex),
-                                    wallet_ready,
-                                    picker_open: reaction_picker.as_deref() == Some(&id_hex),
-                                    replies: 0,
-                                    reduced_motion,
-                                };
-                                wire_card(
-                                    idx,
-                                    ev,
-                                    st,
-                                    &profiles,
-                                    &media_snap,
-                                    &quotes,
-                                    time,
-                                    handle.clone(),
-                                )
+                        list(self.list.clone(), move |idx, _w, cx| {
+                            match snap.rows.get(idx) {
+                                Some(ev) => {
+                                    let secs = ev.created_at.as_secs();
+                                    let time = crate::timefmt::stamp(secs, cx);
+                                    crate::timefmt::ensure(secs, cx);
+                                    let st = snap.engagement.action_state(
+                                        &ev.id.to_string(),
+                                        0,
+                                        reduced_motion,
+                                    );
+                                    wire_card(
+                                        idx,
+                                        ev,
+                                        st,
+                                        &snap.profiles,
+                                        &media_snap,
+                                        &snap.quotes,
+                                        time,
+                                        handle.clone(),
+                                    )
+                                }
+                                None => div().into_any_element(),
                             }
-                            None => div().into_any_element(),
                         })
                         .into_any_element()
                     }),

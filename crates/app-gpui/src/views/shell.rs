@@ -346,8 +346,8 @@ impl Shell {
             add_menu: false,
             reorder_over: None,
             row_scroll: ScrollHandle::new(),
-            tag_input: cx.new(|cx| shell_input("#", cx)),
-            relay_input: cx.new(|cx| shell_input("wss://…", cx)),
+            tag_input: cx.new(|cx| Input::single_line("#", cx)),
+            relay_input: cx.new(|cx| Input::single_line("wss://…", cx)),
             me: None,
             me_profile: None,
         };
@@ -721,6 +721,15 @@ impl Shell {
         if self.columns.len() >= COLUMN_CAP {
             return;
         }
+        self.push_column(kind, cx);
+    }
+
+    /// The shared pin tail: build, subscribe, append, focus, scroll,
+    /// persist, repaint. pin_column and pin_tagged's push arm had been
+    /// two copies of these twelve lines with exactly one line of drift
+    /// (the notifications dot clearing) — the kind of implicit invariant
+    /// a third copy would have broken (the audit's duplication lens).
+    fn push_column(&mut self, kind: ColumnKind, cx: &mut Context<Self>) {
         let pane = self.build_pane(&kind, cx);
         self.subscribe_pane(&pane, cx);
         if kind == ColumnKind::Notifications {
@@ -774,17 +783,7 @@ impl Shell {
                 if self.columns.len() >= COLUMN_CAP {
                     return;
                 }
-                let pane = self.build_pane(&kind, cx);
-                self.subscribe_pane(&pane, cx);
-                self.columns.push(Column {
-                    kind,
-                    pane,
-                    width: None,
-                });
-                self.focused_col = self.columns.len() - 1;
-                self.scroll_col_into_view(self.focused_col);
-                self.save_layout();
-                cx.notify();
+                self.push_column(kind, cx);
             }
         }
     }
@@ -838,7 +837,17 @@ impl Shell {
                 // A corrupt hex degrades the layout (never fails).
                 Err(_) => return None,
             },
-            ("relay", Some(url)) => ColumnKind::Relay(url.to_string()),
+            ("relay", Some(url)) => {
+                // The prefs entry passes the same core screen the typed
+                // path's dial will run (`routable_relay`): a corrupt or
+                // hostile prefs.json can never aim the wire transport at
+                // a private endpoint — the column degrades out of the
+                // layout instead of dialing (the audit's security lens).
+                if !satori_core::net_guard::routable_relay(url) {
+                    return None;
+                }
+                ColumnKind::Relay(url.to_string())
+            }
             _ => return None,
         };
         Some(Column {
@@ -910,15 +919,18 @@ impl Shell {
     }
 
     /// The + menu's relay row: the URL is validated and normalized like
-    /// settings' add_relay (wss:// or ws://; anything else leaves the
-    /// field standing with a corrective placeholder), then the live wire
+    /// settings' add field (the shared `net_guard::is_relay_url` shape
+    /// predicate; the CORE gate behind it is the stricter
+    /// `routable_relay`, so a ws:// URL would pin a dead column — the
+    /// field corrects to wss:// before that). Anything else leaves the
+    /// field standing with a corrective placeholder, then the live wire
     /// pins.
     fn add_relay_column(&mut self, cx: &mut Context<Self>) {
         let url = self.relay_input.read(cx).content.trim().to_string();
         if url.is_empty() {
             return;
         }
-        if !url.starts_with("wss://") && !url.starts_with("ws://") {
+        if !satori_core::net_guard::is_relay_url(&url) || !url.starts_with("wss://") {
             self.relay_input.update(cx, |input, _| {
                 input.set_placeholder("needs wss://");
             });
@@ -939,6 +951,10 @@ impl Shell {
         if self.focused_col >= self.columns.len() {
             self.focused_col = self.columns.len().saturating_sub(1);
         }
+        // The invariant every focused_col mutation keeps: the focus
+        // scrolls into view (the clamp can land the focus on a column
+        // that is partially offscreen after the removal).
+        self.scroll_col_into_view(self.focused_col);
         self.save_layout();
         cx.notify();
     }
@@ -2599,12 +2615,6 @@ impl Shell {
 
 /// A single-line input for the shell's + menu (settings.rs single_line's
 /// shape: multiline off, a placeholder that shows the expected shape).
-fn shell_input(placeholder: &str, cx: &mut Context<Input>) -> Input {
-    let mut i = Input::new(cx);
-    i.multiline = false;
-    i.placeholder(placeholder)
-}
-
 /// A sheet overlay (the zap amount card, the reply box, #21): the card
 /// floats centered over a dim scrim — the pane you were reading stays
 /// visible underneath. Any click that bubbles to the overlay root closes
