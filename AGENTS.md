@@ -16,6 +16,10 @@ is commit `a4b09e8`: `git show a4b09e8:src/<file>`). The build spec is
   `theme.rs`, stroke-drawn glyphs in `icons.rs`, views in `views/`.
 - `vendor/xattr`: one-line Linux compile fix for a gpui 0.2.2 transitive dep
   (D13); wired via `[patch.crates-io]` in the root `Cargo.toml`.
+- `vendor/gpui-pre-wgpu`: frozen gpui-pre snapshot with one guard clause:
+  known emoji fonts are exempt from the primary-font 'm' gate, so color
+  emoji can load as a run's primary face (D66); wired via the same
+  `[patch.crates-io]`.
 - `packaging/`: `install-local.sh` ships the release (bin + wrapper + desktop
   file + hicolor icons into `~/.local`). `self/` +
   `.github/workflows/release.yml`: tag-driven deb/rpm/flatpak builds and

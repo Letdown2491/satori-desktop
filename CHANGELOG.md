@@ -39,6 +39,31 @@ so they exist where we only read, personal kinds (mute lists,
 bookmarks, drafts) never broadcast, and a foreign inbox relay visits
 for one publish and leaves instead of joining the pool forever.
 
+Composing got friendlier. The emoji picker inserts the unicode
+character instead of the :shortcode:; the reaction row's heart grows a
+right-click quick-set (five positive glyphs plus the heart) with
+tooltips; and emoji render in color at last: a vendored gpui patch
+exempts the known emoji fonts from the primary-font gate, and the
+composer field splits its text runs so emoji clusters ride the color
+face.
+
+Mentions learned people. The typeahead matches display name, handle,
+NIP-05 and pubkey hex, and finds anyone you interact with, not just
+accounts you follow; the profile mirror is seeded from the disk cache
+at launch, so names resolve on the first keystroke after a restart.
+
+Under the hood, the interop batch got its five-lens audit (the same
+performance / system usage / memory / security / duplication pass as
+the previous two cycles) and the findings landed: the feed's
+parent-whisper and comment-count maps are capped so a long scrolling
+session cannot grow them for the process lifetime; secrets (nsec,
+bunker pairing and client keys, the wallet's NWC secret) are wiped from
+freed heap; the single-instance socket verifies the connecting peer's
+uid and fails closed; the auth-URL door only opens http and https
+links; the mention scan was moved off the per-keystroke hot path; and
+the wallet pump no longer reads its own entity mid-construction at
+startup.
+
 ## 0.7.1 - 2026-11-13
 
 The attachment-interop fix, hours after 0.7.0: a note's attached image
