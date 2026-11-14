@@ -10,9 +10,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, AnyView, App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle,
-    Focusable, KeyDownEvent, ObjectFit, Render, SharedString, Stateful, Window, div, img,
-    prelude::*, px, rgb,
+    AnyElement, AnyView, App, ClickEvent, Context, Div, DragMoveEvent, Entity, EventEmitter,
+    FocusHandle, Focusable, KeyDownEvent, ObjectFit, Render, SharedString, Stateful, Window, div,
+    img, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, Profile, PublishEvent};
@@ -86,38 +86,66 @@ pub enum Pane {
 /// on-screen-pin surface the audits flagged.
 const COLUMN_CAP: usize = 4;
 
-/// The stream kinds a column can pin (D68, v1: the ambient surfaces).
-/// Hashtag columns need a tag parameter — they ride Phase 2's layout
-/// spec, not the fixed v1 menu.
-#[derive(Clone, Copy, PartialEq)]
+/// Per-column width bounds (phase 2 resize): narrower than this a
+/// stream is unreadable, wider than this it starves the row.
+const COL_MIN_W: f32 = 280.0;
+const COL_MAX_W: f32 = 960.0;
+
+/// The stream kinds a column can pin (D68): the ambient surfaces plus
+/// the hashtag stream (phase 2 — pinned from the hashtag drill's title
+/// row while the workspace is up; it carries a tag, so it's not in the
+/// fixed add menu).
+#[derive(Clone, PartialEq)]
 enum ColumnKind {
     Feed,
     Articles,
     Notifications,
     Search,
+    Hashtag(String),
 }
 
 impl ColumnKind {
-    fn label(self) -> &'static str {
+    fn label(&self) -> SharedString {
         match self {
-            ColumnKind::Feed => "Home",
-            ColumnKind::Articles => "Articles",
-            ColumnKind::Notifications => "Notifications",
-            ColumnKind::Search => "Search",
+            ColumnKind::Feed => "Home".into(),
+            ColumnKind::Articles => "Articles".into(),
+            ColumnKind::Notifications => "Notifications".into(),
+            ColumnKind::Search => "Search".into(),
+            ColumnKind::Hashtag(tag) => format!("#{tag}").into(),
         }
     }
 
-    fn icon(self, color: u32) -> AnyElement {
+    fn icon(&self, color: u32) -> AnyElement {
         match self {
             ColumnKind::Feed => icons::stream_icon(color).into_any_element(),
             ColumnKind::Articles => icons::article_icon(color).into_any_element(),
             ColumnKind::Notifications => icons::bell_icon(color).into_any_element(),
             ColumnKind::Search => icons::search_icon(color).into_any_element(),
+            ColumnKind::Hashtag(_) => icons::hash_icon(color).into_any_element(),
         }
     }
 
-    /// Every kind, menu order — the add-column menu walks this and
-    /// offers the ones not already pinned.
+    /// The persistence key (prefs.json `columns.cols[].kind`).
+    fn key(&self) -> &'static str {
+        match self {
+            ColumnKind::Feed => "feed",
+            ColumnKind::Articles => "articles",
+            ColumnKind::Notifications => "notifications",
+            ColumnKind::Search => "search",
+            ColumnKind::Hashtag(_) => "hashtag",
+        }
+    }
+
+    /// The hashtag variant's tag, if any.
+    fn tag(&self) -> Option<String> {
+        match self {
+            ColumnKind::Hashtag(tag) => Some(tag.clone()),
+            _ => None,
+        }
+    }
+
+    /// The fixed kinds, menu order — the add-column menu walks this and
+    /// offers the ones not already pinned (hashtag pins elsewhere).
     const ALL: [ColumnKind; 4] = [
         ColumnKind::Feed,
         ColumnKind::Articles,
@@ -133,6 +161,43 @@ impl ColumnKind {
 struct Column {
     kind: ColumnKind,
     pane: Pane,
+    /// Per-column width px (phase 2 drag handle); None = the flexible
+    /// default (equal share capped at the reading column).
+    width: Option<f32>,
+}
+
+/// A column drag's payload (phase 2 reorder): the source index and the
+/// header label for the ghost chip.
+#[derive(Clone)]
+struct ColumnDrag {
+    from: usize,
+    label: SharedString,
+}
+
+/// A width handle drag's payload (phase 2 resize): which column.
+#[derive(Clone, Copy)]
+struct WidthDrag {
+    col: usize,
+}
+
+/// The drag ghost: a small labeled chip riding the cursor (phase 2).
+struct DragGhost {
+    label: SharedString,
+}
+
+impl Render for DragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(10.0))
+            .py(px(4.0))
+            .rounded(px(theme::R_EMBED))
+            .border_1()
+            .border_color(rgb(theme::vermilion()))
+            .bg(rgb(theme::washi()))
+            .text_size(px(theme::T_UI))
+            .text_color(rgb(theme::ink()))
+            .child(self.label.clone())
+    }
 }
 
 /// Shell-to-root events. The root subscribes at both shell-creation sites
@@ -201,6 +266,9 @@ pub struct Shell {
     focused_col: usize,
     /// The add-column menu's open flag (the workspace's + affordance).
     add_menu: bool,
+    /// The column a drag is over right now (phase 2 reorder cue): its
+    /// header lights vermilion; cleared on drop.
+    reorder_over: Option<usize>,
     /// The signed-in identity: the rail's top mark is the user's avatar
     /// (replacing the ensō as the home glyph).
     me: Option<PublicKey>,
@@ -234,6 +302,7 @@ impl Shell {
             columns: Vec::new(),
             focused_col: 0,
             add_menu: false,
+            reorder_over: None,
             me: None,
             me_profile: None,
         };
@@ -242,6 +311,22 @@ impl Shell {
         // gets (audit DRY — Shell::new hand-wrote a second copy of this
         // match, the forgot-one-copy trap for the next Nav variant).
         shell.subscribe_nav(&feed, cx);
+        // The columns workspace restores at launch (phase 2): a persisted
+        // on-layout re-enters the mode with its columns rebuilt — the pane
+        // entities are session-local, only the layout persists. The fresh
+        // base feed above never renders; it drops.
+        let layout = crate::prefs::columns_layout();
+        if layout.on && !layout.cols.is_empty() {
+            shell.columns_on = true;
+            shell.stack.clear();
+            for pref in layout.cols.iter().take(COLUMN_CAP) {
+                if let Some(col) = shell.column_from_pref(pref, cx) {
+                    shell.subscribe_pane(&col.pane, cx);
+                    shell.columns.push(col);
+                }
+            }
+            shell.focused_col = 0;
+        }
         // The rail avatar: session pubkey synchronously, profile via the
         // usual ensure_profiles pump (name/picture arrive from the store or
         // the relays a beat later).
@@ -525,10 +610,11 @@ impl Shell {
 
     /// Enter the workspace: unwind the drill stack with its earned pop
     /// semantics (composer draft stash, edit-profile refresh), release
-    /// the base pane's media pins, and seed the default layout once.
-    /// The stack drains EMPTY in columns mode — the base feed entity
-    /// would sit unrendered but alive (live receiver, page in memory)
-    /// otherwise; a fresh one is built on exit.
+    /// the base pane's media pins, then rebuild the columns — the
+    /// persisted layout first (phase 2), the Home+Notifications seed
+    /// once if nothing is saved. The stack drains EMPTY in columns mode
+    /// — the base feed entity would sit unrendered but alive (live
+    /// receiver, page in memory) otherwise; a fresh one is built on exit.
     fn enter_columns(&mut self, cx: &mut Context<Self>) {
         if self.columns_on {
             return;
@@ -538,21 +624,31 @@ impl Shell {
             self.back(cx);
         }
         if self.columns.is_empty() {
-            self.pin_column(ColumnKind::Feed, cx);
-            self.pin_column(ColumnKind::Notifications, cx);
+            let saved = crate::prefs::columns_layout();
+            for pref in saved.cols.iter().take(COLUMN_CAP) {
+                if let Some(col) = self.column_from_pref(pref, cx) {
+                    self.subscribe_pane(&col.pane, cx);
+                    self.columns.push(col);
+                }
+            }
+            if self.columns.is_empty() {
+                self.pin_column(ColumnKind::Feed, cx);
+                self.pin_column(ColumnKind::Notifications, cx);
+            }
         }
         self.focused_col = 0;
         cx.notify();
     }
 
-    /// Leave the workspace: the columns drop (media released), a fresh
-    /// base feed fills the stack (the Phase 2 layout persistence will
-    /// also restore the pre-columns trail).
+    /// Leave the workspace: the layout persists first (mode off, the
+    /// live widths), then the columns drop (media released) and a fresh
+    /// base feed fills the stack.
     fn exit_columns(&mut self, cx: &mut Context<Self>) {
         if !self.columns_on {
             return;
         }
         self.columns_on = false;
+        self.save_layout();
         self.add_menu = false;
         for col in self.columns.drain(..) {
             col.pane.release_media(cx);
@@ -571,24 +667,117 @@ impl Shell {
         if self.columns.len() >= COLUMN_CAP {
             return;
         }
-        let pane = match kind {
+        let pane = self.build_pane(&kind, cx);
+        self.subscribe_pane(&pane, cx);
+        if kind == ColumnKind::Notifications {
+            // Opening notifications marks seen (the constructor does
+            // the read-state advance); the dot goes quiet at once,
+            // same as the drill-in open below.
+            self.notif_unread = false;
+        }
+        self.columns.push(Column {
+            kind,
+            pane,
+            width: None,
+        });
+        self.focused_col = self.columns.len() - 1;
+        self.save_layout();
+        cx.notify();
+    }
+
+    /// Pin (or focus) a hashtag column — the pin affordance on the
+    /// hashtag drill's title row, columns mode only. A column on the
+    /// same tag focuses instead of a duplicate pin.
+    fn pin_hashtag(&mut self, tag: &str, cx: &mut Context<Self>) {
+        match self
+            .columns
+            .iter()
+            .position(|c| c.kind.tag().as_deref() == Some(tag))
+        {
+            Some(i) if i == self.focused_col => self.column_to_top(i, cx),
+            Some(i) => {
+                self.focused_col = i;
+                cx.notify();
+            }
+            None => {
+                if self.columns.len() >= COLUMN_CAP {
+                    return;
+                }
+                let kind = ColumnKind::Hashtag(tag.to_string());
+                let pane = self.build_pane(&kind, cx);
+                self.subscribe_pane(&pane, cx);
+                self.columns.push(Column {
+                    kind,
+                    pane,
+                    width: None,
+                });
+                self.focused_col = self.columns.len() - 1;
+                self.save_layout();
+                cx.notify();
+            }
+        }
+    }
+
+    /// A column pane's entity, per kind (pin, restore-from-prefs).
+    fn build_pane(&self, kind: &ColumnKind, cx: &mut Context<Self>) -> Pane {
+        match kind {
             ColumnKind::Feed => Pane::Feed(cx.new(|cx| Feed::new(self.core.clone(), cx))),
             ColumnKind::Articles => {
                 Pane::Articles(cx.new(|cx| Feed::articles(self.core.clone(), cx)))
             }
+            // NOTE: the constructor advances the seen marker — a restored
+            // notifications column opens quiet at launch (the pre-launch
+            // backlog doesn't relight the bell), the same face pinning
+            // the column has. Live notes after startup ring as ever.
             ColumnKind::Notifications => {
-                // Opening notifications marks seen (the constructor does
-                // the read-state advance); the dot goes quiet at once,
-                // same as the drill-in open below.
-                self.notif_unread = false;
                 Pane::Notifications(cx.new(|cx| NotificationsView::new(self.core.clone(), cx)))
             }
             ColumnKind::Search => Pane::Search(cx.new(|cx| SearchView::new(self.core.clone(), cx))),
+            ColumnKind::Hashtag(tag) => {
+                Pane::Hashtag(cx.new(|cx| Feed::hashtag(self.core.clone(), tag.clone(), cx)))
+            }
+        }
+    }
+
+    /// A column from its persisted pref (phase 2 restore): unknown kind
+    /// strings (a future layout) return None — the layout degrades,
+    /// never fails.
+    fn column_from_pref(
+        &self,
+        pref: &crate::prefs::ColumnPref,
+        cx: &mut Context<Self>,
+    ) -> Option<Column> {
+        let kind = match (pref.kind.as_str(), pref.tag.as_deref()) {
+            ("feed", _) => ColumnKind::Feed,
+            ("articles", _) => ColumnKind::Articles,
+            ("notifications", _) => ColumnKind::Notifications,
+            ("search", _) => ColumnKind::Search,
+            ("hashtag", Some(tag)) => ColumnKind::Hashtag(tag.to_string()),
+            _ => return None,
         };
-        self.subscribe_pane(&pane, cx);
-        self.columns.push(Column { kind, pane });
-        self.focused_col = self.columns.len() - 1;
-        cx.notify();
+        Some(Column {
+            pane: self.build_pane(&kind, cx),
+            kind,
+            width: pref.width,
+        })
+    }
+
+    /// The layout to prefs.json (phase 2): mode flag, order, widths.
+    /// Local-only for now — NIP-78 sync rides later polish.
+    fn save_layout(&self) {
+        let layout = crate::prefs::ColumnsPref {
+            on: self.columns_on,
+            cols: self
+                .columns
+                .iter()
+                .map(|c| crate::prefs::ColumnPref {
+                    kind: c.kind.key().to_owned(),
+                    tag: c.kind.tag(),
+                    width: c.width,
+                })
+                .collect(),
+        };
+        crate::prefs::save_columns_layout(&layout);
     }
 
     /// A rail stream tap in columns mode: focus the column of the kind,
@@ -618,6 +807,7 @@ impl Shell {
         if self.focused_col >= self.columns.len() {
             self.focused_col = self.columns.len().saturating_sub(1);
         }
+        self.save_layout();
         cx.notify();
     }
 
@@ -1429,6 +1619,39 @@ impl Shell {
                     .text_color(rgb(theme::ink()))
                     .child(self.title(cx)),
             )
+            // The columns workspace (D68 phase 2): a hashtag drill over
+            // the workspace offers to pin that tag as a column.
+            .children(self.hashtag_pin(cx))
+    }
+
+    /// The hashtag drill's + Column affordance (columns mode only):
+    /// pins (or focuses) the tag as a workspace column.
+    fn hashtag_pin(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let tag = match self.stack.last() {
+            Some(Pane::Hashtag(view)) => view.read(cx).tag()?,
+            _ => return None,
+        };
+        Some(
+            div()
+                .id("col-pin-tag")
+                .cursor_pointer()
+                .px(px(8.0))
+                .py(px(2.0))
+                .rounded(px(theme::R_EMBED))
+                .border_1()
+                .border_color(rgb(theme::hairline()))
+                .text_size(px(theme::T_UI))
+                .text_color(rgb(theme::muted()))
+                .hover(|s| {
+                    s.border_color(rgb(theme::vermilion()))
+                        .text_color(rgb(theme::vermilion()))
+                })
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    cx.stop_propagation();
+                    shell.pin_hashtag(&tag, cx);
+                }))
+                .child("+ Column"),
+        )
     }
 
     /// The floating back-to-top whisper — bottom-right of the content
@@ -1716,15 +1939,19 @@ impl Shell {
         for i in 0..self.columns.len() {
             let label = self.columns[i].kind.label();
             let element = Self::pane_element(&self.columns[i].pane);
+            let width = self.columns[i].width;
             let is_last = i + 1 == self.columns.len();
             let is_focused = i == focused;
+            let is_drop_target = self.reorder_over == Some(i);
             row = row.child(
                 div()
+                    .relative()
                     .flex()
                     .flex_col()
-                    .flex_1()
+                    .when_some(width, |d, w| d.w(px(w)).flex_none())
+                    .when(width.is_none(), |d| d.flex_1())
                     .min_w_0()
-                    .max_w(px(content::COL_W))
+                    .max_w(px(COL_MAX_W))
                     .h_full()
                     .overflow_hidden()
                     .when(!is_last, |d| {
@@ -1741,19 +1968,80 @@ impl Shell {
                             cx.notify();
                         }
                     }))
+                    // The reorder cue (phase 2): a column drag over this
+                    // column lights its header; the drop commits.
+                    .on_drag_move::<ColumnDrag>(cx.listener(
+                        move |shell, ev: &DragMoveEvent<ColumnDrag>, _, cx| {
+                            let d = ev.drag(cx);
+                            if d.from == i {
+                                return;
+                            }
+                            if ev.bounds.contains(&ev.event.position)
+                                && shell.reorder_over != Some(i)
+                            {
+                                shell.reorder_over = Some(i);
+                                cx.notify();
+                            }
+                        },
+                    ))
+                    // The drop: the dragged column takes this slot.
+                    .on_drop::<ColumnDrag>(cx.listener(move |shell, d: &ColumnDrag, _, cx| {
+                        shell.reorder_over = None;
+                        if d.from != i && d.from < shell.columns.len() {
+                            let col = shell.columns.remove(d.from);
+                            shell.columns.insert(i, col);
+                            shell.focused_col = i;
+                            shell.save_layout();
+                        }
+                        cx.notify();
+                    }))
+                    // The width handle's moves: the dragged column's width
+                    // follows the pointer, anchored at its own left edge
+                    // (these bounds — a column's left never moves under a
+                    // right-edge drag, so the width is exact).
+                    .on_drag_move::<WidthDrag>(cx.listener(
+                        move |shell, ev: &DragMoveEvent<WidthDrag>, _, cx| {
+                            let d = ev.drag(cx);
+                            if d.col != i {
+                                return;
+                            }
+                            let w = (ev.event.position.x - ev.bounds.origin.x)
+                                .clamp(px(COL_MIN_W), px(COL_MAX_W));
+                            if shell.columns[i].width != Some(w.into()) {
+                                shell.columns[i].width = Some(w.into());
+                                cx.notify();
+                            }
+                        },
+                    ))
                     // The column's slim header: the stream's name (ink when
-                    // focused, muted beside it) and the unpin ×.
+                    // focused, vermilion while a drag targets it, muted
+                    // beside it) and the unpin ×. The header is the
+                    // reorder drag's grabber.
                     .child(
                         div()
+                            .id(SharedString::from(format!("col-h-{i}")))
                             .flex()
                             .items_center()
                             .gap_2()
                             .px_2()
                             .pb(px(8.0))
+                            .on_drag(
+                                ColumnDrag {
+                                    from: i,
+                                    label: label.clone(),
+                                },
+                                |value: &ColumnDrag, _, _, cx| {
+                                    cx.new(|_| DragGhost {
+                                        label: value.label.clone(),
+                                    })
+                                },
+                            )
                             .child(
                                 div()
                                     .text_size(px(theme::T_UI))
-                                    .text_color(rgb(if is_focused {
+                                    .text_color(rgb(if is_drop_target {
+                                        theme::vermilion()
+                                    } else if is_focused {
                                         theme::ink()
                                     } else {
                                         theme::muted()
@@ -1777,7 +2065,25 @@ impl Shell {
                                 )
                             }),
                     )
-                    .child(element),
+                    .child(element)
+                    // The width drag handle: a thin hit strip straddling
+                    // the right hairline (the last column has one too —
+                    // its drag narrows or widens from its left edge).
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("col-w-{i}")))
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right(px(-3.0))
+                            .w(px(6.0))
+                            .cursor_ew_resize()
+                            .on_drag(WidthDrag { col: i }, |_, _, _, cx| {
+                                cx.new(|_| DragGhost {
+                                    label: "↔".into()
+                                })
+                            }),
+                    ),
             );
         }
         // The + slot: the add-column menu's anchor, only while a kind is
@@ -1825,6 +2131,12 @@ impl Shell {
             .flex()
             .flex_col()
             .pt(px(16.0))
+            // A width drag ends here (the row covers the whole
+            // workspace): the live widths persist.
+            .on_drop::<WidthDrag>(cx.listener(|shell, _, _, cx| {
+                shell.save_layout();
+                cx.notify();
+            }))
             // The outbox honesty pill floats over the workspace too (it is
             // the SHELL's news, D26).
             .when(self.outbox_pending > 0, |d| {
@@ -1842,7 +2154,7 @@ impl Shell {
 
     /// The add-column menu: the kinds not already pinned, one row each.
     fn add_menu_card(&self, cx: &mut Context<Self>) -> Div {
-        let pinned: Vec<ColumnKind> = self.columns.iter().map(|c| c.kind).collect();
+        let pinned: Vec<ColumnKind> = self.columns.iter().map(|c| c.kind.clone()).collect();
         let mut card = div()
             .absolute()
             .top(px(52.0))
@@ -1857,6 +2169,8 @@ impl Shell {
             if pinned.contains(&kind) {
                 continue;
             }
+            let kind = kind.clone();
+            let menu_kind = kind.clone();
             card = card.child(
                 div()
                     .id(SharedString::from(format!("col-add-{}", kind.label())))
@@ -1871,7 +2185,7 @@ impl Shell {
                     .hover(|s| s.bg(rgb(theme::ink())))
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         shell.add_menu = false;
-                        shell.pin_column(kind, cx);
+                        shell.pin_column(menu_kind.clone(), cx);
                     }))
                     .child(kind.icon(theme::muted()))
                     .child(kind.label()),
