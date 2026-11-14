@@ -188,7 +188,7 @@ impl ThreadView {
         };
         // The wallet broadcast (D20): the thread's bolts follow every zap,
         // theirs or the sheet's, wherever it started.
-        engagement::pump_wallet(&cx.entity(), cx);
+        engagement::pump_wallet(&view.core, &cx.entity(), cx);
         view
     }
 

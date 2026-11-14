@@ -302,7 +302,7 @@ impl Feed {
         .detach();
         // The wallet broadcast (D20): bolt glyphs follow every zap —
         // theirs or the sheet's — wherever it started.
-        engagement::pump_wallet(&cx.entity(), cx);
+        engagement::pump_wallet(&feed.core, &cx.entity(), cx);
         // Hashtag feeds have no follow set to deep-fetch — the tag filter
         // IS the query (profile()-shaped); the rest bootstrap as usual.
         let boot = match &feed.mode {

@@ -124,15 +124,9 @@ pub fn on_wallet<H: Host>(host: &mut H, ev: WalletEvent, cx: &mut Context<H>) {
 /// three mirror hosts' constructors (feed, thread, notifications; the
 /// wallet and settings panes keep their own richer pumps — they handle
 /// arms the mirrors don't).
-pub fn pump_wallet<H: Host>(entity: &Entity<H>, cx: &mut Context<H>) {
+pub fn pump_wallet<H: Host>(core: &Arc<Core>, entity: &Entity<H>, cx: &mut Context<H>) {
     let this = entity.downgrade();
-    let mut wallet_rx = {
-        let core = {
-            let w = entity.read(cx);
-            w.core().clone()
-        };
-        core.subscribe_wallet()
-    };
+    let mut wallet_rx = core.subscribe_wallet();
     cx.spawn(async move |_, cx| {
         loop {
             match wallet_rx.recv().await {
