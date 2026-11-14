@@ -1470,6 +1470,10 @@ impl Shell {
             // avatar (16px page band + 12px note-card padding).
             .pt(px(19.0))
             .gap_1()
+            // The columns toggle leads the rail while the workspace is
+            // up (the mode is the primary surface then — owner call);
+            // off, it sits in its slot by the pen.
+            .when(self.columns_on, |d| d.child(self.columns_toggle_button(cx)))
             // The user's avatar is the Profile spot (D38): clicking opens
             // the own profile, re-clicking the active one scrolls it back
             // up; the tick marks it (Home remains the Feed spot's re-click
@@ -1579,13 +1583,11 @@ impl Shell {
             // The columns workspace toggle (D68): the same ink-at-rest /
             // ink-when-active discipline as the other state buttons — the
             // tick carries the state, the glyph needs no second voice.
-            .child(self.rail_button(
-                "rail-columns",
-                "Columns",
-                icons::columns_icon(ink(self.columns_on)),
-                self.columns_on,
-                cx.listener(move |shell, _, _, cx| shell.toggle_columns(cx)),
-            ))
+            // In its slot only when the mode is OFF (on, it leads the
+            // rail — see the top of this chain).
+            .when(!self.columns_on, |d| {
+                d.child(self.columns_toggle_button(cx))
+            })
             // Compose speaks (it broadcasts) — the pen wears vermilion.
             .child(self.rail_button(
                 "rail-settings",
@@ -1610,6 +1612,23 @@ impl Shell {
                     }
                 }),
             ))
+    }
+
+    /// The columns toggle's button — built per slot (it renders at the
+    /// rail's lead while the mode is on, in its slot by the pen when
+    /// off; an element can't be Childed twice).
+    fn columns_toggle_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        self.rail_button(
+            "rail-columns",
+            "Columns",
+            icons::columns_icon(if self.columns_on {
+                theme::ink()
+            } else {
+                theme::muted()
+            }),
+            self.columns_on,
+            cx.listener(move |shell, _, _, cx| shell.toggle_columns(cx)),
+        )
     }
 
     fn rail_button(
