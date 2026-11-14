@@ -53,10 +53,12 @@ accounts you follow; the profile mirror is seeded from the disk cache
 at launch, so names resolve on the first keystroke after a restart.
 
 The screen learned to work in columns. A rail toggle (or the c key)
-opens a TweetDeck-style workspace: up to four stream columns pin side
+opens a TweetDeck-style workspace: up to six stream columns pin side
 by side, each live, each scrolling on its own; the streams are Home,
-Articles, Notifications, Search, and any hashtag (pinned from the
-hashtag page's new + Column button). Drilling into a thread, article
+Articles, Notifications, Search, any hashtag, an author (pinned from
+a profile's + Column button), or a relay (pinned from the + menu,
+live only: what that relay pushes while the column is open, no
+history). Drilling into a thread, article
 or profile still takes the whole width, and Esc hands you back to the
 columns exactly as you left them. The layout persists across
 restarts: which columns, in what order, how wide. Columns reorder by
