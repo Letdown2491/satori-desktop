@@ -222,7 +222,11 @@ async fn serve(stream: tokio::net::TcpStream, state: Arc<State>) {
     }
     let mut res = match req.send().await {
         Ok(res) => res,
-        Err(_) => {
+        Err(e) => {
+            eprintln!(
+                "[video] proxy origin fetch failed for {}: {e}",
+                state.origin
+            );
             let _ = simple(&mut wr, 502).await;
             return;
         }

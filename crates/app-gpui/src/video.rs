@@ -125,7 +125,8 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
     // No door, no dial: degrade to the browser link, fail closed.
     let proxy = match satori_core::video_proxy::spawn(url.clone()) {
         Ok(proxy) => proxy,
-        Err(_) => {
+        Err(e) => {
+            eprintln!("[video] proxy spawn failed ({e}); degrading to browser");
             if let Ok(mut g) = OPENING.write() {
                 *g = None;
             }
@@ -136,7 +137,8 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
     };
     let proxied = match url::Url::parse(&proxy.uri()) {
         Ok(u) => u,
-        Err(_) => {
+        Err(e) => {
+            eprintln!("[video] proxy uri unparseable ({e}); degrading to browser");
             if let Ok(mut g) = OPENING.write() {
                 *g = None;
             }
@@ -166,6 +168,7 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
             None => false,
         };
         if !allowed {
+            eprintln!("[video] dial-time screen refused {host:?}; degrading to browser");
             cx.update(|cx| {
                 if let Ok(mut g) = OPENING.write()
                     && g.as_deref() == Some(&url)
@@ -208,7 +211,8 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
                 }
                 // The pipeline failed (missing plugins, dead URL): the honest
                 // fallback is the browser — the pre-Phase-3 behavior.
-                Err(_) => {
+                Err(e) => {
+                    eprintln!("[video] pipeline failed for {url}: {e:?}; degrading to browser");
                     if crate::views::content::web_url(&url) {
                         cx.open_url(&url);
                     }
