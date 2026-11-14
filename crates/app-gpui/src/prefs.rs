@@ -109,6 +109,19 @@ pub fn stamp(key: &str) {
     }
 }
 
+/// The NIP-78 pref dance: local recency stamp (the login overlay defers
+/// to it), then the relay sync — fire and forget. The caller writes the
+/// local value first. Was spelled out inline in every toggling view, and
+/// the drift was real (only the theme switch guarded its publish).
+pub fn sync(
+    core: &std::sync::Arc<satori_core::manager::Core>,
+    key: &str,
+    value: serde_json::Value,
+) {
+    stamp(key);
+    core.publish_app_data(key, value);
+}
+
 /// A top-level bool pref that defaults ON when missing (the WoT gates:
 /// `notif_wot_tier`, `thread_collapse`, `profile_badge` — issue #2's
 /// posture makes the tier default-on; core reads the same keys via

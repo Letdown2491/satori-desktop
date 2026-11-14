@@ -17,9 +17,8 @@ use gpui::{
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Live, ParentNote, Profile, PublishEvent};
 use satori_core::nip::nip10;
-use satori_core::wallet::WalletEvent;
 
-use super::{actions, cards, content, engagement, nav::Nav, states};
+use super::{actions, cards, content, engagement, nav, nav::Nav, quotes, states};
 use crate::{icons, media, theme};
 
 /// Which surface a feed pane carries: the timeline (the visible catalog),
@@ -219,7 +218,7 @@ impl Feed {
                     // once the reader is a few items down — a dozen was too
                     // deep (the owner kept scrolling before thinking "where is
                     // it"). Emit on change only.
-                    let deep = ev.visible_range.start >= 3;
+                    let deep = ev.visible_range.start >= nav::PANE_DEEP_AT;
                     if feed.deep != deep {
                         feed.deep = deep;
                         cx.emit(Nav::PaneDeep);
@@ -291,22 +290,7 @@ impl Feed {
         .detach();
         // The wallet broadcast (D20): bolt glyphs follow every zap —
         // theirs or the sheet's — wherever it started.
-        let this = cx.entity().downgrade();
-        let mut wallet_rx = feed.core.subscribe_wallet();
-        cx.spawn(async move |_, cx| {
-            loop {
-                match wallet_rx.recv().await {
-                    Ok(ev) => {
-                        if this.update(cx, |feed, cx| feed.on_wallet(ev, cx)).is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(_) => continue, // lagged: the next event re-syncs
-                }
-            }
-        })
-        .detach();
+        engagement::pump_wallet(&cx.entity(), cx);
         // Hashtag feeds have no follow set to deep-fetch — the tag filter
         // IS the query (profile()-shaped); the rest bootstrap as usual.
         let boot = match &feed.mode {
@@ -633,7 +617,7 @@ impl Feed {
                 continue;
             }
             self.want_images(&note, cx);
-            self.want_quotes(&note, cx);
+            quotes::want_quotes(self, &note, cx);
             if u16::from(note.kind) == 1068 {
                 self.want_poll(&note, cx);
             }
@@ -757,47 +741,6 @@ impl Feed {
     fn want_images(&mut self, note: &Event, cx: &mut Context<Self>) {
         for url in content::media_urls_cached(note).iter().cloned() {
             media::fetch(&self.core, url, cx.entity_id(), cx);
-        }
-    }
-
-    /// One quote-reference resolution, routed off `on_event` (quote replies
-    /// must not touch the feed list).
-    fn pump_quote(&self, bech: String, mut rx: FeedRx, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            while let Some(ev) = rx.recv().await {
-                if let FeedEvent::One(Some(target), prof) = ev {
-                    let _ = this.update(cx, |this, cx| {
-                        let key = target.pubkey.to_string();
-                        let name = prof
-                            .as_ref()
-                            .map(|p| p.display())
-                            .or_else(|| this.profiles.get(&key).map(|p| p.display()))
-                            .unwrap_or_else(|| format!("{}…", &key[..8]));
-                        this.quotes.insert(
-                            bech.clone(),
-                            Some(content::Embed {
-                                event: target,
-                                name,
-                            }),
-                        );
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// Queue event fetches for standalone note/nevent references (embeds).
-    fn want_quotes(&mut self, note: &Event, cx: &mut Context<Self>) {
-        for bech in content::note_refs(note) {
-            if self.quotes.contains_key(&bech) {
-                continue;
-            }
-            // Reserve the key so we don't re-request while loading.
-            self.quotes.insert(bech.clone(), None);
-            let rx = self.core.event_by_id_dech32(&bech);
-            self.pump_quote(bech, rx, cx);
         }
     }
 
@@ -992,12 +935,6 @@ impl Feed {
         engagement::reseed(self);
         cx.notify();
     }
-
-    /// The wallet broadcast → glyph states + the quiet status whisper
-    /// (engagement.rs's engine; the with_mode pump calls this).
-    fn on_wallet(&mut self, ev: WalletEvent, cx: &mut Context<Self>) {
-        engagement::on_wallet(self, ev, cx);
-    }
 }
 
 impl Drop for Feed {
@@ -1035,6 +972,20 @@ impl engagement::Host for Feed {
             self.touch();
             cx.notify();
         }
+    }
+}
+
+// The quote engine rides the default no-op `touched`: a quote landing
+// must not churn the feed list (the old pump_quote's routing comment).
+impl quotes::Host for Feed {
+    fn quotes(&mut self) -> &mut content::Quotes {
+        &mut self.quotes
+    }
+    fn core(&self) -> &Arc<Core> {
+        &self.core
+    }
+    fn profiles(&self) -> &HashMap<String, Profile> {
+        &self.profiles
     }
 }
 
@@ -1102,9 +1053,7 @@ fn note_card(
     let id = ev.id.to_string();
     let key = ev.pubkey.to_string();
     let profile = profiles.get(&key);
-    let name = profile
-        .map(|p| p.display())
-        .unwrap_or_else(|| format!("{}…", &key[..8]));
+    let name = content::display_name(profile, &key);
     let picture = profile.map(|p| p.picture.clone()).unwrap_or_default();
     let engaged = eng.liked.contains(&id);
     let saved = eng.bookmarked.contains(&id);
@@ -1112,9 +1061,7 @@ fn note_card(
     let zapped = eng.zapped.contains(&id);
     let zapping = eng.zap_pending.contains(&id);
     let ev_for_open = ev.clone();
-    let ev_for_profile = ev.clone();
     let handle_open = handle.clone();
-    let handle_profile = handle.clone();
 
     // No card box: posts sit directly on the washi, separated by whitespace
     // alone (sumi-e — the empty space carries the composition).
@@ -1128,42 +1075,17 @@ fn note_card(
         .gap_1()
         .px_4()
         .py(px(theme::S4))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(media::avatar(media, &picture, &name, 28.0))
-                .child(
-                    // Clicking the author opens their profile (nav via shell).
-                    div()
-                        .id(SharedString::from(format!("author-{idx}")))
-                        .cursor_pointer()
-                        .flex_1()
-                        .text_size(px(theme::T_BODY))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(theme::ink()))
-                        .on_click(move |_, _, cx| {
-                            let ev = ev_for_profile.clone();
-                            handle_profile.update(cx, |_feed, cx| {
-                                cx.emit(Nav::OpenProfile(ev.pubkey));
-                            });
-                        })
-                        .child(name),
-                )
-                .child(
-                    // The timestamp is the third mode toggle (timefmt.rs):
-                    // tap cycles relative → date → block height.
-                    div()
-                        .id(SharedString::from(format!("time-{idx}")))
-                        .cursor_pointer()
-                        .text_size(px(theme::T_SMALL))
-                        .text_color(rgb(theme::muted()))
-                        .hover(|s| s.text_color(rgb(theme::ink())))
-                        .on_click(|_, _, cx| crate::timefmt::cycle(cx))
-                        .child(time),
-                ),
-        )
+        .child(content::actor_header(
+            None,
+            media,
+            &picture,
+            name,
+            None,
+            time,
+            format!("note-{idx}"),
+            Some(ev.pubkey),
+            handle.clone(),
+        ))
         // The reply context (nip10.ts replyContext, option B): the parent's
         // author + a snippet, fetched by id once and cached in the feed.
         // A whisper, not a box — one muted line with the elbow glyph; click
@@ -1487,10 +1409,7 @@ fn repost_card(
     handle: Entity<Feed>,
 ) -> impl IntoElement {
     let key = ev.pubkey.to_string();
-    let name = profiles
-        .get(&key)
-        .map(|p| p.display())
-        .unwrap_or_else(|| format!("{}…", &key[..8]));
+    let name = content::display_name(profiles.get(&key), &key);
     let picture = profiles
         .get(&key)
         .map(|p| p.picture.clone())

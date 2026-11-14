@@ -42,6 +42,15 @@ pub struct Embed {
 /// placeholder.
 pub type Quotes = HashMap<String, Option<Embed>>;
 
+/// The display-name fallback (render/util.ts style): the profile's
+/// display name, else a short npub. Was spelled out 19 times across the
+/// views (two escape spellings of the ellipsis) — #31. `p` is the
+/// profile if one is in hand (a fetch result or a map hit).
+pub(crate) fn display_name(p: Option<&satori_core::manager::Profile>, hex: &str) -> String {
+    p.map(|p| p.display())
+        .unwrap_or_else(|| format!("{}…", &hex[..8]))
+}
+
 /// Render-time context threaded from each view: the shared media snapshot,
 /// resolved quote embeds and known profiles (mention names).
 pub struct Body<'a> {
@@ -845,16 +854,22 @@ pub fn actor_header<V: EventEmitter<Nav> + 'static>(
         }
         None => head = head.child(name_el.flex_1()),
     }
-    head.child(
-        div()
-            .id(SharedString::from(format!("{id_prefix}-time")))
-            .cursor_pointer()
-            .text_size(px(theme::T_SMALL))
-            .text_color(rgb(theme::muted()))
-            .hover(|s| s.text_color(rgb(theme::ink())))
-            .on_click(|_, _, cx| crate::timefmt::cycle(cx))
-            .child(time),
-    )
+    head.child(time_toggle(format!("{id_prefix}-time"), time))
+}
+
+/// The timestamp tap target (timefmt.rs's third mode toggle: relative →
+/// date → block height), shared by every header row. Was hand-rolled
+/// five times; thread's reply copy (and compact_card, and the reader's
+/// comment rows) had lost the hover affordance (#31).
+pub(crate) fn time_toggle(id: impl Into<SharedString>, time: String) -> gpui::Stateful<Div> {
+    div()
+        .id(id.into())
+        .cursor_pointer()
+        .text_size(px(theme::T_SMALL))
+        .text_color(rgb(theme::muted()))
+        .hover(|s| s.text_color(rgb(theme::ink())))
+        .on_click(|_, _, cx| crate::timefmt::cycle(cx))
+        .child(time)
 }
 
 /// The note a kind-6/16 repost carries (Amethyst's repost guard: a repost
@@ -1768,10 +1783,7 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
     handle: Entity<V>,
 ) -> AnyElement {
     let key = ev.pubkey.to_string();
-    let name = profiles
-        .get(&key)
-        .map(|p| p.display())
-        .unwrap_or_else(|| format!("{}…", &key[..8]));
+    let name = display_name(profiles.get(&key), &key);
     let picture = profiles
         .get(&key)
         .map(|p| p.picture.clone())
@@ -1817,13 +1829,7 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
                 .child(
                     // The timestamp is the third mode toggle (timefmt.rs):
                     // tap cycles relative → date → block height.
-                    div()
-                        .id(SharedString::from(format!("{tag}-time-{idx}")))
-                        .cursor_pointer()
-                        .text_size(px(theme::T_SMALL))
-                        .text_color(rgb(theme::muted()))
-                        .on_click(|_, _, cx| crate::timefmt::cycle(cx))
-                        .child(time),
+                    time_toggle(SharedString::from(format!("{tag}-time-{idx}")), time),
                 ),
         )
         .child(

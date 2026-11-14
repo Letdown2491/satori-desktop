@@ -62,3 +62,9 @@ pub enum Nav {
     /// The active pane closes itself (composer after commit/undo).
     Pop,
 }
+
+/// The deep-scroll threshold, in visible-list items: the whisper appears
+/// once the reader is a few items down (a dozen was too deep — the
+/// owner kept scrolling before thinking "where is it"). Was a hardcoded
+/// literal in each pane's scroll handler (feed, notifications, profile).
+pub(crate) const PANE_DEEP_AT: usize = 3;
