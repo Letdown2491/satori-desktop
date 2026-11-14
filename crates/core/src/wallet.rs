@@ -31,6 +31,7 @@ use nwc::prelude::*;
 use crate::config;
 use crate::net_guard;
 use crate::secrets;
+use zeroize::Zeroizing;
 
 /// How long a pay_invoice may run before it becomes Uncertain. Lightning
 /// routing can legitimately take tens of seconds; below ~15s healthy
@@ -490,7 +491,12 @@ impl Wallet {
                 .collect(),
         };
         self.set_status(Status::Connecting);
-        if let Err(e) = secrets::store(secrets::NWC_SECRET, &parsed.secret.to_secret_hex()).await {
+        if let Err(e) = secrets::store(
+            secrets::NWC_SECRET,
+            &Zeroizing::new(parsed.secret.to_secret_hex()),
+        )
+        .await
+        {
             let _ = self
                 .events
                 .send(WalletEvent::ConnectFailed(format!("secret store: {e}")));

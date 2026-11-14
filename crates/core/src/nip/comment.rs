@@ -299,7 +299,6 @@ mod tests {
             content.to_string(),
         ))
         .unwrap()
-        .into()
     }
 
     /// NIP-22 root preservation (#32's cross-client threading gap): a

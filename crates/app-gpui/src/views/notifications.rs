@@ -1323,7 +1323,6 @@ impl Render for NotificationsView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::prelude::*;
 
     fn note(kind: Kind, tags: Tags, content: &str) -> Event {
         let k = Keys::generate();

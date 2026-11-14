@@ -209,7 +209,10 @@ impl ThreadView {
 
     /// Request-time snapshot invalidation + the shared engine: the thread
     /// touches when a quote fetch is ASKED (its list re-measures) —
-    /// landing-side invalidation rides quotes::Host::touched.
+    /// landing-side invalidation rides quotes::Host::touched. The touch
+    /// here is once-unconditional (the pre-extraction copy touched per
+    /// newly-reserved ref); the superset is harmless — every on_event
+    /// already ends in an unconditional touch.
     fn want_quotes(&mut self, note: &Event, cx: &mut Context<Self>) {
         self.touch();
         quotes::want_quotes(self, note, cx);

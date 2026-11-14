@@ -29,6 +29,7 @@ use crate::seen_event;
 use crate::session::{self, Session, SessionMode};
 use crate::signer::{self, Signer};
 use crate::wallet::{self, Wallet, WalletEvent};
+use zeroize::Zeroizing;
 
 /// How long to wait for the remote signer to approve a connect request.
 const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -418,6 +419,12 @@ struct Active {
     /// Own NIP-65 read relays (indexers are always on).
     read_relays: Vec<String>,
     follows: Vec<PublicKey>,
+    /// The follow list re-encoded to lowercase hex, refreshed whenever
+    /// `follows` is. The mention typeahead walks it per keystroke (the
+    /// empty-@ tier in follow order, membership tests for the ranking);
+    /// hex-encoding per call paid one allocation per follow per
+    /// keystroke. Arc'd so the per-call clone is a refcount bump.
+    follows_hex: Arc<Vec<String>>,
     /// Own pubkey, parsed once at session build. me() hands it out; it
     /// used to re-parse the session hex per call (26 call sites, some on
     /// hot paths) and expect-panicked if session.json held a corrupt
@@ -426,6 +433,13 @@ struct Active {
 }
 
 impl Active {
+    /// Set the follow list and its hex mirror together — the pair must
+    /// never drift (the mirror feeds the mention tiers).
+    fn set_follows(&mut self, follows: Vec<PublicKey>) {
+        self.follows_hex = Arc::new(follows.iter().map(|pk| pk.to_string()).collect::<Vec<_>>());
+        self.follows = follows;
+    }
+
     fn me(&self) -> PublicKey {
         self.me
     }
@@ -581,13 +595,20 @@ fn select_mention_candidates(
     query: &str,
     follows_hex: &[String],
     skip: &str,
-    cache: &[&Profile],
+    cache: &[&ProfileEntry],
 ) -> Vec<Profile> {
+    // One allocation per keystroke (the query itself); every per-profile
+    // key below was pre-lowered at absorb time.
     let q = query.to_lowercase();
     let follow_set: HashSet<&String> = follows_hex.iter().collect();
-    let by_hex: HashMap<&str, &Profile> = cache.iter().map(|p| (p.pubkey.as_str(), *p)).collect();
     let mut out: Vec<Profile> = Vec::new();
     if q.is_empty() {
+        // The bare-@ view: follows in follow order — the only tier that
+        // needs pubkey→profile, so the index builds here only.
+        let by_hex: HashMap<&str, &ProfileEntry> = cache
+            .iter()
+            .map(|e| (e.profile.pubkey.as_str(), *e))
+            .collect();
         for hex in follows_hex {
             if out.len() == 8 {
                 break;
@@ -595,38 +616,38 @@ fn select_mention_candidates(
             if hex == skip {
                 continue;
             }
-            if let Some(p) = by_hex.get(hex.as_str()) {
-                out.push((*p).clone());
+            if let Some(e) = by_hex.get(hex.as_str()) {
+                out.push(e.profile.clone());
             }
         }
         return out;
     }
-    let mut tier_follow: Vec<&Profile> = Vec::new();
-    let mut tier_other: Vec<&Profile> = Vec::new();
-    for p in cache {
-        if p.pubkey == skip {
+    let mut tier_follow: Vec<&ProfileEntry> = Vec::new();
+    let mut tier_other: Vec<&ProfileEntry> = Vec::new();
+    for e in cache {
+        if e.profile.pubkey == skip {
             continue;
         }
-        let hit = p.name.to_lowercase().contains(&q)
-            || p.handle.to_lowercase().contains(&q)
-            || p.nip05.to_lowercase().contains(&q)
-            || p.pubkey.to_lowercase().contains(&q);
+        let hit = e.name_l.contains(&q)
+            || e.handle_l.contains(&q)
+            || e.nip05_l.contains(&q)
+            || e.profile.pubkey.contains(&q);
         if !hit {
             continue;
         }
-        if follow_set.contains(&p.pubkey) {
-            tier_follow.push(p);
+        if follow_set.contains(&e.profile.pubkey) {
+            tier_follow.push(e);
         } else {
-            tier_other.push(p);
+            tier_other.push(e);
         }
     }
-    tier_follow.sort_by_key(|p| p.name.to_lowercase());
-    tier_other.sort_by_key(|p| p.name.to_lowercase());
-    for p in tier_follow.into_iter().chain(tier_other) {
+    tier_follow.sort_by(|a, b| a.name_l.cmp(&b.name_l));
+    tier_other.sort_by(|a, b| a.name_l.cmp(&b.name_l));
+    for e in tier_follow.into_iter().chain(tier_other) {
         if out.len() == 8 {
             break;
         }
-        out.push(p.clone());
+        out.push(e.profile.clone());
     }
     out
 }
@@ -643,8 +664,21 @@ const PROFILES_MEM_CAP: usize = 5000;
 /// oldest-absorbed profile goes first, which is exactly the stale half
 /// of the cache.
 struct ProfileMem {
-    map: HashMap<String, Profile>,
+    map: HashMap<String, ProfileEntry>,
     order: VecDeque<String>,
+}
+
+/// A hydrated profile plus the pre-lowered keys its scans match on:
+/// the mention typeahead runs per keystroke on the UI thread, so the
+/// lowercase copies are computed once at absorb time (lowering all
+/// three per profile per keystroke cost ~15k short-lived allocations
+/// at the mirror cap — and the pubkey hex is already lowercase, so it
+/// never needed one at all).
+struct ProfileEntry {
+    profile: Profile,
+    name_l: String,
+    handle_l: String,
+    nip05_l: String,
 }
 
 impl ProfileMem {
@@ -660,6 +694,12 @@ impl ProfileMem {
     /// duplicate-riddled mess for zero benefit).
     fn insert(&mut self, p: Profile) {
         let key = p.pubkey.clone();
+        let entry = ProfileEntry {
+            name_l: p.name.to_lowercase(),
+            handle_l: p.handle.to_lowercase(),
+            nip05_l: p.nip05.to_lowercase(),
+            profile: p,
+        };
         if !self.map.contains_key(&key)
             && self.map.len() >= PROFILES_MEM_CAP
             && let Some(oldest) = self.order.pop_front()
@@ -669,14 +709,14 @@ impl ProfileMem {
         if !self.map.contains_key(&key) {
             self.order.push_back(key.clone());
         }
-        self.map.insert(key, p);
+        self.map.insert(key, entry);
     }
 
     fn get(&self, pk: &str) -> Option<&Profile> {
-        self.map.get(pk)
+        self.map.get(pk).map(|e| &e.profile)
     }
 
-    fn values(&self) -> impl Iterator<Item = &Profile> {
+    fn entries(&self) -> impl Iterator<Item = &ProfileEntry> {
         self.map.values()
     }
 
@@ -1937,7 +1977,7 @@ impl Core {
 
         secrets::store(
             secrets::BUNKER_CLIENT_SECRET,
-            &client_keys.secret_key().display_secret().to_string(),
+            &Zeroizing::new(client_keys.secret_key().display_secret().to_string()),
         )
         .await?;
         let session = Session {
@@ -2092,7 +2132,7 @@ impl Core {
 
         secrets::store(
             secrets::BUNKER_CLIENT_SECRET,
-            &client_keys.secret_key().display_secret().to_string(),
+            &Zeroizing::new(client_keys.secret_key().display_secret().to_string()),
         )
         .await?;
         let remote = match connect
@@ -2245,7 +2285,8 @@ impl Core {
                 // reconnect then relies on the signer's leniency.
                 let pairing = secrets::load(secrets::BUNKER_PAIRING_SECRET).await?;
                 // Repeated relays join with & (query params, not extra ?s).
-                let mut uri = format!("bunker://{remote}");
+                // The URI carries the pairing secret, so it dies zeroized.
+                let mut uri = Zeroizing::new(format!("bunker://{remote}"));
                 if !relays.is_empty() {
                     uri.push_str("?relay=");
                     uri.push_str(&relays.join("&relay="));
@@ -2351,6 +2392,7 @@ impl Core {
             write_relays: Vec::new(),
             read_relays: Vec::new(),
             follows: Vec::new(),
+            follows_hex: Arc::new(Vec::new()),
             me,
         })
     }
@@ -2461,7 +2503,7 @@ impl Core {
             .map(|ev| ev.tags.public_keys().collect())
             .unwrap_or_default();
         if !cached_follows.is_empty() {
-            active.follows = cached_follows.clone();
+            active.set_follows(cached_follows.clone());
             let page = self.page_from_store(&active, None, &kinds).await?;
             let _ = tx.send(FeedEvent::Loaded(page));
         }
@@ -2538,9 +2580,9 @@ impl Core {
                     self.rebuild_wot_graph(&active, &local_follows).await;
                 }
                 let follows = active.pool.follows(me).await.unwrap_or_default();
-                active.follows = follows.clone();
+                active.set_follows(follows.clone());
                 if let Some(a) = self.active.lock().unwrap().as_mut() {
-                    a.follows = follows.clone();
+                    a.set_follows(follows.clone());
                 }
                 if !follows.is_empty() {
                     crate::read_state::advance(|st| {
@@ -2609,9 +2651,9 @@ impl Core {
                     .await
                 {
                     let follows: Vec<PublicKey> = ev.tags.public_keys().collect();
-                    active.follows = follows.clone();
+                    active.set_follows(follows.clone());
                     if let Some(a) = self.active.lock().unwrap().as_mut() {
-                        a.follows = follows;
+                        a.set_follows(follows);
                     }
                 }
             }
@@ -3110,9 +3152,12 @@ impl Core {
     /// (the reported case: followed, typed "@mpft", unfindable because
     /// `name` stores the display name). Profiles not yet in the cache
     /// can't match — the profiles service fills the rest as the feed
-    /// loads them. One lock, eight hits max: this runs per keystroke.
+    /// loads them. One lock, eight hits max: this runs per keystroke on
+    /// the UI thread, so per-call work is the query's lowercase plus
+    /// borrowed lookups — matching keys were pre-lowered at absorb time
+    /// and the follow list rides its cached hex mirror.
     pub fn mention_candidates(&self, query: &str) -> Vec<Profile> {
-        let (follows, me): (Vec<String>, String) = {
+        let (follows, me): (Arc<Vec<String>>, String) = {
             let held = self.active.lock().unwrap();
             let me = held
                 .as_ref()
@@ -3120,18 +3165,13 @@ impl Core {
                 .unwrap_or_default();
             let follows = held
                 .as_ref()
-                .map(|a| {
-                    a.follows
-                        .iter()
-                        .map(|pk| pk.to_string())
-                        .collect::<Vec<_>>()
-                })
+                .map(|a| Arc::clone(&a.follows_hex))
                 .unwrap_or_default();
             (follows, me)
         };
         let m = self.profiles_mem.lock().unwrap();
-        let cache: Vec<&Profile> = m.values().collect();
-        select_mention_candidates(query, &follows, &me, &cache)
+        let cache: Vec<&ProfileEntry> = m.entries().collect();
+        select_mention_candidates(query, follows.as_slice(), &me, &cache)
     }
 
     /// People results for the search pane: a substring scan of the hydrated
@@ -3145,20 +3185,17 @@ impl Core {
             return vec![];
         }
         let m = self.profiles_mem.lock().unwrap();
-        let mut hits: Vec<Profile> = m
-            .values()
-            .filter(|p| {
-                p.name.to_lowercase().contains(&q)
-                    || p.nip05.to_lowercase().contains(&q)
-                    || p.pubkey.to_lowercase().contains(&q)
+        let mut hits: Vec<&ProfileEntry> = m
+            .entries()
+            .filter(|e| {
+                e.name_l.contains(&q) || e.nip05_l.contains(&q) || e.profile.pubkey.contains(&q)
             })
-            .cloned()
             .collect();
-        hits.sort_by_key(|p| p.name.to_lowercase());
+        hits.sort_by(|a, b| a.name_l.cmp(&b.name_l));
         // The search pane's People tab is a proper results page now (not a
         // sidebar strip) — room for a real page.
         hits.truncate(20);
-        hits
+        hits.into_iter().map(|e| e.profile.clone()).collect()
     }
 
     fn active_pubkey(&self) -> String {
@@ -7648,7 +7685,7 @@ mod tests {
             None,
             Vec::new(),
             None,
-            &[imeta.clone()],
+            std::slice::from_ref(&imeta),
             me,
         );
         // NIP-92: the URL rides the content too (D63's interop report).
@@ -8176,12 +8213,21 @@ mod tests {
         }
     }
 
+    fn entry(hex: &str, name: &str, handle: &str, nip05: &str) -> ProfileEntry {
+        ProfileEntry {
+            name_l: name.to_lowercase(),
+            handle_l: handle.to_lowercase(),
+            nip05_l: nip05.to_lowercase(),
+            profile: profile(hex, name, handle, nip05),
+        }
+    }
+
     #[test]
     fn mention_candidates_match_the_handle_not_just_the_display_name() {
         // The reported case: followed, display name carries no trace of
         // the typed handle, only the raw kind-0 `name` (or NIP-05) hits.
-        let mike = profile("aaaa", "Mike P.", "mpft", "mike@example.com");
-        let satoshi = profile("bbbb", "Satoshi", "sato", "");
+        let mike = entry("aaaa", "Mike P.", "mpft", "mike@example.com");
+        let satoshi = entry("bbbb", "Satoshi", "sato", "");
         let cache = vec![&mike, &satoshi];
         let follows = vec!["aaaa".to_string()];
         let got = select_mention_candidates("mpft", &follows, "", &cache);
@@ -8195,9 +8241,9 @@ mod tests {
 
     #[test]
     fn mention_candidates_rank_follows_first_and_hold_still() {
-        let zed = profile("cccc", "zed unfollowed", "z", "");
-        let amy = profile("aaaa", "amy follow", "amy", "");
-        let bob = profile("bbbb", "bob follow", "bob", "");
+        let zed = entry("cccc", "zed unfollowed", "z", "");
+        let amy = entry("aaaa", "amy follow", "amy", "");
+        let bob = entry("bbbb", "bob follow", "bob", "");
         let cache = vec![&zed, &amy, &bob];
         let follows = vec!["bbbb".to_string(), "aaaa".to_string()];
         let got = select_mention_candidates("o", &follows, "", &cache);
@@ -8211,8 +8257,8 @@ mod tests {
 
     #[test]
     fn mention_candidates_bare_at_lists_follows_in_follow_order() {
-        let bob = profile("bbbb", "bob", "bob", "");
-        let amy = profile("aaaa", "amy", "amy", "");
+        let bob = entry("bbbb", "bob", "bob", "");
+        let amy = entry("aaaa", "amy", "amy", "");
         let cache = vec![&bob, &amy];
         let follows = vec!["aaaa".to_string(), "bbbb".to_string()];
         let got = select_mention_candidates("", &follows, "", &cache);
@@ -8225,13 +8271,13 @@ mod tests {
 
     #[test]
     fn mention_candidates_skip_me_and_cap_at_eight() {
-        let owned: Vec<Profile> = (0..10)
+        let owned: Vec<ProfileEntry> = (0..10)
             .map(|i| {
                 let hex = format!("pk{i:02}");
-                profile(&hex, &format!("u{i:02}"), "", "")
+                entry(&hex, &format!("u{i:02}"), "", "")
             })
             .collect();
-        let cache: Vec<&Profile> = owned.iter().collect();
+        let cache: Vec<&ProfileEntry> = owned.iter().collect();
         let follows: Vec<String> = (0..10).map(|i| format!("pk{i:02}")).collect();
         let got = select_mention_candidates("", &follows, "pk03", &cache);
         assert_eq!(got.len(), 8);

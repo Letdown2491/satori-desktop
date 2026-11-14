@@ -39,8 +39,11 @@ pub(crate) enum FeedMode {
 
 /// The reply-parent whisper cache's bound (#31 latent): a long session's
 /// `parents`/`parents_asked` maps used to grow for the process lifetime.
-/// 512 resolved parents is far past one sitting's scrolling.
+/// 512 tracked parents is far past one sitting's scrolling.
 const PARENTS_CAP: usize = 512;
+
+/// The comment-count maps' bound — same discipline as PARENTS_CAP.
+const COUNTS_CAP: usize = 512;
 impl FeedMode {
     pub(crate) fn kinds(&self) -> Vec<Kind> {
         match self {
@@ -63,18 +66,23 @@ pub struct Feed {
     profiles: HashMap<String, Profile>,
     /// Reply parents (nip10) resolved for the context whisper: parent id →
     /// author + snippet. `parents_asked` keeps misses from re-requesting.
-    /// Both are eviction-capped together (#31 latent): a long session's
-    /// maps used to grow for the process lifetime; past the cap the
-    /// OLDEST parent (insertion order — the scroll origin's side) drops,
-    /// and a re-scroll back there re-asks and re-hydrates it.
+    /// Both are eviction-capped (#31 latent): a long session's maps used
+    /// to grow for the process lifetime. Past the cap the OLDEST key
+    /// (insertion order — the scroll origin's side) drops; a re-scroll
+    /// back re-asks and re-hydrates it. ASKED ids enter the order queue
+    /// too (a miss — deleted parent, relay gap — would otherwise evade
+    /// eviction forever): the queue tracks asks, landings only refresh.
     parents: HashMap<String, ParentNote>,
     parents_asked: HashSet<String>,
     /// Insertion order for the parents cap's eviction (front = oldest).
     parents_order: VecDeque<String>,
     /// Comment counts for the bubbles (CommentCounts landings), and the
-    /// asked-set that keeps a paging feed from re-asking per page.
+    /// asked-set that keeps a paging feed from re-asking per page. Capped
+    /// on the same insertion-order discipline as the parents maps —
+    /// `counts_asked` grew per unique note for the session otherwise.
     counts: HashMap<String, usize>,
     counts_asked: HashSet<String>,
+    counts_order: VecDeque<String>,
     /// Push signals since the last load (the live subscription): the
     /// new-notes pill's count. Nothing moves until the reader clicks.
     live_new: usize,
@@ -190,6 +198,7 @@ impl Feed {
             parents_order: VecDeque::new(),
             counts: HashMap::new(),
             counts_asked: HashSet::new(),
+            counts_order: VecDeque::new(),
             live_new: 0,
             quotes: HashMap::new(),
             poll_tallies: HashMap::new(),
@@ -530,9 +539,16 @@ impl Feed {
             FeedEvent::CommentCounts(counts) => {
                 // The bubble count: same-height patch (a digit appears in
                 // an existing row slot) — no reflow, the anchor survives.
+                // Re-landed ids re-enter the order queue (a re-ask after a
+                // cap eviction refreshes recency, mirroring the parents
+                // landing).
                 for (id, n) in counts {
-                    self.counts.insert(id.to_string(), n as usize);
+                    let key = id.to_string();
+                    self.counts_order.retain(|o| o != &key);
+                    self.counts_order.push_back(key.clone());
+                    self.counts.insert(key, n as usize);
                 }
+                self.trim_counts();
                 cx.notify();
             }
             FeedEvent::Parents(p) => {
@@ -691,15 +707,20 @@ impl Feed {
 
     /// The bubbles' comment counts (one batched round per page of notes).
     fn want_counts(&mut self, cx: &mut Context<Self>) {
-        let ids: Vec<EventId> = self
-            .notes
-            .iter()
-            .filter(|n| self.counts_asked.insert(n.id.to_string()))
-            .map(|n| n.id)
-            .collect();
+        let mut ids: Vec<EventId> = Vec::new();
+        for note in &self.notes {
+            let id = note.id.to_string();
+            if self.counts_asked.contains(&id) {
+                continue;
+            }
+            self.counts_asked.insert(id.clone());
+            self.counts_order.push_back(id);
+            ids.push(note.id);
+        }
         if ids.is_empty() {
             return;
         }
+        self.trim_counts();
         let rx = self.core.comment_counts(ids);
         self.pump(rx, cx);
     }
@@ -707,15 +728,28 @@ impl Feed {
     /// Collect the page's unresolved reply parents and ask core for them
     /// (store first, one by-id relay trip for the misses). Capped per ask.
     /// The parents cap (#31 latent): a long session's whisper maps used
-    /// to grow for the process lifetime. Past the cap the OLDEST parent
+    /// to grow for the process lifetime. Past the cap the OLDEST key
     /// (insertion order — the scroll origin's side) drops, asked-set
-    /// included, so a re-scroll back re-asks and re-hydrates it.
+    /// included, so a re-scroll back re-asks and re-hydrates it. The
+    /// order queue tracks ASKS (not just landings) — a miss would
+    /// otherwise sit in `parents_asked` forever.
     fn trim_parents(&mut self) {
-        while self.parents.len() > PARENTS_CAP
+        while self.parents_order.len() > PARENTS_CAP
             && let Some(old) = self.parents_order.pop_front()
         {
             self.parents.remove(&old);
             self.parents_asked.remove(&old);
+        }
+    }
+
+    /// The comment-count cap: `trim_parents`' discipline for the
+    /// bubbles' maps.
+    fn trim_counts(&mut self) {
+        while self.counts_order.len() > COUNTS_CAP
+            && let Some(old) = self.counts_order.pop_front()
+        {
+            self.counts.remove(&old);
+            self.counts_asked.remove(&old);
         }
     }
 
@@ -727,6 +761,7 @@ impl Feed {
                     continue;
                 }
                 self.parents_asked.insert(id.clone());
+                self.parents_order.push_back(id.clone());
                 ids.push(id);
                 if ids.len() >= 60 {
                     break;
@@ -736,6 +771,7 @@ impl Feed {
         if ids.is_empty() {
             return;
         }
+        self.trim_parents();
         let rx = self.core.load_parents(ids);
         let mut rx = rx;
         cx.spawn(async move |this, cx| {
