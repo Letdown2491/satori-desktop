@@ -25,6 +25,7 @@ use crate::pool::{INDEXERS, Pool};
 use crate::relay_latency;
 use crate::secrets;
 use crate::seen;
+use crate::seen_event;
 use crate::session::{self, Session, SessionMode};
 use crate::signer::{self, Signer};
 use crate::wallet::{self, Wallet, WalletEvent};
@@ -4379,11 +4380,23 @@ impl Core {
                                 .kind(Kind::EventDeletion)
                                 .event(resolved.id)
                                 .limit(50);
+                            // Phase 2 (NIP-65/#32): the tombstone ask goes
+                            // to the relays the ORIGINAL was seen on (the
+                            // per-event sidecar) — the places a deletion
+                            // would have been published to and seen — with
+                            // the blanket read-set req (pool.get) as the
+                            // fallback when we've never seen it with
+                            // attribution.
+                            let seen_on = seen_event::for_event(&resolved.id);
                             this.rt.spawn(async move {
-                                // The chokepoint inside get() records
-                                // whatever comes back; nothing else to do
-                                // with the (filtered) result.
-                                let _ = pool.get(sweep).await;
+                                if seen_on.is_empty() {
+                                    // The chokepoint inside get() records
+                                    // whatever comes back; nothing else to
+                                    // do with the (filtered) result.
+                                    let _ = pool.get(sweep).await;
+                                } else {
+                                    let _ = pool.get_from(&seen_on, &sweep).await;
+                                }
                             });
                         }
                         ev
@@ -6829,6 +6842,7 @@ impl Core {
                                 // gates, then the signal. The SDK has
                                 // already saved the event.
                                 seen::record(&event.pubkey, &[relay_url.as_str()]);
+                                seen_event::record(&event.id, relay_url.as_str());
                                 hints::observe(&event, relay_url.as_str());
                                 // Proof of life for the rail's live dot
                                 // (relay_latency::connected): an event
@@ -7015,6 +7029,7 @@ impl Core {
                 // subscription's onevent. The author-keyed hint store
                 // (WS1, RelayHintStore.kt) feeds off the same drain.
                 seen::record(&event.pubkey, &[relay_url.as_str()]);
+                seen_event::record(&event.id, relay_url.as_str());
                 hints::observe(&event, relay_url.as_str());
                 // Same proof-of-life mark (the live dot, §4.4).
                 crate::relay_latency::mark_delivery(relay_url.as_str());
