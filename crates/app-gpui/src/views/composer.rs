@@ -771,9 +771,13 @@ impl Composer {
     }
 
     /// A suggestion was picked (click, Enter, Tab): replace the `:token`
-    /// with the full `:shortcode:` text (NIP-30-style shortcode in the
-    /// content — the webapp's withEmoji left unknown codes literal, so
-    /// only real shortcodes go in).
+    /// with the unicode CHAR (the port's origin: suggest.ts line 72,
+    /// `h-insert="${em.char}"` — the webapp inserted the glyph, never a
+    /// shortcode). The NIP-30 `:shortcode:` text form only renders as an
+    /// image when the event carries a matching `emoji` tag (custom image
+    /// emoji, the word_flow path); a bare `:rofl:` without the tag is
+    /// literal text in EVERY client, which is how the aliens note went
+    /// out the door.
     fn pick_emoji(&mut self, idx: usize, cx: &mut Context<Self>) {
         let Some(e) = self.emoji_suggest.get(idx).copied() else {
             return;
@@ -790,7 +794,8 @@ impl Composer {
         };
         let mut next = String::with_capacity(text.len());
         next.push_str(&text[..at]);
-        next.push_str(&format!(":{}: ", e.name));
+        next.push_str(e.char);
+        next.push(' ');
         next.push_str(&text[cursor..]);
         self.input.update(cx, |i, cx| i.set_text(&next, cx));
         self.emoji_suggest.clear();
