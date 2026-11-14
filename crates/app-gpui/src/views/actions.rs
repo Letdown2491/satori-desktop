@@ -143,6 +143,11 @@ pub(crate) fn action_row<H: ActionHost>(
                     }
                 })
                 .hover(|s| s.bg(theme::hover_wash()))
+                // The heart doubles as the quick-set's door; the click alone
+                // doesn't say so.
+                .tooltip(super::shell::tip(
+                    "React: click to like, right-click for more",
+                ))
                 .child(icons::heart_icon(if st.liked {
                     theme::vermilion()
                 } else {
@@ -286,6 +291,7 @@ pub(crate) fn action_row<H: ActionHost>(
                     // theme::EMOJI): through the UI face these five paint
                     // as DejaVu/Adwaita monochrome outlines.
                     .font_family(theme::EMOJI)
+                    .tooltip(super::shell::tip(label))
                     .child(*glyph),
             );
         }
