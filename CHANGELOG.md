@@ -52,6 +52,20 @@ NIP-05 and pubkey hex, and finds anyone you interact with, not just
 accounts you follow; the profile mirror is seeded from the disk cache
 at launch, so names resolve on the first keystroke after a restart.
 
+The screen learned to work in columns. A rail toggle (or the c key)
+opens a TweetDeck-style workspace: up to four stream columns pin side
+by side, each live, each scrolling on its own; the streams are Home,
+Articles, Notifications, Search, and any hashtag (pinned from the
+hashtag page's new + Column button). Drilling into a thread, article
+or profile still takes the whole width, and Esc hands you back to the
+columns exactly as you left them. The layout persists across
+restarts: which columns, in what order, how wide. Columns reorder by
+dragging their header and resize from their right edge, and the rail
+keeps out of the way, retiring the button of a stream already pinned.
+Two follow-up fixes from the first days with it: repost rows carry
+the boosted note's action bar (the envelope used to render bare), and
+the columns' add and remove buttons read at full ink.
+
 Under the hood, the interop batch got its five-lens audit (the same
 performance / system usage / memory / security / duplication pass as
 the previous two cycles) and the findings landed: the feed's
