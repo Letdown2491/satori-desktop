@@ -17,6 +17,17 @@ members = ["crates/core", "crates/app-gpui"]
 # extern crate through a private item — a hard error in a future release
 # (pulled in via gpui → stacksafe). The compiler's own one-word fix, vendored.
 # RETIRED in P5 (D35): re-add if the stacksafe chain returns.
+#
+# D66 (Nov 2026): REINTRODUCED a vendored patch — gpui-pre-wgpu 0.3.9, one
+# guard, same mechanism as D13/D29. load_family's 'm' gate bars every color
+# emoji font from loading as a PRIMARY family (their cmaps carry no Latin),
+# so emoji requested by name silently fell back to the UI face and painted
+# monochrome through DejaVu/Adwaita outlines. The gate now exempts known
+# emoji fonts. D29's warning ("port the patch if the duplicate-face
+# regression reappears") came due one layer up: cosmic-text 0.19's own
+# matcher already prefers the CBDT face; gpui's gate was the blocker.
+[patch.crates-io]
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 
 [workspace.package]
 version = "0.8.0"
