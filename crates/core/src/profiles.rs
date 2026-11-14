@@ -85,6 +85,10 @@ impl ProfileService {
             nip05: String,
             #[serde(default)]
             lud: String,
+            // The raw kind-0 `name` handle (mention matching); display
+            // `name` predates it, so old files default to empty.
+            #[serde(default)]
+            handle: String,
             at: u64,
         }
         std::fs::read_to_string(path)
@@ -99,6 +103,7 @@ impl ProfileService {
                                 profile: Profile {
                                     pubkey: r.pubkey,
                                     name: r.name,
+                                    handle: r.handle,
                                     picture: r.picture,
                                     about: r.about,
                                     banner: r.banner,
@@ -122,6 +127,7 @@ impl ProfileService {
         struct Raw {
             pubkey: String,
             name: String,
+            handle: String,
             picture: String,
             about: String,
             banner: String,
@@ -138,6 +144,7 @@ impl ProfileService {
             .map(|e| Raw {
                 pubkey: e.profile.pubkey.clone(),
                 name: e.profile.name.clone(),
+                handle: e.profile.handle.clone(),
                 picture: e.profile.picture.clone(),
                 about: e.profile.about.clone(),
                 banner: e.profile.banner.clone(),

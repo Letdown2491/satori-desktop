@@ -503,7 +503,13 @@ pub fn plain_snippet(content: &str, cap: usize) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct Profile {
     pub pubkey: String,
+    /// The display name: kind-0 `display_name`, falling back to `name`.
+    /// The raw `name` handle rides alongside (`handle`) so @-mention
+    /// matching can find "@mpft" when the display name reads "Mike P.".
     pub name: String,
+    /// The kind-0 `name` handle as self-asserted (the @-identity most
+    /// clients type; distinct from NIP-05, which is verified).
+    pub handle: String,
     pub picture: String,
     pub about: String,
     pub banner: String,
@@ -543,6 +549,7 @@ impl Profile {
             .and_then(|m| m.blurhash);
         Some(Self {
             pubkey: ev.pubkey.to_string(),
+            handle: raw.name.clone().unwrap_or_default(),
             name: raw.display_name.or(raw.name).unwrap_or_default(),
             picture: raw.picture.unwrap_or_default(),
             about: raw.about.unwrap_or_default(),
@@ -562,6 +569,66 @@ impl Profile {
             self.name.clone()
         }
     }
+}
+
+/// The mention-candidate selection, pure for testability: substring match
+/// on display name, raw handle, NIP-05, and pubkey hex; the follow tier
+/// sorts ahead of everyone else's; rows hold still (name-sorted) within a
+/// tier; the empty query is "the people you follow" in follow order (the
+/// bare-@ view). `skip` is the caller's own hex — you don't mention
+/// yourself. Eight hits max, the strip's length.
+fn select_mention_candidates(
+    query: &str,
+    follows_hex: &[String],
+    skip: &str,
+    cache: &[&Profile],
+) -> Vec<Profile> {
+    let q = query.to_lowercase();
+    let follow_set: HashSet<&String> = follows_hex.iter().collect();
+    let by_hex: HashMap<&str, &Profile> = cache.iter().map(|p| (p.pubkey.as_str(), *p)).collect();
+    let mut out: Vec<Profile> = Vec::new();
+    if q.is_empty() {
+        for hex in follows_hex {
+            if out.len() == 8 {
+                break;
+            }
+            if hex == skip {
+                continue;
+            }
+            if let Some(p) = by_hex.get(hex.as_str()) {
+                out.push((*p).clone());
+            }
+        }
+        return out;
+    }
+    let mut tier_follow: Vec<&Profile> = Vec::new();
+    let mut tier_other: Vec<&Profile> = Vec::new();
+    for p in cache {
+        if p.pubkey == skip {
+            continue;
+        }
+        let hit = p.name.to_lowercase().contains(&q)
+            || p.handle.to_lowercase().contains(&q)
+            || p.nip05.to_lowercase().contains(&q)
+            || p.pubkey.to_lowercase().contains(&q);
+        if !hit {
+            continue;
+        }
+        if follow_set.contains(&p.pubkey) {
+            tier_follow.push(p);
+        } else {
+            tier_other.push(p);
+        }
+    }
+    tier_follow.sort_by_key(|p| p.name.to_lowercase());
+    tier_other.sort_by_key(|p| p.name.to_lowercase());
+    for p in tier_follow.into_iter().chain(tier_other) {
+        if out.len() == 8 {
+            break;
+        }
+        out.push(p.clone());
+    }
+    out
 }
 
 /// In-memory cap for the cross-session profile mirror (`profiles_mem`):
@@ -3059,42 +3126,36 @@ impl Core {
             .cloned()
     }
 
-    /// @-mention candidates for the composer: the people you follow whose
-    /// cached name (or pubkey hex) matches the typed handle. Profiles not
-    /// yet in the cache match only by hex — the profiles service fills the
-    /// rest as the feed loads them. One lock, eight hits max: this runs
-    /// per keystroke.
+    /// @-mention candidates for the composer (content.ts: @names from the
+    /// profile cache): a substring scan of the whole hydrated profile
+    /// cache — display name, raw kind-0 handle, NIP-05, pubkey hex —
+    /// follow-ranked. The follow gate it replaced hid anyone you interact
+    /// with but don't follow, and the display-name-only match hid handles
+    /// (the reported case: followed, typed "@mpft", unfindable because
+    /// `name` stores the display name). Profiles not yet in the cache
+    /// can't match — the profiles service fills the rest as the feed
+    /// loads them. One lock, eight hits max: this runs per keystroke.
     pub fn mention_candidates(&self, query: &str) -> Vec<Profile> {
-        let (follows, me): (Vec<PublicKey>, String) = {
+        let (follows, me): (Vec<String>, String) = {
             let held = self.active.lock().unwrap();
             let me = held
                 .as_ref()
-                .map(|a| a.session.pubkey.clone())
+                .map(|a| a.session.pubkey.to_string())
                 .unwrap_or_default();
-            let follows = held.as_ref().map(|a| a.follows.clone()).unwrap_or_default();
+            let follows = held
+                .as_ref()
+                .map(|a| {
+                    a.follows
+                        .iter()
+                        .map(|pk| pk.to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             (follows, me)
         };
-        let q = query.to_lowercase();
         let m = self.profiles_mem.lock().unwrap();
-        let mut out: Vec<Profile> = Vec::new();
-        for pk in &follows {
-            if pk.to_string() == me {
-                continue;
-            }
-            let Some(p) = m.get(&pk.to_string()) else {
-                continue;
-            };
-            if q.is_empty()
-                || p.name.to_lowercase().contains(&q)
-                || p.pubkey.to_lowercase().contains(&q)
-            {
-                out.push(p.clone());
-                if out.len() == 8 {
-                    break;
-                }
-            }
-        }
-        out
+        let cache: Vec<&Profile> = m.values().collect();
+        select_mention_candidates(query, &follows, &me, &cache)
     }
 
     /// People results for the search pane: a substring scan of the hydrated
@@ -8268,6 +8329,85 @@ mod tests {
             got.get("dark").unwrap(),
             &serde_json::Value::Bool(true),
             "no stamp = fresh install, remote applies"
+        );
+    }
+
+    fn profile(hex: &str, name: &str, handle: &str, nip05: &str) -> Profile {
+        Profile {
+            pubkey: hex.to_string(),
+            name: name.to_string(),
+            handle: handle.to_string(),
+            picture: String::new(),
+            about: String::new(),
+            banner: String::new(),
+            nip05: nip05.to_string(),
+            lud: String::new(),
+            banner_blurhash: None,
+        }
+    }
+
+    #[test]
+    fn mention_candidates_match_the_handle_not_just_the_display_name() {
+        // The reported case: followed, display name carries no trace of
+        // the typed handle, only the raw kind-0 `name` (or NIP-05) hits.
+        let mike = profile("aaaa", "Mike P.", "mpft", "mike@example.com");
+        let satoshi = profile("bbbb", "Satoshi", "sato", "");
+        let cache = vec![&mike, &satoshi];
+        let follows = vec!["aaaa".to_string()];
+        let got = select_mention_candidates("mpft", &follows, "", &cache);
+        assert_eq!(got.len(), 1, "the handle must match");
+        assert_eq!(got[0].pubkey, "aaaa");
+        let got = select_mention_candidates("mike@", &follows, "", &cache);
+        assert_eq!(got.len(), 1, "NIP-05 matches");
+        let got = select_mention_candidates("sato", &follows, "", &cache);
+        assert_eq!(got.len(), 1, "an unfollowed cached profile still matches");
+    }
+
+    #[test]
+    fn mention_candidates_rank_follows_first_and_hold_still() {
+        let zed = profile("cccc", "zed unfollowed", "z", "");
+        let amy = profile("aaaa", "amy follow", "amy", "");
+        let bob = profile("bbbb", "bob follow", "bob", "");
+        let cache = vec![&zed, &amy, &bob];
+        let follows = vec!["bbbb".to_string(), "aaaa".to_string()];
+        let got = select_mention_candidates("o", &follows, "", &cache);
+        // "o" hits bob ("bob"), amy ("amy"), zed ("unfollowed"): the two
+        // follows lead, name-sorted; the outsider trails.
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].pubkey, "aaaa");
+        assert_eq!(got[1].pubkey, "bbbb");
+        assert_eq!(got[2].pubkey, "cccc");
+    }
+
+    #[test]
+    fn mention_candidates_bare_at_lists_follows_in_follow_order() {
+        let bob = profile("bbbb", "bob", "bob", "");
+        let amy = profile("aaaa", "amy", "amy", "");
+        let cache = vec![&bob, &amy];
+        let follows = vec!["aaaa".to_string(), "bbbb".to_string()];
+        let got = select_mention_candidates("", &follows, "", &cache);
+        assert_eq!(
+            got.iter().map(|p| p.pubkey.as_str()).collect::<Vec<_>>(),
+            vec!["aaaa", "bbbb"],
+            "follow order, not cache order"
+        );
+    }
+
+    #[test]
+    fn mention_candidates_skip_me_and_cap_at_eight() {
+        let mut owned: Vec<Profile> = (0..10)
+            .map(|i| {
+                let hex = format!("pk{i:02}");
+                profile(&hex, &format!("u{i:02}"), "", "")
+            })
+            .collect();
+        let cache: Vec<&Profile> = owned.iter().collect();
+        let follows: Vec<String> = (0..10).map(|i| format!("pk{i:02}")).collect();
+        let got = select_mention_candidates("", &follows, "pk03", &cache);
+        assert_eq!(got.len(), 8);
+        assert!(
+            got.iter().all(|p| p.pubkey != "pk03"),
+            "you never mention yourself"
         );
     }
 }
