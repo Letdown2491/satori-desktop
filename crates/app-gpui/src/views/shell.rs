@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, AnyView, App, ClickEvent, Context, Div, DragMoveEvent, Entity, EventEmitter,
-    FocusHandle, Focusable, KeyDownEvent, ObjectFit, Render, SharedString, Stateful, Window, div,
-    img, prelude::*, px, rgb,
+    FocusHandle, Focusable, KeyDownEvent, ObjectFit, Render, ScrollHandle, SharedString, Stateful,
+    Window, div, img, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, Profile, PublishEvent};
@@ -100,13 +100,6 @@ const COL_MAX_W: f32 = 960.0;
 /// enough to hit this means twelve panes were left unattended. The
 /// base feed (single-pane stack[0]) never drops.
 const PANE_CAP: usize = 12;
-
-/// Below this window width the workspace collapses to the focused
-/// column (D68 decision 3's auto-collapse): two minimum columns plus
-/// the + slot stop fitting around here, and the single reading column
-/// is the fallback face. The mode itself stays on — widening the
-/// window restores the full row, scroll states intact.
-const COLUMNS_MIN_W: f32 = 900.0;
 
 /// The stream kinds a column can pin (D68): the ambient surfaces plus
 /// the hashtag stream (phase 2 — pinned from the hashtag drill's title
@@ -286,6 +279,10 @@ pub struct Shell {
     /// The column a drag is over right now (phase 2 reorder cue): its
     /// header lights vermilion; cleared on drop.
     reorder_over: Option<usize>,
+    /// The workspace row's horizontal scroll (the columns keep their
+    /// measure and the row scrolls — the owner's amendment to D68's
+    /// collapse fork); h/l and focus moves scroll the target in view.
+    row_scroll: ScrollHandle,
     /// The signed-in identity: the rail's top mark is the user's avatar
     /// (replacing the ensō as the home glyph).
     me: Option<PublicKey>,
@@ -320,6 +317,7 @@ impl Shell {
             focused_col: 0,
             add_menu: false,
             reorder_over: None,
+            row_scroll: ScrollHandle::new(),
             me: None,
             me_profile: None,
         };
@@ -706,6 +704,7 @@ impl Shell {
             width: None,
         });
         self.focused_col = self.columns.len() - 1;
+        self.scroll_col_into_view(self.focused_col);
         self.save_layout();
         cx.notify();
     }
@@ -737,6 +736,7 @@ impl Shell {
                     width: None,
                 });
                 self.focused_col = self.columns.len() - 1;
+                self.scroll_col_into_view(self.focused_col);
                 self.save_layout();
                 cx.notify();
             }
@@ -813,6 +813,7 @@ impl Shell {
             Some(i) if i == self.focused_col => self.column_to_top(i, cx),
             Some(i) => {
                 self.focused_col = i;
+                self.scroll_col_into_view(i);
                 if kind == ColumnKind::Notifications {
                     self.notif_unread = false;
                 }
@@ -855,49 +856,13 @@ impl Shell {
         self.columns_on && self.stack.is_empty()
     }
 
-    /// The narrow-window auto-collapse (D68 decision 3, phase 3): below
-    /// COLUMNS_MIN_W the workspace row can't carry two minimum columns,
-    /// so it falls back to the single-pane face — the focused column
-    /// fills the reading column, the mode stays on, and widening the
-    /// window restores the full row with scroll states intact.
-    fn columns_collapsed(&self, window: &Window) -> bool {
-        window.viewport_size().width < px(COLUMNS_MIN_W)
-    }
-
-    /// The collapsed workspace face: the focused column as the reading
-    /// column — single-pane anatomy minus the title row (nothing to
-    /// pop; a drill still takes the whole width with its own).
-    fn collapsed_column(&mut self, _cx: &mut Context<Self>) -> Div {
-        let pane = self.columns.get(self.focused_col).map(|c| &c.pane);
-        div()
-            .relative()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .pt(px(16.0))
-            .when(self.outbox_pending > 0, |d| {
-                let n = self.outbox_pending;
-                d.child(states::offline_pill(&format!(
-                    "{n} note{} queued for delivery, the relays will answer",
-                    if n == 1 { "" } else { "s" }
-                )))
-            })
-            .children(pane.map(Self::pane_element))
-            .when(pane.is_none(), |d| {
-                d.child(
-                    div()
-                        .flex_1()
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(theme::T_UI))
-                        .text_color(rgb(theme::muted()))
-                        .child("No columns — widen the window or press c"),
-                )
-            })
+    /// Scroll a column into view (h/l hops, pin, focus moves): the row's
+    /// children are the columns in order — the scroll handle tracks
+    /// them, and scroll_to_item takes the minimal nudge.
+    fn scroll_col_into_view(&self, i: usize) {
+        if !self.columns.is_empty() {
+            self.row_scroll.scroll_to_item(i);
+        }
     }
 
     /// h/l: the focused column steps left/right, clamped at the ends
@@ -910,6 +875,7 @@ impl Shell {
         let next = (self.focused_col as isize + delta).clamp(0, n as isize - 1) as usize;
         if next != self.focused_col {
             self.focused_col = next;
+            self.scroll_col_into_view(next);
             cx.notify();
         }
     }
@@ -1795,14 +1761,13 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Built before the pane borrow: rail() takes &mut self (snapshot
         // memo). The content is the columns workspace while the mode is
-        // on and no drill is up — collapsing to the focused column below
-        // COLUMNS_MIN_W (phase 3's auto-collapse); otherwise the
-        // single-pane reading column.
+        // on and no drill is up; otherwise the single-pane reading
+        // column. Narrow windows scroll the row horizontally — the
+        // columns keep their measure (the owner's amendment to D68's
+        // collapse fork).
         let rail = self.rail(cx);
-        let content: AnyElement = if self.workspace_up() && !self.columns_collapsed(window) {
+        let content: AnyElement = if self.workspace_up() {
             self.workspace(cx).into_any_element()
-        } else if self.workspace_up() {
-            self.collapsed_column(cx).into_any_element()
         } else {
             self.pane_column(cx).into_any_element()
         };
@@ -2017,12 +1982,17 @@ impl Shell {
     fn workspace(&mut self, cx: &mut Context<Self>) -> Div {
         let focused = self.focused_col;
         let mut row = div()
+            .id("columns-row")
             .flex()
             .flex_row()
             .flex_1()
             .min_w_0()
             .h_full()
-            .overflow_hidden();
+            // The columns keep their measure and the row scrolls
+            // horizontally (the owner's amendment to D68's collapse
+            // fork): no narrow columns, TweetDeck's own answer.
+            .overflow_x_scroll()
+            .track_scroll(&self.row_scroll);
         if self.columns.is_empty() {
             // The unpinned extreme: a quiet word, the + slot beside it.
             row = row.child(
@@ -2040,7 +2010,12 @@ impl Shell {
         for i in 0..self.columns.len() {
             let label = self.columns[i].kind.label();
             let element = Self::pane_element(&self.columns[i].pane);
-            let width = self.columns[i].width;
+            // The column's measure: the persisted width, else the reading
+            // column's — never squeezed by the row (it scrolls instead).
+            let col_w = self.columns[i]
+                .width
+                .unwrap_or(content::COL_W)
+                .min(COL_MAX_W);
             let is_last = i + 1 == self.columns.len();
             let is_focused = i == focused;
             let is_drop_target = self.reorder_over == Some(i);
@@ -2049,10 +2024,8 @@ impl Shell {
                     .relative()
                     .flex()
                     .flex_col()
-                    .when_some(width, |d, w| d.w(px(w)).flex_none())
-                    .when(width.is_none(), |d| d.flex_1())
-                    .min_w_0()
-                    .max_w(px(COL_MAX_W))
+                    .flex_none()
+                    .w(px(col_w))
                     .h_full()
                     .overflow_hidden()
                     .when(!is_last, |d| {
@@ -2066,6 +2039,7 @@ impl Shell {
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         if shell.focused_col != i {
                             shell.focused_col = i;
+                            shell.scroll_col_into_view(i);
                             cx.notify();
                         }
                     }))
