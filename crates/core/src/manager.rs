@@ -1351,12 +1351,7 @@ impl Core {
         self: &Arc<Self>,
         url: String,
     ) -> mpsc::UnboundedReceiver<Option<serde_json::Value>> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.rt.spawn(async move {
-            let res = crate::media::fetch_json(&url).await.ok();
-            let _ = tx.send(res);
-        });
-        rx
+        self.task_once(|| Box::pin(async move { crate::media::fetch_json(&url).await.ok() }))
     }
 
     /// NIP-05 verification: does `domain`'s /.well-known/nostr.json vouch
@@ -1370,12 +1365,7 @@ impl Core {
         nip05: String,
         pubkey: String,
     ) -> mpsc::UnboundedReceiver<Option<bool>> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.rt.spawn(async move {
-            let verdict = verify_nip05_inner(&nip05, &pubkey).await;
-            let _ = tx.send(verdict);
-        });
-        rx
+        self.task_once(|| Box::pin(async move { verify_nip05_inner(&nip05, &pubkey).await }))
     }
 
     /// Fetch (and cache) an image — SSRF-guarded, sha256-keyed (media.rs).
@@ -1388,12 +1378,7 @@ impl Core {
     ) -> mpsc::UnboundedReceiver<
         std::result::Result<crate::media::DecodedImage, crate::media::MediaError>,
     > {
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.rt.spawn(async move {
-            let res = crate::media::fetch_image(&url).await;
-            let _ = tx.send(res);
-        });
-        rx
+        self.task_once(|| Box::pin(async move { crate::media::fetch_image(&url).await }))
     }
 
     /// The poster job (D32): everything tokio-flavored stays on this
@@ -1410,12 +1395,9 @@ impl Core {
     ) -> mpsc::UnboundedReceiver<
         std::result::Result<crate::media::DecodedImage, crate::media::MediaError>,
     > {
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.rt.spawn(async move {
-            let res = crate::media::fetch_poster(url, cap, sniff).await;
-            let _ = tx.send(res);
-        });
-        rx
+        self.task_once(move || {
+            Box::pin(async move { crate::media::fetch_poster(url, cap, sniff).await })
+        })
     }
 
     // --- wallet / zaps (D20) ---------------------------------------------------
@@ -3041,12 +3023,10 @@ impl Core {
     /// shown), all visible kinds — and project again. The store stays the
     /// chokepoint; the relays are the reservoir.
     pub fn older(self: &Arc<Self>, until: u64, kinds: Vec<Kind>) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<FeedEvent> = async {
-                let active = this.active().await?;
-                let mut notes = this.project_page(&active, Some(until), &kinds).await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
+                let mut notes = this.project_page(active, Some(until), &kinds).await?;
                 // NIP-01: an empty list can never match — with no follows
                 // there is nothing to top up from the relays.
                 if notes.len() <= PAGE && !active.follows.is_empty() {
@@ -3072,24 +3052,14 @@ impl Core {
                         .until(Timestamp::from(until))
                         .limit(500);
                     let _ = active.pool.get(del_filter).await;
-                    notes = this.project_page(&active, Some(until), &kinds).await?;
+                    notes = this.project_page(active, Some(until), &kinds).await?;
                 }
                 let has_more = notes.len() > PAGE;
                 notes.truncate(PAGE);
-                let profiles = Self::profiles_for(&active, &notes).await;
+                let profiles = Self::profiles_for(active, &notes).await;
                 Ok(FeedEvent::Older(FeedPage { notes, profiles }, has_more))
-            }
-            .await;
-            match res {
-                Ok(ev) => {
-                    let _ = tx.send(ev);
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+            })
+        })
     }
 
     fn absorb_profiles(&self, profiles: &[Profile]) {
@@ -3642,11 +3612,8 @@ impl Core {
     /// Reply-presence: per note, who replied (up to 3, earliest first) —
     /// the web app's "faces" hydration (routes/feed.ts getFaces).
     pub fn reply_faces(self: &Arc<Self>, ids: Vec<EventId>) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<Vec<(EventId, Vec<PublicKey>)>> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 let filter = Filter::new()
                     .kind(Kind::TextNote)
                     .events(ids.clone())
@@ -3681,19 +3648,9 @@ impl Core {
                 for (id, names) in per_note {
                     out.push((id, names));
                 }
-                Ok(out)
-            }
-            .await;
-            match res {
-                Ok(faces) => {
-                    let _ = tx.send(FeedEvent::Faces(faces));
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+                Ok(FeedEvent::Faces(out))
+            })
+        })
     }
 
     /// Comment counts per note (the action row's bubble): how many
@@ -3706,11 +3663,8 @@ impl Core {
     /// ADDRESS, not event id — their counts ride the address-carrying
     /// path, not this one (#32's notifications-door item).
     pub fn comment_counts(self: &Arc<Self>, ids: Vec<EventId>) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<Vec<(EventId, u32)>> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 let filter = Filter::new()
                     .kinds([Kind::TextNote, Kind::Custom(1111)])
                     .events(ids.clone())
@@ -3723,29 +3677,16 @@ impl Core {
                         *per_note.entry(pid).or_default() += 1;
                     }
                 }
-                Ok(per_note.into_iter().collect())
-            }
-            .await;
-            match res {
-                Ok(counts) => {
-                    let _ = tx.send(FeedEvent::CommentCounts(counts));
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+                Ok(FeedEvent::CommentCounts(per_note.into_iter().collect()))
+            })
+        })
     }
 
     /// Does the following feed hold notes newer than the last home view?
     /// (Quiet-dot poll — the store answers, no relays.)
     pub fn feed_dot(self: &Arc<Self>) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<bool> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 // Same probe as refresh (newest_created_at docs): the
                 // all-kinds page materialized one event per author-kind
                 // pair per poll.
@@ -3755,21 +3696,13 @@ impl Core {
                     .newest_created_at(&active.follows)
                     .await
                     .map_err(|e| LoginError::Resume(e.to_string()))?;
-                Ok(newest
-                    .map(|t| t > crate::read_state::load().feed_seen)
-                    .unwrap_or(false))
-            }
-            .await;
-            match res {
-                Ok(dot) => {
-                    let _ = tx.send(FeedEvent::NotifDot(dot));
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+                Ok(FeedEvent::NotifDot(
+                    newest
+                        .map(|t| t > crate::read_state::load().feed_seen)
+                        .unwrap_or(false),
+                ))
+            })
+        })
     }
 
     /// Home opened: the feed is seen up to now (monotonic).
@@ -3780,11 +3713,8 @@ impl Core {
     /// Export the user's list events (kinds 3/10000/10002/10003) as raw
     /// signed JSON — the list-backup.ts export.
     pub fn export_lists(self: &Arc<Self>) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<String> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 let me = active.me();
                 let filter = Filter::new().author(me).kinds([
                     Kind::ContactList,
@@ -3800,19 +3730,11 @@ impl Core {
                     by_kind.insert(u16::from(ev.kind), ev);
                 }
                 let events: Vec<&Event> = by_kind.values().collect();
-                serde_json::to_string_pretty(&events).map_err(|e| LoginError::Resume(e.to_string()))
-            }
-            .await;
-            match res {
-                Ok(json) => {
-                    let _ = tx.send(FeedEvent::BackupJson(json));
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+                let json = serde_json::to_string_pretty(&events)
+                    .map_err(|e| LoginError::Resume(e.to_string()))?;
+                Ok(FeedEvent::BackupJson(json))
+            })
+        })
     }
 
     /// Restore from a backup: re-sign each event fresh (list-backup.ts:
@@ -3862,11 +3784,9 @@ impl Core {
 
     /// Comments on a target (NIP-22 kind:1111), oldest first.
     pub fn comments(self: &Arc<Self>, target: crate::nip::comment::CommentTarget) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<(Vec<Event>, Vec<Profile>)> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 let mut comments: Vec<Event> = Vec::new();
                 for filter in target.fetch_filters() {
                     for ev in active.pool.get(filter).await.unwrap_or_default() {
@@ -3879,23 +3799,13 @@ impl Core {
                 comments.retain(|ev| seen.insert(ev.id));
                 comments.sort_by_key(|e| e.created_at.as_secs());
                 let _authors: Vec<PublicKey> = comments.iter().map(|e| e.pubkey).collect();
-                let profiles = Self::profiles_for(&active, &comments).await;
+                let profiles = Self::profiles_for(active, &comments).await;
                 this.absorb_profiles(&profiles);
                 // Include target-author profile (fetch may be empty).
 
-                Ok((comments, profiles))
-            }
-            .await;
-            match res {
-                Ok((comments, profiles)) => {
-                    let _ = tx.send(FeedEvent::Comments(comments, profiles));
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+                Ok(FeedEvent::Comments(comments, profiles))
+            })
+        })
     }
 
     /// Publish a comment (top-level when `parent` is None, else a reply).
@@ -3986,11 +3896,8 @@ impl Core {
 
     /// Tallies for a poll: kind:1018 ballots #e=poll id.
     pub fn poll_votes(self: &Arc<Self>, poll_id: EventId) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<Vec<(String, u32)>> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 let filter = Filter::new()
                     .kind(Kind::Custom(1018))
                     .event(poll_id)
@@ -4000,19 +3907,9 @@ impl Core {
                     votes.push(ev);
                 }
                 // (no explicit save: the SDK persists what it receives)
-                Ok(crate::nip::poll::tally(&votes))
-            }
-            .await;
-            match res {
-                Ok(t) => {
-                    let _ = tx.send(FeedEvent::PollVotes(t));
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+                Ok(FeedEvent::PollVotes(crate::nip::poll::tally(&votes)))
+            })
+        })
     }
 
     /// A zap goal's raised total (NIP-75): the receipts that name the
@@ -4386,11 +4283,9 @@ impl Core {
         hints: Vec<String>,
         author: Option<PublicKey>,
     ) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<(Option<Event>, Option<Profile>)> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 let cached = active.pool.store.event_by_id(id).await.ok().flatten();
                 let ev = match cached {
                     Some(ev) => Some(ev),
@@ -4502,19 +4397,9 @@ impl Core {
                     }
                     None => None,
                 };
-                Ok((ev, profile))
-            }
-            .await;
-            match res {
-                Ok((ev, profile)) => {
-                    let _ = tx.send(FeedEvent::One(ev, profile));
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+                Ok(FeedEvent::One(ev, profile))
+            })
+        })
     }
 
     /// One addressable event by (kind, author, d) — naddr resolution.
@@ -4524,11 +4409,9 @@ impl Core {
         author: PublicKey,
         identifier: String,
     ) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<(Option<Event>, Option<Profile>)> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 // Store-first (audit: the sibling event_by_id checks the
                 // store before any pool REQ; this bought a full-pool
                 // round trip per address even after the event landed).
@@ -4584,19 +4467,9 @@ impl Core {
                 if let Some(p) = &profile {
                     this.absorb_profiles(std::slice::from_ref(p));
                 }
-                Ok((ev, profile))
-            }
-            .await;
-            match res {
-                Ok((ev, profile)) => {
-                    let _ = tx.send(FeedEvent::One(ev, profile));
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+                Ok(FeedEvent::One(ev, profile))
+            })
+        })
     }
 
     // --- search (NIP-50) ----------------------------------------------------------
@@ -4608,11 +4481,8 @@ impl Core {
     /// empty — all-known-incapable asks everyone, search degrades
     /// instead of breaking.
     pub fn search(self: &Arc<Self>, query: String) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<FeedPage> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 let filter = Filter::new().kind(Kind::TextNote).search(&query).limit(50);
                 let mut relays: Vec<String> = active
                     .pool
@@ -4634,23 +4504,10 @@ impl Core {
                     .collect();
                 // (no explicit save: the SDK persists what it receives)
                 results.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
-                let profiles = Self::profiles_for(&active, &results).await;
-                Ok(FeedPage {
-                    notes: results,
-                    profiles,
-                })
-            }
-            .await;
-            match res {
-                Ok(page) => {
-                    let _ = tx.send(FeedEvent::Search(page.notes, page.profiles));
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+                let profiles = Self::profiles_for(active, &results).await;
+                Ok(FeedEvent::Search(results, profiles))
+            })
+        })
     }
 
     // --- profiles ---------------------------------------------------------------
@@ -4661,11 +4518,9 @@ impl Core {
     /// straight off the fetch (the store's matcher isn't trusted for tags);
     /// mutes and deletions gate like every feed page.
     pub fn hashtag(self: &Arc<Self>, tag: String) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<FeedPage> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 // t tags are conventionally lowercase (NIP-24); the tap
                 // keeps its raw case for display, the filter normalizes.
                 let filter = Filter::new()
@@ -4686,20 +4541,10 @@ impl Core {
                 }
                 let mut notes = this.drop_deleted(notes);
                 notes.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
-                let profiles = Self::profiles_for(&active, &notes).await;
-                Ok(FeedPage { notes, profiles })
-            }
-            .await;
-            match res {
-                Ok(page) => {
-                    let _ = tx.send(FeedEvent::Loaded(page));
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+                let profiles = Self::profiles_for(active, &notes).await;
+                Ok(FeedEvent::Loaded(FeedPage { notes, profiles }))
+            })
+        })
     }
 
     /// The hashtag timeline's older page — the home feed's scroll
@@ -4707,11 +4552,9 @@ impl Core {
     /// follow set. A full page keeps `has_more` lit; the next probe
     /// refetches around the oldest shown.
     pub fn hashtag_older(self: &Arc<Self>, tag: String, until: u64) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<FeedEvent> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 let filter = Filter::new()
                     .kinds(crate::store::visible_kinds())
                     .custom_tag(SingleLetterTag::LOWERCASE_T, tag.to_lowercase())
@@ -4733,29 +4576,16 @@ impl Core {
                 notes.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
                 let has_more = notes.len() > PAGE;
                 notes.truncate(PAGE);
-                let profiles = Self::profiles_for(&active, &notes).await;
+                let profiles = Self::profiles_for(active, &notes).await;
                 Ok(FeedEvent::Older(FeedPage { notes, profiles }, has_more))
-            }
-            .await;
-            match res {
-                Ok(ev) => {
-                    let _ = tx.send(ev);
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// A profile page's projection: their recent notes + their metadata.
     pub fn profile(self: &Arc<Self>, who: PublicKey) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<FeedPage> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 // Their notes: relay fetch into the store, then project.
                 let filter = Filter::new()
                     .kinds(crate::store::visible_kinds())
@@ -4769,31 +4599,18 @@ impl Core {
                     .feed_page(&[who], None, PAGE)
                     .await
                     .unwrap_or_default();
-                let profiles = Self::profiles_for(&active, &notes).await;
-                Ok(FeedPage { notes, profiles })
-            }
-            .await;
-            match res {
-                Ok(page) => {
-                    let _ = tx.send(FeedEvent::Loaded(page));
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+                let profiles = Self::profiles_for(active, &notes).await;
+                Ok(FeedEvent::Loaded(FeedPage { notes, profiles }))
+            })
+        })
     }
 
     /// The profile's next older page (endless scroll): author-scoped mirror
     /// of `older` — the store page behind the anchor, then a relay top-up
     /// for the author only (deletions ride along), then re-project.
     pub fn profile_older(self: &Arc<Self>, who: PublicKey, until: u64) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<FeedEvent> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 let mut notes = active
                     .pool
                     .store
@@ -4823,31 +4640,18 @@ impl Core {
                 }
                 let has_more = notes.len() > PAGE;
                 notes.truncate(PAGE);
-                let profiles = Self::profiles_for(&active, &notes).await;
+                let profiles = Self::profiles_for(active, &notes).await;
                 Ok(FeedEvent::Older(FeedPage { notes, profiles }, has_more))
-            }
-            .await;
-            match res {
-                Ok(ev) => {
-                    let _ = tx.send(ev);
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+            })
+        })
     }
 
     // --- threads ----------------------------------------------------------------
 
     /// Replies to a note (store first, relay top-up).
     pub fn thread(self: &Arc<Self>, id: EventId) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<FeedEvent> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 // Relay top-up for kind-1 replies (the SDK saves what it
                 // receives); the store holds the threaded set.
                 let filter = Filter::new().kind(Kind::TextNote).event(id).limit(200);
@@ -4930,18 +4734,8 @@ impl Core {
                 let profiles: Vec<Profile> =
                     cached.iter().filter_map(Profile::from_event).collect();
                 Ok(FeedEvent::Replies(replies, profiles))
-            }
-            .await;
-            match res {
-                Ok(ev) => {
-                    let _ = tx.send(ev);
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+            })
+        })
     }
 
     // --- write path ---------------------------------------------------------------
@@ -5780,11 +5574,8 @@ impl Core {
     /// Fetch your kind:10063 media-server list for the settings pane. Emits
     /// `FeedEvent::MediaServers` (empty list = the out-of-box default applies).
     pub fn fetch_media_servers(self: &Arc<Self>) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<Vec<String>> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 let me = active.me();
                 let filter = Filter::new()
                     .author(me)
@@ -5798,19 +5589,9 @@ impl Core {
                     .and_then(|events| events.into_iter().max_by_key(|ev| ev.created_at.as_secs()))
                     .map(|ev| server_tags(&ev))
                     .unwrap_or_default();
-                Ok(list)
-            }
-            .await;
-            match res {
-                Ok(list) => {
-                    let _ = tx.send(FeedEvent::MediaServers(list));
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+                Ok(FeedEvent::MediaServers(list))
+            })
+        })
     }
 
     /// Publish the media-server list (kind:10063, BUD-03) to your write
@@ -6246,11 +6027,9 @@ impl Core {
     /// list is finite, so the page carries has_more = false (the feed never
     /// orders an Older round for this mode).
     pub fn bookmarked_notes(self: &Arc<Self>) -> FeedRx {
-        let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<FeedEvent> = async {
-                let active = this.active().await?;
+        self.feed_task(move |active| {
+            Box::pin(async move {
                 let want: Vec<EventId> = this
                     .own_bookmarked
                     .lock()
@@ -6299,23 +6078,13 @@ impl Core {
                     }
                 }
                 events.sort_by_key(|e| std::cmp::Reverse(e.created_at));
-                let profiles = Self::profiles_for(&active, &events).await;
+                let profiles = Self::profiles_for(active, &events).await;
                 Ok(FeedEvent::Loaded(FeedPage {
                     notes: events,
                     profiles,
                 }))
-            }
-            .await;
-            match res {
-                Ok(ev) => {
-                    let _ = tx.send(ev);
-                }
-                Err(e) => {
-                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
-                }
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// Save a composer draft (D38): replace-or-insert by slot — the
@@ -7199,6 +6968,61 @@ impl Core {
             }
             eprintln!("[core] live stream ended (relay disconnects resume via fetches)");
         });
+    }
+
+    /// The fire-once task scaffold (#31 DRY): spawn on the runtime, route
+    /// one value to a fresh channel. Was a pasted dance at every
+    /// standalone fetch (json, nip05, image, poster, ...). The boxed
+    /// future keeps the spawn's Send bound nameable on stable (async
+    /// closures' CallOnceFuture can't be).
+    fn task_once<T>(
+        &self,
+        work: impl FnOnce() -> std::pin::Pin<Box<dyn Future<Output = T> + Send>> + Send + 'static,
+    ) -> mpsc::UnboundedReceiver<T>
+    where
+        T: Send + 'static,
+    {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.rt.spawn(async move {
+            let value = work().await;
+            let _ = tx.send(value);
+        });
+        rx
+    }
+
+    /// The FeedRx active-session scaffold (#31 DRY): spawn + the session
+    /// handshake + the Ok/Failed routing — the repeated skeleton.
+    /// `work` gets the resolved session and returns the event to route;
+    /// an error routes as FeedEvent::Failed. (Multi-send and
+    /// side-channel sites — the wallet emit, the two-snapshot list —
+    /// keep their own spawn.)
+    fn feed_task<F>(self: &Arc<Self>, work: F) -> FeedRx
+    where
+        F: for<'a> FnOnce(
+                &'a Active,
+            )
+                -> std::pin::Pin<Box<dyn Future<Output = Result<FeedEvent>> + Send + 'a>>
+            + Send
+            + 'static,
+    {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            match async {
+                let active = this.active().await?;
+                work(&active).await
+            }
+            .await
+            {
+                Ok(ev) => {
+                    let _ = tx.send(ev);
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
     }
 
     async fn active(&self) -> Result<Active> {
