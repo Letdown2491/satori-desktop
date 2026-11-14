@@ -1580,14 +1580,12 @@ impl Shell {
             // avatar (16px page band + 12px note-card padding).
             .pt(px(19.0))
             .gap_1()
-            // The columns toggle leads the rail while the workspace is
-            // up (the mode is the primary surface then — owner call);
-            // off, it sits in its slot by the pen.
-            .when(self.columns_on, |d| d.child(self.columns_toggle_button(cx)))
             // The user's avatar is the Profile spot (D38): clicking opens
             // the own profile, re-clicking the active one scrolls it back
             // up; the tick marks it (Home remains the Feed spot's re-click
-            // — go_home below).
+            // — go_home below). It LEADS the rail — including in columns
+            // mode, where the toggle follows it (owner correction: the
+            // toggle-first order was their earlier mistake).
             .child(self.rail_button(
                 "rail-profile",
                 "Profile",
@@ -1601,6 +1599,9 @@ impl Shell {
                     }
                 }),
             ))
+            // The columns toggle second while the workspace is up (the
+            // owner's standing order); off, it sits in its slot by the pen.
+            .when(self.columns_on, |d| d.child(self.columns_toggle_button(cx)))
             .when(!self.rail_hides(&ColumnKind::Feed), |d| {
                 d.child(self.rail_button(
                     "rail-feed",
@@ -1724,9 +1725,9 @@ impl Shell {
             ))
     }
 
-    /// The columns toggle's button — built per slot (it renders at the
-    /// rail's lead while the mode is on, in its slot by the pen when
-    /// off; an element can't be Childed twice).
+    /// The columns toggle's button — built per slot (it renders second
+    /// from the top, right under the avatar, while the mode is on, in
+    /// its slot by the pen when off; an element can't be Childed twice).
     fn columns_toggle_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         self.rail_button(
             "rail-columns",
