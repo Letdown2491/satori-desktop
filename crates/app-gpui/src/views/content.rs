@@ -160,14 +160,25 @@ pub fn article_cover(ev: &Event) -> Option<String> {
 }
 
 pub fn media_assets(ev: &Event) -> Vec<MediaAsset> {
+    media_assets_with(article::parse(ev).as_ref(), ev)
+}
+
+/// `media_assets` with the article parse handed in (#31's rich-card
+/// rider): the memo's miss path owns the one parse and shares it here,
+/// instead of `article::parse` running twice per miss (here and for the
+/// cover).
+fn media_assets_with(parsed: Option<&article::ArticleData>, ev: &Event) -> Vec<MediaAsset> {
     let mut out: Vec<MediaAsset> = Vec::new();
     // NIP-23: an article's cover rides the `image` tag, not the content and
     // not imeta — without it no fetch is ever queued and the card's media
     // frame stays an empty panel (article.ts header image). First, so the
-    // cover leads the reading order.
+    // cover leads the reading order. Kind-gated: article::parse itself
+    // accepts any event with a title tag, and a non-article `image` tag
+    // must not lead the body's media.
     if u16::from(ev.kind) == 30023
-        && let Some(cover) = article::parse(ev).and_then(|d| d.image)
-        && !cover.is_empty()
+        && let Some(cover) = parsed
+            .and_then(|d| d.image.clone())
+            .filter(|c| !c.is_empty())
     {
         out.push(MediaAsset::Picture { url: cover });
     }
@@ -579,24 +590,6 @@ pub(crate) fn word_flow<V: EventEmitter<Nav> + 'static>(
     flow
 }
 
-/// The RENDER path's per-event parse (audit perf H3): body() re-ran
-/// imeta::parse (a full tag-vec clone), media_urls and media_assets per
-/// visible card per frame — the fetch path's media_urls_cached existed,
-/// but render never used it. One memo here, keyed by event id: the parse
-/// is a pure function of the event (unlike the fetch memo, whose privacy
-/// mode rides its key). Bounded, oldest-dropped at 4096 events; an entry
-/// is a handful of url strings + the asset vec.
-struct BodyParse {
-    cover: Option<String>,
-    dims: HashMap<String, Option<(u32, u32)>>,
-    /// NIP-68 `alt` per url (WS4): the reader-side badge reads it here,
-    /// the composer-side editor wrote it into the same tag.
-    alts: HashMap<String, String>,
-    murls: std::sync::Arc<[String]>,
-    assets: Vec<MediaAsset>,
-    media_links: Vec<String>,
-}
-
 fn body_parse_cached(ev: &Event) -> std::sync::Arc<BodyParse> {
     const CAP: usize = 4096;
     struct Memo {
@@ -615,10 +608,11 @@ fn body_parse_cached(ev: &Event) -> std::sync::Arc<BodyParse> {
     if let Some(hit) = memo.map.get(&key) {
         return hit.clone();
     }
-    let assets = media_assets(ev);
+    let parsed_article = article::parse(ev).map(std::sync::Arc::new);
+    let assets = media_assets_with(parsed_article.as_deref(), ev);
     let media_links: Vec<String> = assets.iter().map(|a| a.url().to_string()).collect();
-    let cover = match article::parse(ev).map(|d| d.image) {
-        Some(Some(img)) if !img.is_empty() => Some(img),
+    let cover = match parsed_article.as_deref().and_then(|d| d.image.clone()) {
+        Some(img) if !img.is_empty() => Some(img),
         _ => assets.iter().find_map(|a| match a {
             MediaAsset::Picture { url } => Some(url.clone()),
             _ => None,
@@ -639,6 +633,7 @@ fn body_parse_cached(ev: &Event) -> std::sync::Arc<BodyParse> {
         murls: media_urls(ev).into(),
         assets,
         media_links,
+        article: parsed_article,
     });
     if memo.map.len() >= CAP
         && let Some(oldest) = memo.order.pop_front()
@@ -648,6 +643,41 @@ fn body_parse_cached(ev: &Event) -> std::sync::Arc<BodyParse> {
     memo.order.push_back(key.clone());
     memo.map.insert(key, parsed.clone());
     parsed
+}
+
+/// The RENDER path's per-event parse (audit perf H3): body() re-ran
+/// imeta::parse (a full tag-vec clone), media_urls and media_assets per
+/// visible card per frame — the fetch path's media_urls_cached existed,
+/// but render never used it. One memo here, keyed by event id: the parse
+/// is a pure function of the event (unlike the fetch memo, whose privacy
+/// mode rides its key). Bounded, oldest-dropped at 4096 events; an entry
+/// is a handful of url strings + the asset vec.
+///
+/// Exposed to sibling views (#31's rich-card riders): the article card
+/// reads the memoized NIP-23 data instead of re-cloning the tag vec per
+/// frame, and the classified card's gallery reads `dims`/`alts` instead
+/// of running `imeta::parse` twice.
+pub(crate) struct BodyParse {
+    pub(crate) cover: Option<String>,
+    pub(crate) dims: HashMap<String, Option<(u32, u32)>>,
+    /// NIP-68 `alt` per url (WS4): the reader-side badge reads it here,
+    /// the composer-side editor wrote it into the same tag.
+    pub(crate) alts: HashMap<String, String>,
+    murls: std::sync::Arc<[String]>,
+    assets: Vec<MediaAsset>,
+    media_links: Vec<String>,
+    article: Option<std::sync::Arc<article::ArticleData>>,
+}
+
+pub(crate) fn body_parse(ev: &Event) -> std::sync::Arc<BodyParse> {
+    body_parse_cached(ev)
+}
+
+/// The NIP-23 article data, riding the same memo (#31's rich-card rider):
+/// `article::parse` clones the whole tag vec, and it ran per visible card
+/// per frame in cards.rs.
+pub fn article_data_cached(ev: &Event) -> Option<std::sync::Arc<article::ArticleData>> {
+    body_parse_cached(ev).article.clone()
 }
 
 /// The one actor header every "someone did X" row wears — notification
