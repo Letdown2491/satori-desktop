@@ -235,6 +235,16 @@ impl Input {
         self.placeholder = placeholder.to_string().into();
     }
 
+    /// A single-line input with a shape-hinting placeholder (settings'
+    /// add fields and the columns + menu's rows). The views' verbatim
+    /// `single_line` helpers had already twinned — the D55 lens pulled
+    /// the constructor into the widget at birth's end.
+    pub fn single_line(placeholder: &str, cx: &mut Context<Self>) -> Self {
+        let mut i = Self::new(cx);
+        i.multiline = false;
+        i.placeholder(placeholder)
+    }
+
     /// Replace the whole buffer, caret at the end (draft restore).
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.content = text.to_string();

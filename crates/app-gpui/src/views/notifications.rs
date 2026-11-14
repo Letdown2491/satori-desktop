@@ -1090,15 +1090,10 @@ impl Render for NotificationsView {
         let parents = self.parents.clone();
         let me = self.me.clone();
         // The action row's glyph states, snapshotted per render (feed.rs's
-        // FeedSnap discipline, inline — the page is bounded content).
-        let liked = self.engagement.liked.clone();
-        let reposted = self.engagement.reposted.clone();
-        let reaction_picker = self.engagement.reaction_picker.clone();
-        let bookmarked = self.engagement.bookmarked.clone();
-        let zapped = self.engagement.zapped.clone();
-        let zap_pending = self.engagement.zap_pending.clone();
-        let wallet_ready = self.engagement.wallet_ready;
-        let reduced_motion = crate::desktop::Desktop::get(cx).reduced_motion;
+        // FeedSnap discipline, inline — the page is bounded content). One
+        // mirror clone seeds the rows' action_state lookups.
+        let engagement = Arc::new(self.engagement.clone());
+        let reduced_motion = actions::reduced_motion(cx);
         let empty = rows.is_empty();
         // WS4 receipts: the suppressed page (core's last notifications
         // build) — the pane's bottom strip lists each hidden item (author,
@@ -1196,18 +1191,8 @@ impl Render for NotificationsView {
                                     let time = crate::timefmt::stamp(secs, cx);
                                     crate::timefmt::ensure(secs, cx);
                                     let id_hex = ev.id.to_string();
-                                    let st = actions::ActionState {
-                                        liked: liked.contains(&id_hex),
-                                        reposted: reposted.contains(&id_hex),
-                                        bookmarked: bookmarked.contains(&id_hex),
-                                        zapped: zapped.contains(&id_hex),
-                                        zapping: zap_pending.contains(&id_hex),
-                                        wallet_ready,
-                                        picker_open: reaction_picker.as_deref() == Some(&id_hex),
-                                        // The notification IS the reply.
-                                        replies: 0,
-                                        reduced_motion,
-                                    };
+                                    // The notification IS the reply.
+                                    let st = engagement.action_state(&id_hex, 0, reduced_motion);
                                     notif_card(
                                         idx,
                                         ev,

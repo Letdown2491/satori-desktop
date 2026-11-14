@@ -882,6 +882,18 @@ pub(crate) fn repost_inner(ev: &Event) -> Option<Event> {
     (inner.kind == Kind::TextNote || super::cards::is_feed_kind(inner.kind)).then_some(inner)
 }
 
+/// The article card's summary line: the tag summary, else the first ~140
+/// chars of the body (article.ts). One home for the rule — cards.rs and
+/// wire.rs had already twinned it, and the twin was one title-size
+/// divergence away from drifting.
+pub(crate) fn article_summary(data: &article::ArticleData, raw: &str) -> String {
+    if data.summary.is_empty() {
+        raw.chars().take(140).collect::<String>()
+    } else {
+        data.summary.clone()
+    }
+}
+
 /// `repost_inner`, memoized per event (audit perf: a repost's content IS
 /// the boosted event's full JSON, and the feed's item closure re-parsed
 /// it twice per visible repost row per frame — card_media_urls and

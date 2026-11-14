@@ -143,11 +143,11 @@ impl SettingsView {
             focus: cx.focus_handle(),
             relays: relay_rows(core.current_relays()),
             direct_relays: satori_core::net_guard::direct_relays(),
-            add_relay: cx.new(|cx| single_line("wss://…", cx)),
+            add_relay: cx.new(|cx| Input::single_line("wss://…", cx)),
             relay_read: true,
             relay_write: true,
             servers: vec![],
-            add_server: cx.new(|cx| single_line("https://…", cx)),
+            add_server: cx.new(|cx| Input::single_line("https://…", cx)),
             dark: p.dark,
             undo_enabled: p.undo_enabled.unwrap_or(true),
             undo_secs_val,
@@ -350,7 +350,7 @@ impl SettingsView {
         if url.is_empty() {
             return;
         }
-        if !url.starts_with("wss://") && !url.starts_with("ws://") {
+        if !satori_core::net_guard::is_relay_url(&url) {
             self.set_status("Relay URLs start with wss://".into(), true);
             cx.notify();
             return;
@@ -1692,12 +1692,6 @@ fn relay_rows((read, write): (Vec<String>, Vec<String>)) -> Vec<RelayEntry> {
         }
     }
     rows
-}
-
-fn single_line(placeholder: &str, cx: &mut Context<Input>) -> Input {
-    let mut i = Input::new(cx);
-    i.multiline = false;
-    i.placeholder(placeholder)
 }
 
 /// The quiet pill switch (sumi-e: a dot moving between two states).

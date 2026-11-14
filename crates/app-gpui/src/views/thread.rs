@@ -671,18 +671,14 @@ impl Render for ThreadView {
         // The action row's glyph states, snapshotted once per render
         // (mirrors mutated optimistically by the ActionHost impl).
         let reduced_motion = actions::reduced_motion(cx);
-        let note_state = move |note: &Event| actions::ActionState {
-            liked: eng.liked.contains(&note.id.to_string()),
-            reposted: eng.reposted.contains(&note.id.to_string()),
-            bookmarked: eng.bookmarked.contains(&note.id.to_string()),
-            zapped: eng.zapped.contains(&note.id.to_string()),
-            zapping: eng.zap_pending.contains(&note.id.to_string()),
-            wallet_ready: eng.wallet_ready,
-            picker_open: eng.reaction_picker.as_deref() == Some(&note.id.to_string()),
-            // The thread pane shows the conversation itself; a count on
-            // the bubble would repeat what the pane already renders.
-            replies: 0,
-            reduced_motion,
+        let note_state = move |note: &Event| {
+            eng.action_state(
+                &note.id.to_string(),
+                // The thread pane shows the conversation itself; a count
+                // on the bubble would repeat what the pane already renders.
+                0,
+                reduced_motion,
+            )
         };
         // The WS3 collapse line's click target (the list closure moves its
         // own clone; `handle` stays for the anchor above).

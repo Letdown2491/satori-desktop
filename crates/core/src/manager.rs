@@ -6673,15 +6673,30 @@ impl Core {
     /// whatever session is active at arm time, and the wire's lifetime
     /// is the VIEW's receiver, not the login's.
     ///
-    /// When the view dies the broadcast has no receivers; the drain
-    /// task's next send fails and it unsubscribes — a closed column
-    /// stops paying for its socket.
+    /// The URL passes the ONE ruleset (`net_guard::routable_relay`:
+    /// wss only, public addresses only) at this CORE door — a typed or
+    /// prefs-restored relay can never aim the wire transport at a
+    /// private endpoint, and every future caller inherits the screen
+    /// (the D61 no-second-ruleset lesson). Refusal returns a closed
+    /// receiver: nothing dials, the view's pump exits quietly.
+    ///
+    /// When the view dies the broadcast's receiver count falls to zero;
+    /// the drain task notices on its next send OR its 10s idle tick —
+    /// whichever comes first — and unsubscribes. A closed column stops
+    /// paying for its socket even when the relay has nothing to say.
     pub fn subscribe_relay_wire(
         self: &Arc<Self>,
         url: String,
     ) -> tokio::sync::broadcast::Receiver<Event> {
         use futures_util::StreamExt as _;
         let (tx, rx) = tokio::sync::broadcast::channel(128);
+        if !crate::net_guard::routable_relay(&url) {
+            eprintln!(
+                "[core] wire: {} refused (not a routable relay)",
+                crate::pool::clean_reason(&url)
+            );
+            return rx;
+        }
         let this = self.clone();
         self.rt.spawn(async move {
             let Ok(active) = this.active().await else {
@@ -6699,19 +6714,37 @@ impl Core {
                 )]))
                 .await
             else {
-                eprintln!("[core] wire: subscribe to {url} failed");
+                eprintln!(
+                    "[core] wire: subscribe to {} failed",
+                    crate::pool::clean_reason(&url)
+                );
                 return;
             };
             let mut notifications = pool.client().notifications();
-            while let Some(n) = notifications.next().await {
+            // The idle sweep: teardown needs no event to arrive — the
+            // receiver count is the truth about whether anyone watches.
+            let mut idle = tokio::time::interval(std::time::Duration::from_secs(10));
+            idle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                let n = tokio::select! {
+                    _ = idle.tick() => {
+                        if tx.receiver_count() == 0 {
+                            eprintln!("[core] wire: {} unwatched; unsubscribing", url);
+                            break;
+                        }
+                        continue;
+                    }
+                    n = notifications.next() => n,
+                };
                 let event = match n {
-                    nostr_sdk::client::ClientNotification::Event {
+                    Some(nostr_sdk::client::ClientNotification::Event {
                         subscription_id,
                         event,
                         ..
-                    } if output.id() == &subscription_id => *event,
-                    nostr_sdk::client::ClientNotification::Shutdown => break,
-                    _ => continue,
+                    }) if output.id() == &subscription_id => *event,
+                    Some(nostr_sdk::client::ClientNotification::Shutdown) => break,
+                    Some(_) => continue,
+                    None => break,
                 };
                 // The chokepoint's kind-5/expiry arms (pool.ts onevent):
                 // tombstones and expired copies never reach a view.
