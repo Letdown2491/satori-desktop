@@ -110,7 +110,13 @@ mod tests {
                 let mode = std::fs::metadata(&path).unwrap().permissions().mode();
                 assert_eq!(mode & 0o777, 0o600, "fallback secret file must be 0600");
                 assert_eq!(
-                    secrets::load(secrets::NSEC).await.unwrap().as_deref(),
+                    // Two deref levels (Zeroizing<String> → String → str):
+                    // the round-trip copy is zeroized-on-drop (#31).
+                    secrets::load(secrets::NSEC)
+                        .await
+                        .unwrap()
+                        .as_deref()
+                        .map(String::as_str),
                     Some(TEST_SECRET)
                 );
             });

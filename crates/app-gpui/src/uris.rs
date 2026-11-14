@@ -127,6 +127,15 @@ pub fn acquire(uri: Option<&str>) -> Instance {
                 // truncated one) past the cap parses as unhandled and dies
                 // in route's ignore line — noisy at worst.
                 let mut stream = stream;
+                // The peer is the same uid or the connection is dropped
+                // (#31 hardening, fail-closed): the 0700 dir is the only
+                // boundary, and SO_PEERCRED makes it two. A same-machine
+                // impersonator (another user's process that can bind a
+                // name... they can't take THIS name, but a stolen/tmpfs
+                // mount could serve it) reads nothing.
+                if !peer_is_self(&stream) {
+                    continue;
+                }
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 4096];
                 loop {
@@ -147,6 +156,38 @@ pub fn acquire(uri: Option<&str>) -> Instance {
             }
         });
     Instance::Primary(Some(rx))
+}
+
+/// SO_PEERCRED check (Linux): the connected peer runs as the same uid.
+/// A getsockopt failure refuses the peer — hardening must not open a
+/// hole when the credential read fails.
+#[cfg(target_os = "linux")]
+fn peer_is_self(stream: &UnixStream) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: plain SO_PEERCRED read into a local ucred; fd is live.
+    let ok = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    } == 0;
+    ok && cred.uid == unsafe { libc::getuid() }
+}
+
+/// Non-linux unix: no credential check compiled in (the 0700 dir is the
+/// boundary, as before).
+#[cfg(not(target_os = "linux"))]
+fn peer_is_self(_stream: &UnixStream) -> bool {
+    true
 }
 
 #[cfg(test)]
