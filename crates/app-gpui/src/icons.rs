@@ -239,6 +239,10 @@ pub fn arrow_up_icon(color: u32) -> impl IntoElement {
     icon(arrow_up, color, 16.0)
 }
 
+pub fn columns_icon(color: u32) -> impl IntoElement {
+    icon(columns, color, 20.0)
+}
+
 // The ensō — the brush circle with a gap, drawn as a slightly spiralling
 // arc that tapers toward the tail (the brush lifting off). It opens every
 // session: the waiting mark of the login flow.
@@ -382,6 +386,14 @@ fn arrow_up(b: &mut PathBuilder, g: &Grid) {
     b.move_to(g.p(6.5, 11.0));
     b.line_to(g.p(12.0, 5.5));
     b.line_to(g.p(17.5, 11.0));
+}
+
+/// The columns workspace (D68): a triptych — three pane strokes.
+fn columns(b: &mut PathBuilder, g: &Grid) {
+    for x in [5.0, 12.0, 19.0] {
+        b.move_to(g.p(x, 5.0));
+        b.line_to(g.p(x, 19.0));
+    }
 }
 
 /// The ensō at display size — a brush circle, so the stroke runs heavier

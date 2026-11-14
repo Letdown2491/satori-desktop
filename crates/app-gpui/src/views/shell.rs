@@ -10,8 +10,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use gpui::{
-    AnyView, App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
-    KeyDownEvent, ObjectFit, Render, SharedString, Stateful, Window, div, img, prelude::*, px, rgb,
+    AnyElement, AnyView, App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle,
+    Focusable, KeyDownEvent, ObjectFit, Render, SharedString, Stateful, Window, div, img,
+    prelude::*, px, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, Profile, PublishEvent};
@@ -80,6 +81,60 @@ pub enum Pane {
     Wallet(Entity<WalletView>),
 }
 
+/// The columns workspace's hard cap (D68): four streams is past anything
+/// a laptop window carries, and the cap bounds the live-receiver and
+/// on-screen-pin surface the audits flagged.
+const COLUMN_CAP: usize = 4;
+
+/// The stream kinds a column can pin (D68, v1: the ambient surfaces).
+/// Hashtag columns need a tag parameter — they ride Phase 2's layout
+/// spec, not the fixed v1 menu.
+#[derive(Clone, Copy, PartialEq)]
+enum ColumnKind {
+    Feed,
+    Articles,
+    Notifications,
+    Search,
+}
+
+impl ColumnKind {
+    fn label(self) -> &'static str {
+        match self {
+            ColumnKind::Feed => "Home",
+            ColumnKind::Articles => "Articles",
+            ColumnKind::Notifications => "Notifications",
+            ColumnKind::Search => "Search",
+        }
+    }
+
+    fn icon(self, color: u32) -> AnyElement {
+        match self {
+            ColumnKind::Feed => icons::stream_icon(color).into_any_element(),
+            ColumnKind::Articles => icons::article_icon(color).into_any_element(),
+            ColumnKind::Notifications => icons::bell_icon(color).into_any_element(),
+            ColumnKind::Search => icons::search_icon(color).into_any_element(),
+        }
+    }
+
+    /// Every kind, menu order — the add-column menu walks this and
+    /// offers the ones not already pinned.
+    const ALL: [ColumnKind; 4] = [
+        ColumnKind::Feed,
+        ColumnKind::Articles,
+        ColumnKind::Notifications,
+        ColumnKind::Search,
+    ];
+}
+
+/// One pinned column of the workspace (D68): a stream surface living
+/// OUTSIDE the navigation stack — its own pane entity, pumping and
+/// scrolling independently. Detail views never land here; they stack
+/// over the whole workspace (D68's drill-in rule).
+struct Column {
+    kind: ColumnKind,
+    pane: Pane,
+}
+
 /// Shell-to-root events. The root subscribes at both shell-creation sites
 /// (startup session resume and Login::Approved) — today only the sign-out
 /// handoff, which swaps the window back to the login doors.
@@ -136,6 +191,16 @@ pub struct Shell {
     /// discovered at the point of action (publish/zap whispers). The
     /// durable diagnostics live in the settings pane's relay-health rows.
     stack: Vec<Pane>,
+    /// The columns workspace (D68): pinned stream surfaces shown while
+    /// `columns_on` AND the drill stack is empty. Toggled from the rail
+    /// (or `c`); the layout persists in Phase 2.
+    columns_on: bool,
+    columns: Vec<Column>,
+    /// The focused column: owns Esc's target, the j/k feed cursor and
+    /// the rail's stream-spot ticking while the workspace is up.
+    focused_col: usize,
+    /// The add-column menu's open flag (the workspace's + affordance).
+    add_menu: bool,
     /// The signed-in identity: the rail's top mark is the user's avatar
     /// (replacing the ensō as the home glyph).
     me: Option<PublicKey>,
@@ -165,6 +230,10 @@ impl Shell {
             notif_unread: false,
             outbox_pending: 0,
             stack: vec![],
+            columns_on: false,
+            columns: Vec::new(),
+            focused_col: 0,
+            add_menu: false,
             me: None,
             me_profile: None,
         };
@@ -432,6 +501,150 @@ impl Shell {
         cx.notify();
     }
 
+    // --- the columns workspace (D68) --------------------------------------
+
+    /// Wire a pane's Nav dispatch (the same one every pane gets) — only
+    /// the stream variants a column can hold.
+    fn subscribe_pane(&mut self, pane: &Pane, cx: &mut Context<Self>) {
+        match pane {
+            Pane::Feed(v) | Pane::Articles(v) | Pane::Hashtag(v) => self.subscribe_nav(v, cx),
+            Pane::Notifications(v) => self.subscribe_nav(v, cx),
+            Pane::Search(v) => self.subscribe_nav(v, cx),
+            _ => {}
+        }
+    }
+
+    /// Rail toggle (or `c`): enter the workspace if off, leave it if on.
+    fn toggle_columns(&mut self, cx: &mut Context<Self>) {
+        if self.columns_on {
+            self.exit_columns(cx);
+        } else {
+            self.enter_columns(cx);
+        }
+    }
+
+    /// Enter the workspace: unwind the drill stack with its earned pop
+    /// semantics (composer draft stash, edit-profile refresh), release
+    /// the base pane's media pins, and seed the default layout once.
+    /// The stack drains EMPTY in columns mode — the base feed entity
+    /// would sit unrendered but alive (live receiver, page in memory)
+    /// otherwise; a fresh one is built on exit.
+    fn enter_columns(&mut self, cx: &mut Context<Self>) {
+        if self.columns_on {
+            return;
+        }
+        self.columns_on = true;
+        while !self.stack.is_empty() {
+            self.back(cx);
+        }
+        if self.columns.is_empty() {
+            self.pin_column(ColumnKind::Feed, cx);
+            self.pin_column(ColumnKind::Notifications, cx);
+        }
+        self.focused_col = 0;
+        cx.notify();
+    }
+
+    /// Leave the workspace: the columns drop (media released), a fresh
+    /// base feed fills the stack (the Phase 2 layout persistence will
+    /// also restore the pre-columns trail).
+    fn exit_columns(&mut self, cx: &mut Context<Self>) {
+        if !self.columns_on {
+            return;
+        }
+        self.columns_on = false;
+        self.add_menu = false;
+        for col in self.columns.drain(..) {
+            col.pane.release_media(cx);
+        }
+        self.focused_col = 0;
+        let feed = cx.new(|cx| Feed::new(self.core.clone(), cx));
+        self.subscribe_nav(&feed, cx);
+        self.stack.push(Pane::Feed(feed));
+        cx.notify();
+    }
+
+    /// Pin a new column of the kind (the add menu only offers unpinned
+    /// kinds, and the cap bounds the workspace — a full workspace ignores
+    /// the ask).
+    fn pin_column(&mut self, kind: ColumnKind, cx: &mut Context<Self>) {
+        if self.columns.len() >= COLUMN_CAP {
+            return;
+        }
+        let pane = match kind {
+            ColumnKind::Feed => Pane::Feed(cx.new(|cx| Feed::new(self.core.clone(), cx))),
+            ColumnKind::Articles => {
+                Pane::Articles(cx.new(|cx| Feed::articles(self.core.clone(), cx)))
+            }
+            ColumnKind::Notifications => {
+                // Opening notifications marks seen (the constructor does
+                // the read-state advance); the dot goes quiet at once,
+                // same as the drill-in open below.
+                self.notif_unread = false;
+                Pane::Notifications(cx.new(|cx| NotificationsView::new(self.core.clone(), cx)))
+            }
+            ColumnKind::Search => Pane::Search(cx.new(|cx| SearchView::new(self.core.clone(), cx))),
+        };
+        self.subscribe_pane(&pane, cx);
+        self.columns.push(Column { kind, pane });
+        self.focused_col = self.columns.len() - 1;
+        cx.notify();
+    }
+
+    /// A rail stream tap in columns mode: focus the column of the kind,
+    /// pin it if missing (up to the cap). Re-tapping the FOCUSED
+    /// column's kind scrolls it back to the top (the re-click affordance).
+    fn ensure_column(&mut self, kind: ColumnKind, cx: &mut Context<Self>) {
+        match self.columns.iter().position(|c| c.kind == kind) {
+            Some(i) if i == self.focused_col => self.column_to_top(i, cx),
+            Some(i) => {
+                self.focused_col = i;
+                if kind == ColumnKind::Notifications {
+                    self.notif_unread = false;
+                }
+                cx.notify();
+            }
+            None => self.pin_column(kind, cx),
+        }
+    }
+
+    /// Unpin column `i` (the header's ×): media released, focus clamped.
+    fn remove_column(&mut self, i: usize, cx: &mut Context<Self>) {
+        if i >= self.columns.len() {
+            return;
+        }
+        let col = self.columns.remove(i);
+        col.pane.release_media(cx);
+        if self.focused_col >= self.columns.len() {
+            self.focused_col = self.columns.len().saturating_sub(1);
+        }
+        cx.notify();
+    }
+
+    /// The focused column's stream back to its top (the re-click
+    /// affordance; j/k's cursor lives in the pane).
+    fn column_to_top(&self, i: usize, cx: &mut Context<Self>) {
+        match self.columns.get(i).map(|c| &c.pane) {
+            Some(Pane::Feed(v)) | Some(Pane::Articles(v)) | Some(Pane::Hashtag(v)) => {
+                v.update(cx, |feed, _| feed.scroll_top());
+            }
+            Some(Pane::Notifications(v)) => {
+                v.update(cx, |n, _| n.scroll_top());
+            }
+            _ => {}
+        }
+    }
+
+    /// True while the workspace owns the view (columns mode, no drill up).
+    fn workspace_up(&self) -> bool {
+        self.columns_on && self.stack.is_empty()
+    }
+
+    /// The focused column's stream pane, if the workspace is up.
+    fn focused_stream(&self) -> Option<&Pane> {
+        self.columns.get(self.focused_col).map(|c| &c.pane)
+    }
+
     /// Bell-dot poll, every 90s (shell.rs poll_notif): one notifications()
     /// drain, kept until the NotifDot verdict.
     fn watch_notif(&self, cx: &mut Context<Self>) {
@@ -672,6 +885,16 @@ impl Shell {
     /// moves its row cursor one note down/up. Quiet — the list scrolls,
     /// nothing else changes.
     fn feed_nav(&mut self, delta: isize, cx: &mut Context<Self>) {
+        // The workspace up: the cursor steps the FOCUSED column's feed.
+        if self.workspace_up() {
+            match self.focused_stream().cloned() {
+                Some(Pane::Feed(view)) | Some(Pane::Articles(view)) | Some(Pane::Hashtag(view)) => {
+                    view.update(cx, |feed, _| feed.key_nav(delta));
+                }
+                _ => {}
+            }
+            return;
+        }
         match self.stack.last().cloned() {
             Some(Pane::Feed(view)) | Some(Pane::Articles(view)) | Some(Pane::Hashtag(view)) => {
                 view.update(cx, |feed, _| feed.key_nav(delta));
@@ -684,6 +907,18 @@ impl Shell {
     /// active feed pane's cursor row steps if it paints a multi-image
     /// carousel, and the pane repaints; otherwise the key does nothing.
     fn carousel_nav(&mut self, delta: isize, cx: &mut Context<Self>) {
+        // The workspace up: the FOCUSED column's carousel steps.
+        if self.workspace_up() {
+            match self.focused_stream().cloned() {
+                Some(Pane::Feed(view)) | Some(Pane::Articles(view)) | Some(Pane::Hashtag(view)) => {
+                    view.update(cx, |feed, cx| {
+                        feed.carousel_nav(delta, cx);
+                    });
+                }
+                _ => {}
+            }
+            return;
+        }
         match self.stack.last().cloned() {
             Some(Pane::Feed(view)) | Some(Pane::Articles(view)) | Some(Pane::Hashtag(view)) => {
                 view.update(cx, |feed, cx| {
@@ -748,7 +983,19 @@ impl Shell {
             cx.notify();
             return;
         }
-        if self.stack.len() > 1 {
+        // The workspace owns the view when no drill is up: Esc closes the
+        // add-column menu if it's open, and nothing pops.
+        if self.workspace_up() {
+            if self.add_menu {
+                self.add_menu = false;
+                cx.notify();
+            }
+            return;
+        }
+        // In columns mode the stack holds ONLY drills, so a single pane
+        // pops (back to the workspace); single-pane mode keeps the base
+        // pane (len 1 is home, nothing to pop).
+        if self.stack.len() > 1 || self.columns_on {
             // Closing a composer stashes the top-level buffer (composer.rs:288);
             // reply composers leave the draft untouched (`draft_candidate`).
             if let Some(Pane::Composer(c)) = self.stack.last()
@@ -862,7 +1109,18 @@ enum Spot {
 }
 
 impl Shell {
+    /// The workspace up: the FOCUSED column's stream ticks; a drill over
+    /// the workspace reads like any stacked pane.
     fn active_spot(&self, cx: &App) -> Option<Spot> {
+        if self.workspace_up() {
+            return match self.focused_stream() {
+                Some(Pane::Feed(_)) => Some(Spot::Feed),
+                Some(Pane::Articles(_)) => Some(Spot::Articles),
+                Some(Pane::Search(_)) => Some(Spot::Search),
+                Some(Pane::Notifications(_)) => Some(Spot::Notif),
+                _ => None,
+            };
+        }
         match self.stack.last() {
             Some(Pane::Feed(_)) => Some(Spot::Feed),
             Some(Pane::Articles(_)) => Some(Spot::Articles),
@@ -879,8 +1137,15 @@ impl Shell {
     }
 
     /// Home: back to the feed, unstacking whatever depth we're at (back()
-    /// handles each pop, including the composer draft stash).
+    /// handles each pop, including the composer draft stash). In columns
+    /// mode home is the workspace — every drill pops off.
     fn go_home(&mut self, cx: &mut Context<Self>) {
+        if self.columns_on {
+            while !self.stack.is_empty() {
+                self.back(cx);
+            }
+            return;
+        }
         while self.stack.len() > 1 {
             self.back(cx);
         }
@@ -904,6 +1169,12 @@ impl Shell {
     /// The active pane's scroll-to-top (rail re-click, the floating
     /// whisper): whichever scrollable list is on top of the stack.
     fn pane_to_top(&self, cx: &mut Context<Self>) {
+        // The workspace up: the focused column's stream scrolls.
+        if self.workspace_up() {
+            let i = self.focused_col;
+            self.column_to_top(i, cx);
+            return;
+        }
         match self.stack.last().cloned() {
             Some(Pane::Feed(view)) | Some(Pane::Articles(view)) | Some(Pane::Hashtag(view)) => {
                 view.update(cx, |feed, _| feed.scroll_top());
@@ -982,7 +1253,9 @@ impl Shell {
                 icons::stream_icon(ink(feed_active)),
                 feed_active,
                 cx.listener(move |shell, _, _, cx| {
-                    if feed_active {
+                    if shell.columns_on {
+                        shell.ensure_column(ColumnKind::Feed, cx);
+                    } else if feed_active {
                         // Re-click the active spot: back to the top.
                         shell.pane_to_top(cx);
                     } else {
@@ -996,7 +1269,9 @@ impl Shell {
                 icons::article_icon(ink(active == Some(Spot::Articles))),
                 active == Some(Spot::Articles),
                 cx.listener(move |shell, _, _, cx| {
-                    if shell.active_spot(cx) != Some(Spot::Articles) {
+                    if shell.columns_on {
+                        shell.ensure_column(ColumnKind::Articles, cx);
+                    } else if shell.active_spot(cx) != Some(Spot::Articles) {
                         shell.open_articles(cx);
                     }
                 }),
@@ -1018,7 +1293,9 @@ impl Shell {
                 icons::search_icon(ink(active == Some(Spot::Search))),
                 active == Some(Spot::Search),
                 cx.listener(move |shell, _, _, cx| {
-                    if shell.active_spot(cx) != Some(Spot::Search) {
+                    if shell.columns_on {
+                        shell.ensure_column(ColumnKind::Search, cx);
+                    } else if shell.active_spot(cx) != Some(Spot::Search) {
                         shell.open_search(cx);
                     }
                 }),
@@ -1043,12 +1320,27 @@ impl Shell {
                         }),
                     active == Some(Spot::Notif),
                     cx.listener(move |shell, _, _, cx| {
-                        if shell.active_spot(cx) != Some(Spot::Notif) {
+                        if shell.columns_on {
+                            shell.ensure_column(ColumnKind::Notifications, cx);
+                        } else if shell.active_spot(cx) != Some(Spot::Notif) {
                             shell.open_notifications(cx);
                         }
                     }),
                 ),
             )
+            // The columns workspace toggle (D68): vermilion while the mode
+            // is on (a state, like compose's speaking pen).
+            .child(self.rail_button(
+                "rail-columns",
+                "Columns",
+                icons::columns_icon(if self.columns_on {
+                    theme::vermilion()
+                } else {
+                    ink(false)
+                }),
+                self.columns_on,
+                cx.listener(move |shell, _, _, cx| shell.toggle_columns(cx)),
+            ))
             // Compose speaks (it broadcasts) — the pen wears vermilion.
             .child(self.rail_button(
                 "rail-settings",
@@ -1189,11 +1481,15 @@ impl Focusable for Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let depth = self.stack.len();
         // Built before the pane borrow: rail() takes &mut self (snapshot
-        // memo), and `pane` holds the stack for the rest of the render.
+        // memo). The content is the columns workspace while the mode is
+        // on and no drill is up; otherwise the single-pane reading column.
         let rail = self.rail(cx);
-        let pane = self.stack.last().unwrap();
+        let content: AnyElement = if self.workspace_up() {
+            self.workspace(cx).into_any_element()
+        } else {
+            self.pane_column(cx).into_any_element()
+        };
         if !self.focused_once || self.refocus {
             self.focused_once = true;
             self.refocus = false;
@@ -1246,16 +1542,28 @@ impl Render for Shell {
                     if ev.keystroke.key == "n" {
                         shell.open_composer(None, None, cx);
                     }
+                    // The columns workspace toggle (D68).
+                    if ev.keystroke.key == "c" {
+                        shell.toggle_columns(cx);
+                    }
                     // No GTK accel — the header seals are unclickable when the
                     // window is CSD-tiled (§9.1 finding), so the keyboard is
                     // the reliable way in.
                     if ev.keystroke.key == "u" {
-                        shell.open_notifications(cx);
+                        if shell.columns_on {
+                            shell.ensure_column(ColumnKind::Notifications, cx);
+                        } else {
+                            shell.open_notifications(cx);
+                        }
                     }
                     // Ported: crates/app/src/main.rs — "/" opens search
                     // (app.goto-search accel).
                     if ev.keystroke.key == "/" {
-                        shell.open_search(cx);
+                        if shell.columns_on {
+                            shell.ensure_column(ColumnKind::Search, cx);
+                        } else {
+                            shell.open_search(cx);
+                        }
                     }
                     // j/k: one note down/up in the active feed (the list
                     // model makes it a scroll_to — nothing fancy, §1.3
@@ -1277,7 +1585,11 @@ impl Render for Shell {
                         shell.carousel_nav(1, cx);
                     }
                     if ev.keystroke.key == "a" {
-                        shell.open_articles(cx);
+                        if shell.columns_on {
+                            shell.ensure_column(ColumnKind::Articles, cx);
+                        } else {
+                            shell.open_articles(cx);
+                        }
                     }
                     // No GTK accel — same CSD story: the header Settings seal
                     // needs a keyboard way in.
@@ -1300,63 +1612,7 @@ impl Render for Shell {
             .items_start()
             .justify_center()
             .child(rail)
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .max_w(px(content::COL_W))
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    // The quiet band every page starts under (uniform top
-                    // padding — the feed's first note, the deep panes'
-                    // title row: all begin 16px down).
-                    .pt(px(16.0))
-                    .when(depth > 1, |d| d.child(self.title_row(cx)))
-                    // The reading column's top band is the pane's, but the
-                    // outbox honesty pill (D26: a state, not an error; §4.4)
-                    // floats over any pane — queued notes are the SHELL's
-                    // news, whatever you're reading.
-                    .when(self.outbox_pending > 0, |d| {
-                        let n = self.outbox_pending;
-                        d.child(states::offline_pill(&format!(
-                            "{n} note{} queued for delivery, the relays will answer",
-                            if n == 1 { "" } else { "s" }
-                        )))
-                    })
-                    .child(match pane {
-                        Pane::Feed(view) => view.clone().into_any_element(),
-                        Pane::Articles(view) => view.clone().into_any_element(),
-                        Pane::Library(view) => view.clone().into_any_element(),
-                        Pane::Hashtag(view) => view.clone().into_any_element(),
-                        Pane::Thread(view) => view.clone().into_any_element(),
-                        Pane::Profile(view) => view.clone().into_any_element(),
-                        Pane::EditProfile(view) => view.clone().into_any_element(),
-                        Pane::Notifications(view) => view.clone().into_any_element(),
-                        Pane::Search(view) => view.clone().into_any_element(),
-                        Pane::Settings(view) => view.clone().into_any_element(),
-                        Pane::Article(view) => view.clone().into_any_element(),
-                        Pane::Composer(view) => view.clone().into_any_element(),
-                        Pane::Wallet(view) => view.clone().into_any_element(),
-                    })
-                    // The floating back-to-top whisper: the ACTIVE pane's own
-                    // deep state, read straight from the view (never a shell
-                    // copy — a stale flag would show the whisper over the
-                    // wrong pane after a switch).
-                    .when(
-                        Self::pane_deep(pane, cx)
-                            && matches!(
-                                pane,
-                                Pane::Feed(_)
-                                    | Pane::Articles(_)
-                                    | Pane::Hashtag(_)
-                                    | Pane::Notifications(_)
-                                    | Pane::Library(_)
-                            ),
-                        |d| d.child(self.floating_top(cx)),
-                    ),
-            )
+            .child(content)
             .when(self.hold.is_some(), |d| d.child(self.hold_toast(cx)))
             .when_some(self.lightbox.clone(), |d, (urls, idx)| {
                 d.child(lightbox_overlay(&urls, idx, cx))
@@ -1374,6 +1630,276 @@ impl Render for Shell {
 }
 
 impl Shell {
+    /// The single-pane reading column (mode off, or a drill over the
+    /// workspace): the rail-content contract — capped width, the quiet
+    /// top band, the title row over depth 1 (or any drill in columns
+    /// mode, whose back door returns to the workspace), the outbox pill,
+    /// the pane, the deep-scroll whisper.
+    fn pane_column(&mut self, cx: &mut Context<Self>) -> Div {
+        let depth = self.stack.len();
+        let pane = self.stack.last().unwrap();
+        div()
+            .relative()
+            .flex_1()
+            .max_w(px(content::COL_W))
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            // The quiet band every page starts under (uniform top
+            // padding — the feed's first note, the deep panes'
+            // title row: all begin 16px down).
+            .pt(px(16.0))
+            .when(depth > 1 || self.columns_on, |d| {
+                d.child(self.title_row(cx))
+            })
+            // The reading column's top band is the pane's, but the
+            // outbox honesty pill (D26: a state, not an error; §4.4)
+            // floats over any pane — queued notes are the SHELL's
+            // news, whatever you're reading.
+            .when(self.outbox_pending > 0, |d| {
+                let n = self.outbox_pending;
+                d.child(states::offline_pill(&format!(
+                    "{n} note{} queued for delivery, the relays will answer",
+                    if n == 1 { "" } else { "s" }
+                )))
+            })
+            .child(Self::pane_element(pane))
+            // The floating back-to-top whisper: the ACTIVE pane's own
+            // deep state, read straight from the view (never a shell
+            // copy — a stale flag would show the whisper over the
+            // wrong pane after a switch).
+            .when(
+                Self::pane_deep(pane, cx)
+                    && matches!(
+                        pane,
+                        Pane::Feed(_)
+                            | Pane::Articles(_)
+                            | Pane::Hashtag(_)
+                            | Pane::Notifications(_)
+                            | Pane::Library(_)
+                    ),
+                |d| d.child(self.floating_top(cx)),
+            )
+    }
+
+    /// The columns workspace (D68): the pinned streams side by side, each
+    /// its own scrolling pane entity, separated by hairlines (the
+    /// no-card-box aesthetic — a hairline, not a card). Equal widths
+    /// capped at the reading column for v1; drag-to-reorder and
+    /// per-column widths ride Phase 2. Clicking a column focuses it
+    /// (sealed child clicks never reach the container); a drill pushes
+    /// over the WHOLE workspace and Esc pops back.
+    fn workspace(&mut self, cx: &mut Context<Self>) -> Div {
+        let focused = self.focused_col;
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_hidden();
+        if self.columns.is_empty() {
+            // The unpinned extreme: a quiet word, the + slot beside it.
+            row = row.child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(theme::T_UI))
+                    .text_color(rgb(theme::muted()))
+                    .child("No columns — add a stream with +"),
+            );
+        }
+        for i in 0..self.columns.len() {
+            let label = self.columns[i].kind.label();
+            let element = Self::pane_element(&self.columns[i].pane);
+            let is_last = i + 1 == self.columns.len();
+            let is_focused = i == focused;
+            row = row.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .max_w(px(content::COL_W))
+                    .h_full()
+                    .overflow_hidden()
+                    .when(!is_last, |d| {
+                        d.border_r_1().border_color(rgb(theme::hairline()))
+                    })
+                    // The quiet band, level with the single-pane column's.
+                    .pt(px(16.0))
+                    .px(px(12.0))
+                    // Clicking dead space focuses the column.
+                    .id(SharedString::from(format!("col-{i}")))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        if shell.focused_col != i {
+                            shell.focused_col = i;
+                            cx.notify();
+                        }
+                    }))
+                    // The column's slim header: the stream's name (ink when
+                    // focused, muted beside it) and the unpin ×.
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .pb(px(8.0))
+                            .child(
+                                div()
+                                    .text_size(px(theme::T_UI))
+                                    .text_color(rgb(if is_focused {
+                                        theme::ink()
+                                    } else {
+                                        theme::muted()
+                                    }))
+                                    .child(label),
+                            )
+                            .child(div().flex_1())
+                            .when(self.columns.len() > 1, |d| {
+                                d.child(
+                                    div()
+                                        .id(SharedString::from(format!("col-x-{i}")))
+                                        .cursor_pointer()
+                                        .text_size(px(theme::T_UI))
+                                        .text_color(rgb(theme::muted()))
+                                        .hover(|s| s.text_color(rgb(theme::vermilion())))
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            cx.stop_propagation();
+                                            shell.remove_column(i, cx);
+                                        }))
+                                        .child("×"),
+                                )
+                            }),
+                    )
+                    .child(element),
+            );
+        }
+        // The + slot: the add-column menu's anchor, only while a kind is
+        // unpinned (the cap and the kind list are the same size).
+        if self.columns.len() < COLUMN_CAP {
+            row = row.child(
+                div()
+                    .flex_none()
+                    .w(px(44.0))
+                    .h_full()
+                    .flex()
+                    .items_start()
+                    .justify_center()
+                    .pt(px(16.0))
+                    .child(
+                        div()
+                            .id("col-add")
+                            .cursor_pointer()
+                            .size(px(32.0))
+                            .rounded(px(theme::R_EMBED))
+                            .border_1()
+                            .border_color(rgb(theme::hairline()))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(theme::T_UI))
+                            .text_color(rgb(theme::muted()))
+                            .hover(|s| {
+                                s.border_color(rgb(theme::vermilion()))
+                                    .text_color(rgb(theme::vermilion()))
+                            })
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                shell.add_menu = !shell.add_menu;
+                                cx.notify();
+                            }))
+                            .child("+"),
+                    ),
+            );
+        }
+        div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .pt(px(16.0))
+            // The outbox honesty pill floats over the workspace too (it is
+            // the SHELL's news, D26).
+            .when(self.outbox_pending > 0, |d| {
+                let n = self.outbox_pending;
+                d.child(states::offline_pill(&format!(
+                    "{n} note{} queued for delivery, the relays will answer",
+                    if n == 1 { "" } else { "s" }
+                )))
+            })
+            .child(row)
+            // The add-column menu: an absolute card over the + slot; Esc
+            // closes (back()'s workspace branch), a pick pins and closes.
+            .when(self.add_menu, |d| d.child(self.add_menu_card(cx)))
+    }
+
+    /// The add-column menu: the kinds not already pinned, one row each.
+    fn add_menu_card(&self, cx: &mut Context<Self>) -> Div {
+        let pinned: Vec<ColumnKind> = self.columns.iter().map(|c| c.kind).collect();
+        let mut card = div()
+            .absolute()
+            .top(px(52.0))
+            .right(px(24.0))
+            .w(px(220.0))
+            .rounded(px(theme::R_EMBED))
+            .border_1()
+            .border_color(rgb(theme::hairline()))
+            .bg(rgb(theme::washi()))
+            .py(px(4.0));
+        for kind in ColumnKind::ALL {
+            if pinned.contains(&kind) {
+                continue;
+            }
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!("col-add-{}", kind.label())))
+                    .cursor_pointer()
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(theme::T_UI))
+                    .text_color(rgb(theme::ink()))
+                    .hover(|s| s.bg(rgb(theme::ink())))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.add_menu = false;
+                        shell.pin_column(kind, cx);
+                    }))
+                    .child(kind.icon(theme::muted()))
+                    .child(kind.label()),
+            );
+        }
+        card
+    }
+
+    /// A pane as an element (the shared match the single-pane column and
+    /// every workspace column ride).
+    fn pane_element(pane: &Pane) -> AnyElement {
+        match pane {
+            Pane::Feed(view) => view.clone().into_any_element(),
+            Pane::Articles(view) => view.clone().into_any_element(),
+            Pane::Library(view) => view.clone().into_any_element(),
+            Pane::Hashtag(view) => view.clone().into_any_element(),
+            Pane::Thread(view) => view.clone().into_any_element(),
+            Pane::Profile(view) => view.clone().into_any_element(),
+            Pane::EditProfile(view) => view.clone().into_any_element(),
+            Pane::Notifications(view) => view.clone().into_any_element(),
+            Pane::Search(view) => view.clone().into_any_element(),
+            Pane::Settings(view) => view.clone().into_any_element(),
+            Pane::Article(view) => view.clone().into_any_element(),
+            Pane::Composer(view) => view.clone().into_any_element(),
+            Pane::Wallet(view) => view.clone().into_any_element(),
+        }
+    }
+
     /// The undo-window toast: floats bottom-center over any pane —
     /// countdown + Undo while held, a brief "undone" whisper, a sticky
     /// failure line (cleared by the next publish).
