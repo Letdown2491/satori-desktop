@@ -91,6 +91,23 @@ const COLUMN_CAP: usize = 4;
 const COL_MIN_W: f32 = 280.0;
 const COL_MAX_W: f32 = 960.0;
 
+/// The drill stack's cap (D67's watch item, closed in D68 phase 3):
+/// each stacked pane pins its own notes, quotes and engagement maps
+/// for the session; deep nav must not ratchet. Past the cap the
+/// OLDEST drill drops (media released with it). The drop is an
+/// eviction, not a navigation: back()'s pop semantics (composer
+/// draft stash, edit-profile refresh) don't run — a trail deep
+/// enough to hit this means twelve panes were left unattended. The
+/// base feed (single-pane stack[0]) never drops.
+const PANE_CAP: usize = 12;
+
+/// Below this window width the workspace collapses to the focused
+/// column (D68 decision 3's auto-collapse): two minimum columns plus
+/// the + slot stop fitting around here, and the single reading column
+/// is the fallback face. The mode itself stays on — widening the
+/// window restores the full row, scroll states intact.
+const COLUMNS_MIN_W: f32 = 900.0;
+
 /// The stream kinds a column can pin (D68): the ambient surfaces plus
 /// the hashtag stream (phase 2 — pinned from the hashtag drill's title
 /// row while the workspace is up; it carries a tag, so it's not in the
@@ -424,8 +441,7 @@ impl Shell {
     pub(crate) fn open_thread(&mut self, id: EventId, cx: &mut Context<Self>) {
         let view = cx.new(|cx| ThreadView::new(self.core.clone(), id, cx));
         self.subscribe_nav(&view, cx);
-        self.stack.push(Pane::Thread(view));
-        cx.notify();
+        self.push_drill(Pane::Thread(view), cx);
     }
 
     /// The address door (NIP-22): a comment notification on an addressable
@@ -441,23 +457,20 @@ impl Shell {
     ) {
         let view = cx.new(|cx| ThreadView::new_addr(self.core.clone(), kind, who, d, cx));
         self.subscribe_nav(&view, cx);
-        self.stack.push(Pane::Thread(view));
-        cx.notify();
+        self.push_drill(Pane::Thread(view), cx);
     }
 
     pub(crate) fn open_profile(&mut self, who: PublicKey, cx: &mut Context<Self>) {
         let view = cx.new(|cx| ProfileView::new(self.core.clone(), who, self.me == Some(who), cx));
         self.subscribe_nav(&view, cx);
-        self.stack.push(Pane::Profile(view));
-        cx.notify();
+        self.push_drill(Pane::Profile(view), cx);
     }
 
     /// The profile edit form (D38): the own-profile header's Edit button.
     fn open_edit_profile(&mut self, who: PublicKey, cx: &mut Context<Self>) {
         let view = cx.new(|cx| EditProfileView::new(self.core.clone(), who, cx));
         self.subscribe_nav(&view, cx);
-        self.stack.push(Pane::EditProfile(view));
-        cx.notify();
+        self.push_drill(Pane::EditProfile(view), cx);
     }
 
     /// The articles shelf: a second feed entity, kind 30023 from the same
@@ -465,8 +478,7 @@ impl Shell {
     fn open_articles(&mut self, cx: &mut Context<Self>) {
         let view = cx.new(|cx| Feed::articles(self.core.clone(), cx));
         self.subscribe_nav(&view, cx);
-        self.stack.push(Pane::Articles(view));
-        cx.notify();
+        self.push_drill(Pane::Articles(view), cx);
     }
 
     /// The Library pane (D38): Bookmarks | Drafts | Lists — the user's own
@@ -474,8 +486,7 @@ impl Shell {
     fn open_library(&mut self, cx: &mut Context<Self>) {
         let view = cx.new(|cx| LibraryView::new(self.core.clone(), cx));
         self.subscribe_nav(&view, cx);
-        self.stack.push(Pane::Library(view));
-        cx.notify();
+        self.push_drill(Pane::Library(view), cx);
     }
 
     /// Reopen a synced draft (D38): the composer with its context back, the
@@ -499,8 +510,7 @@ impl Shell {
     fn open_hashtag(&mut self, tag: String, cx: &mut Context<Self>) {
         let view = cx.new(|cx| Feed::hashtag(self.core.clone(), tag, cx));
         self.subscribe_nav(&view, cx);
-        self.stack.push(Pane::Hashtag(view));
-        cx.notify();
+        self.push_drill(Pane::Hashtag(view), cx);
     }
 
     fn open_composer(
@@ -511,15 +521,13 @@ impl Shell {
     ) {
         let view = cx.new(|cx| Composer::new(self.core.clone(), reply_to, quote, cx));
         self.subscribe_nav(&view, cx);
-        self.stack.push(Pane::Composer(view));
-        cx.notify();
+        self.push_drill(Pane::Composer(view), cx);
     }
 
     pub(crate) fn open_article(&mut self, ev: Event, cx: &mut Context<Self>) {
         let view = cx.new(|cx| ArticleView::new(self.core.clone(), ev, cx));
         self.subscribe_nav(&view, cx);
-        self.stack.push(Pane::Article(view));
-        cx.notify();
+        self.push_drill(Pane::Article(view), cx);
     }
 
     /// The zap amount sheet (bolt hold / right-click): a floating card
@@ -550,15 +558,13 @@ impl Shell {
     fn open_wallet(&mut self, cx: &mut Context<Self>) {
         let view = cx.new(|cx| WalletView::new(self.core.clone(), cx));
         self.subscribe_nav(&view, cx);
-        self.stack.push(Pane::Wallet(view));
-        cx.notify();
+        self.push_drill(Pane::Wallet(view), cx);
     }
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         let view = cx.new(|cx| SettingsView::new(self.core.clone(), cx));
         self.subscribe_nav(&view, cx);
-        self.stack.push(Pane::Settings(view));
-        cx.notify();
+        self.push_drill(Pane::Settings(view), cx);
     }
 
     /// Settings' sign-out row: clear the session + secrets, then hand the
@@ -574,15 +580,27 @@ impl Shell {
     fn open_notifications(&mut self, cx: &mut Context<Self>) {
         let view = cx.new(|cx| NotificationsView::new(self.core.clone(), cx));
         self.subscribe_nav(&view, cx);
-        self.stack.push(Pane::Notifications(view));
         self.notif_unread = false;
-        cx.notify();
+        self.push_drill(Pane::Notifications(view), cx);
     }
 
     fn open_search(&mut self, cx: &mut Context<Self>) {
         let view = cx.new(|cx| SearchView::new(self.core.clone(), cx));
         self.subscribe_nav(&view, cx);
-        self.stack.push(Pane::Search(view));
+        self.push_drill(Pane::Search(view), cx);
+    }
+
+    /// The drill stack's capped push (D67's watch item, closed): past
+    /// PANE_CAP the oldest drill drops, media released with it.
+    fn push_drill(&mut self, pane: Pane, cx: &mut Context<Self>) {
+        if self.stack.len() >= PANE_CAP {
+            // Columns mode: the stack holds ONLY drills, so the oldest
+            // is stack[0]; single-pane mode keeps the base feed.
+            let i = if self.columns_on { 0 } else { 1 };
+            let dropped = self.stack.remove(i);
+            dropped.release_media(cx);
+        }
+        self.stack.push(pane);
         cx.notify();
     }
 
@@ -835,6 +853,65 @@ impl Shell {
     /// True while the workspace owns the view (columns mode, no drill up).
     fn workspace_up(&self) -> bool {
         self.columns_on && self.stack.is_empty()
+    }
+
+    /// The narrow-window auto-collapse (D68 decision 3, phase 3): below
+    /// COLUMNS_MIN_W the workspace row can't carry two minimum columns,
+    /// so it falls back to the single-pane face — the focused column
+    /// fills the reading column, the mode stays on, and widening the
+    /// window restores the full row with scroll states intact.
+    fn columns_collapsed(&self, window: &Window) -> bool {
+        window.viewport_size().width < px(COLUMNS_MIN_W)
+    }
+
+    /// The collapsed workspace face: the focused column as the reading
+    /// column — single-pane anatomy minus the title row (nothing to
+    /// pop; a drill still takes the whole width with its own).
+    fn collapsed_column(&mut self, _cx: &mut Context<Self>) -> Div {
+        let pane = self.columns.get(self.focused_col).map(|c| &c.pane);
+        div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .pt(px(16.0))
+            .when(self.outbox_pending > 0, |d| {
+                let n = self.outbox_pending;
+                d.child(states::offline_pill(&format!(
+                    "{n} note{} queued for delivery, the relays will answer",
+                    if n == 1 { "" } else { "s" }
+                )))
+            })
+            .children(pane.map(Self::pane_element))
+            .when(pane.is_none(), |d| {
+                d.child(
+                    div()
+                        .flex_1()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(theme::T_UI))
+                        .text_color(rgb(theme::muted()))
+                        .child("No columns — widen the window or press c"),
+                )
+            })
+    }
+
+    /// h/l: the focused column steps left/right, clamped at the ends
+    /// (phase 3's keyboard column-hopping; nothing to hop below two).
+    fn hop_columns(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let n = self.columns.len();
+        if n < 2 {
+            return;
+        }
+        let next = (self.focused_col as isize + delta).clamp(0, n as isize - 1) as usize;
+        if next != self.focused_col {
+            self.focused_col = next;
+            cx.notify();
+        }
     }
 
     /// The focused column's stream pane, if the workspace is up.
@@ -1718,10 +1795,14 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Built before the pane borrow: rail() takes &mut self (snapshot
         // memo). The content is the columns workspace while the mode is
-        // on and no drill is up; otherwise the single-pane reading column.
+        // on and no drill is up — collapsing to the focused column below
+        // COLUMNS_MIN_W (phase 3's auto-collapse); otherwise the
+        // single-pane reading column.
         let rail = self.rail(cx);
-        let content: AnyElement = if self.workspace_up() {
+        let content: AnyElement = if self.workspace_up() && !self.columns_collapsed(window) {
             self.workspace(cx).into_any_element()
+        } else if self.workspace_up() {
+            self.collapsed_column(cx).into_any_element()
         } else {
             self.pane_column(cx).into_any_element()
         };
@@ -1809,6 +1890,14 @@ impl Render for Shell {
                     }
                     if ev.keystroke.key == "k" {
                         shell.feed_nav(-1, cx);
+                    }
+                    // h/l: the focused column steps left/right (phase 3's
+                    // keyboard column-hopping; workspace up only).
+                    if ev.keystroke.key == "h" && shell.workspace_up() {
+                        shell.hop_columns(-1, cx);
+                    }
+                    if ev.keystroke.key == "l" && shell.workspace_up() {
+                        shell.hop_columns(1, cx);
                     }
                     // ←/→: the cursor row's multi-image carousel (the same
                     // selection the ‹ › arrows move). A row without one
