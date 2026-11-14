@@ -1401,6 +1401,9 @@ impl Render for Feed {
                                     repost_card(
                                         ev,
                                         &profiles,
+                                        &eng,
+                                        &counts,
+                                        reduced_motion,
                                         &media,
                                         &quotes,
                                         &cards,
@@ -1471,12 +1474,18 @@ fn card_media_urls(ev: &Event, profiles: &HashMap<String, Profile>) -> Vec<Strin
 }
 
 /// A repost row (NIP-18 kind 6): the reposter in the header slot, the
-/// boosted note's card as the body. No action row — the boosted note
-/// carries its own engagement where it was posted; clicking the body
+/// boosted note's card as the body, and the BOOSTED note's action row
+/// beneath it — a repost is a delivery envelope, not a different kind
+/// of content; its engagement belongs to the note inside (user report:
+/// the envelope-only row read as a broken card). Clicking the body
 /// opens the note (thread, or reader for articles).
+#[allow(clippy::too_many_arguments)]
 fn repost_card(
     ev: &Event,
     profiles: &HashMap<String, Profile>,
+    eng: &engagement::Engagement,
+    counts: &HashMap<String, usize>,
+    reduced_motion: bool,
     media: &media::Snapshot,
     quotes: &content::Quotes,
     cards: &cards::CardState,
@@ -1506,6 +1515,17 @@ fn repost_card(
         },
         |note| {
             let is_article = u16::from(note.kind) == 30023;
+            // The action row speaks for the BOOSTED note: mirrors, picker
+            // and counts keyed by its id, the same keys the toggles write.
+            // Arc bump — the deep-clone discipline note_card keeps.
+            let inner_ev = note.clone();
+            let inner_id = inner_ev.id.to_string();
+            let engaged = eng.liked.contains(&inner_id);
+            let saved = eng.bookmarked.contains(&inner_id);
+            let shared = eng.reposted.contains(&inner_id);
+            let zapped = eng.zapped.contains(&inner_id);
+            let zapping = eng.zap_pending.contains(&inner_id);
+            let replies = counts.get(&inner_id).copied().unwrap_or(0);
             div()
                 .w_full()
                 .flex()
@@ -1561,6 +1581,22 @@ fn repost_card(
                             cards,
                         )),
                 )
+                .child(actions::action_row(
+                    &inner_id,
+                    &inner_ev,
+                    actions::ActionState {
+                        liked: engaged,
+                        reposted: shared,
+                        bookmarked: saved,
+                        zapped,
+                        zapping,
+                        wallet_ready: eng.wallet_ready,
+                        picker_open: eng.reaction_picker.as_deref() == Some(&inner_id),
+                        replies,
+                        reduced_motion,
+                    },
+                    handle,
+                ))
         },
     )
 }
