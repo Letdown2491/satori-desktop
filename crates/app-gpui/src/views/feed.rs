@@ -1042,6 +1042,12 @@ impl actions::ActionHost for Feed {
     fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>) {
         engagement::toggle_like(self, ev, cx)
     }
+    fn toggle_reaction_picker(&mut self, id: &str, cx: &mut Context<Self>) {
+        engagement::toggle_reaction_picker(self, id, cx)
+    }
+    fn react_with(&mut self, ev: &Event, content: &str, cx: &mut Context<Self>) {
+        engagement::react_with(self, ev, content, cx)
+    }
     fn toggle_repost(&mut self, ev: &Event, cx: &mut Context<Self>) {
         engagement::toggle_repost(self, ev, cx)
     }
@@ -1209,6 +1215,7 @@ fn note_card(
                 zapped,
                 zapping,
                 wallet_ready: eng.wallet_ready,
+                picker_open: eng.reaction_picker.as_deref() == Some(&id),
                 replies,
                 reduced_motion,
             },

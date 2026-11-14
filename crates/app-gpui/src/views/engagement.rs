@@ -32,6 +32,9 @@ pub struct Engagement {
     pub zap_pending: HashSet<String>,
     /// Whether the NWC wallet answers (the dim-bolt affordance).
     pub wallet_ready: bool,
+    /// The row (note id) whose reaction quick-set is open, if any — one
+    /// at a time; a pick or a second right-click closes it.
+    pub reaction_picker: Option<String>,
 }
 
 impl Engagement {
@@ -43,6 +46,7 @@ impl Engagement {
             zapped: core.zapped_set(),
             zap_pending: HashSet::new(),
             wallet_ready: core.wallet().is_ready(),
+            reaction_picker: None,
         }
     }
 }
@@ -123,7 +127,34 @@ pub fn toggle_like<H: Host>(host: &mut H, ev: &Event, cx: &mut Context<H>) {
         return;
     }
     host.touched();
-    let mut rx = host.core().react(ev);
+    let mut rx = host.core().react(ev, "+");
+    cx.spawn(async move |_, _| while rx.recv().await.is_some() {})
+        .detach();
+    cx.notify();
+}
+
+/// The row's reaction quick-set toggle (the heart's right-click): one
+/// picker open at a time; a second right-click closes it.
+pub fn toggle_reaction_picker<H: Host>(host: &mut H, id: &str, cx: &mut Context<H>) {
+    let e = host.engagement();
+    e.reaction_picker = if e.reaction_picker.as_deref() == Some(id) {
+        None
+    } else {
+        Some(id.to_string())
+    };
+    host.touched();
+    cx.notify();
+}
+
+/// A picked reaction (the quick-set): optimistic like the heart is — any
+/// own reaction lights the glyph — then publish with that content. The
+/// picker closes behind it.
+pub fn react_with<H: Host>(host: &mut H, ev: &Event, content: &str, cx: &mut Context<H>) {
+    let id = ev.id.to_string();
+    host.engagement().liked.insert(id);
+    host.engagement().reaction_picker = None;
+    host.touched();
+    let mut rx = host.core().react(ev, content);
     cx.spawn(async move |_, _| while rx.recv().await.is_some() {})
         .detach();
     cx.notify();
