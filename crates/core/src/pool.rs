@@ -291,8 +291,9 @@ impl Pool {
         // class as user entries; they dial direct, as they always have.
         for indexer in INDEXERS {
             if let Ok(parsed) = url::Url::parse(indexer)
-                && let Some(host) = parsed.host_str() {
-                    crate::net_guard::allow_direct_relay(host);
+                && let Some(host) = parsed.host_str()
+            {
+                crate::net_guard::allow_direct_relay(host);
             }
         }
         Ok(Self {
@@ -352,8 +353,9 @@ impl Pool {
         }
         for url in &retired_reads {
             if let Ok(parsed) = url::Url::parse(url)
-                && let Some(host) = parsed.host_str() {
-                    crate::net_guard::disallow_direct_relay(host);
+                && let Some(host) = parsed.host_str()
+            {
+                crate::net_guard::disallow_direct_relay(host);
             }
             let _ = self.client.remove_relay(url).force().await;
         }
@@ -361,8 +363,9 @@ impl Pool {
         urls.extend(own_reads.iter().cloned());
         for url in own_reads {
             if let Ok(parsed) = url::Url::parse(url)
-                && let Some(host) = parsed.host_str() {
-                    crate::net_guard::allow_direct_relay(host);
+                && let Some(host) = parsed.host_str()
+            {
+                crate::net_guard::allow_direct_relay(host);
             }
         }
         for url in urls {
@@ -862,8 +865,9 @@ impl Pool {
             for url in &new_targets {
                 // Own write relays are user-chosen (NIP-65): dial direct.
                 if let Ok(parsed) = url::Url::parse(url)
-                    && let Some(host) = parsed.host_str() {
-                        crate::net_guard::allow_direct_relay(host);
+                    && let Some(host) = parsed.host_str()
+                {
+                    crate::net_guard::allow_direct_relay(host);
                 }
                 let _ = self
                     .client

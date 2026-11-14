@@ -29,7 +29,9 @@ use crate::views::content;
 struct Player {
     url: String,
     video: Video,
-    proxy: Option<satori_core::video_proxy::RangeProxy>,
+    /// Held for its Drop (aborts the proxy listener when the player dies);
+    /// never read, hence the underscore.
+    _proxy: Option<satori_core::video_proxy::RangeProxy>,
 }
 
 static ACTIVE: RwLock<Option<Player>> = RwLock::new(None);
@@ -103,11 +105,11 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
         }
         return;
     }
-    if url::Url::parse(&url).is_err() {
+    let Ok(parsed) = url::Url::parse(&url) else {
         // Not a real URL at all — the browser can sort it out or not.
         cx.open_url(&url);
         return;
-    }
+    };
     // Already open or opening — a second tap on the same tile is a no-op,
     // not a second pipeline.
     if active(&url).is_some() || opening(&url) {
@@ -121,7 +123,7 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
     // M5 WP3: the guarded door. Playbin never sees the origin URL — its
     // souphttpsrc resolves and redirects outside every guard we have.
     // No door, no dial: degrade to the browser link, fail closed.
-    let proxy = match satori_core::video_proxy::RangeProxy::spawn(url.clone()) {
+    let proxy = match satori_core::video_proxy::spawn(url.clone()) {
         Ok(proxy) => proxy,
         Err(_) => {
             if let Ok(mut g) = OPENING.write() {
@@ -146,12 +148,14 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
     // Video::new blocks up to ~5s (playbin state + caps) — the background
     // executor, never the UI thread.
     cx.spawn(async move |cx| {
-        // Dial-time screen (audit security): the playbin dials whatever gst
-        // resolves, with its own redirect chain and no SafeResolver inside.
-        // Pre-check the host against the one IP authority (D57) and degrade
-        // to the browser link when the name rebinds private. A DNS miss is
-        // weather — gst reports it on its own; only the guard speaking
-        // (NonPublic) refuses.
+        // Dial-time screen (audit security, D59 cycle) — now the UX layer
+        // of a two-layer guard. WP3's proxy enforces the invariant at the
+        // socket (every origin fetch rides media::client's pinned
+        // resolution); this pre-check decides the HANDOFF before any
+        // player is built: an origin name that rebinds private degrades to
+        // the browser link instead of a dead inline player. A DNS miss is
+        // weather — the proxy's fetch reports it honestly; only the guard
+        // speaking (NonPublic) refuses.
         let host = parsed.host_str().map(str::to_string);
         let allowed = match host.as_deref() {
             Some(h) => match satori_core::net_guard::resolve_pinned_public(h, 443).await {
@@ -195,7 +199,7 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
                         guard.replace(Player {
                             url: url.clone(),
                             video,
-                            proxy: Some(proxy),
+                            _proxy: Some(proxy),
                         })
                     };
                     if let Some(old) = old {

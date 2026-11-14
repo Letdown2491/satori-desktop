@@ -96,10 +96,35 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 /// Bind a loopback listener and start serving the origin. Synchronous
 /// from the caller's view (the bind happens on the proxy runtime; this
 /// returns once the listener is live).
+///
+/// Literal origins screen by value at the facade (the SOCKS5 transport's
+/// own rule for its targets): `media::client()`'s pinning covers NAMES —
+/// hyper skips the resolver for an IP literal, so a feed-supplied
+/// `http://127.0.0.1:6379/...` origin would dial loopback unscreened.
+/// Non-public literal (or unparseable origin) refuses here, and the
+/// caller degrades to the browser facade. Domain origins pin inside the
+/// client on every fetch and every redirect hop.
 pub fn spawn(origin: String) -> Result<RangeProxy, std::io::Error> {
+    let parsed = url::Url::parse(&origin)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let non_public = match parsed.host() {
+        Some(url::Host::Ipv4(v4)) => !crate::net_guard::is_public_ip(&std::net::IpAddr::V4(v4)),
+        Some(url::Host::Ipv6(v6)) => !crate::net_guard::is_public_ip(&std::net::IpAddr::V6(v6)),
+        Some(url::Host::Domain(_)) => false,
+        None => true,
+    };
+    if non_public {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "origin is a non-public IP literal",
+        ));
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     let token = new_token();
-    let state = Arc::new(State { origin, token: token.clone() });
+    let state = Arc::new(State {
+        origin,
+        token: token.clone(),
+    });
     let task = runtime().spawn(async move {
         let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 0)).await {
             Ok(l) => l,
@@ -185,7 +210,8 @@ async fn serve(stream: tokio::net::TcpStream, state: Arc<State>) {
         .lines()
         .find_map(|l| {
             let (k, v) = l.split_once(':')?;
-            k.eq_ignore_ascii_case("range").then(|| v.trim().to_string())
+            k.eq_ignore_ascii_case("range")
+                .then(|| v.trim().to_string())
         })
         .filter(|v| !v.is_empty());
 
@@ -216,7 +242,10 @@ async fn serve(stream: tokio::net::TcpStream, state: Arc<State>) {
         status,
         reason(status),
         [
-            ("Accept-Ranges", Some(header(&res, "accept-ranges").unwrap_or_else(|| "bytes".into()))),
+            (
+                "Accept-Ranges",
+                Some(header(&res, "accept-ranges").unwrap_or_else(|| "bytes".into()))
+            ),
             ("Content-Length", header(&res, "content-length")),
             ("Content-Range", header(&res, "content-range")),
             ("Content-Type", header(&res, "content-type")),
@@ -274,10 +303,7 @@ fn reason(status: u16) -> &'static str {
     }
 }
 
-async fn simple(
-    wr: &mut tokio::net::tcp::OwnedWriteHalf,
-    status: u16,
-) -> std::io::Result<()> {
+async fn simple(wr: &mut tokio::net::tcp::OwnedWriteHalf, status: u16) -> std::io::Result<()> {
     wr.write_all(
         format!(
             "HTTP/1.1 {} {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
@@ -311,10 +337,31 @@ mod tests {
         assert!(ct_eq(b"", b""));
     }
 
+    /// Literal origins screen by value at the facade: a feed-supplied
+    /// video URL pointing at loopback / RFC1918 / ULA must refuse before
+    /// any listener exists (media::client's pinning covers names; hyper
+    /// skips the resolver for an IP literal). Unparseable origins fail
+    /// closed too.
+    #[test]
+    fn spawn_refuses_non_public_literal_origins() {
+        for origin in [
+            "http://127.0.0.1:9/x.mp4",
+            "http://192.168.1.10/x.mp4",
+            "http://[::1]:9/x.mp4",
+            "http://[fc00::5]/x.mp4",
+            "http://169.254.169.254/latest/x.mp4",
+            "not a url",
+        ] {
+            let res = spawn(origin.into());
+            assert!(res.is_err(), "{origin} must refuse at the facade");
+        }
+        // A public literal is fine (rare, but legal).
+        assert!(spawn("https://8.8.8.8/x.mp4".into()).is_ok());
+    }
+
     #[test]
     fn capability_gate_refuses_wrong_token() {
-        let proxy = spawn("https://blossom.example.invalid/x.mp4".into())
-            .expect("loopback bind");
+        let proxy = spawn("https://blossom.example.invalid/x.mp4".into()).expect("loopback bind");
         let uri = proxy.uri();
         assert!(uri.starts_with("http://127.0.0.1:"), "{uri}");
         assert!(uri.ends_with("/stream"));
