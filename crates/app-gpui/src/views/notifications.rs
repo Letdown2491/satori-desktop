@@ -1070,11 +1070,14 @@ fn reaction_glyph(
         })
     });
     let fallback = || {
-        div()
-            .text_size(px(20.0))
-            .line_height(px(24.0))
-            .child(raw.to_string())
-            .into_any_element()
+        // The color emoji face for emoji runs (theme::EMOJI note): the
+        // notification face's fallback chain paints them monochrome.
+        let emoji = crate::emoji::is_emoji_run(raw);
+        let mut el = div().text_size(px(20.0)).line_height(px(24.0));
+        if emoji {
+            el = el.font_family(theme::EMOJI);
+        }
+        el.child(raw.to_string()).into_any_element()
     };
     match url.filter(|u| !u.is_empty()) {
         Some(u) => match media.thumb(&u) {
