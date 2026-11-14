@@ -1040,16 +1040,21 @@ impl Element for InputElement {
         let mut y = px(0.);
         let mut byte_start = 0usize;
         for seg in display_text.split('\n') {
-            let run = TextRun {
-                len: seg.len().max(1),
-                font: style.font(),
-                color: text_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
+            let base_font = style.font();
+            let runs = if seg.is_empty() {
+                // Empty paragraphs shape as a single space so the cursor has
+                // a position to live at; their mapping length stays 0.
+                vec![TextRun {
+                    len: 1,
+                    font: base_font,
+                    color: text_color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }]
+            } else {
+                split_emoji_runs(seg, &base_font, text_color)
             };
-            // Empty paragraphs shape as a single space so the cursor has a
-            // position to live at; their mapping length stays 0.
             let shape_text: SharedString = if seg.is_empty() {
                 " ".to_string().into()
             } else {
@@ -1060,7 +1065,7 @@ impl Element for InputElement {
                 .shape_text(
                     shape_text,
                     font_size,
-                    std::slice::from_ref(&run),
+                    &runs,
                     // Single-line never wraps — it scrolls horizontally.
                     if multiline {
                         Some(bounds.size.width)
@@ -1226,6 +1231,40 @@ impl Element for InputElement {
     }
 }
 
+/// Paragraph runs with emoji clusters split onto the color emoji face
+/// (theme::EMOJI) as their PRIMARY font (D66): through the UI face they
+/// shape to DejaVu/Adwaita monochrome outlines. The sub-runs partition
+/// the paragraph's bytes exactly, so the shaped layout's byte indices
+/// (caret, selection, click mapping) are identical to a single run.
+/// Same mechanism as content.rs `word()`, at the TextRun level.
+fn split_emoji_runs(seg: &str, base: &gpui::Font, color: gpui::Hsla) -> Vec<TextRun> {
+    let mut runs: Vec<TextRun> = Vec::new();
+    for cluster in seg.graphemes(true) {
+        let emoji = crate::emoji::is_emoji_run(cluster);
+        // Merge adjacent clusters of the same kind so an emoji run (or a
+        // plain run) is one TextRun, not one per grapheme.
+        if let Some(last) = runs.last_mut()
+            && (last.font.family.as_ref() == theme::EMOJI) == emoji
+        {
+            last.len += cluster.len();
+            continue;
+        }
+        let mut font = base.clone();
+        if emoji {
+            font.family = theme::EMOJI.into();
+        }
+        runs.push(TextRun {
+            len: cluster.len(),
+            font,
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        });
+    }
+    runs
+}
+
 fn rows_of(para: &Para) -> Vec<(usize, usize)> {
     let bounds = para
         .line
@@ -1305,5 +1344,58 @@ impl Render for Input {
 impl Focusable for Input {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_emoji_runs;
+
+    #[test]
+    fn emoji_runs_partition_the_paragraph_bytes_exactly() {
+        // The caret/selection machinery consumes shaped byte indices; the
+        // split runs must cover the text exactly (no gaps, no overlap).
+        let font = gpui::font("Adwaita Sans");
+        let color = gpui::black();
+        for text in [
+            "plain text",
+            "hi 👍 lol",
+            "❤️!",
+            "2️⃣ to go",
+            "😂😮😢🤣👍❤️",
+            "emoji 👍🤣 mixed with text and 😢 more",
+        ] {
+            let runs = split_emoji_runs(text, &font, color);
+            assert_eq!(
+                runs.iter().map(|r| r.len).sum::<usize>(),
+                text.len(),
+                "byte coverage mismatch for {text:?}"
+            );
+            // Every run boundary must land on a grapheme boundary (a
+            // cluster never splits across two faces).
+            let mut offset = 0;
+            for run in &runs {
+                assert!(text.is_char_boundary(offset + run.len));
+                offset += run.len;
+            }
+        }
+    }
+
+    #[test]
+    fn emoji_clusters_ride_the_emoji_face_and_text_does_not() {
+        let font = gpui::font("Adwaita Sans");
+        let color = gpui::black();
+        let runs = split_emoji_runs("hi 👍 there", &font, color);
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].len, 3); // "hi "
+        assert_eq!(runs[1].len, 4); // 👍 (4 UTF-8 bytes)
+        assert_eq!(runs[2].len, 6); // " there"
+        assert_eq!(runs[0].font.family.as_ref(), "Adwaita Sans");
+        assert_eq!(runs[1].font.family.as_ref(), crate::theme::EMOJI);
+        assert_eq!(runs[2].font.family.as_ref(), "Adwaita Sans");
+        // VS16 stays with its base (❤️ is one cluster, one emoji run).
+        let runs = split_emoji_runs("❤️", &font, color);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].font.family.as_ref(), crate::theme::EMOJI);
     }
 }
