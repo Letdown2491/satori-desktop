@@ -18,4 +18,5 @@ pub mod shell;
 pub mod states;
 pub mod thread;
 pub mod wallet;
+pub mod wire;
 pub mod zap;

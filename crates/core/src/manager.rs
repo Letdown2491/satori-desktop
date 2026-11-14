@@ -6664,6 +6664,71 @@ impl Core {
         self.live.subscribe()
     }
 
+    /// The live wire (D68's relay column, live-wire v1 — owner call):
+    /// subscribe ONE relay directly, kinds note + long-form, since NOW —
+    /// no history, no store-attribution change (the real version is
+    /// documented as per-event source-relay indexing; the wire proves
+    /// the metaphor first). The note stream is account-independent, so
+    /// this lives on the manager, not the session: the pool rides
+    /// whatever session is active at arm time, and the wire's lifetime
+    /// is the VIEW's receiver, not the login's.
+    ///
+    /// When the view dies the broadcast has no receivers; the drain
+    /// task's next send fails and it unsubscribes — a closed column
+    /// stops paying for its socket.
+    pub fn subscribe_relay_wire(
+        self: &Arc<Self>,
+        url: String,
+    ) -> tokio::sync::broadcast::Receiver<Event> {
+        use futures_util::StreamExt as _;
+        let (tx, rx) = tokio::sync::broadcast::channel(128);
+        let this = self.clone();
+        self.rt.spawn(async move {
+            let Ok(active) = this.active().await else {
+                return;
+            };
+            let pool = active.pool.clone();
+            let filter = Filter::new()
+                .kinds([Kind::TextNote, Kind::Custom(30023)])
+                .since(Timestamp::now());
+            let Ok(output) = pool
+                .client()
+                .subscribe(nostr_sdk::client::ReqTarget::manual(vec![(
+                    url.as_str(),
+                    vec![filter],
+                )]))
+                .await
+            else {
+                eprintln!("[core] wire: subscribe to {url} failed");
+                return;
+            };
+            let mut notifications = pool.client().notifications();
+            while let Some(n) = notifications.next().await {
+                let event = match n {
+                    nostr_sdk::client::ClientNotification::Event {
+                        subscription_id,
+                        event,
+                        ..
+                    } if output.id() == &subscription_id => *event,
+                    nostr_sdk::client::ClientNotification::Shutdown => break,
+                    _ => continue,
+                };
+                // The chokepoint's kind-5/expiry arms (pool.ts onevent):
+                // tombstones and expired copies never reach a view.
+                if u16::from(event.kind) == 5 || nip40::is_expired(&event) {
+                    continue;
+                }
+                // Nobody listening (the column closed): tear the sub down.
+                if tx.send(event).is_err() {
+                    let _ = pool.client().unsubscribe(output.id()).await;
+                    return;
+                }
+            }
+            let _ = pool.client().unsubscribe(output.id()).await;
+        });
+        rx
+    }
+
     // --- viewport engagement (WS2, viewport.rs) ---------------------------------
 
     /// The feed's settled visible window: the ids whose engagement should

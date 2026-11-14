@@ -229,6 +229,12 @@ impl Input {
         self
     }
 
+    /// Replace the placeholder in place (the + menu's relay row corrects
+    /// the reader inside the field itself: "needs wss://").
+    pub fn set_placeholder(&mut self, placeholder: &str) {
+        self.placeholder = placeholder.to_string().into();
+    }
+
     /// Replace the whole buffer, caret at the end (draft restore).
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.content = text.to_string();
