@@ -599,6 +599,13 @@ impl Shell {
         }
     }
 
+    /// The rail hides a stream button whose surface is already pinned
+    /// as a column (columns mode, owner call): the column IS the
+    /// affordance, a rail twin would be two doors to the same room.
+    fn rail_hides(&self, kind: &ColumnKind) -> bool {
+        self.columns_on && self.columns.iter().any(|c| &c.kind == kind)
+    }
+
     /// Rail toggle (or `c`): enter the workspace if off, leave it if on.
     fn toggle_columns(&mut self, cx: &mut Context<Self>) {
         if self.columns_on {
@@ -1437,35 +1444,39 @@ impl Shell {
                     }
                 }),
             ))
-            .child(self.rail_button(
-                "rail-feed",
-                "Feed",
-                icons::stream_icon(ink(feed_active)),
-                feed_active,
-                cx.listener(move |shell, _, _, cx| {
-                    if shell.columns_on {
-                        shell.ensure_column(ColumnKind::Feed, cx);
-                    } else if feed_active {
-                        // Re-click the active spot: back to the top.
-                        shell.pane_to_top(cx);
-                    } else {
-                        shell.go_home(cx);
-                    }
-                }),
-            ))
-            .child(self.rail_button(
-                "rail-articles",
-                "Articles",
-                icons::article_icon(ink(active == Some(Spot::Articles))),
-                active == Some(Spot::Articles),
-                cx.listener(move |shell, _, _, cx| {
-                    if shell.columns_on {
-                        shell.ensure_column(ColumnKind::Articles, cx);
-                    } else if shell.active_spot(cx) != Some(Spot::Articles) {
-                        shell.open_articles(cx);
-                    }
-                }),
-            ))
+            .when(!self.rail_hides(&ColumnKind::Feed), |d| {
+                d.child(self.rail_button(
+                    "rail-feed",
+                    "Feed",
+                    icons::stream_icon(ink(feed_active)),
+                    feed_active,
+                    cx.listener(move |shell, _, _, cx| {
+                        if shell.columns_on {
+                            shell.ensure_column(ColumnKind::Feed, cx);
+                        } else if feed_active {
+                            // Re-click the active spot: back to the top.
+                            shell.pane_to_top(cx);
+                        } else {
+                            shell.go_home(cx);
+                        }
+                    }),
+                ))
+            })
+            .when(!self.rail_hides(&ColumnKind::Articles), |d| {
+                d.child(self.rail_button(
+                    "rail-articles",
+                    "Articles",
+                    icons::article_icon(ink(active == Some(Spot::Articles))),
+                    active == Some(Spot::Articles),
+                    cx.listener(move |shell, _, _, cx| {
+                        if shell.columns_on {
+                            shell.ensure_column(ColumnKind::Articles, cx);
+                        } else if shell.active_spot(cx) != Some(Spot::Articles) {
+                            shell.open_articles(cx);
+                        }
+                    }),
+                ))
+            })
             .child(self.rail_button(
                 "rail-library",
                 "Library",
@@ -1477,47 +1488,51 @@ impl Shell {
                     }
                 }),
             ))
-            .child(self.rail_button(
-                "rail-search",
-                "Search",
-                icons::search_icon(ink(active == Some(Spot::Search))),
-                active == Some(Spot::Search),
-                cx.listener(move |shell, _, _, cx| {
-                    if shell.columns_on {
-                        shell.ensure_column(ColumnKind::Search, cx);
-                    } else if shell.active_spot(cx) != Some(Spot::Search) {
-                        shell.open_search(cx);
-                    }
-                }),
-            ))
-            .child(
-                self.rail_button(
-                    "rail-notifications",
-                    "Notifications",
-                    div()
-                        .relative()
-                        .child(icons::bell_icon(ink(active == Some(Spot::Notif))))
-                        .when(self.notif_unread, |d| {
-                            d.child(
-                                div()
-                                    .absolute()
-                                    .top(px(-1.))
-                                    .right(px(-1.))
-                                    .size(px(6.))
-                                    .rounded_full()
-                                    .bg(rgb(theme::vermilion())),
-                            )
-                        }),
-                    active == Some(Spot::Notif),
+            .when(!self.rail_hides(&ColumnKind::Search), |d| {
+                d.child(self.rail_button(
+                    "rail-search",
+                    "Search",
+                    icons::search_icon(ink(active == Some(Spot::Search))),
+                    active == Some(Spot::Search),
                     cx.listener(move |shell, _, _, cx| {
                         if shell.columns_on {
-                            shell.ensure_column(ColumnKind::Notifications, cx);
-                        } else if shell.active_spot(cx) != Some(Spot::Notif) {
-                            shell.open_notifications(cx);
+                            shell.ensure_column(ColumnKind::Search, cx);
+                        } else if shell.active_spot(cx) != Some(Spot::Search) {
+                            shell.open_search(cx);
                         }
                     }),
-                ),
-            )
+                ))
+            })
+            .when(!self.rail_hides(&ColumnKind::Notifications), |d| {
+                d.child(
+                    self.rail_button(
+                        "rail-notifications",
+                        "Notifications",
+                        div()
+                            .relative()
+                            .child(icons::bell_icon(ink(active == Some(Spot::Notif))))
+                            .when(self.notif_unread, |dd| {
+                                dd.child(
+                                    div()
+                                        .absolute()
+                                        .top(px(-1.))
+                                        .right(px(-1.))
+                                        .size(px(6.))
+                                        .rounded_full()
+                                        .bg(rgb(theme::vermilion())),
+                                )
+                            }),
+                        active == Some(Spot::Notif),
+                        cx.listener(move |shell, _, _, cx| {
+                            if shell.columns_on {
+                                shell.ensure_column(ColumnKind::Notifications, cx);
+                            } else if shell.active_spot(cx) != Some(Spot::Notif) {
+                                shell.open_notifications(cx);
+                            }
+                        }),
+                    ),
+                )
+            })
             // The columns workspace toggle (D68): vermilion while the mode
             // is on (a state, like compose's speaking pen).
             .child(self.rail_button(
