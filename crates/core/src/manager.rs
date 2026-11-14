@@ -5828,6 +5828,33 @@ impl Core {
         let _ = active.pool.store.save(event).await;
         crate::outbox_queue::enqueue(event);
         let targets = crate::routing::targets(&active.pool, &active.write_relays, event).await;
+        Self::publish_targets(active, event, targets).await
+    }
+
+    /// The EVERYWHERE-known publish (NIP-65 phase 2): own profile and
+    /// relay list ride every relay the session knows (write set + read
+    /// set), not just the write set — a profile that exists only where we
+    /// publish CONTENT is invisible on relays we only read. Personal
+    /// kinds never ride it: `routing::broadcastable` is the allowlist
+    /// (the opt-out sweep), refusing loudly rather than leaking.
+    async fn commit_broadcast(active: &Active, event: &Event) -> Result<()> {
+        if !crate::routing::broadcastable(u16::from(event.kind)) {
+            return Err(LoginError::Connect(format!(
+                "kind {} is not broadcastable (personal kinds skip the everywhere publish)",
+                u16::from(event.kind)
+            )));
+        }
+        let _ = active.pool.store.save(event).await;
+        crate::outbox_queue::enqueue(event);
+        let targets =
+            crate::routing::broadcast_targets(&active.write_relays, &active.pool.read_relays());
+        Self::publish_targets(active, event, targets).await
+    }
+
+    /// Commit's tail (both funnels): the publish, the write-latency
+    /// mirror, dequeue on ≥1 ACK (zero → the item STAYS queued and Err
+    /// flows to the UI as Failed).
+    async fn publish_targets(active: &Active, event: &Event, targets: Vec<String>) -> Result<()> {
         let report = active.pool.publish(event, &targets).await;
         for r in &report.ok {
             crate::relay_latency::record_write_result(r, true);
@@ -6484,7 +6511,7 @@ impl Core {
                 }
                 let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::RelayList, tags, "");
                 let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit(&active, &signed, &tx).await?;
+                Self::commit_broadcast(&active, &signed).await?;
                 {
                     let mut a = this.active.lock().unwrap();
                     if let Some(a) = a.as_mut() {
@@ -6651,8 +6678,9 @@ impl Core {
     /// Edit profile (NIP-01 kind:0 read-modify-write): the patch's Some
     /// fields overwrite, Some("") clears, None leaves the stored value;
     /// fields the app doesn't edit (lud06/lud16 and friends) ride along
-    /// untouched. Published through commit() — the outbox retries it
-    /// (kind 0 is coordinate-keyed, D36).
+    /// untouched. Published through commit_broadcast (phase 2: the
+    /// profile rides every known relay, outbox retries it — kind 0 is
+    /// coordinate-keyed, D36).
     pub fn set_profile(self: &Arc<Self>, patch: ProfileEdit) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
@@ -6674,7 +6702,7 @@ impl Core {
                 let unsigned =
                     UnsignedEvent::new(me, Timestamp::now(), Kind::Metadata, [], content);
                 let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit(&active, &signed, &tx).await?;
+                Self::commit_broadcast(&active, &signed).await?;
                 Ok(())
             }
             .await;

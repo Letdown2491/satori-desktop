@@ -139,6 +139,32 @@ fn merge(base: Vec<String>, inboxes: Vec<String>, seen: Vec<String>) -> Vec<Stri
     out
 }
 
+// --- phase 2: the everywhere-known broadcast ------------------------------
+
+/// The identity kinds the EVERYWHERE broadcast carries (NIP-65 phase 2):
+/// own profile (0) and own relay list (10002). A profile that exists
+/// only where we publish CONTENT is invisible on relays we only read.
+/// Personal kinds — mute (10000), bookmarks (10003/30001), the never-
+/// published drafts and prefs — skip broadcast ENTIRELY: this allowlist
+/// IS the opt-out sweep, and the compile-time door means a new publish
+/// site has to opt a kind in deliberately. Pinned by test.
+pub fn broadcastable(kind: u16) -> bool {
+    matches!(kind, 0 | 10002)
+}
+
+/// The broadcast target set: own write relays + the session's read set —
+/// every relay the session knows, all user-chosen or house constants
+/// (no foreign inboxes ride a broadcast; those are conversation-scoped).
+/// Pure for the test; dedup by url string, non-routable dropped.
+pub fn broadcast_targets(write_relays: &[String], read_relays: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = write_relays.to_vec();
+    out.extend(read_relays.iter().cloned());
+    out.sort();
+    out.dedup();
+    out.retain(|u| crate::outbox::routable_relay(u));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +334,37 @@ mod tests {
             assert!(out.contains(&inbox.to_string()), "{inbox} is an inbox");
         }
         assert!(!out.contains(&"wss://outbox.example".to_string()));
+    }
+
+    /// The broadcast allowlist IS the personal-kind opt-out: identity
+    /// kinds ride, everything personal or content-shaped refuses.
+    #[test]
+    fn broadcast_allowlist() {
+        assert!(broadcastable(0)); // profile
+        assert!(broadcastable(10002)); // relay list
+        for k in [1, 6, 7, 10000, 10001, 10003, 30001, 30023] {
+            assert!(!broadcastable(k), "kind {k} must not broadcast");
+        }
+    }
+
+    /// Broadcast targets: writes + reads, deduped, non-routable dropped.
+    #[test]
+    fn broadcast_targets_merge_and_screen() {
+        let out = broadcast_targets(
+            &["wss://write.example".into(), "wss://shared.example".into()],
+            &[
+                "wss://shared.example".into(),
+                "ws://127.0.0.1:8080".into(), // not routable
+                "wss://read.example".into(),
+            ],
+        );
+        assert_eq!(
+            out,
+            vec![
+                "wss://read.example",
+                "wss://shared.example",
+                "wss://write.example"
+            ]
+        );
     }
 }

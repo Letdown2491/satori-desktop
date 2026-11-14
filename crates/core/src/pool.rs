@@ -860,9 +860,36 @@ impl Pool {
         // not replace), so a relay that is also a read keeps both. Connect
         // only when something new joined; sends to already-connected
         // relays are unaffected.
+        //
+        // NIP-65 phase 2 socketing: a KNOWN target (own write relays,
+        // own reads — user-chosen, the exemption ledger is theirs)
+        // joins the pool as before. A FOREIGN target (a routing inbox
+        // from someone else's kind-10002) is EPHEMERAL: added WRITE for
+        // this one send — the one-shot shape, connect → publish → ack →
+        // remove, no direct-dial exemption (a foreign relay is NOT
+        // user-chosen: phase 1 granted it one, and each grant persisted
+        // into the ledger uncapped) — then force-removed, so no
+        // process-lifetime socket, no writes-reg entry, and a retry
+        // one-shots again. The screens still ride: routing checked
+        // routable_relay, and the pool's proxy screens everything not
+        // user-chosen through the screening transport.
+        let (known, foreign): (Vec<String>, Vec<String>) = {
+            let reg = self.writes.lock().unwrap();
+            let reads = self.reads.lock().unwrap();
+            let mut k = Vec::new();
+            let mut f = Vec::new();
+            for t in &targets {
+                if reg.contains(t) || reads.contains(t) {
+                    k.push(t.clone());
+                } else {
+                    f.push(t.clone());
+                }
+            }
+            (k, f)
+        };
         let new_targets: Vec<String> = {
             let reg = self.writes.lock().unwrap();
-            targets
+            known
                 .iter()
                 .filter(|u| !reg.contains(*u))
                 .cloned()
@@ -883,6 +910,16 @@ impl Pool {
                     .await;
                 self.writes.lock().unwrap().insert(url.clone());
             }
+            self.client.connect().await;
+        }
+        for url in &foreign {
+            let _ = self
+                .client
+                .add_relay(url.clone())
+                .capabilities(RelayCapabilities::WRITE)
+                .await;
+        }
+        if !foreign.is_empty() {
             self.client.connect().await;
         }
         let short = &event.id.to_string()[..8];
@@ -923,6 +960,13 @@ impl Pool {
             report.ok.len(),
             report.failed.len()
         );
+        // The one-shot's shutdown half: foreign relays leave the pool
+        // after the send (their write registration was never recorded;
+        // a routed READ socket to the same relay re-joins on next use —
+        // add_routed re-adds unconditionally).
+        for url in &foreign {
+            let _ = self.client.remove_relay(url).force().await;
+        }
         report
     }
 }
