@@ -31,6 +31,7 @@ use std::sync::{Mutex, OnceLock};
 use nostr::prelude::*;
 
 use crate::config;
+use crate::sidecar;
 
 /// Per relay-fed map; a tombstone is ~100 bytes, so this stays a small file.
 const MAX_TOMBS: usize = 5000;
@@ -42,8 +43,6 @@ const MAX_TAGS_PER_EVENT: usize = 100;
 const MAX_KEY: usize = 256;
 /// Don't re-ask relays about the same event's deletion for 30 min.
 const CHECK_TTL_SECS: u64 = 30 * 60;
-/// Flush cadence (deletions.ts debouncedFlush: 10s).
-const FLUSH_SECS: u64 = 10;
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 struct Stored {
@@ -125,46 +124,13 @@ fn write_disk() {
     // entries must not stall a paint (audit perf).
     let snap = deletions().lock().unwrap().maps.clone();
     let body = serde_json::to_string(&snap).unwrap_or_default();
-    // Temp sibling + rename, 0600 — the state-file discipline.
+    // Temp sibling + rename, 0600 — the sidecar kernel's discipline.
     let path = config::state_file(config::files::DELETIONS);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    let tmp = path.with_extension(format!("tmp-{}-{nanos}", std::process::id()));
-    use std::os::unix::fs::OpenOptionsExt;
-    let Ok(mut f) = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)
-    else {
-        return;
-    };
-    use std::io::Write as _;
-    if f.write_all(body.as_bytes()).is_ok() {
-        drop(f);
-        let _ = std::fs::rename(&tmp, &path);
-    } else {
-        let _ = std::fs::remove_file(&tmp);
-    }
+    sidecar::write_atomic(path, &body);
 }
 
 fn spawn_flusher() {
-    std::thread::Builder::new()
-        .name("deletions-flush".into())
-        .spawn(|| {
-            loop {
-                std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
-                if DIRTY.swap(false, Ordering::Relaxed) {
-                    write_disk();
-                }
-            }
-        })
-        .ok();
+    sidecar::spawn_flusher("deletions-flush", &DIRTY, write_disk);
 }
 
 /// Keep the NEWEST deletion time per key; oldest evicted over the cap.

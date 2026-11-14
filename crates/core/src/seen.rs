@@ -11,175 +11,69 @@
 //! otherwise forget a relay you taught it, and events there would stop
 //! resolving until you visited again. Bounded so the file can't grow
 //! without limit (MAX_PER_AUTHOR relays per author, MAX_AUTHORS LRU).
+//! The plumbing (write, flusher, LRU frame, url screen) is the sidecar
+//! kernel; this module owns only seen-relays semantics.
 
-use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use nostr::prelude::*;
 
 use crate::config;
-use crate::outbox;
+use crate::sidecar;
 
 /// Keep the most-recently-seen relays per author (seen-relays.ts: a niche
 /// relay + a few others).
 const MAX_PER_AUTHOR: usize = 6;
 /// LRU cap so the map (and its file) can't grow without bound.
 const MAX_AUTHORS: usize = 8000;
-/// Flush cadence (seen-relays.ts debouncedFlush: 10s).
-const FLUSH_SECS: u64 = 10;
 
-/// pubkey hex → relay urls, recency-ordered (most recent LAST, like the
-/// TS Set's insertion order); the order vec is the author LRU.
-struct Seen {
-    map: HashMap<String, Vec<String>>,
-    order: VecDeque<String>,
-}
-
-static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
+static SEEN: OnceLock<Mutex<sidecar::RelayLru>> = OnceLock::new();
 static DIRTY: AtomicBool = AtomicBool::new(false);
 
-fn seen() -> &'static Mutex<Seen> {
+fn seen() -> &'static Mutex<sidecar::RelayLru> {
     SEEN.get_or_init(|| {
-        let mut s = Seen {
-            map: HashMap::new(),
-            order: VecDeque::new(),
-        };
-        for (pk, relays) in read_disk() {
-            // Hydrate honoring the per-author cap (seen-relays.ts:
-            // slice(-MAX_PER_AUTHOR) keeps the newest tail).
-            let tail: Vec<String> = relays
-                .iter()
-                .rev()
-                .take(MAX_PER_AUTHOR)
-                .rev()
-                .cloned()
-                .collect();
-            if !tail.is_empty() {
-                s.map.insert(pk.clone(), tail);
-                s.order.push_back(pk);
-            }
-        }
-        // Global LRU cap on hydrate: drop OLDEST authors first.
-        while s.order.len() > MAX_AUTHORS {
-            let old = s.order.pop_front();
-            if let Some(old) = old {
-                s.map.remove(&old);
-            }
-        }
-        spawn_flusher();
-        Mutex::new(s)
+        let mut lru = sidecar::RelayLru::new();
+        lru.hydrate(
+            sidecar::read_relay_pairs(config::files::SEEN_RELAYS),
+            MAX_PER_AUTHOR,
+            MAX_AUTHORS,
+        );
+        sidecar::spawn_flusher("seen-flush", &DIRTY, write_disk);
+        Mutex::new(lru)
     })
-}
-
-fn read_disk() -> Vec<(String, Vec<String>)> {
-    let Ok(raw) = std::fs::read_to_string(config::state_file(config::files::SEEN_RELAYS)) else {
-        return Vec::new();
-    };
-    serde_json::from_str::<HashMap<String, Vec<String>>>(&raw)
-        .map(|m| m.into_iter().collect())
-        .unwrap_or_default()
 }
 
 fn write_disk() {
     let held = seen().lock().unwrap();
-    let mut out = serde_json::Map::new();
-    for (pk, relays) in &held.map {
-        out.insert(pk.clone(), serde_json::to_value(relays).unwrap_or_default());
-    }
+    let body = sidecar::relay_json(held.map.clone());
     drop(held);
-    // Temp sibling + rename, 0600 — the state-file discipline (read_state,
-    // secrets): never rewrite in place, never follow a planted link.
-    let path = config::state_file(config::files::SEEN_RELAYS);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    let tmp = path.with_extension(format!("tmp-{}-{nanos}", std::process::id()));
-    let body = serde_json::Value::Object(out).to_string();
-    use std::os::unix::fs::OpenOptionsExt;
-    let Ok(mut f) = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)
-    else {
-        return;
-    };
-    use std::io::Write as _;
-    if f.write_all(body.as_bytes()).is_ok() {
-        drop(f);
-        let _ = std::fs::rename(&tmp, &path);
-    } else {
-        let _ = std::fs::remove_file(&tmp);
-    }
-}
-
-/// The flusher thread: park_timeout wakeups scanning the dirty flag — no
-/// runtime dependency, no timer churn (a missed window just rides the next
-/// wake; the data is a learned cache, at most FLUSH_SECS stale on exit).
-fn spawn_flusher() {
-    std::thread::Builder::new()
-        .name("seen-flush".into())
-        .spawn(|| {
-            loop {
-                std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
-                if DIRTY.swap(false, Ordering::Relaxed) {
-                    write_disk();
-                }
-            }
-        })
-        .ok();
+    sidecar::write_atomic(config::state_file(config::files::SEEN_RELAYS), &body);
 }
 
 /// Record that `pk`'s events arrived from `relay_urls` (seen-relays.ts
-/// recordSeen). Indexers are skipped: they're queried on every fetch
-/// anyway, so recording them would only crowd out the interesting niche
-/// relays under the cap. Non-routable urls too: since we PERSIST + REPLAY
-/// these into future fetches, a relay-hint must never teach the client a
-/// loopback/LAN relay, even once (outbox::routable_relay is the same
-/// screen routed queries pass).
+/// recordSeen). Indexers and non-routable urls are skipped by the
+/// kernel's screen: indexers are queried on every fetch anyway, and a
+/// persisted hint must never teach the client a loopback/LAN relay.
 pub fn record(pk: &PublicKey, relay_urls: &[&str]) {
     let fresh: Vec<String> = relay_urls
         .iter()
-        .filter_map(|s| {
-            let key = outbox::relay_key(s);
-            (outbox::routable_relay(&key) && !indexer(&key)).then_some(key)
-        })
+        .filter_map(|s| sidecar::screen_relay(s))
         .collect();
     if fresh.is_empty() {
         return;
     }
     let key = pk.to_string();
-    let mut held = seen().lock().unwrap();
-    // Re-insert the author most-recently-used (TS: delete + set).
-    held.order.retain(|k| k != &key);
-    let set = held.map.entry(key.clone()).or_default();
-    for u in fresh {
-        set.retain(|x| x != &u);
-        set.push(u); // most recent last
-    }
-    while set.len() > MAX_PER_AUTHOR {
-        set.remove(0); // drop oldest relay
-    }
-    held.order.push_back(key);
-    while held.order.len() > MAX_AUTHORS {
-        let old = held.order.pop_front();
-        if let Some(old) = old {
-            held.map.remove(&old);
+    {
+        let mut held = seen().lock().unwrap();
+        // Re-insert the author most-recently-used (TS: delete + set),
+        // then each relay most-recent-last under the per-author cap.
+        held.touch(&key, MAX_AUTHORS);
+        for u in fresh {
+            held.push_relay(&key, u, MAX_PER_AUTHOR);
         }
     }
-    drop(held);
     DIRTY.store(true, Ordering::Relaxed);
-}
-
-fn indexer(key: &str) -> bool {
-    crate::pool::INDEXERS
-        .iter()
-        .any(|i| outbox::relay_key(i) == key)
 }
 
 /// The relays we've empirically seen this author on (seen-relays.ts

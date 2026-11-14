@@ -10,21 +10,22 @@
 //! every read relay; per-event relay hints ride the same data later.
 //!
 //! The store (nostr-lmdb) can't host sidecar tables (no migration hooks,
-//! no env access), so this follows the D33 sidecar discipline seen.rs /
-//! deletions.rs / hints.rs share: a bounded JSON state file —
-//! OnceLock<Mutex<…>>, temp-sibling + rename at 0600, park_timeout
-//! flusher, LRU cap — and only non-indexer, routable relays recorded
-//! (indexers are asked on every fetch anyway; a persisted hint must
-//! never teach the client a loopback/LAN relay).
+//! no env access), so this follows the D33 sidecar discipline on the
+//! `sidecar` kernel: a bounded JSON state file — OnceLock<Mutex<…>>,
+//! temp-sibling + rename at 0600, park_timeout flusher, LRU cap — and
+//! only non-indexer, routable relays recorded. This sidecar's recency
+//! policy is FIFO (the audit's hot-path fix): the consumer (the
+//! deletion sweep's targeted ask) doesn't care WHICH capped events
+//! stay, so the per-ingest O(cap) MRU scan is gone; the per-event
+//! relay list still reorders.
 
-use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use nostr::prelude::*;
 
 use crate::config;
-use crate::outbox;
+use crate::sidecar;
 
 /// Relays kept per event (recency-ordered): the deletion check needs a
 /// couple of witnesses, not a census.
@@ -32,153 +33,49 @@ const MAX_PER_EVENT: usize = 3;
 /// LRU cap so the map (and its file) can't grow without bound: ~2MB of
 /// 64-char hex ids + short urls.
 const MAX_EVENTS: usize = 10_000;
-/// Flush cadence (the D33 discipline's 10s).
-const FLUSH_SECS: u64 = 10;
 
-/// event id hex → relay urls, recency-ordered (most recent LAST); the
-/// order vec is the event LRU.
-struct EventSeen {
-    map: HashMap<String, Vec<String>>,
-    order: VecDeque<String>,
-}
-
-static EVENT_SEEN: OnceLock<Mutex<EventSeen>> = OnceLock::new();
+static EVENT_SEEN: OnceLock<Mutex<sidecar::RelayLru>> = OnceLock::new();
 static DIRTY: AtomicBool = AtomicBool::new(false);
 
-fn seen_event() -> &'static Mutex<EventSeen> {
+fn seen_event() -> &'static Mutex<sidecar::RelayLru> {
     EVENT_SEEN.get_or_init(|| {
-        let mut s = EventSeen {
-            map: HashMap::new(),
-            order: VecDeque::new(),
-        };
-        for (id, relays) in read_disk() {
-            let tail: Vec<String> = relays
-                .iter()
-                .rev()
-                .take(MAX_PER_EVENT)
-                .rev()
-                .cloned()
-                .collect();
-            if !tail.is_empty() {
-                s.map.insert(id.clone(), tail);
-                s.order.push_back(id);
-            }
-        }
-        while s.order.len() > MAX_EVENTS {
-            let old = s.order.pop_front();
-            if let Some(old) = old {
-                s.map.remove(&old);
-            }
-        }
-        spawn_flusher();
-        Mutex::new(s)
+        let mut lru = sidecar::RelayLru::new();
+        lru.hydrate(
+            sidecar::read_relay_pairs(config::files::SEEN_EVENT),
+            MAX_PER_EVENT,
+            MAX_EVENTS,
+        );
+        sidecar::spawn_flusher("seen-event-flush", &DIRTY, write_disk);
+        Mutex::new(lru)
     })
-}
-
-fn read_disk() -> Vec<(String, Vec<String>)> {
-    let Ok(raw) = std::fs::read_to_string(config::state_file(config::files::SEEN_EVENT)) else {
-        return Vec::new();
-    };
-    serde_json::from_str::<HashMap<String, Vec<String>>>(&raw)
-        .map(|m| m.into_iter().collect())
-        .unwrap_or_default()
 }
 
 fn write_disk() {
     let held = seen_event().lock().unwrap();
-    let mut out = serde_json::Map::new();
-    for (id, relays) in &held.map {
-        out.insert(id.clone(), serde_json::to_value(relays).unwrap_or_default());
-    }
+    let body = sidecar::relay_json(held.map.clone());
     drop(held);
-    let path = config::state_file(config::files::SEEN_EVENT);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    let tmp = path.with_extension(format!("tmp-{}-{nanos}", std::process::id()));
-    let body = serde_json::Value::Object(out).to_string();
-    use std::os::unix::fs::OpenOptionsExt;
-    let Ok(mut f) = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)
-    else {
-        return;
-    };
-    use std::io::Write as _;
-    if f.write_all(body.as_bytes()).is_ok() {
-        drop(f);
-        let _ = std::fs::rename(&tmp, &path);
-    } else {
-        let _ = std::fs::remove_file(&tmp);
-    }
-}
-
-fn spawn_flusher() {
-    std::thread::Builder::new()
-        .name("seen-event-flush".into())
-        .spawn(|| {
-            loop {
-                std::thread::park_timeout(std::time::Duration::from_secs(FLUSH_SECS));
-                if DIRTY.swap(false, Ordering::Relaxed) {
-                    write_disk();
-                }
-            }
-        })
-        .ok();
-}
-
-/// The indexer keys, parsed once (the per-event screen runs on every
-/// ingested event; re-lowercasing five constants per event was the
-/// audit's arithmetic waste).
-fn indexer_keys() -> &'static std::collections::HashSet<String> {
-    static KEYS: std::sync::OnceLock<std::collections::HashSet<String>> =
-        std::sync::OnceLock::new();
-    KEYS.get_or_init(|| {
-        crate::pool::INDEXERS
-            .iter()
-            .map(|i| outbox::relay_key(i))
-            .collect()
-    })
+    sidecar::write_atomic(config::state_file(config::files::SEEN_EVENT), &body);
 }
 
 /// Record that `id` arrived from `relay_url` (the chokepoints: pool
 /// fetch_route / get_from and the live drains — every site that already
 /// records the author-keyed seen-on with attribution in hand). Indexers
-/// and non-routable urls never record (the seen.rs screen, same reason).
+/// and non-routable urls never record (the kernel's screen, same
+/// reason as seen.rs).
 pub fn record(id: &EventId, relay_url: &str) {
-    let relay = outbox::relay_key(relay_url);
-    if !outbox::routable_relay(&relay) || indexer_keys().contains(&relay) {
+    let Some(relay) = sidecar::screen_relay(relay_url) else {
         return;
-    }
+    };
     let ekey = id.to_string();
-    let mut held = seen_event().lock().unwrap();
-    // FIFO eviction (audit): no MRU retain — the per-event O(cap) scan
-    // under this mutex cost a page load millions of string compares,
-    // and the consumer (the deletion sweep's targeted ask) doesn't
-    // care WHICH capped events stay. The per-event relay list still
-    // reorders (retain + push below).
-    if !held.map.contains_key(&ekey) {
-        held.order.push_back(ekey.clone());
+    {
+        let mut held = seen_event().lock().unwrap();
+        // FIFO key insert (audit): no MRU retain — the per-event O(cap)
+        // scan under this mutex cost a page load millions of string
+        // compares, and the consumer doesn't care WHICH capped events
+        // stay. The per-event relay list still reorders (push_relay).
+        held.touch_fifo(&ekey, MAX_EVENTS);
+        held.push_relay(&ekey, relay, MAX_PER_EVENT);
     }
-    let set = held.map.entry(ekey).or_default();
-    set.retain(|x| x != &relay);
-    set.push(relay); // most recent last
-    while set.len() > MAX_PER_EVENT {
-        set.remove(0); // drop oldest relay
-    }
-    while held.order.len() > MAX_EVENTS {
-        let old = held.order.pop_front();
-        if let Some(old) = old {
-            held.map.remove(&old);
-        }
-    }
-    drop(held);
     DIRTY.store(true, Ordering::Relaxed);
 }
 
