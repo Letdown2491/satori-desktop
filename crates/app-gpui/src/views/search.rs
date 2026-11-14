@@ -17,7 +17,7 @@ use gpui::{
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, Profile};
 
-use super::{content, nav::Nav, states};
+use super::{content, nav::Nav, quotes, states};
 use crate::{input::Input, media, theme, uris};
 
 /// The results pane's tab.
@@ -202,7 +202,7 @@ impl SearchView {
                     for url in content::media_urls_cached(n).iter().cloned() {
                         media::fetch(&self.core, url, cx.entity_id(), cx);
                     }
-                    self.want_quotes(n, cx);
+                    quotes::want_quotes(self, n, cx);
                 }
                 self.status = String::new();
                 self.results = results;
@@ -221,48 +221,17 @@ impl SearchView {
         }
         cx.notify();
     }
+}
 
-    fn pump_quote(
-        &self,
-        bech: String,
-        mut rx: satori_core::manager::FeedRx,
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn(async move |this, cx| {
-            while let Some(ev) = rx.recv().await {
-                if let FeedEvent::One(Some(target), prof) = ev {
-                    let _ = this.update(cx, |this, cx| {
-                        let key = target.pubkey.to_string();
-                        let name = prof
-                            .as_ref()
-                            .map(|p| p.display())
-                            .or_else(|| this.profiles.get(&key).map(|p| p.display()))
-                            .unwrap_or_else(|| format!("{}…", &key[..8]));
-                        this.quotes.insert(
-                            bech.clone(),
-                            Some(content::Embed {
-                                event: target,
-                                name,
-                            }),
-                        );
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
+impl quotes::Host for SearchView {
+    fn quotes(&mut self) -> &mut content::Quotes {
+        &mut self.quotes
     }
-
-    fn want_quotes(&mut self, note: &Event, cx: &mut Context<Self>) {
-        for bech in content::note_refs(note) {
-            if self.quotes.contains_key(&bech) {
-                continue;
-            }
-            // Reserve the key so we don't re-request while loading.
-            self.quotes.insert(bech.clone(), None);
-            let rx = self.core.event_by_id_dech32(&bech);
-            self.pump_quote(bech, rx, cx);
-        }
+    fn core(&self) -> &Arc<Core> {
+        &self.core
+    }
+    fn profiles(&self) -> &HashMap<String, Profile> {
+        &self.profiles
     }
 }
 

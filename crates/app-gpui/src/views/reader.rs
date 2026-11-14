@@ -176,10 +176,8 @@ impl ArticleView {
     }
 
     fn name_for(&self, pk: &PublicKey) -> String {
-        self.profiles
-            .get(&pk.to_string())
-            .map(|p| p.display())
-            .unwrap_or_else(|| format!("{}…", &pk.to_string()[..8]))
+        let hex = pk.to_string();
+        content::display_name(self.profiles.get(&hex), &hex)
     }
 }
 
@@ -795,19 +793,12 @@ impl Render for ArticleView {
                                                                 .child(name),
                                                         ),
                                                 )
-                                                .child(
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "comment-time-{ci}"
-                                                        )))
-                                                        .cursor_pointer()
-                                                        .text_size(px(theme::T_SMALL))
-                                                        .text_color(rgb(theme::muted()))
-                                                        .on_click(|_, _, cx| {
-                                                            crate::timefmt::cycle(cx)
-                                                        })
-                                                        .child(time),
-                                                ),
+                                                .child(content::time_toggle(
+                                                    SharedString::from(format!(
+                                                        "comment-time-{ci}"
+                                                    )),
+                                                    time,
+                                                )),
                                         )
                                         .child(content::body(
                                             &ev,

@@ -13,12 +13,11 @@ use gpui::{
     ListState, Render, SharedString, Window, div, img, list, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile};
+use satori_core::manager::{Core, FeedEvent, ParentNote, Profile};
 use satori_core::nip::{comment, nip10};
 use satori_core::notifications::parse_zap_receipt;
-use satori_core::wallet::WalletEvent;
 
-use super::{actions, content, engagement, nav::Nav, states};
+use super::{actions, content, engagement, nav, nav::Nav, quotes, states};
 use crate::{icons, media, theme};
 
 /// What the event did to you (notifications.ts `add`): a comment is always
@@ -279,7 +278,7 @@ impl NotificationsView {
                 let _ = this.update(cx, |n, cx| {
                     n.first_visible_start = ev.visible_range.start;
                     n.last_visible_end = ev.visible_range.end;
-                    let deep = ev.visible_range.start >= 3;
+                    let deep = ev.visible_range.start >= nav::PANE_DEEP_AT;
                     if n.deep != deep {
                         n.deep = deep;
                         cx.emit(Nav::PaneDeep);
@@ -291,25 +290,8 @@ impl NotificationsView {
                 });
             });
         // The wallet broadcast (D20): the rows' bolts follow every zap,
-        // theirs or the sheet's, wherever it started (thread.rs's
-        // subscription, verbatim shape).
-        let this = cx.entity().downgrade();
-        let mut wallet_rx = view.core.subscribe_wallet();
-        cx.spawn(async move |_, cx| {
-            loop {
-                match wallet_rx.recv().await {
-                    Ok(ev) => {
-                        // Dead pane (popped): the pump's exit is update() failing.
-                        if this.update(cx, |view, cx| view.on_wallet(ev, cx)).is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(_) => continue, // lagged: the next event re-syncs
-                }
-            }
-        })
-        .detach();
+        // theirs or the sheet's, wherever it started.
+        engagement::pump_wallet(&cx.entity(), cx);
         view
     }
 
@@ -446,7 +428,7 @@ impl NotificationsView {
                 }
                 for n in &notifs {
                     self.want_media(n, cx);
-                    self.want_quotes(n, cx);
+                    quotes::want_quotes(self, n, cx);
                 }
                 self.rows = sectioned(prev, &notifs);
                 self.me = self.core.me().unwrap_or_default();
@@ -681,49 +663,19 @@ impl NotificationsView {
         })
         .detach();
     }
+}
 
-    fn pump_quote(&self, bech: String, mut rx: FeedRx, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            while let Some(ev) = rx.recv().await {
-                if let FeedEvent::One(Some(target), prof) = ev {
-                    let _ = this.update(cx, |this, cx| {
-                        let key = target.pubkey.to_string();
-                        let name = prof
-                            .as_ref()
-                            .map(|p| p.display())
-                            .or_else(|| this.profiles.get(&key).map(|p| p.display()))
-                            .unwrap_or_else(|| format!("{}…", &key[..8]));
-                        this.quotes.insert(
-                            bech.clone(),
-                            Some(content::Embed {
-                                event: target,
-                                name,
-                            }),
-                        );
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
+// The quote engine rides the default no-op `touched` (render reads the
+// mirror directly).
+impl quotes::Host for NotificationsView {
+    fn quotes(&mut self) -> &mut content::Quotes {
+        &mut self.quotes
     }
-
-    /// The wallet broadcast → glyph states + the quiet status whisper
-    /// (engagement.rs's engine; the pump calls this).
-    fn on_wallet(&mut self, ev: WalletEvent, cx: &mut Context<Self>) {
-        engagement::on_wallet(self, ev, cx);
+    fn core(&self) -> &Arc<Core> {
+        &self.core
     }
-
-    fn want_quotes(&mut self, note: &Event, cx: &mut Context<Self>) {
-        for bech in content::note_refs(note) {
-            if self.quotes.contains_key(&bech) {
-                continue;
-            }
-            // Reserve the key so we don't re-request while loading.
-            self.quotes.insert(bech.clone(), None);
-            let rx = self.core.event_by_id_dech32(&bech);
-            self.pump_quote(bech, rx, cx);
-        }
+    fn profiles(&self) -> &HashMap<String, Profile> {
+        &self.profiles
     }
 }
 
@@ -822,10 +774,7 @@ fn notif_whisper<V: EventEmitter<Nav> + 'static>(
     let label = if parent.author == me {
         "\u{21b3} on your note".to_string()
     } else {
-        let name = profiles
-            .get(&parent.author)
-            .map(|p| p.display())
-            .unwrap_or_else(|| format!("{}\u{2026}", &parent.author[..8]));
+        let name = content::display_name(profiles.get(&parent.author), &parent.author);
         format!("\u{21b3} on {name}'s note")
     };
     let snippet = (!parent.snippet.is_empty()).then(|| parent.snippet.clone());
@@ -901,10 +850,7 @@ fn notif_card(
     handle: Entity<NotificationsView>,
 ) -> gpui::AnyElement {
     let key = ev.pubkey.to_string();
-    let name = profiles
-        .get(&key)
-        .map(|p| p.display())
-        .unwrap_or_else(|| format!("{}\u{2026}", &key[..8]));
+    let name = content::display_name(profiles.get(&key), &key);
     let picture = profiles
         .get(&key)
         .map(|p| p.picture.clone())
@@ -1163,11 +1109,7 @@ impl Render for NotificationsView {
             .iter()
             .map(|s| {
                 let key = s.event.pubkey.to_string();
-                let name = self
-                    .profiles
-                    .get(&key)
-                    .map(|p| p.display())
-                    .unwrap_or_else(|| format!("{}…", &key[..8]));
+                let name = content::display_name(self.profiles.get(&key), &key);
                 (
                     name,
                     action_parts(notif_type(&s.event), &s.event).0.to_string(),

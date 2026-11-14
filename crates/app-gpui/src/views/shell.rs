@@ -261,9 +261,7 @@ impl Shell {
         cx.notify();
         // NIP-78: sync the theme slot (Phase 2 §4.1) — fire and forget.
         if changed {
-            crate::prefs::stamp("dark");
-            self.core
-                .publish_app_data("dark", serde_json::Value::Bool(dark));
+            crate::prefs::sync(&self.core, "dark", serde_json::Value::Bool(dark));
         }
     }
 
@@ -933,7 +931,7 @@ impl Shell {
         let rail_snap = media::Snapshot::new(cx);
         let (me_pic, me_name) = match (&self.me_profile, self.me) {
             (Some(p), _) => (p.picture.clone(), p.display()),
-            (None, Some(pk)) => (String::new(), format!("{}…", &pk.to_string()[..8])),
+            (None, Some(pk)) => (String::new(), content::display_name(None, &pk.to_string())),
             _ => (String::new(), "You".to_string()),
         };
         // The rail avatar comes back if the cache evicted it (silent no-op

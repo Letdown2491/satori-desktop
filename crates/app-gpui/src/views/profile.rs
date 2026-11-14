@@ -17,7 +17,7 @@ use gpui::{
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
 
-use super::{content, feed::Feed, nav::Nav, states};
+use super::{content, feed::Feed, nav, nav::Nav, states};
 use crate::{icons, media, theme};
 use satori_core::wot::Verdict;
 
@@ -153,7 +153,7 @@ impl ProfileView {
                 let _ = this.update(cx, |this, cx| {
                     this.first_visible_start = ev.visible_range.start;
                     this.last_visible_end = ev.visible_range.end;
-                    let deep = ev.visible_range.start >= 3;
+                    let deep = ev.visible_range.start >= nav::PANE_DEEP_AT;
                     if this.deep != deep {
                         this.deep = deep;
                         cx.emit(Nav::PaneDeep);
@@ -510,11 +510,7 @@ impl ProfileView {
 impl Render for ProfileView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let who_hex = self.who.to_string();
-        let name = self
-            .profile
-            .as_ref()
-            .map(|p| p.display())
-            .unwrap_or_else(|| format!("{}…", &who_hex[..8]));
+        let name = content::display_name(self.profile.as_ref(), &who_hex);
         let about = self
             .profile
             .as_ref()

@@ -1738,9 +1738,7 @@ impl Render for Composer {
         let quote_prev = self.quote.as_ref().map(|q| {
             let prof = self.core.profile_of(&q.pubkey);
             (
-                prof.as_ref()
-                    .map(|p| p.display())
-                    .unwrap_or_else(|| format!("{}…", &q.pubkey.to_string()[..8])),
+                content::display_name(prof.as_ref(), &q.pubkey.to_string()),
                 q.content
                     .split_whitespace()
                     .collect::<Vec<_>>()
@@ -1754,9 +1752,7 @@ impl Render for Composer {
         let reply_prev = self.reply_to.as_ref().map(|r| {
             let prof = self.core.profile_of(&r.pubkey);
             (
-                prof.as_ref()
-                    .map(|p| p.display())
-                    .unwrap_or_else(|| format!("{}…", &r.pubkey.to_string()[..8])),
+                content::display_name(prof.as_ref(), &r.pubkey.to_string()),
                 r.content
                     .split_whitespace()
                     .collect::<Vec<_>>()

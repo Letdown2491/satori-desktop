@@ -15,6 +15,7 @@ use gpui::{
 use nostr::prelude::*;
 use satori_core::manager::Core;
 
+use super::content;
 use super::nav::Nav;
 use crate::{input::Input, theme};
 
@@ -81,10 +82,8 @@ impl ZapSheet {
     /// The recipient's display name (best effort — the short npub stands
     /// in until the profile is cached).
     fn who(&self) -> String {
-        self.core
-            .profile_of(&self.note.pubkey)
-            .map(|p| p.display())
-            .unwrap_or_else(|| format!("{}…", &self.note.pubkey.to_string()[..8]))
+        let hex = self.note.pubkey.to_string();
+        content::display_name(self.core.profile_of(&self.note.pubkey).as_ref(), &hex)
     }
 
     /// The chosen amount in msats (the custom field wins when no preset

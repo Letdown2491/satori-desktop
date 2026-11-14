@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use gpui::{Context, EventEmitter};
+use gpui::{Context, Entity, EventEmitter};
 use nostr::prelude::*;
 use satori_core::manager::{Core, PublishEvent};
 use satori_core::wallet::{Status, WalletEvent};
@@ -117,6 +117,43 @@ pub fn on_wallet<H: Host>(host: &mut H, ev: WalletEvent, cx: &mut Context<H>) {
     }
     host.touched();
     cx.notify();
+}
+
+/// The wallet broadcast pump (D20): bolt glyphs follow every zap —
+/// theirs or the sheet's — wherever it started. Was pasted into the
+/// three mirror hosts' constructors (feed, thread, notifications; the
+/// wallet and settings panes keep their own richer pumps — they handle
+/// arms the mirrors don't).
+pub fn pump_wallet<H: Host>(entity: &Entity<H>, cx: &mut Context<H>) {
+    let this = entity.downgrade();
+    let mut wallet_rx = {
+        let core = {
+            let w = entity.read(cx);
+            w.core().clone()
+        };
+        core.subscribe_wallet()
+    };
+    cx.spawn(async move |_, cx| {
+        loop {
+            match wallet_rx.recv().await {
+                Ok(ev) => {
+                    // Dead pane (popped): the pump's exit is update() failing.
+                    if this
+                        .update(cx, |host, cx| {
+                            let ev = ev;
+                            on_wallet(host, ev, cx)
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(_) => continue, // lagged: the next event re-syncs
+            }
+        }
+    })
+    .detach();
 }
 
 /// Optimistic like, per §1.2: mutate state first (glyph flips vermilion

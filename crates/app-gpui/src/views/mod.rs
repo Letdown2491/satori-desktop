@@ -10,6 +10,7 @@ pub mod login;
 pub mod nav;
 pub mod notifications;
 pub mod profile;
+pub mod quotes;
 pub mod reader;
 pub mod search;
 pub mod settings;

@@ -17,10 +17,9 @@ use gpui::{
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile};
-use satori_core::wallet::WalletEvent;
 use satori_core::wot::Verdict;
 
-use super::{actions, content, engagement, nav::Nav, states};
+use super::{actions, content, engagement, nav::Nav, quotes, states};
 use crate::{media, theme};
 
 pub struct ThreadView {
@@ -116,6 +115,23 @@ impl engagement::Host for ThreadView {
     }
 }
 
+// A quote embed landing invalidates the snapshot (the reply list may
+// re-measure) — the same touch discipline as engagement.
+impl quotes::Host for ThreadView {
+    fn quotes(&mut self) -> &mut content::Quotes {
+        &mut self.quotes
+    }
+    fn core(&self) -> &Arc<Core> {
+        &self.core
+    }
+    fn profiles(&self) -> &HashMap<String, Profile> {
+        &self.profiles
+    }
+    fn touched(&mut self) {
+        self.touch();
+    }
+}
+
 impl ThreadView {
     pub fn new(core: Arc<Core>, id: EventId, cx: &mut Context<Self>) -> Self {
         let view = Self::build(core, None, Some(id), cx);
@@ -172,30 +188,8 @@ impl ThreadView {
         };
         // The wallet broadcast (D20): the thread's bolts follow every zap,
         // theirs or the sheet's, wherever it started.
-        let this = cx.entity().downgrade();
-        let mut wallet_rx = view.core.subscribe_wallet();
-        cx.spawn(async move |_, cx| {
-            loop {
-                match wallet_rx.recv().await {
-                    Ok(ev) => {
-                        // Dead pane (popped): the pump's exit is update() failing.
-                        if this.update(cx, |view, cx| view.on_wallet(ev, cx)).is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(_) => continue, // lagged: the next event re-syncs
-                }
-            }
-        })
-        .detach();
+        engagement::pump_wallet(&cx.entity(), cx);
         view
-    }
-
-    /// The wallet broadcast → glyph states + the quiet status whisper
-    /// (engagement.rs's engine; the with_mode pump calls this).
-    fn on_wallet(&mut self, ev: WalletEvent, cx: &mut Context<Self>) {
-        engagement::on_wallet(self, ev, cx);
     }
 
     /// Any snapshot-state mutation goes through here so the render
@@ -213,33 +207,12 @@ impl ThreadView {
         .detach();
     }
 
-    /// One quote-reference resolution, kept off `on_event` (its `One` arm
-    /// means "the anchor").
-    fn pump_quote(&self, bech: String, mut rx: FeedRx, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            while let Some(ev) = rx.recv().await {
-                if let FeedEvent::One(Some(target), prof) = ev {
-                    let _ = this.update(cx, |this, cx| {
-                        let key = target.pubkey.to_string();
-                        let name = prof
-                            .as_ref()
-                            .map(|p| p.display())
-                            .or_else(|| this.profiles.get(&key).map(|p| p.display()))
-                            .unwrap_or_else(|| format!("{}…", &key[..8]));
-                        this.quotes.insert(
-                            bech.clone(),
-                            Some(content::Embed {
-                                event: target,
-                                name,
-                            }),
-                        );
-                        this.touch();
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
+    /// Request-time snapshot invalidation + the shared engine: the thread
+    /// touches when a quote fetch is ASKED (its list re-measures) —
+    /// landing-side invalidation rides quotes::Host::touched.
+    fn want_quotes(&mut self, note: &Event, cx: &mut Context<Self>) {
+        self.touch();
+        quotes::want_quotes(self, note, cx);
     }
 
     /// Hydrate names for note authors + mentioned pubkeys (TODO(port):
@@ -342,26 +315,9 @@ impl ThreadView {
         }
     }
 
-    /// Queue event fetches for standalone note/nevent references (embeds).
-    fn want_quotes(&mut self, note: &Event, cx: &mut Context<Self>) {
-        for bech in content::note_refs(note) {
-            if self.quotes.contains_key(&bech) {
-                continue;
-            }
-            // Reserve the key so we don't re-request while loading.
-            self.quotes.insert(bech.clone(), None);
-            let rx = self.core.event_by_id_dech32(&bech);
-            self.touch();
-            self.pump_quote(bech, rx, cx);
-        }
-    }
-
     fn name_for(&self, ev: &Event) -> String {
         let key = ev.pubkey.to_string();
-        self.profiles
-            .get(&key)
-            .map(|p| p.display())
-            .unwrap_or_else(|| format!("{}…", &key[..8]))
+        content::display_name(self.profiles.get(&key), &key)
     }
 
     /// Lazy parent hydration (webapp render/note.ts:216–219, the "↩ in
@@ -405,11 +361,7 @@ impl ThreadView {
     fn parent_whisper(&self, pid: &str) -> String {
         match self.parents.get(pid) {
             Some(p) => {
-                let name = self
-                    .profiles
-                    .get(&p.author)
-                    .map(|pr| pr.display())
-                    .unwrap_or_else(|| format!("{}…", &p.author[..8]));
+                let name = content::display_name(self.profiles.get(&p.author), &p.author);
                 if p.snippet.is_empty() {
                     format!("↩ in reply to {name}'s earlier note")
                 } else {
@@ -612,13 +564,7 @@ fn reply_row(
                 .child(
                     // The timestamp is the third mode toggle (timefmt.rs):
                     // tap cycles relative → date → block height.
-                    div()
-                        .id(SharedString::from(format!("reply-time-{idx}")))
-                        .cursor_pointer()
-                        .text_size(px(theme::T_SMALL))
-                        .text_color(rgb(theme::muted()))
-                        .on_click(|_, _, cx| crate::timefmt::cycle(cx))
-                        .child(time),
+                    content::time_toggle(SharedString::from(format!("reply-time-{idx}")), time),
                 ),
         )
         .child(
@@ -944,10 +890,8 @@ impl Render for ThreadView {
                                         Some(_) => div().into_any_element(),
                                         None => {
                                             let key = ev.pubkey.to_string();
-                                            let name = profiles
-                                                .get(&key)
-                                                .map(|p| p.display())
-                                                .unwrap_or_else(|| format!("{}…", &key[..8]));
+                                            let name =
+                                                content::display_name(profiles.get(&key), &key);
                                             // The stamp reads the current mode +
                                             // blocktime cache per frame; ensure
                                             // refines Block mode from the bridge.
