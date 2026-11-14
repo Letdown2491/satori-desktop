@@ -32,9 +32,10 @@ use super::{
     states,
     thread::ThreadView,
     wallet::WalletView,
+    wire::WireView,
     zap::ZapSheet,
 };
-use crate::{icons, media, theme};
+use crate::{icons, input::Input, media, theme};
 
 impl Pane {
     /// Release the pane's media pins (shell.back: the pane is about to
@@ -54,6 +55,7 @@ impl Pane {
             Pane::Settings(e) => e.entity_id(),
             Pane::Composer(e) => e.entity_id(),
             Pane::Wallet(e) => e.entity_id(),
+            Pane::Wire(e) => e.entity_id(),
         };
         media::release(id, cx);
     }
@@ -79,12 +81,16 @@ pub enum Pane {
     Composer(Entity<Composer>),
     /// The NWC wallet connect pane (D20).
     Wallet(Entity<WalletView>),
+    /// The live-wire relay column (D68's kind expansion): ONE relay,
+    /// subscribed directly, since-launch traffic only.
+    Wire(Entity<WireView>),
 }
 
-/// The columns workspace's hard cap (D68): four streams is past anything
-/// a laptop window carries, and the cap bounds the live-receiver and
-/// on-screen-pin surface the audits flagged.
-const COLUMN_CAP: usize = 4;
+/// The columns workspace's hard cap (D68): six streams is the owner's
+/// budget — horizontal scrolling removed the width pressure (PR #73),
+/// and six stays well inside the live-receiver and on-screen-pin
+/// surface the audits flagged.
+const COLUMN_CAP: usize = 6;
 
 /// Per-column width bounds (phase 2 resize): narrower than this a
 /// stream is unreadable, wider than this it starves the row.
@@ -101,10 +107,14 @@ const COL_MAX_W: f32 = 960.0;
 /// base feed (single-pane stack[0]) never drops.
 const PANE_CAP: usize = 12;
 
-/// The stream kinds a column can pin (D68): the ambient surfaces plus
-/// the hashtag stream (phase 2 — pinned from the hashtag drill's title
-/// row while the workspace is up; it carries a tag, so it's not in the
-/// fixed add menu).
+/// The stream kinds a column can pin (D68): the ambient surfaces, the
+/// hashtag stream (phase 2, pinned from the hashtag drill's title row),
+/// and the kind expansion (owner call): @user columns (the profile
+/// drill's timeline as a Feed in author mode) and live-wire relay
+/// columns (one relay, since-launch traffic — v1 of relay columns; the
+/// store-attribution version is documented as the "real" one). The
+/// parameterized kinds carry their persistence tag: the author's
+/// pubkey hex, the relay's URL.
 #[derive(Clone, PartialEq)]
 enum ColumnKind {
     Feed,
@@ -112,6 +122,8 @@ enum ColumnKind {
     Notifications,
     Search,
     Hashtag(String),
+    Author(PublicKey),
+    Relay(String),
 }
 
 impl ColumnKind {
@@ -122,6 +134,11 @@ impl ColumnKind {
             ColumnKind::Notifications => "Notifications".into(),
             ColumnKind::Search => "Search".into(),
             ColumnKind::Hashtag(tag) => format!("#{tag}").into(),
+            // The author column resolves its label through the profile
+            // cache at render (Shell::column_label); the hex is the
+            // fallback face.
+            ColumnKind::Author(pk) => pk.to_string().into(),
+            ColumnKind::Relay(url) => url.into(),
         }
     }
 
@@ -132,6 +149,8 @@ impl ColumnKind {
             ColumnKind::Notifications => icons::bell_icon(color).into_any_element(),
             ColumnKind::Search => icons::search_icon(color).into_any_element(),
             ColumnKind::Hashtag(_) => icons::hash_icon(color).into_any_element(),
+            ColumnKind::Author(_) => icons::at_icon(color).into_any_element(),
+            ColumnKind::Relay(_) => icons::wire_icon(color).into_any_element(),
         }
     }
 
@@ -143,13 +162,18 @@ impl ColumnKind {
             ColumnKind::Notifications => "notifications",
             ColumnKind::Search => "search",
             ColumnKind::Hashtag(_) => "hashtag",
+            ColumnKind::Author(_) => "author",
+            ColumnKind::Relay(_) => "relay",
         }
     }
 
-    /// The hashtag variant's tag, if any.
+    /// The parameterized variants' tag (the persistence tag + the dedupe
+    /// key): the hashtag's tag, the author's pubkey hex, the relay's URL.
     fn tag(&self) -> Option<String> {
         match self {
             ColumnKind::Hashtag(tag) => Some(tag.clone()),
+            ColumnKind::Author(pk) => Some(pk.to_string()),
+            ColumnKind::Relay(url) => Some(url.clone()),
             _ => None,
         }
     }
@@ -283,6 +307,10 @@ pub struct Shell {
     /// measure and the row scrolls — the owner's amendment to D68's
     /// collapse fork); h/l and focus moves scroll the target in view.
     row_scroll: ScrollHandle,
+    /// The + menu's hashtag and relay-URL inputs (the kind expansion):
+    /// type a tag or a wss:// URL, tap Add, the column pins.
+    tag_input: Entity<Input>,
+    relay_input: Entity<Input>,
     /// The signed-in identity: the rail's top mark is the user's avatar
     /// (replacing the ensō as the home glyph).
     me: Option<PublicKey>,
@@ -318,6 +346,8 @@ impl Shell {
             add_menu: false,
             reorder_over: None,
             row_scroll: ScrollHandle::new(),
+            tag_input: cx.new(|cx| shell_input("#", cx)),
+            relay_input: cx.new(|cx| shell_input("wss://…", cx)),
             me: None,
             me_profile: None,
         };
@@ -611,6 +641,7 @@ impl Shell {
             Pane::Feed(v) | Pane::Articles(v) | Pane::Hashtag(v) => self.subscribe_nav(v, cx),
             Pane::Notifications(v) => self.subscribe_nav(v, cx),
             Pane::Search(v) => self.subscribe_nav(v, cx),
+            Pane::Wire(v) => self.subscribe_nav(v, cx),
             _ => {}
         }
     }
@@ -710,24 +741,39 @@ impl Shell {
     }
 
     /// Pin (or focus) a hashtag column — the pin affordance on the
-    /// hashtag drill's title row, columns mode only. A column on the
-    /// same tag focuses instead of a duplicate pin.
+    /// hashtag drill's title row, columns mode only.
     fn pin_hashtag(&mut self, tag: &str, cx: &mut Context<Self>) {
-        match self
-            .columns
-            .iter()
-            .position(|c| c.kind.tag().as_deref() == Some(tag))
-        {
+        self.pin_tagged(ColumnKind::Hashtag(tag.to_string()), cx);
+    }
+
+    /// Pin (or focus) an @user column — the profile drill's + Column
+    /// affordance (the owner's entry point: a button the reader already
+    /// knows from the hashtag drill).
+    fn pin_author(&mut self, pk: PublicKey, cx: &mut Context<Self>) {
+        self.pin_tagged(ColumnKind::Author(pk), cx);
+    }
+
+    /// Pin (or focus) a live-wire relay column — the + menu's URL row.
+    fn pin_relay(&mut self, url: String, cx: &mut Context<Self>) {
+        self.pin_tagged(ColumnKind::Relay(url), cx);
+    }
+
+    /// The parameterized kinds' shared pin: a column with the same tag
+    /// focuses instead of a duplicate pin (the hashtag drill's rule,
+    /// generalized — the tag IS the dedupe key for author hex and relay
+    /// URL alike).
+    fn pin_tagged(&mut self, kind: ColumnKind, cx: &mut Context<Self>) {
+        match self.columns.iter().position(|c| c.kind.tag() == kind.tag()) {
             Some(i) if i == self.focused_col => self.column_to_top(i, cx),
             Some(i) => {
                 self.focused_col = i;
+                self.scroll_col_into_view(i);
                 cx.notify();
             }
             None => {
                 if self.columns.len() >= COLUMN_CAP {
                     return;
                 }
-                let kind = ColumnKind::Hashtag(tag.to_string());
                 let pane = self.build_pane(&kind, cx);
                 self.subscribe_pane(&pane, cx);
                 self.columns.push(Column {
@@ -761,6 +807,15 @@ impl Shell {
             ColumnKind::Hashtag(tag) => {
                 Pane::Hashtag(cx.new(|cx| Feed::hashtag(self.core.clone(), tag.clone(), cx)))
             }
+            // The author column IS a Feed (profile mode): j/k, the cursor
+            // and the paging come free (owner call — pin from the profile
+            // drill's title row).
+            ColumnKind::Author(pk) => {
+                Pane::Feed(cx.new(|cx| Feed::author(self.core.clone(), *pk, cx)))
+            }
+            ColumnKind::Relay(url) => {
+                Pane::Wire(cx.new(|cx| WireView::new(self.core.clone(), url.clone(), cx)))
+            }
         }
     }
 
@@ -778,6 +833,12 @@ impl Shell {
             ("notifications", _) => ColumnKind::Notifications,
             ("search", _) => ColumnKind::Search,
             ("hashtag", Some(tag)) => ColumnKind::Hashtag(tag.to_string()),
+            ("author", Some(hex)) => match PublicKey::from_str(hex) {
+                Ok(pk) => ColumnKind::Author(pk),
+                // A corrupt hex degrades the layout (never fails).
+                Err(_) => return None,
+            },
+            ("relay", Some(url)) => ColumnKind::Relay(url.to_string()),
             _ => return None,
         };
         Some(Column {
@@ -823,6 +884,51 @@ impl Shell {
         }
     }
 
+    /// A column's header label: the fixed kinds' static ones; the author
+    /// column's resolved through the profile cache (display name, the
+    /// hex as fallback).
+    fn column_label(&self, kind: &ColumnKind) -> SharedString {
+        match kind {
+            ColumnKind::Author(pk) => {
+                content::display_name(self.core.profile_of(pk).as_ref(), &pk.to_string()).into()
+            }
+            _ => kind.label(),
+        }
+    }
+
+    /// The + menu's hashtag row: pin (or focus) the typed tag. Leading
+    /// `#` stripped — the row is a door, not a prefix quiz.
+    fn add_tag_column(&mut self, cx: &mut Context<Self>) {
+        let raw = self.tag_input.read(cx).content.trim().to_string();
+        let tag = raw.trim_start_matches('#').trim().to_string();
+        if tag.is_empty() {
+            return;
+        }
+        self.tag_input.update(cx, Input::clear);
+        self.add_menu = false;
+        self.pin_hashtag(&tag, cx);
+    }
+
+    /// The + menu's relay row: the URL is validated and normalized like
+    /// settings' add_relay (wss:// or ws://; anything else leaves the
+    /// field standing with a corrective placeholder), then the live wire
+    /// pins.
+    fn add_relay_column(&mut self, cx: &mut Context<Self>) {
+        let url = self.relay_input.read(cx).content.trim().to_string();
+        if url.is_empty() {
+            return;
+        }
+        if !url.starts_with("wss://") && !url.starts_with("ws://") {
+            self.relay_input.update(cx, |input, _| {
+                input.set_placeholder("needs wss://");
+            });
+            return;
+        }
+        self.relay_input.update(cx, Input::clear);
+        self.add_menu = false;
+        self.pin_relay(url, cx);
+    }
+
     /// Unpin column `i` (the header's ×): media released, focus clamped.
     fn remove_column(&mut self, i: usize, cx: &mut Context<Self>) {
         if i >= self.columns.len() {
@@ -845,6 +951,9 @@ impl Shell {
                 v.update(cx, |feed, _| feed.scroll_top());
             }
             Some(Pane::Notifications(v)) => {
+                v.update(cx, |n, _| n.scroll_top());
+            }
+            Some(Pane::Wire(v)) => {
                 v.update(cx, |n, _| n.scroll_top());
             }
             _ => {}
@@ -1301,6 +1410,7 @@ impl Shell {
             Some(Pane::Article(_)) => "Read".into(),
             Some(Pane::Composer(_)) => "Compose".into(),
             Some(Pane::Wallet(_)) => "Wallet".into(),
+            Some(Pane::Wire(_)) => "Relay wire".into(),
             None => "Satori".into(),
         }
     }
@@ -1693,16 +1803,22 @@ impl Shell {
                     .text_color(rgb(theme::ink()))
                     .child(self.title(cx)),
             )
-            // The columns workspace (D68 phase 2): a hashtag drill over
-            // the workspace offers to pin that tag as a column.
-            .children(self.hashtag_pin(cx))
+            // The columns workspace (D68 phase 2): a hashtag or profile
+            // drill over the workspace offers to pin that stream as a
+            // column (the kind expansion's author entry point).
+            .children(self.column_pin(cx))
     }
 
-    /// The hashtag drill's + Column affordance (columns mode only):
-    /// pins (or focuses) the tag as a workspace column.
-    fn hashtag_pin(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
-        let tag = match self.stack.last() {
-            Some(Pane::Hashtag(view)) => view.read(cx).tag()?,
+    /// A drill's + Column affordance (columns mode only): the hashtag
+    /// drill pins its tag, the profile drill pins its author (the
+    /// @user column's entry point — owner call).
+    fn column_pin(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let kind = match self.stack.last() {
+            Some(Pane::Hashtag(view)) => {
+                let tag = view.read(cx).tag()?;
+                ColumnKind::Hashtag(tag.to_string())
+            }
+            Some(Pane::Profile(view)) => ColumnKind::Author(view.read(cx).who),
             _ => return None,
         };
         Some(
@@ -1722,7 +1838,10 @@ impl Shell {
                 })
                 .on_click(cx.listener(move |shell, _, _, cx| {
                     cx.stop_propagation();
-                    shell.pin_hashtag(&tag, cx);
+                    match &kind {
+                        ColumnKind::Author(pk) => shell.pin_author(*pk, cx),
+                        _ => shell.pin_tagged(kind.clone(), cx),
+                    };
                 }))
                 .child("+ Column"),
         )
@@ -2032,7 +2151,7 @@ impl Shell {
             );
         }
         for i in 0..self.columns.len() {
-            let label = self.columns[i].kind.label();
+            let label = self.column_label(&self.columns[i].kind);
             let element = Self::pane_element(&self.columns[i].pane);
             // The column's measure: the persisted width, else the reading
             // column's — never squeezed by the row (it scrolls instead).
@@ -2297,7 +2416,86 @@ impl Shell {
                     .child(kind.label()),
             );
         }
+        // The kind expansion's input rows (owner call): a hashtag and a
+        // relay URL typed straight into the menu — no drill to visit
+        // first. The relay column is the live wire (v1): since-launch
+        // traffic from that one relay, no history.
+        let tag_input = self.tag_input.clone();
+        let relay_input = self.relay_input.clone();
+        card = card
+            .child(Self::menu_input_row(
+                "Hashtag column",
+                tag_input,
+                "col-tag-field",
+                cx.listener(move |shell, _, _, cx| shell.add_tag_column(cx)),
+            ))
+            .child(Self::menu_input_row(
+                "Relay wire",
+                relay_input,
+                "col-relay-field",
+                cx.listener(move |shell, _, _, cx| shell.add_relay_column(cx)),
+            ));
         card
+    }
+
+    /// One + menu input row: the label, the field, the Add button.
+    fn menu_input_row(
+        label: &str,
+        input: Entity<Input>,
+        id: &'static str,
+        on_add: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Div {
+        let focus_target = input.clone();
+        div()
+            .border_t_1()
+            .border_color(rgb(theme::hairline()))
+            .mt(px(4.0))
+            .px(px(12.0))
+            .py(px(8.0))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(theme::T_SMALL))
+                    .text_color(rgb(theme::muted()))
+                    .child(label.to_string()),
+            )
+            .child(
+                div()
+                    .id(id)
+                    .cursor_text()
+                    .h(px(28.0))
+                    .px_2()
+                    .rounded(px(theme::R_INPUT))
+                    .bg(rgb(theme::panel()))
+                    .border_1()
+                    .border_color(rgb(theme::hairline()))
+                    .child(input)
+                    .on_click(move |_, window, cx| {
+                        let fh = focus_target.read(cx).focus_handle(cx);
+                        window.focus(&fh, cx);
+                    }),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id}-add")))
+                    .cursor_pointer()
+                    .self_start()
+                    .px(px(8.0))
+                    .py(px(2.0))
+                    .rounded(px(theme::R_EMBED))
+                    .border_1()
+                    .border_color(rgb(theme::hairline()))
+                    .text_size(px(theme::T_UI))
+                    .text_color(rgb(theme::muted()))
+                    .hover(|s| {
+                        s.border_color(rgb(theme::vermilion()))
+                            .text_color(rgb(theme::vermilion()))
+                    })
+                    .on_click(on_add)
+                    .child("Add"),
+            )
     }
 
     /// A pane as an element (the shared match the single-pane column and
@@ -2317,6 +2515,7 @@ impl Shell {
             Pane::Article(view) => view.clone().into_any_element(),
             Pane::Composer(view) => view.clone().into_any_element(),
             Pane::Wallet(view) => view.clone().into_any_element(),
+            Pane::Wire(view) => view.clone().into_any_element(),
         }
     }
 
@@ -2395,6 +2594,14 @@ impl Shell {
                 )
             })
     }
+}
+
+/// A single-line input for the shell's + menu (settings.rs single_line's
+/// shape: multiline off, a placeholder that shows the expected shape).
+fn shell_input(placeholder: &str, cx: &mut Context<Input>) -> Input {
+    let mut i = Input::new(cx);
+    i.multiline = false;
+    i.placeholder(placeholder)
 }
 
 /// A sheet overlay (the zap amount card, the reply box, #21): the card

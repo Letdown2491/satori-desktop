@@ -247,6 +247,13 @@ pub fn hash_icon(color: u32) -> impl IntoElement {
     icon(hash, color, 20.0)
 }
 
+/// The live wire (D68's relay column): a dot with broadcast waves on
+/// both sides — distinct from the stream glyph (a timeline) and the
+/// hash (a tag).
+pub fn wire_icon(color: u32) -> impl IntoElement {
+    icon(wire, color, 20.0)
+}
+
 // The ensō — the brush circle with a gap, drawn as a slightly spiralling
 // arc that tapers toward the tail (the brush lifting off). It opens every
 // session: the waiting mark of the login flow.
@@ -410,6 +417,28 @@ fn hash(b: &mut PathBuilder, g: &Grid) {
         b.move_to(g.p(4.5, y));
         b.line_to(g.p(19.5, y));
     }
+}
+
+/// The live wire: a source dot, broadcast waves arcing out on both
+/// sides (stroke-only, the icon rule). Quadratic curves: endpoint +
+/// one control (gpui's curve_to).
+fn wire(b: &mut PathBuilder, g: &Grid) {
+    // The dot: a hairline circle, four quad arcs.
+    b.move_to(g.p(13.2, 12.0));
+    b.curve_to(g.p(12.0, 13.2), g.p(13.2, 13.2));
+    b.curve_to(g.p(10.8, 12.0), g.p(12.0, 13.2));
+    b.curve_to(g.p(12.0, 10.8), g.p(10.8, 12.0));
+    b.curve_to(g.p(13.2, 12.0), g.p(12.0, 10.8));
+    // The inner waves.
+    b.move_to(g.p(8.5, 9.5));
+    b.curve_to(g.p(8.5, 14.5), g.p(5.6, 12.0));
+    b.move_to(g.p(15.5, 9.5));
+    b.curve_to(g.p(15.5, 14.5), g.p(18.4, 12.0));
+    // The outer waves.
+    b.move_to(g.p(6.3, 7.0));
+    b.curve_to(g.p(6.3, 17.0), g.p(2.2, 12.0));
+    b.move_to(g.p(17.7, 7.0));
+    b.curve_to(g.p(17.7, 17.0), g.p(21.8, 12.0));
 }
 
 /// The ensō at display size — a brush circle, so the stroke runs heavier

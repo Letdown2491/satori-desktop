@@ -44,7 +44,9 @@ enum Row {
 
 pub struct ProfileView {
     core: Arc<Core>,
-    who: PublicKey,
+    /// The profile this pane shows (the workspace's + Column affordance
+    /// reads it to pin the @user column — D68's kind expansion).
+    pub(crate) who: PublicKey,
     profile: Option<Profile>,
     notes: Vec<Event>,
     /// The active surface (notes body / media strips — Phase 2 §4.3).
