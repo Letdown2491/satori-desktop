@@ -29,6 +29,7 @@ pub mod read_state;
 pub mod secrets;
 pub mod session;
 pub mod signer;
+pub mod socks;
 pub mod undo;
 
 pub mod dms;
@@ -49,6 +50,7 @@ pub mod seen;
 pub mod store;
 pub mod tor;
 pub mod upload;
+pub mod video_proxy;
 pub mod viewport;
 pub mod wallet;
 pub mod wot;

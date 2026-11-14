@@ -50,7 +50,7 @@ pub fn is_public_ip(ip: &std::net::IpAddr) -> bool {
                 || v4.is_unspecified()
                 || v4.is_documentation()
                 || o[0] == 0 // this-network (0.0.0.0/8)
-                || o[0] == 100 // shared address space (CGNAT, 100.64/10)
+                || o[0] == 100 // all of 100.0.0.0/8: the CGNAT range 100.64/10 plus the rest, unallocated or not (fail closed)
                 || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0.0/24
                 || (o[0] == 198 && (o[1] == 18 || o[1] == 19)) // 198.18/15 benchmark
                 || o[0] >= 240) // reserved + broadcast
@@ -228,11 +228,24 @@ fn screened(
     if addrs.is_empty() {
         return Err(NetGuardError::Resolve(host.to_string()));
     }
-    if !addrs.iter().all(|a| is_public_ip(&a.ip())) {
+    if !non_public_answers(addrs.iter().map(|a| a.ip())).is_empty() {
         // Fail closed on the WHOLE name: no partial dials.
         return Err(NetGuardError::NonPublic(host.to_string()));
     }
     Ok(addrs)
+}
+
+/// The fail-closed mix rule's ONE kernel: the non-public answers of a
+/// resolution, in input order. Empty = every answer dialable; non-empty =
+/// the whole name fails (the resolve path refuses with `NonPublic`, the
+/// URI screen reports the offending addresses to the dialog). The two
+/// shapes it replaces (`iter().all` here, filter+is_empty in the URI
+/// screen) could never disagree by construction, but also shared no code.
+fn non_public_answers<I>(addrs: I) -> Vec<IpAddr>
+where
+    I: IntoIterator<Item = IpAddr>,
+{
+    addrs.into_iter().filter(|ip| !is_public_ip(ip)).collect()
 }
 
 /// Why a name was refused. `Resolve` is weather (DNS down, no answers);
@@ -389,12 +402,27 @@ pub fn user_chosen_relay(url: &str) -> bool {
     }
 }
 
+/// The ledger's host form: trimmed, lowercased, trailing dot stripped,
+/// brackets stripped, PORT stripped. The lookup side (`user_chosen_relay`)
+/// reads `url::Url::host_str()`, which never carries a port, so a caller
+/// that stores `umbrel.local:7777` used to create a silent never-match
+/// exemption (review Tier 2.6 / #9's carried nit). A bare IPv6 literal has
+/// several colons and is left whole; exactly one colon can only be
+/// host:port.
 fn normalize_host(host: &str) -> String {
-    host.trim()
-        .trim_end_matches('.')
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_ascii_lowercase()
+    let host = host.trim();
+    let host = if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed IPv6, with or without a trailing :port.
+        match rest.split_once(']') {
+            Some((inside, _)) => inside,
+            None => rest,
+        }
+    } else if host.matches(':').count() == 1 {
+        host.split(':').next().unwrap_or(host)
+    } else {
+        host
+    };
+    host.trim_end_matches('.').to_ascii_lowercase()
 }
 
 // --- paste-time URI relay screening (issue #11) ----------------------------
@@ -496,10 +524,7 @@ where
         .await
         {
             Ok(Ok(addrs)) => {
-                let refused: Vec<IpAddr> = addrs
-                    .map(|a| a.ip())
-                    .filter(|ip| !is_public_ip(ip))
-                    .collect();
+                let refused = non_public_answers(addrs.map(|a| a.ip()));
                 if refused.is_empty() {
                     RelayScreen::Public
                 } else {
@@ -718,18 +743,41 @@ mod tests {
 
     #[test]
     fn pinned_resolution_fails_closed() {
-        // localhost never resolves to a public address — the name is
-        // refused outright, whatever the answer list looks like.
+        // The classification is part of the contract now that WP2's SOCKS5
+        // server is resolve_pinned_public's first consumer: localhost in
+        // this environment resolves (getaddrinfo, /etc/hosts) to a
+        // loopback answer, so it must refuse with the GUARD's variant
+        // (NonPublic), not weather (Resolve). A Resolve here would mean
+        // the lookup never ran.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         rt.block_on(async {
             let res = resolve_pinned_public("localhost", 8080).await;
-            assert!(matches!(
-                res,
-                Err(NetGuardError::NonPublic(_)) | Err(NetGuardError::Resolve(_))
-            ));
+            assert!(
+                matches!(res, Err(NetGuardError::NonPublic(_))),
+                "localhost must refuse with NonPublic, got {res:?}"
+            );
+        });
+    }
+
+    /// The other half of the split: an unresolvable name is WEATHER
+    /// (Resolve), not the guard. `.invalid` is reserved to never resolve
+    /// (RFC 6761), so a lookup error is the only honest outcome; if this
+    /// ever returns NonPublic or Ok, a resolver is lying to us.
+    #[test]
+    fn unresolvable_name_is_resolve_weather_not_the_guard() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let res = resolve_pinned_public("no-such-host.invalid", 8080).await;
+            assert!(
+                matches!(res, Err(NetGuardError::Resolve(_))),
+                "an unresolvable name must refuse with Resolve, got {res:?}"
+            );
         });
     }
 
@@ -770,6 +818,34 @@ mod tests {
         assert!(!user_chosen_relay(url));
         // Garbage URLs are never "user chosen".
         assert!(!user_chosen_relay("not a url"));
+    }
+
+    /// #9's carried nit: the lookup side (`user_chosen_relay`) is always
+    /// port-less (`url::Url::host_str`), so a caller storing a host:port
+    /// used to create a silent never-match exemption. normalize_host
+    /// strips the port (and the brackets) on the way in.
+    #[test]
+    fn exemption_normalization_strips_ports_and_brackets() {
+        let _env = crate::test_env::EnvGuard::new("netguard-port");
+        allow_direct_relay("umbrel.local:7777");
+        assert!(
+            user_chosen_relay("wss://umbrel.local:7777"),
+            "a host:port exemption must match a port-less lookup"
+        );
+        allow_direct_relay("[2001:db8::1]:443");
+        assert!(
+            user_chosen_relay("wss://[2001:db8::1]:443"),
+            "a bracketed IPv6 exemption must match, port or no port"
+        );
+        // Bare IPv6 literals (several colons) stay whole.
+        allow_direct_relay("2001:db8::2");
+        assert!(user_chosen_relay("wss://[2001:db8::2]:443"));
+        // And the disallow half matches what the store side holds.
+        disallow_direct_relay("umbrel.local");
+        assert!(!user_chosen_relay("wss://umbrel.local:7777"));
+        // The ledger is process-global: leave nothing behind.
+        disallow_direct_relay("2001:db8::1");
+        disallow_direct_relay("2001:db8::2");
     }
 
     // --- paste-time URI relay screening (issue #11) ----------------------
