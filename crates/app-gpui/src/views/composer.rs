@@ -2429,7 +2429,20 @@ impl Render for Composer {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.pick_emoji(i, cx);
                                 }))
-                                .child(format!("{} :{}:", e.char, e.name))
+                                // The glyph rides the color emoji face as its
+                                // primary font (theme::EMOJI): through the UI
+                                // face it paints as DejaVu/Adwaita monochrome
+                                // outlines. The shortcode stays on the UI
+                                // face — it is plain text.
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_family(theme::EMOJI)
+                                        .child(e.char),
+                                )
+                                .child(format!(":{}:", e.name))
                         })),
                 )
             })
