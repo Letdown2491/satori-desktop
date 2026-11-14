@@ -94,6 +94,9 @@ pub enum FeedEvent {
     Parents(std::collections::HashMap<String, ParentNote>),
     /// Poll tallies: (option id, count) over each voter's latest ballot.
     PollVotes(Vec<(String, u32)>),
+    /// NIP-75 zap-goal progress: the goal's raised total in msat (the
+    /// receipts' bolt11-authoritative amounts, summed).
+    GoalMsat(EventId, u64),
     /// Comments on a target, oldest first + profiles.
     Comments(Vec<Event>, Vec<Profile>),
     /// Per-note comment counts (the bubble): (note id, count) for the
@@ -3939,6 +3942,48 @@ impl Core {
             match res {
                 Ok(t) => {
                     let _ = tx.send(FeedEvent::PollVotes(t));
+                }
+                Err(e) => {
+                    let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
+    /// A zap goal's raised total (NIP-75): the receipts that name the
+    /// goal's coordinate in their `a` tag, summed. The goal rides in (the
+    /// view has it in hand); the store/network ask is receipts-only, `a`
+    /// -scoped so other goals' receipts never land here.
+    pub fn goal_progress(self: &Arc<Self>, goal: &Event) -> FeedRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        let goal = goal.clone();
+        self.rt.spawn(async move {
+            let res: Result<u64> = async {
+                let coord = match crate::nip::goal::coordinate(&goal) {
+                    Some(c) => c,
+                    None => return Ok(0),
+                };
+                let active = this.active().await?;
+                let filter = Filter::new()
+                    .kind(Kind::Custom(9735))
+                    .custom_tag(SingleLetterTag::LOWERCASE_A, coord)
+                    .limit(1000);
+                let receipts: Vec<Event> = active
+                    .pool
+                    .get(filter)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                // (no explicit save: the SDK persists what it receives)
+                Ok(crate::nip::goal::raised_msat(&goal, &receipts))
+            }
+            .await;
+            match res {
+                Ok(msat) => {
+                    let _ = tx.send(FeedEvent::GoalMsat(goal.id, msat));
                 }
                 Err(e) => {
                     let _ = tx.send(FeedEvent::Failed(e.to_string()));
