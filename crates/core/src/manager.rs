@@ -2328,6 +2328,12 @@ impl Core {
         // the authenticated owner (NIP-78, Sep 2026).
         pool.set_identity(signer.clone());
         let profiles = crate::profiles::ProfileService::new(Arc::clone(&pool));
+        // Seed the display mirror from the durable cache: mentions and
+        // people search read profiles_mem, which otherwise starts empty
+        // each launch and re-learns profiles one feed page at a time —
+        // '@amethyst' missed right after restart even though the disk
+        // cache held her.
+        self.absorb_profiles(&profiles.snapshot());
         // Undo-window prefs live in prefs.json (theme.ts semantics); core
         // reads its slice at session build — TODO(M1): cleaner pref split.
         let mut undo = crate::undo::UndoWindow::default();
