@@ -170,6 +170,20 @@ impl ProfileService {
         self.dirty.store(false, Ordering::Relaxed);
     }
 
+    /// A bulk read of the whole cache: the session build seeds the
+    /// manager's display mirror (`profiles_mem`) from the disk-bootstrapped
+    /// cache, so @-mention and people search see last session's profiles
+    /// without waiting for feed pages to rehydrate them one author at a
+    /// time.
+    pub fn snapshot(&self) -> Vec<Profile> {
+        self.cache
+            .lock()
+            .unwrap()
+            .values()
+            .map(|e| e.profile.clone())
+            .collect()
+    }
+
     pub fn get(&self, pk: &PublicKey) -> Option<Profile> {
         self.cache
             .lock()
