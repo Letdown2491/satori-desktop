@@ -17,6 +17,10 @@ pub enum Nav {
     /// pref, selects the palette and signals the watchers (theme.rs).
     SetTheme(bool),
     OpenThread(EventId),
+    /// A thread whose anchor is an ADDRESSABLE event (NIP-22 address
+    /// parents: the coordinate, not an id). The anchor lands by address,
+    /// then the thread rides its event id like any other.
+    OpenThreadAddr(u16, PublicKey, String),
     OpenProfile(PublicKey),
     /// The profile edit form (D38) for the given (own) pubkey.
     OpenEditProfile(PublicKey),

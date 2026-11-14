@@ -223,6 +223,7 @@ impl Shell {
     ) {
         cx.subscribe(view, |this, _view, ev: &Nav, cx| match ev {
             Nav::OpenThread(id) => this.open_thread(*id, cx),
+            Nav::OpenThreadAddr(kind, who, d) => this.open_thread_addr(*kind, *who, d.clone(), cx),
             Nav::OpenProfile(who) => this.open_profile(*who, cx),
             Nav::OpenEditProfile(me) => this.open_edit_profile(*me, cx),
             Nav::OpenHashtag(tag) => this.open_hashtag(tag.clone(), cx),
@@ -270,6 +271,23 @@ impl Shell {
     /// through the same navigation the in-app taps use.
     pub(crate) fn open_thread(&mut self, id: EventId, cx: &mut Context<Self>) {
         let view = cx.new(|cx| ThreadView::new(self.core.clone(), id, cx));
+        self.subscribe_nav(&view, cx);
+        self.stack.push(Pane::Thread(view));
+        cx.notify();
+    }
+
+    /// The address door (NIP-22): a comment notification on an addressable
+    /// parent opens the thread by its coordinate; the anchor lands by
+    /// address, and a long-form parent redirects into the reader (the
+    /// thread's own landing rule).
+    pub(crate) fn open_thread_addr(
+        &mut self,
+        kind: u16,
+        who: PublicKey,
+        d: String,
+        cx: &mut Context<Self>,
+    ) {
+        let view = cx.new(|cx| ThreadView::new_addr(self.core.clone(), kind, who, d, cx));
         self.subscribe_nav(&view, cx);
         self.stack.push(Pane::Thread(view));
         cx.notify();

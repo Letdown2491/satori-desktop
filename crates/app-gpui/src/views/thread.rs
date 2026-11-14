@@ -38,7 +38,12 @@ pub struct ThreadView {
     /// §4.3: the kinded error strip (replaces the raw `… {e}` status dump).
     error: Option<states::PaneError>,
     /// The pane's anchor — Retry re-asks it (and the thread) by id.
-    anchor_id: EventId,
+    /// `None` in the address door's mode (NIP-22): the anchor rides a
+    /// coordinate until it lands and learns its id.
+    anchor_id: Option<EventId>,
+    /// The address the anchor is fetched by (the coordinate door's
+    /// variant); Retry re-asks by address while the anchor is unknown.
+    addr: Option<(u16, PublicKey, String)>,
     /// Lazy parent hydration (the webapp's "↩ in reply to an earlier note",
     /// render/note.ts reply-context): direct parents that aren't in the
     /// thread — id → author + snippet, asked-set keeps misses from looping.
@@ -107,6 +112,36 @@ impl engagement::Host for ThreadView {
 
 impl ThreadView {
     pub fn new(core: Arc<Core>, id: EventId, cx: &mut Context<Self>) -> Self {
+        let view = Self::build(core, None, Some(id), cx);
+        // The anchor rides in with its author's profile; replies follow.
+        view.pump(view.core.event_by_id(id, Vec::new(), None), cx);
+        view.pump(view.core.thread(id), cx);
+        view
+    }
+
+    /// The address door (NIP-22): the anchor is an ADDRESSABLE event,
+    /// fetched by its coordinate; when it lands it learns its id and the
+    /// replies follow (the landing wires that itself). A long-form anchor
+    /// redirects into the reader (the thread's landing rule).
+    pub fn new_addr(
+        core: Arc<Core>,
+        kind: u16,
+        who: PublicKey,
+        d: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let view = Self::build(core, Some((kind, who, d.clone())), None, cx);
+        view.pump(view.core.event_by_address(kind, who, d), cx);
+        view
+    }
+
+    /// The pane's bones + the wallet broadcast pump (both constructors).
+    fn build(
+        core: Arc<Core>,
+        addr: Option<(u16, PublicKey, String)>,
+        anchor_id: Option<EventId>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         crate::timefmt::watch(cx); // repaint on mode/height change
         crate::video::watch(cx); // repaint on player open/toggle/close
@@ -120,7 +155,8 @@ impl ThreadView {
             quotes: HashMap::new(),
             status: "loading the thread…".into(),
             error: None,
-            anchor_id: id,
+            anchor_id,
+            addr,
             parents: HashMap::new(),
             parents_asked: HashSet::new(),
             list: ListState::new(0, ListAlignment::Top, px(400.)),
@@ -128,9 +164,6 @@ impl ThreadView {
             snap: None,
             snap_dirty: true,
         };
-        // The anchor rides in with its author's profile; replies follow.
-        view.pump(view.core.event_by_id(id, Vec::new(), None), cx);
-        view.pump(view.core.thread(id), cx);
         // The wallet broadcast (D20): the thread's bolts follow every zap,
         // theirs or the sheet's, wherever it started.
         let this = cx.entity().downgrade();
@@ -231,6 +264,12 @@ impl ThreadView {
                 if u16::from(note.kind) == 30023 {
                     cx.emit(Nav::OpenArticle(note.clone()));
                     return;
+                }
+                // The address door's first landing: the anchor learns its
+                // id and the replies follow (new_addr has no id to ask).
+                if self.anchor_id.is_none() {
+                    self.anchor_id = Some(note.id);
+                    self.pump(self.core.thread(note.id), cx);
                 }
                 self.anchor = Some(note.clone());
                 self.error = None;
@@ -824,11 +863,15 @@ impl Render for ThreadView {
                                 move |_, _, cx| {
                                     retry.update(cx, |view, cx| {
                                         view.error = None;
-                                        view.pump(
-                                            view.core.event_by_id(view.anchor_id, Vec::new(), None),
-                                            cx,
-                                        );
-                                        view.pump(view.core.thread(view.anchor_id), cx);
+                                        if let Some(id) = view.anchor_id {
+                                            view.pump(
+                                                view.core.event_by_id(id, Vec::new(), None),
+                                                cx,
+                                            );
+                                            view.pump(view.core.thread(id), cx);
+                                        } else if let Some((k, who, d)) = view.addr.clone() {
+                                            view.pump(view.core.event_by_address(k, who, d), cx);
+                                        }
                                     });
                                 },
                                 move |_, _, cx| {

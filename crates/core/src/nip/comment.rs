@@ -70,6 +70,13 @@ impl Ref {
             Ref::Url(u) => u.clone(),
         }
     }
+
+    /// Parse a coordinate ("kind:author:d") — the parent-key inverse of
+    /// [`Ref::value`]: notifications key addressable parents by their
+    /// coordinate (an address has no event id to resolve).
+    pub fn from_coordinate(s: &str) -> Option<Ref> {
+        Self::from_tag('a', s)
+    }
 }
 
 /// The root/parent references a comment carries.
@@ -446,5 +453,21 @@ mod tests {
             "on a different article",
         );
         assert!(!filters[0].match_event(&other, MatchEventOptions::default()));
+    }
+
+    #[test]
+    fn coordinate_round_trips_through_value() {
+        // The notifications' parent key: a Ref::Address's value() re-parses
+        // to the same address (from_coordinate is from_tag('a')).
+        let r = Ref::Address {
+            kind: 30023,
+            author: Keys::generate().public_key(),
+            d: "some-slug".into(),
+        };
+        let parsed = Ref::from_coordinate(&r.value()).expect("coordinate parses");
+        assert_eq!(parsed, r.clone());
+        // And junk coordinates refuse.
+        assert!(Ref::from_coordinate("not-a-coord").is_none());
+        assert!(Ref::from_coordinate("1:notahex:d").is_none());
     }
 }

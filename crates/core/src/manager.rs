@@ -4131,12 +4131,19 @@ impl Core {
                 std::collections::HashMap::new();
             let _: Result<()> = async {
                 let active = this.active().await?;
-                let want: Vec<EventId> = ids
-                    .iter()
-                    .filter_map(|h| EventId::from_hex(h).ok())
-                    .collect();
-                if want.is_empty() {
-                    return Ok(());
+                // Parents key by hex id OR coordinate ("kind:author:d" —
+                // NIP-22 address parents have no event id to resolve; the
+                // coordinate's replaceable pointer is the target).
+                let mut want: Vec<EventId> = Vec::new();
+                let mut coords: Vec<(u16, PublicKey, String)> = Vec::new();
+                for id in &ids {
+                    if let Ok(eid) = EventId::from_hex(id) {
+                        want.push(eid);
+                    } else if let Some(crate::nip::comment::Ref::Address { kind, author, d }) =
+                        crate::nip::comment::Ref::from_coordinate(id)
+                    {
+                        coords.push((kind, author, d));
+                    }
                 }
                 let mut events: Vec<Event> = Vec::new();
                 for id in &want {
@@ -4145,6 +4152,15 @@ impl Core {
                     // author-deleted parents don't resolve — the whisper
                     // degrades, which is the point.
                     if let Some(ev) = active.pool.store.event_by_id(*id).await.ok().flatten()
+                        && !nip40::is_expired(&ev)
+                        && !deletions::is_deleted(&ev)
+                    {
+                        events.push(ev);
+                    }
+                }
+                for (kind, author, d) in &coords {
+                    let k = Kind::from_u16(*kind);
+                    if let Ok(Some(ev)) = active.pool.store.latest_by_kind_d(*author, k, d).await
                         && !nip40::is_expired(&ev)
                         && !deletions::is_deleted(&ev)
                     {
@@ -4178,7 +4194,35 @@ impl Core {
                         events.extend(fetched);
                     }
                 }
-                for ev in events {
+                // Coordinate misses: one filter per coordinate (they're
+                // rare — only comments on addressable parents land here),
+                // on the indexers.
+                for (kind, author, d) in &coords {
+                    // A store hit already resolved this coordinate.
+                    if events.iter().any(|e| {
+                        u16::from(e.kind) == *kind
+                            && e.pubkey == *author
+                            && e.tags.identifier().as_deref() == Some(d.as_str())
+                    }) {
+                        continue;
+                    }
+                    let k = Kind::from_u16(*kind);
+                    let filter = Filter::new().kind(k).author(*author).identifier(d).limit(1);
+                    let fetched = active
+                        .pool
+                        .get_from(
+                            &INDEXERS.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                            &filter,
+                        )
+                        .await;
+                    // (no explicit save: the SDK persists what it receives)
+                    for ev in fetched {
+                        if !nip40::is_expired(&ev) && !deletions::is_deleted(&ev) {
+                            events.push(ev);
+                        }
+                    }
+                }
+                for ev in &events {
                     let snippet = plain_snippet(&ev.content, 140);
                     resolved.insert(
                         ev.id.to_string(),
@@ -4187,6 +4231,24 @@ impl Core {
                             snippet,
                         },
                     );
+                }
+                // The coordinate parents key by the coordinate (the string
+                // notif_parent_id returned), not the event id.
+                for (kind, author, d) in &coords {
+                    let key = format!("{kind}:{author}:{d}");
+                    if let Some(ev) = events.iter().find(|e| {
+                        u16::from(e.kind) == *kind
+                            && e.pubkey == *author
+                            && e.tags.identifier().as_deref() == Some(d.as_str())
+                    }) {
+                        resolved.insert(
+                            key,
+                            ParentNote {
+                                author: ev.pubkey.to_string(),
+                                snippet: plain_snippet(&ev.content, 140),
+                            },
+                        );
+                    }
                 }
                 Ok(())
             }
