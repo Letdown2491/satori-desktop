@@ -79,7 +79,14 @@ freed heap; the single-instance socket verifies the connecting peer's
 uid and fails closed; the auth-URL door only opens http and https
 links; the mention scan was moved off the per-keystroke hot path; and
 the wallet pump no longer reads its own entity mid-construction at
-startup.
+startup. The columns batch got its own five-lens pass, and the
+findings landed: a closed relay column's socket used to leak (its
+pump held the subscription open after the view died; the pump now
+exits with the view and the relay task unsubscribes on an idle
+check), the wire column snapshots its data like the feed's instead of
+deep-copying it per frame, relay URLs pass the same screening
+everywhere they are typed, restored or dialed, and five hand-copied
+code shapes collapsed into shared kernels.
 
 ## 0.7.1 - 2026-11-13
 
