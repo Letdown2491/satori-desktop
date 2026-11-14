@@ -240,13 +240,17 @@ pub fn ledger_update(record: ZapRecord) {
     save_ledger(&l);
 }
 
-/// The stored record for a note's most recent zap, if any (the retry path).
-pub fn ledger_for_note(note: &str) -> Option<ZapRecord> {
-    load_ledger()
+/// All stored records for a note, newest first (the retry path). A split
+/// zap (NIP-57 Appendix G) stores one record per receiver — same note,
+/// distinct request ids.
+pub fn ledger_for_note(note: &str) -> Vec<ZapRecord> {
+    let mut out: Vec<ZapRecord> = load_ledger()
         .zaps
         .into_iter()
-        .rev()
-        .find(|z| z.note == note)
+        .filter(|z| z.note == note)
+        .collect();
+    out.reverse();
+    out
 }
 
 /// Remove a record (a definite failure paid nothing — no history to keep).
@@ -680,6 +684,90 @@ pub fn zap_request(
     data.into_event_builder().finalize_unsigned(me)
 }
 
+// --- NIP-57 zap splits (Appendix G) ---------------------------------------
+
+/// One `zap` tag on the event being zapped:
+/// `["zap", <hex pubkey>, <relay to fetch kind-0>, <weight?>]`.
+#[derive(Clone)]
+pub struct ZapSplit {
+    pub pk: PublicKey,
+    /// The relay to download the receiver's metadata from. Advisory —
+    /// Satori resolves profiles through its own pool.
+    pub relay: Option<String>,
+    pub weight: Option<f64>,
+}
+
+/// The `zap` tags on the target event (NIP-57 Appendix G): the split
+/// receivers. The author is NOT implicitly among them — a split note's
+/// recipients are exactly its tags. Junk tags (bad hex) drop out; weights
+/// parse as f64, non-finite or negative treated as absent.
+pub fn zap_splits(ev: &Event) -> Vec<ZapSplit> {
+    ev.tags
+        .iter()
+        .filter(|t| t.as_slice().first().map(String::as_str) == Some("zap"))
+        .filter_map(|t| {
+            let pk = PublicKey::from_hex(t.as_slice().get(1)?).ok()?;
+            let weight = t
+                .as_slice()
+                .get(3)
+                .and_then(|w| w.parse::<f64>().ok())
+                .filter(|w| w.is_finite() && *w >= 0.0);
+            Some(ZapSplit {
+                pk,
+                relay: t.as_slice().get(2).cloned(),
+                weight,
+            })
+        })
+        .collect()
+}
+
+/// Divide `msat` across the split receivers (NIP-57 Appendix G): weights
+/// are relative; when NO tag carries a weight the zap divides equally;
+/// when weights are PARTIALLY present the unweighted receivers get
+/// nothing (`weight = 0`, the spec's own rule). Per-share floors sweep
+/// their rounding remainder onto the largest receiver so the shares sum
+/// to `msat` exactly. Empty input → empty (the caller keeps the
+/// author-only path).
+pub fn split_shares(msat: u64, splits: &[ZapSplit]) -> Vec<(PublicKey, u64)> {
+    if splits.is_empty() {
+        return Vec::new();
+    }
+    let total: f64 = splits.iter().filter_map(|s| s.weight).sum();
+    let shares: Vec<(PublicKey, f64)> = if splits.iter().all(|s| s.weight.is_some()) {
+        // All weighted (the total may be 0 only if every weight is 0 —
+        // then there is nothing to divide).
+        if total <= 0.0 {
+            return Vec::new();
+        }
+        splits
+            .iter()
+            .map(|s| (s.pk, s.weight.unwrap_or_default() / total))
+            .collect()
+    } else if total > 0.0 {
+        // Partially weighted: the unweighted drop out (weight = 0).
+        splits
+            .iter()
+            .filter_map(|s| s.weight.map(|w| (s.pk, w / total)))
+            .collect()
+    } else {
+        // No weights at all: equal division.
+        let n = splits.len() as f64;
+        splits.iter().map(|s| (s.pk, 1.0 / n)).collect()
+    };
+    let mut out: Vec<(PublicKey, u64)> = shares
+        .iter()
+        .map(|(pk, frac)| (*pk, (msat as f64 * frac).floor() as u64))
+        .filter(|(_, m)| *m > 0)
+        .collect();
+    let allotted: u64 = out.iter().map(|(_, m)| *m).sum();
+    if let Some(rest) = msat.checked_sub(allotted)
+        && let Some((_, largest)) = out.iter_mut().max_by_key(|(_, m)| *m)
+    {
+        *largest += rest;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -880,24 +968,177 @@ mod tests {
         // (the manager stores it, then pays — a crash here leaves a Pending
         // record, not a paid wallet and no memory of it).
         ledger_update(record.clone());
-        let stored = ledger_for_note(&note).expect("stored before pay");
+        let stored = &ledger_for_note(&note)[0];
         assert_eq!(stored.state, ZapState::Pending);
         assert_eq!(stored.msat, 21_000);
 
         // An explicit retry reuses the SAME event ID (no duplicate zap
         // events after a crash/restart).
-        assert_eq!(ledger_for_note(&note).unwrap().req, "req1");
+        assert_eq!(ledger_for_note(&note)[0].req, "req1");
 
         // Pay confirmed → Paid. A later crash keeps the bolt settled.
         let mut paid = record.clone();
         paid.state = ZapState::Paid;
         ledger_update(paid);
-        assert_eq!(ledger_for_note(&note).unwrap().state, ZapState::Paid);
+        assert_eq!(ledger_for_note(&note)[0].state, ZapState::Paid);
 
         // History (amount-picker seeds), newest first.
         let hist = ledger_history();
         assert_eq!(hist.len(), 1);
         assert_eq!(hist[0].req, "req1");
+    }
+
+    #[test]
+    fn ledger_holds_one_record_per_split_receiver() {
+        let _env = crate::test_env::EnvGuard::new("zaps");
+
+        // A split zap stores N records for one note (distinct request ids,
+        // same note id); the retry path sees them all, newest first.
+        let note = "c".repeat(64);
+        let mk = |req: &str, pk: &str| ZapRecord {
+            req: req.into(),
+            note: note.clone(),
+            recipient: pk.into(),
+            msat: 10_000,
+            state: ZapState::Pending,
+            created_at: 1,
+            event: format!(r#"{{"id":"{req}","kind":9734}}"#),
+        };
+        ledger_update(mk("reqA", "aa"));
+        ledger_update(mk("reqB", "bb"));
+        let stored = ledger_for_note(&note);
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].req, "reqB", "newest first");
+
+        // A retry skips the one that already settled.
+        let mut settled = mk("reqA", "aa");
+        settled.state = ZapState::Paid;
+        ledger_update(settled);
+        let pendings: Vec<_> = ledger_for_note(&note)
+            .into_iter()
+            .filter(|z| matches!(z.state, ZapState::Pending | ZapState::Uncertain))
+            .collect();
+        assert_eq!(pendings.len(), 1);
+        assert_eq!(pendings[0].req, "reqB");
+    }
+
+    // --- NIP-57 zap splits (Appendix G) ----------------------------------
+
+    fn split_event(tags: &[&str]) -> Event {
+        // zap_splits only reads the tag vec; the event itself is a plain
+        // signed text note (notifications.rs's forged-receipt pattern).
+        let keys = Keys::generate();
+        let tags: Vec<Tag> = tags
+            .iter()
+            .map(|t| {
+                let parts: Vec<&str> = t.split('|').collect();
+                Tag::custom(
+                    parts[0].to_string(),
+                    parts[1..].iter().map(|s| s.to_string()),
+                )
+            })
+            .collect();
+        let unsigned = UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::now(),
+            Kind::TextNote,
+            tags,
+            String::new(),
+        );
+        keys.sign_event(unsigned).unwrap()
+    }
+
+    #[test]
+    fn zap_splits_parse_tags_and_drop_junk() {
+        let ev = split_event(&[
+            "zap|1111111111111111111111111111111111111111111111111111111111111111|wss://a|1",
+            "zap|not-hex",
+            "note|whatever",
+            "zap|2222222222222222222222222222222222222222222222222222222222222222|wss://b|2",
+        ]);
+        let splits = zap_splits(&ev);
+        assert_eq!(splits.len(), 2);
+        assert_eq!(splits[1].weight, Some(2.0));
+        assert_eq!(splits[1].relay.as_deref(), Some("wss://b"));
+    }
+
+    #[test]
+    fn split_shares_weights_are_relative_and_sum_exactly() {
+        let mk = |hex: &str, w: Option<f64>| ZapSplit {
+            pk: PublicKey::from_hex(hex).expect("pk"),
+            relay: None,
+            weight: w,
+        };
+        let a = mk(
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            Some(1.0),
+        );
+        let b = mk(
+            "2222222222222222222222222222222222222222222222222222222222222222",
+            Some(1.0),
+        );
+        let c = mk(
+            "3333333333333333333333333333333333333333333333333333333333333333",
+            Some(2.0),
+        );
+
+        // 1 + 1 + 2 → 25% / 25% / 50%, floors + remainder sum to msat.
+        let shares = split_shares(10_000, &[a.clone(), b.clone(), c.clone()]);
+        assert_eq!(
+            shares.iter().map(|(_, m)| *m).collect::<Vec<_>>(),
+            vec![2500, 2500, 5000]
+        );
+        assert_eq!(shares.iter().map(|(_, m)| *m).sum::<u64>(), 10_000);
+
+        // Rounding remainder lands on the largest receiver.
+        let shares = split_shares(9999, &[a.clone(), b.clone(), c.clone()]);
+        assert_eq!(
+            shares.iter().map(|(_, m)| *m).collect::<Vec<_>>(),
+            vec![2499, 2499, 5001]
+        );
+
+        // No weights at all: equal division.
+        let unweighted = vec![
+            mk(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                None,
+            ),
+            mk(
+                "2222222222222222222222222222222222222222222222222222222222222222",
+                None,
+            ),
+        ];
+        let shares = split_shares(3001, &unweighted);
+        assert_eq!(
+            shares.iter().map(|(_, m)| *m).collect::<Vec<_>>(),
+            vec![1500, 1501]
+        );
+
+        // Partially weighted: the unweighted receiver gets nothing (the
+        // spec's own rule).
+        let partial = vec![
+            a.clone(),
+            mk(
+                "4444444444444444444444444444444444444444444444444444444444444444",
+                None,
+            ),
+        ];
+        let shares = split_shares(5000, &partial);
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].1, 5000);
+
+        // Every weight zero → nothing to divide.
+        let zero = vec![
+            mk(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                Some(0.0),
+            ),
+            mk(
+                "2222222222222222222222222222222222222222222222222222222222222222",
+                Some(0.0),
+            ),
+        ];
+        assert!(split_shares(5000, &zero).is_empty());
     }
 
     #[test]
