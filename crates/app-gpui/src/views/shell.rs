@@ -1533,16 +1533,13 @@ impl Shell {
                     ),
                 )
             })
-            // The columns workspace toggle (D68): vermilion while the mode
-            // is on (a state, like compose's speaking pen).
+            // The columns workspace toggle (D68): the same ink-at-rest /
+            // ink-when-active discipline as the other state buttons — the
+            // tick carries the state, the glyph needs no second voice.
             .child(self.rail_button(
                 "rail-columns",
                 "Columns",
-                icons::columns_icon(if self.columns_on {
-                    theme::vermilion()
-                } else {
-                    ink(false)
-                }),
+                icons::columns_icon(ink(self.columns_on)),
                 self.columns_on,
                 cx.listener(move |shell, _, _, cx| shell.toggle_columns(cx)),
             ))
