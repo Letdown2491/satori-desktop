@@ -15,6 +15,7 @@ use std::sync::Mutex;
 
 use crate::config;
 use crate::error::{LoginError, Result};
+use zeroize::Zeroizing;
 
 // Renamed with the app ID (D12). Entries under the old capitalized service
 // are NOT orphaned anymore: load() migrates them on first miss (below).
@@ -72,7 +73,8 @@ pub async fn store(name: &'static str, secret: &str) -> Result<()> {
     // secret: taking a ticket supersedes it (see delete).
     take_ticket(name);
     let name = name.to_string();
-    let secret = secret.to_string();
+    // Zeroized on drop: our copy of the secret never lingers in freed heap.
+    let secret = Zeroizing::new(secret.to_string());
     let stored: bool = {
         let (n, v) = (name.clone(), secret.clone());
         with_deadline(move || match entry(&n) {
@@ -90,12 +92,15 @@ pub async fn store(name: &'static str, secret: &str) -> Result<()> {
 
 /// Load a secret; `None` when never stored. A keyring miss first tries the
 /// pre-rename (D12) service — one-time migration, invisible to callers.
-pub async fn load(name: &str) -> Result<Option<String>> {
-    let from_keyring: Option<String> = {
+/// The round-trip copy is `Zeroizing`: dropped memory is wiped (#31
+/// hardening) — the nsec, the bunker transport + pairing secrets and the
+/// NWC secret don't linger in freed heap between here and the parser.
+pub async fn load(name: &str) -> Result<Option<Zeroizing<String>>> {
+    let from_keyring: Option<Zeroizing<String>> = {
         let name = name.to_string();
         with_deadline(move || match entry(&name) {
             Ok(e) => match e.get_password() {
-                Ok(v) => Ok(Some(v)),
+                Ok(v) => Ok(Some(Zeroizing::new(v))),
                 Err(keyring::Error::NoEntry) => Ok(None),
                 Err(e) => Err(LoginError::from(e)),
             },
@@ -120,9 +125,9 @@ pub async fn load(name: &str) -> Result<Option<String>> {
 /// clears the orphan. Best-effort in both directions: any legacy-read
 /// trouble is a clean miss (the file fallback still runs), and a failed
 /// copy keeps the legacy entry for the next attempt.
-async fn migrate_legacy_service(name: &str) -> Result<Option<String>> {
+async fn migrate_legacy_service(name: &str) -> Result<Option<Zeroizing<String>>> {
     let name = name.to_string();
-    let migrated: Option<String> = with_deadline(move || {
+    let migrated: Option<Zeroizing<String>> = with_deadline(move || {
         let legacy = match keyring::Entry::new(LEGACY_SERVICE, &name) {
             Ok(e) => e,
             Err(_) => return Ok(None),
@@ -139,7 +144,7 @@ async fn migrate_legacy_service(name: &str) -> Result<Option<String>> {
                 }
                 // Resume with the legacy secret either way — this launch
                 // works, and a failed copy migrates on the next one.
-                Ok(Some(secret))
+                Ok(Some(Zeroizing::new(secret)))
             }
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => {
@@ -220,13 +225,15 @@ fn file_store(name: &str, secret: &str) -> Result<()> {
     Ok(())
 }
 
-fn file_load(name: &str) -> Result<Option<String>> {
+fn file_load(name: &str) -> Result<Option<Zeroizing<String>>> {
     let path = fallback_path(name);
     if !path.exists() {
         return Ok(None);
     }
-    let s = std::fs::read_to_string(&path).map_err(|e| LoginError::Store(e.to_string()))?;
-    Ok(Some(s.trim().to_string()))
+    let s = Zeroizing::new(
+        std::fs::read_to_string(&path).map_err(|e| LoginError::Store(e.to_string()))?,
+    );
+    Ok(Some(Zeroizing::new(s.trim().to_string())))
 }
 
 #[cfg(test)]
@@ -259,7 +266,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
             let got = rt.block_on(load(name)).expect("load").expect("present");
             assert_eq!(
-                got,
+                got.as_str(),
                 format!("new-{round}"),
                 "round {round}: delete ate the fresh secret"
             );

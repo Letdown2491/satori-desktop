@@ -16,6 +16,7 @@ use satori_core::dlog;
 use satori_core::manager::{ConnectEvent, ConnectRx, Core};
 use std::time::Duration;
 
+use crate::views::content;
 use crate::{desktop, icons, input::Input, theme};
 
 /// Login outcome — the root drops the login view and mounts the shell.
@@ -364,17 +365,27 @@ impl Render for LoginView {
                                 .unwrap_or_else(|| div().into_any_element()),
                             auth_url
                                 .map(|url| {
+                                    // The audit's hardening: a signer-supplied
+                                    // string is opened only when it IS a web
+                                    // URL (content::web_url's http/https
+                                    // allow-list) — anything else renders as
+                                    // inert text, before any emitter is wired.
+                                    let openable = content::web_url(&url);
                                     let open = url.clone();
-                                    div()
+                                    let d = div()
                                         .id("login-auth-url")
-                                        .cursor_pointer()
                                         .text_size(px(theme::T_SMALL))
                                         .text_color(rgb(theme::live()))
                                         .overflow_x_scroll()
-                                        .max_w(px(360.))
-                                        .on_click(move |_, _, cx| cx.open_url(&open))
-                                        .child(url)
-                                        .into_any_element()
+                                        .max_w(px(360.));
+                                    if openable {
+                                        d.cursor_pointer()
+                                            .on_click(move |_, _, cx| cx.open_url(&open))
+                                            .child(url)
+                                            .into_any_element()
+                                    } else {
+                                        d.child(url).into_any_element()
+                                    }
                                 })
                                 .unwrap_or_else(|| div().into_any_element()),
                             div()

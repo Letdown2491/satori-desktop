@@ -6,7 +6,7 @@
 //! registry kinds render via cards.rs (P3).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
@@ -36,6 +36,11 @@ pub(crate) enum FeedMode {
     /// (private 10003 + public 30001 merged), no paging.
     Bookmarks,
 }
+
+/// The reply-parent whisper cache's bound (#31 latent): a long session's
+/// `parents`/`parents_asked` maps used to grow for the process lifetime.
+/// 512 resolved parents is far past one sitting's scrolling.
+const PARENTS_CAP: usize = 512;
 impl FeedMode {
     pub(crate) fn kinds(&self) -> Vec<Kind> {
         match self {
@@ -58,8 +63,14 @@ pub struct Feed {
     profiles: HashMap<String, Profile>,
     /// Reply parents (nip10) resolved for the context whisper: parent id →
     /// author + snippet. `parents_asked` keeps misses from re-requesting.
+    /// Both are eviction-capped together (#31 latent): a long session's
+    /// maps used to grow for the process lifetime; past the cap the
+    /// OLDEST parent (insertion order — the scroll origin's side) drops,
+    /// and a re-scroll back there re-asks and re-hydrates it.
     parents: HashMap<String, ParentNote>,
     parents_asked: HashSet<String>,
+    /// Insertion order for the parents cap's eviction (front = oldest).
+    parents_order: VecDeque<String>,
     /// Comment counts for the bubbles (CommentCounts landings), and the
     /// asked-set that keeps a paging feed from re-asking per page.
     counts: HashMap<String, usize>,
@@ -176,6 +187,7 @@ impl Feed {
             profiles: HashMap::new(),
             parents: HashMap::new(),
             parents_asked: HashSet::new(),
+            parents_order: VecDeque::new(),
             counts: HashMap::new(),
             counts_asked: HashSet::new(),
             live_new: 0,
@@ -537,7 +549,12 @@ impl Feed {
                     .filter(|a| !self.profiles.contains_key(a) && seen.insert(a.clone()))
                     .filter_map(|a| PublicKey::from_hex(&a).ok())
                     .collect();
-                self.parents.extend(p);
+                for (k, v) in p {
+                    self.parents.insert(k.clone(), v);
+                    self.parents_order.retain(|o| o != &k);
+                    self.parents_order.push_back(k);
+                }
+                self.trim_parents();
                 if !missing.is_empty() {
                     let rx = self.core.ensure_profiles(missing);
                     self.pump(rx, cx);
@@ -689,6 +706,19 @@ impl Feed {
 
     /// Collect the page's unresolved reply parents and ask core for them
     /// (store first, one by-id relay trip for the misses). Capped per ask.
+    /// The parents cap (#31 latent): a long session's whisper maps used
+    /// to grow for the process lifetime. Past the cap the OLDEST parent
+    /// (insertion order — the scroll origin's side) drops, asked-set
+    /// included, so a re-scroll back re-asks and re-hydrates it.
+    fn trim_parents(&mut self) {
+        while self.parents.len() > PARENTS_CAP
+            && let Some(old) = self.parents_order.pop_front()
+        {
+            self.parents.remove(&old);
+            self.parents_asked.remove(&old);
+        }
+    }
+
     fn want_parents(&mut self, cx: &mut Context<Self>) {
         let mut ids: Vec<String> = Vec::new();
         for note in &self.notes {

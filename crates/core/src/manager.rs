@@ -8401,7 +8401,7 @@ mod tests {
 
     #[test]
     fn mention_candidates_skip_me_and_cap_at_eight() {
-        let mut owned: Vec<Profile> = (0..10)
+        let owned: Vec<Profile> = (0..10)
             .map(|i| {
                 let hex = format!("pk{i:02}");
                 profile(&hex, &format!("u{i:02}"), "", "")
