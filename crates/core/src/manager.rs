@@ -142,6 +142,11 @@ static SUPPRESSED: Mutex<Vec<SuppressedNotif>> = Mutex::new(Vec::new());
 /// anything older can't re-candidate anyway).
 const SUPPRESSED_CAP: usize = 200;
 const SUPPRESSED_FLUSH_SECS: u64 = 10;
+
+/// How long the zap path waits for split receivers' kind-0 to warm
+/// (NIP-57 App. G tags can name profiles we've never met) before
+/// resolving pointers from whatever landed.
+const SPLIT_WARM_SECS: u64 = 5;
 static SUPPRESSED_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SUPPRESSED_FLUSHER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 static SUPPRESSED_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1458,24 +1463,25 @@ impl Core {
         note: String,
         tx: &mpsc::UnboundedSender<WalletEvent>,
     ) -> ZapFlow {
-        let Some(record) = wallet::ledger_for_note(&note).filter(|z| {
-            matches!(
-                z.state,
-                wallet::ZapState::Pending | wallet::ZapState::Uncertain
-            )
-        }) else {
+        let pendings: Vec<wallet::ZapRecord> = wallet::ledger_for_note(&note)
+            .into_iter()
+            .filter(|z| {
+                matches!(
+                    z.state,
+                    wallet::ZapState::Pending | wallet::ZapState::Uncertain
+                )
+            })
+            .collect();
+        if pendings.is_empty() {
             return Err(WalletEvent::ZapFailed {
                 note,
                 reason: "nothing to retry for this note".into(),
             });
-        };
-        // The stored request replays as-is — re-signing would mint a new
-        // event id and risk a duplicate zap event (the Feather rule).
-        let signed =
-            serde_json::from_str::<Event>(&record.event).map_err(|_| WalletEvent::ZapFailed {
-                note: note.clone(),
-                reason: "stored zap request is corrupt".into(),
-            })?;
+        }
+        // The stored requests replay as-is — re-signing would mint new
+        // event ids and risk duplicate zap events (the Feather rule). A
+        // split zap has one record per receiver: each replays, and one
+        // corrupt record doesn't block the rest.
         // One in-flight payment per note — the retry reclaims the slot.
         if !self.wallet.claim_flight(&note) {
             return Err(WalletEvent::ZapFailed {
@@ -1484,7 +1490,22 @@ impl Core {
             });
         }
         let _guard = FlightGuard(&self.wallet, &note);
-        self.pay_stored(&record, &signed, tx).await
+        for record in pendings {
+            let signed = match serde_json::from_str::<Event>(&record.event) {
+                Ok(s) => s,
+                Err(_) => {
+                    let ev = WalletEvent::ZapFailed {
+                        note: note.clone(),
+                        reason: "stored zap request is corrupt".into(),
+                    };
+                    self.wallet.emit(ev.clone());
+                    let _ = tx.send(ev);
+                    continue;
+                }
+            };
+            let _ = self.pay_stored(&record, &signed, tx).await;
+        }
+        Ok(())
     }
 
     async fn zap_inner(
@@ -1517,58 +1538,93 @@ impl Core {
         let me = active.me();
         let recipient = note.pubkey;
 
-        // The recipient's lightning pointer (lud16 before lud06). No
-        // address, no zap — an honest quiet failure, not a dialog.
-        let lud = match active
-            .pool
-            .store
-            .latest_by_kind(recipient, Kind::Metadata)
-            .await
-        {
-            Ok(Some(meta)) => lightning_field(&meta.content),
-            _ => None,
-        }
-        .ok_or_else(|| WalletEvent::ZapFailed {
-            note: note_hex.clone(),
-            reason: "this profile has no lightning address".into(),
-        })?;
-        let lnurl = wallet::lnurlp_url(&lud).map_err(|e| WalletEvent::ZapFailed {
-            note: note_hex.clone(),
-            reason: e,
-        })?;
-
-        // Sign FIRST (through the owner's signer — the bunker), STORE the
-        // signed request, then pay. A crash between sign and pay leaves a
-        // Pending record a retry can finish — same event id.
-        let unsigned = wallet::zap_request(
-            me,
-            recipient,
-            note.id,
-            msat,
-            &lnurl,
-            active.write_relays.clone(),
-        );
-        let signed =
-            active
-                .signer
-                .sign_event(unsigned)
-                .await
-                .map_err(|e| WalletEvent::ZapFailed {
-                    note: note_hex.clone(),
-                    reason: e.to_string(),
-                })?;
-        let record = wallet::ZapRecord {
-            req: signed.id.to_string(),
-            note: note_hex.clone(),
-            recipient: recipient.to_string(),
-            msat,
-            state: wallet::ZapState::Pending,
-            created_at: now_secs(),
-            event: serde_json::to_string(&signed).unwrap_or_default(),
+        // NIP-57 Appendix G: `zap` tags on the target event name the split
+        // receivers (the author is not implicitly among them); no tags →
+        // the author takes the whole zap, exactly as before. The tags may
+        // name receivers we've never met: warm their kind-0 before the
+        // pointer lookups (bounded — a slow relay must not park the zap).
+        let splits = wallet::zap_splits(note);
+        let shares: Vec<(PublicKey, u64)> = if splits.is_empty() {
+            vec![(recipient, msat)]
+        } else {
+            let pks: Vec<PublicKey> = splits.iter().map(|s| s.pk).collect();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(SPLIT_WARM_SECS),
+                active.profiles.warm_await(pks),
+            )
+            .await;
+            let mut shares = wallet::split_shares(msat, &splits);
+            shares.retain(|(_, m)| *m > 0);
+            shares
         };
-        wallet::ledger_update(record.clone());
+        if shares.is_empty() {
+            return Err(WalletEvent::ZapFailed {
+                note: note_hex.clone(),
+                reason: "the zap split added up to nothing".into(),
+            });
+        }
 
-        self.pay_stored(&record, &signed, tx).await
+        // Per receiver: resolve the lightning pointer, sign, STORE, pay.
+        // A receiver with no pointer fails the WHOLE zap (fail-closed):
+        // paying only the resolvable shares would silently shortchange
+        // the rest. One receiver's definite failure (dead lnurl server,
+        // wallet refusal) doesn't block the others — each reports its own
+        // outcome.
+        for (share_pk, share_msat) in shares {
+            let lud = match active
+                .pool
+                .store
+                .latest_by_kind(share_pk, Kind::Metadata)
+                .await
+            {
+                Ok(Some(meta)) => lightning_field(&meta.content),
+                _ => None,
+            }
+            .ok_or_else(|| WalletEvent::ZapFailed {
+                note: note_hex.clone(),
+                reason: format!("no lightning address for {share_pk}"),
+            })?;
+            let lnurl = wallet::lnurlp_url(&lud).map_err(|e| WalletEvent::ZapFailed {
+                note: note_hex.clone(),
+                reason: e,
+            })?;
+
+            // Sign FIRST (through the owner's signer — the bunker), STORE
+            // the signed request, then pay. A crash between sign and pay
+            // leaves a Pending record a retry can finish — same event id.
+            let unsigned = wallet::zap_request(
+                me,
+                share_pk,
+                note.id,
+                share_msat,
+                &lnurl,
+                active.write_relays.clone(),
+            );
+            let signed =
+                active
+                    .signer
+                    .sign_event(unsigned)
+                    .await
+                    .map_err(|e| WalletEvent::ZapFailed {
+                        note: note_hex.clone(),
+                        reason: e.to_string(),
+                    })?;
+            let record = wallet::ZapRecord {
+                req: signed.id.to_string(),
+                note: note_hex.clone(),
+                recipient: share_pk.to_string(),
+                msat: share_msat,
+                state: wallet::ZapState::Pending,
+                created_at: now_secs(),
+                event: serde_json::to_string(&signed).unwrap_or_default(),
+            };
+            wallet::ledger_update(record.clone());
+
+            // A definite failure here has already erased the record and
+            // reported itself; the remaining receivers still get paid.
+            let _ = self.pay_stored(&record, &signed, tx).await;
+        }
+        Ok(())
     }
 
     /// The shared pay path for a STORED, signed request (fresh or retry):
