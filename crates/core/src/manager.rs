@@ -5949,10 +5949,15 @@ impl Core {
     }
 
     /// Like (NIP-25). No undo window on reactions.
-    pub fn react(self: &Arc<Self>, target: &Event) -> PublishRx {
+    /// React to `target` (NIP-25 kind:7). `content` is the reaction body:
+    /// `"+"` (the heart) or one of the row picker's positive unicode
+    /// glyphs. Negative reactions stay unsent, unshown, unnotified —
+    /// the house posture, deliberately kept.
+    pub fn react(self: &Arc<Self>, target: &Event, content: &str) -> PublishRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         let target = target.clone();
+        let content = content.to_string();
         self.rt.spawn(async move {
             let res: Result<()> = async {
                 let active = this.active().await?;
@@ -5964,7 +5969,7 @@ impl Core {
                         seen::hint_tag(target.id, &target.pubkey),
                         Tag::public_key(target.pubkey),
                     ],
-                    "+",
+                    content,
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;

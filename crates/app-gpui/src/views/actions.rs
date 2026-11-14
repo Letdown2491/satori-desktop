@@ -30,6 +30,11 @@ const ZAP_HOLD: Duration = Duration::from_millis(500);
 /// mirrors and the core publishes; the row only calls.
 pub trait ActionHost: EventEmitter<Nav> + Sized + 'static {
     fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>);
+    /// The heart's right-click: open/close the row's reaction quick-set.
+    fn toggle_reaction_picker(&mut self, id: &str, cx: &mut Context<Self>);
+    /// A picked quick-set reaction (positive unicode glyphs; the heart
+    /// stays the plain click).
+    fn react_with(&mut self, ev: &Event, content: &str, cx: &mut Context<Self>);
     fn toggle_repost(&mut self, ev: &Event, cx: &mut Context<Self>);
     fn toggle_bookmark(&mut self, ev: &Event, cx: &mut Context<Self>);
     fn zap_tap(&mut self, ev: &Event, cx: &mut Context<Self>);
@@ -48,8 +53,24 @@ pub struct ActionState {
     pub wallet_ready: bool,
     /// Comment/reply count for the bubble (0 = bare glyph).
     pub replies: usize,
+    /// The reaction quick-set is open on this row (the heart's
+    /// right-click).
+    pub picker_open: bool,
     pub reduced_motion: bool,
 }
+
+/// The reaction quick-set (the heart's right-click): fixed, positive —
+/// the house posture never sends a negative reaction, and the heart
+/// itself stays the plain click's default. Content `"+"` = the heart
+/// (NIP-25's like marker, what every compatible client already counts);
+/// the rest ride as their unicode body.
+const QUICKSET: &[(&str, &str)] = &[
+    ("👍", "thumbs up"),
+    ("❤️", "heart"),
+    ("😂", "laugh"),
+    ("😮", "wow"),
+    ("😢", "sad"),
+];
 
 /// The row: body→actions at S3 (8px), glyph buttons with the hover wash.
 /// `key` seeds the element ids (the note id hex — unique per subtree).
@@ -67,12 +88,13 @@ pub(crate) fn action_row<H: ActionHost>(
     let ev_for_zap = ev.clone();
     let handle_reply = handle.clone();
     let handle_like = handle.clone();
+    let handle_picker = handle.clone();
     let handle_bookmark = handle.clone();
     let handle_repost = handle.clone();
     let handle_quote = handle.clone();
     let handle_zap = handle.clone();
 
-    div()
+    let row = div()
         .flex()
         .gap_5()
         .items_center()
@@ -110,6 +132,15 @@ pub(crate) fn action_row<H: ActionHost>(
                 .on_click(move |_, _, cx| {
                     let ev = ev_for_like.clone();
                     handle_like.update(cx, |host, cx| host.toggle_like(&ev, cx));
+                })
+                // Right-click = the reaction quick-set (more than just the
+                // heart): the bolt's pattern, one pane-local strip.
+                .on_mouse_down(gpui::MouseButton::Right, {
+                    let key = key.to_string();
+                    let handle_picker = handle_picker.clone();
+                    move |_, _, cx| {
+                        handle_picker.update(cx, |host, cx| host.toggle_reaction_picker(&key, cx));
+                    }
                 })
                 .hover(|s| s.bg(theme::hover_wash()))
                 .child(icons::heart_icon(if st.liked {
@@ -229,7 +260,35 @@ pub(crate) fn action_row<H: ActionHost>(
                 } else {
                     theme::muted()
                 })),
-        )
+        );
+    // The quick-set strip (the heart's right-click): pane-local, beneath
+    // the row — no overlay sheet for a five-glyph choice. A pick closes
+    // it (react_with); a second right-click toggles it.
+    if st.picker_open {
+        let mut strip = div().flex().gap_3().items_center().mt_1();
+        for (glyph, label) in QUICKSET {
+            let ev = ev.clone();
+            let handle = handle.clone();
+            strip = strip.child(
+                div()
+                    .id(SharedString::from(format!("react-{key}-{label}")))
+                    .cursor_pointer()
+                    .px_1()
+                    .rounded(px(theme::R_EMBED))
+                    .hover(|s| s.bg(theme::hover_wash()))
+                    .on_click(move |_, _, cx| {
+                        let ev = ev.clone();
+                        let content = (*glyph).to_string();
+                        handle.update(cx, |host, cx| host.react_with(&ev, &content, cx));
+                    })
+                    .text_size(px(theme::T_BODY))
+                    .child(*glyph),
+            );
+        }
+        div().w_full().flex().flex_col().child(row).child(strip)
+    } else {
+        div().w_full().flex().flex_col().child(row)
+    }
 }
 
 /// The paint-time reduced-motion pref (desktop.rs's portal read; the same

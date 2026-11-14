@@ -777,6 +777,12 @@ impl actions::ActionHost for NotificationsView {
     fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>) {
         engagement::toggle_like(self, ev, cx)
     }
+    fn toggle_reaction_picker(&mut self, id: &str, cx: &mut Context<Self>) {
+        engagement::toggle_reaction_picker(self, id, cx)
+    }
+    fn react_with(&mut self, ev: &Event, content: &str, cx: &mut Context<Self>) {
+        engagement::react_with(self, ev, content, cx)
+    }
     fn toggle_repost(&mut self, ev: &Event, cx: &mut Context<Self>) {
         engagement::toggle_repost(self, ev, cx)
     }
@@ -1138,6 +1144,7 @@ impl Render for NotificationsView {
         // FeedSnap discipline, inline — the page is bounded content).
         let liked = self.engagement.liked.clone();
         let reposted = self.engagement.reposted.clone();
+        let reaction_picker = self.engagement.reaction_picker.clone();
         let bookmarked = self.engagement.bookmarked.clone();
         let zapped = self.engagement.zapped.clone();
         let zap_pending = self.engagement.zap_pending.clone();
@@ -1251,6 +1258,7 @@ impl Render for NotificationsView {
                                         zapped: zapped.contains(&id_hex),
                                         zapping: zap_pending.contains(&id_hex),
                                         wallet_ready,
+                                        picker_open: reaction_picker.as_deref() == Some(&id_hex),
                                         // The notification IS the reply.
                                         replies: 0,
                                         reduced_motion,

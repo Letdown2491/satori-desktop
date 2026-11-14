@@ -84,6 +84,12 @@ impl actions::ActionHost for ThreadView {
     fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>) {
         engagement::toggle_like(self, ev, cx)
     }
+    fn toggle_reaction_picker(&mut self, id: &str, cx: &mut Context<Self>) {
+        engagement::toggle_reaction_picker(self, id, cx)
+    }
+    fn react_with(&mut self, ev: &Event, content: &str, cx: &mut Context<Self>) {
+        engagement::react_with(self, ev, content, cx)
+    }
     fn toggle_repost(&mut self, ev: &Event, cx: &mut Context<Self>) {
         engagement::toggle_repost(self, ev, cx)
     }
@@ -723,6 +729,7 @@ impl Render for ThreadView {
             zapped: eng.zapped.contains(&note.id.to_string()),
             zapping: eng.zap_pending.contains(&note.id.to_string()),
             wallet_ready: eng.wallet_ready,
+            picker_open: eng.reaction_picker.as_deref() == Some(&note.id.to_string()),
             // The thread pane shows the conversation itself; a count on
             // the bubble would repeat what the pane already renders.
             replies: 0,
