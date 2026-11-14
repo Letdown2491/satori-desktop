@@ -80,6 +80,8 @@ pub struct Feed {
     rsvped: HashMap<EventId, String>,
     /// NIP-36 warnings revealed this session (veil_card taps Show).
     revealed: HashSet<EventId>,
+    /// NIP-75 zap goals' raised totals in msat (goal id → sum).
+    goal_msat: HashMap<EventId, u64>,
     status: String,
     /// §4.3: the pane's kinded error — the strip replaces the old raw
     /// `format!("… {e}")` status-line dump (deficiency 8).
@@ -184,6 +186,7 @@ impl Feed {
             voted: HashSet::new(),
             rsvped: HashMap::new(),
             revealed: HashSet::new(),
+            goal_msat: HashMap::new(),
             status: "connecting to the relays…".into(),
             error: None,
             has_more: true,
@@ -634,6 +637,9 @@ impl Feed {
             if u16::from(note.kind) == 1068 {
                 self.want_poll(&note, cx);
             }
+            if u16::from(note.kind) == 9041 {
+                self.want_goal(&note, cx);
+            }
             mention_candidates.push(note.pubkey);
             mention_candidates.extend(content::mention_pks(&note.content));
             self.note_ids.insert(note.id);
@@ -810,6 +816,30 @@ impl Feed {
                 if let FeedEvent::PollVotes(t) = ev {
                     let _ = this.update(cx, |this, cx| {
                         this.poll_tallies.insert(id, t);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Progress for a goal card (cards.rs goal_card): core sums the zap
+    /// receipts naming the goal; the id rides the pump closure (GoalMsat
+    /// carries the id, but re-requests stay reserved like want_poll).
+    fn want_goal(&mut self, note: &Event, cx: &mut Context<Self>) {
+        if self.goal_msat.contains_key(&note.id) {
+            return;
+        }
+        // Reserve so re-renders don't re-request while loading.
+        self.goal_msat.insert(note.id, 0);
+        let mut rx = self.core.goal_progress(note);
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                if let FeedEvent::GoalMsat(gid, msat) = ev {
+                    let _ = this.update(cx, |this, cx| {
+                        this.goal_msat.insert(gid, msat);
                         cx.notify();
                     });
                 }
@@ -1212,6 +1242,7 @@ impl Render for Feed {
                     voted: self.voted.clone(),
                     rsvped: self.rsvped.clone(),
                     revealed: self.revealed.clone(),
+                    goal_msat: self.goal_msat.clone(),
                 }),
             });
             self.snap_dirty = false;

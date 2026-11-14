@@ -19,7 +19,7 @@ type NostrResult<T> = Result<T, DbError>;
 
 /// The content-kind catalog (content-prefs.ts:40-55): label + the kinds it
 /// groups. All default visible; prefs.json `content_hidden` hides.
-pub const CATALOG: [(&str, &[u16]); 12] = [
+pub const CATALOG: [(&str, &[u16]); 13] = [
     ("Notes", &[1]),
     ("Reposts", &[6]),
     ("Pictures", &[20]),
@@ -32,6 +32,7 @@ pub const CATALOG: [(&str, &[u16]); 12] = [
     ("Wikis", &[30818]),
     ("Calendar", &[31922, 31923]),
     ("Highlights", &[9802]),
+    ("Goals", &[9041]),
 ];
 
 /// The kinds currently visible (prefs.json `content_hidden: [kind]`).
@@ -54,7 +55,7 @@ pub fn visible_kinds() -> Vec<Kind> {
 
 /// The content kinds the following feed carries (content-prefs.ts catalog's
 /// default surface).
-pub const FEED_KINDS: [Kind; 14] = [
+pub const FEED_KINDS: [Kind; 15] = [
     Kind::TextNote,      // 1
     Kind::Repost,        // 6
     Kind::Custom(20),    // picture (NIP-68)
@@ -69,6 +70,7 @@ pub const FEED_KINDS: [Kind; 14] = [
     Kind::Custom(31922), // calendar date (NIP-52)
     Kind::Custom(31923), // calendar time
     Kind::Custom(9802),  // highlight (NIP-84)
+    Kind::Custom(9041),  // zap goal (NIP-75)
 ];
 
 pub struct Store {

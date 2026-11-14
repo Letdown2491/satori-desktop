@@ -22,6 +22,7 @@ pub mod calendar;
 pub mod classified;
 pub mod comment;
 pub mod fields;
+pub mod goal;
 pub mod highlight;
 pub mod imeta;
 pub mod nip10;

@@ -15,7 +15,7 @@ use gpui::{
     ClipboardItem, Div, Entity, FontWeight, SharedString, div, prelude::*, px, relative, rgb,
 };
 use nostr::prelude::*;
-use satori_core::nip::{calendar, classified, fields, highlight, podcast, poll, repo, wiki};
+use satori_core::nip::{calendar, classified, fields, goal, highlight, podcast, poll, repo, wiki};
 
 use super::content::{self, Body};
 use super::feed::Feed;
@@ -33,6 +33,8 @@ pub struct CardState {
     /// NIP-36: warnings the reader has chosen to reveal (the veil
     /// collapses to this bar; the reveal is a per-feed choice).
     pub revealed: HashSet<EventId>,
+    /// NIP-75: zap goals' raised totals in msat (0 while the pump is out).
+    pub goal_msat: HashMap<EventId, u64>,
 }
 
 /// Kinds the feed carries beyond text notes (cards.rs `card_for` / the
@@ -44,7 +46,7 @@ pub fn is_feed_kind(kind: Kind) -> bool {
     // matched, cards silently didn't. Numbers are variant-proof.
     matches!(
         u16::from(kind),
-        20 | 21 | 22 | 54 | 1068 | 30023 | 30402 | 30617 | 30818 | 31922 | 31923 | 9802
+        20 | 21 | 22 | 54 | 1068 | 30023 | 30402 | 30617 | 30818 | 31922 | 31923 | 9802 | 9041
     )
 }
 
@@ -69,6 +71,7 @@ pub fn row_body(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> 
         30818 => wiki_card(ev, ctx, feed),
         31922 | 31923 => calendar_card(ev, ctx, feed, st),
         9802 => highlight_card(ev, ctx, feed, st),
+        9041 => goal_card(ev, ctx, feed, st),
         _ => {
             // Unknown-but-advertised (NIP-31): an `alt` tag describes the
             // event in its author's words — render that, muted, no
@@ -161,6 +164,66 @@ fn alt_card(ev: &Event, alt: &str) -> Div {
                 .text_color(rgb(theme::muted()))
                 .child(alt.to_string()),
         )
+}
+
+/// NIP-75's zap goal (kind 9041): the author's content states the ask, a
+/// hairline track fills toward the `amount` target (vermilion — the
+/// seal-moment accent), and a closed goal says so (receipts still sum:
+/// late zaps count, the ask just stops being open).
+fn goal_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> Div {
+    let raised_msat = st.goal_msat.get(&ev.id).copied().unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (target_msat, closed) = match goal::parse(ev) {
+        Some(d) => (d.amount_msat, d.closed_at.is_some_and(|end| end < now)),
+        None => (0, false),
+    };
+    let pct = if target_msat > 0 {
+        raised_msat.min(target_msat) as f32 / target_msat as f32
+    } else {
+        0.0
+    };
+    let meta = if closed {
+        format!(
+            "raised {} of {} sats · closed",
+            raised_msat / 1000,
+            target_msat / 1000
+        )
+    } else {
+        format!(
+            "raised {} of {} sats",
+            raised_msat / 1000,
+            target_msat / 1000
+        )
+    };
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(kicker("Zap goal"))
+        .child(content::body(ev, ctx, feed.clone()))
+        .child(
+            div()
+                .relative()
+                .w_full()
+                .h(px(6.))
+                .rounded_full()
+                .bg(rgb(theme::washi()))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .w(relative(pct))
+                        .bg(rgb(theme::vermilion())),
+                ),
+        )
+        .child(meta_line(meta))
 }
 
 // --- shared bits ---------------------------------------------------------
