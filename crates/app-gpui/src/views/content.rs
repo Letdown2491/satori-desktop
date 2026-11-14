@@ -45,7 +45,10 @@ pub type Quotes = HashMap<String, Option<Embed>>;
 /// The display-name fallback (render/util.ts style): the profile's
 /// display name, else a short npub. Was spelled out 19 times across the
 /// views (two escape spellings of the ellipsis) — #31. `p` is the
-/// profile if one is in hand (a fetch result or a map hit).
+/// profile if one is in hand (a fetch result or a map hit). `hex` is
+/// a PUBKEY hex only, and the byte cut is safe for it (ASCII) — never
+/// feed it a relay-controlled string (cards::short owns the
+/// char-boundary cut for those).
 pub(crate) fn display_name(p: Option<&satori_core::manager::Profile>, hex: &str) -> String {
     p.map(|p| p.display())
         .unwrap_or_else(|| format!("{}…", &hex[..8]))

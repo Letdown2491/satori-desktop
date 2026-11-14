@@ -146,7 +146,7 @@ pub const S7: f32 = 32.0;
 
 // §1.3 — the type scale: four sizes, not eight. Under 12px goes mushy at
 // gpui's unhinted grayscale AA — a measured constraint, not taste.
-pub const T_BODY: f32 = 14.0; // note bodies, author names
+pub const T_BODY: f32 = 14.0; // note bodies
 pub const T_UI: f32 = 13.0; // timestamps, meta rows, list secondary
 pub const T_SMALL: f32 = 12.0; // whispers, glyph labels, badges
 #[allow(dead_code)]

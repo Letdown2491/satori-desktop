@@ -259,6 +259,10 @@ pub struct Composer {
     /// being completed.
     suggest: Vec<Profile>,
     mention_token: Option<String>,
+    /// The last token detect_mention scanned for: the input observer
+    /// fires on cursor moves too, and an unchanged token means the
+    /// candidate scan would return the same strip — skip it.
+    mention_scanned: Option<String>,
     /// The `:`-emoji typeahead (WS4): the table hits for the token under
     /// the caret, the token, the arrow-key selection.
     emoji_suggest: Vec<&'static crate::emoji::Emoji>,
@@ -476,6 +480,7 @@ impl Composer {
             mentions: vec![],
             suggest: vec![],
             mention_token: None,
+            mention_scanned: None,
             reply_to,
             surface: Surface::Page,
             quote,
@@ -663,6 +668,14 @@ impl Composer {
 
     fn detect_mention(&mut self, cx: &mut Context<Self>) {
         let token = self.mention_under_caret(cx);
+        if token == self.mention_scanned {
+            // The token under the caret didn't change since the last
+            // scan (cursor moves re-fire the observer): the strip stays
+            // exactly as it was.
+            self.detect_emoji(cx);
+            return;
+        }
+        self.mention_scanned = token.clone();
         match &token {
             Some(q) if !q.is_empty() => {
                 let candidates = self.core.mention_candidates(q);
@@ -724,6 +737,7 @@ impl Composer {
         }
         self.suggest.clear();
         self.mention_token = None;
+        self.mention_scanned = None;
         cx.notify();
     }
 
@@ -758,6 +772,7 @@ impl Composer {
                 // owns the keys.
                 self.suggest.clear();
                 self.mention_token = None;
+                self.mention_scanned = None;
             }
             None => {
                 self.emoji_suggest.clear();
@@ -920,6 +935,7 @@ impl Composer {
             self.tab = tab;
             self.suggest.clear();
             self.mention_token = None;
+            self.mention_scanned = None;
             // Each tab's preview is its own draft shape — a switch starts
             // flat again (the pill is one click to restore).
             self.previewing = false;

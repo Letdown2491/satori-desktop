@@ -334,8 +334,7 @@ impl SettingsView {
     /// the key — not per-render work.
     fn me_npub_short() -> String {
         satori_core::session::load()
-            .and_then(|s| PublicKey::from_str(&s.pubkey).ok())
-            .and_then(|pk| pk.to_bech32().ok().map(|full| format!("{}…", &full[..12])))
+            .and_then(|s| bech32_short(&s.pubkey))
             .unwrap_or_else(|| "unknown key".to_string())
     }
 
@@ -1814,14 +1813,21 @@ fn ago(secs: u64) -> String {
     }
 }
 
-/// A caught spammer's short display key (settings.rs me_npub_short shape):
-/// npub prefix when the hex parses, the hex prefix otherwise.
-fn short_author(hex: &str) -> String {
+/// The shared bech32-prefix shape: an npub's first 12 chars + ellipsis.
+/// Both the Session row (me_npub_short) and the blocked/spam author rows
+/// (short_author) render it — one spelling, or the two drift. `None`
+/// when the hex doesn't parse; each caller owns its miss tail.
+fn bech32_short(hex: &str) -> Option<String> {
     PublicKey::from_str(hex)
         .ok()
         .and_then(|pk| pk.to_bech32().ok())
         .map(|full| format!("{}…", &full[..12]))
-        .unwrap_or_else(|| format!("{}…", &hex[..8.min(hex.len())]))
+}
+
+/// A caught spammer's short display key: npub prefix when the hex
+/// parses, the hex prefix otherwise.
+fn short_author(hex: &str) -> String {
+    bech32_short(hex).unwrap_or_else(|| format!("{}…", &hex[..8.min(hex.len())]))
 }
 
 /// One WoT settings row: label + the quiet pill toggle, the undo row's

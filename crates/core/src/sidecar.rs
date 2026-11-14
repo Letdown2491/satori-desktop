@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(lru.order, ["k3", "k1"]);
         // Global cap: the oldest key falls off.
         lru.touch("k4", 2);
-        assert!(lru.map.get("k3").is_none());
+        assert!(!lru.map.contains_key("k3"));
         assert_eq!(lru.order, ["k1", "k4"]);
 
         // FIFO touch: an existing key's position never moves.

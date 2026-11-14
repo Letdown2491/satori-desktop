@@ -112,6 +112,33 @@ pub fn new_identifier() -> String {
     id
 }
 
+/// The article's payload (NIP-23): title/summary/image/published_at/`d`.
+/// A kind-30023 without a title is not an article (the composer's
+/// long-form toggle owns the shape).
+pub fn parse(ev: &Event) -> Option<ArticleData> {
+    let mut d = ArticleData {
+        title: String::new(),
+        summary: String::new(),
+        image: None,
+        published_at: None,
+        slug: String::new(),
+    };
+    for tag in ev.tags.clone().to_vec() {
+        let parts = tag.as_slice();
+        match parts.first().map(String::as_str) {
+            Some("title") if parts.len() >= 2 => d.title = parts[1..].join(" "),
+            Some("summary") if parts.len() >= 2 => d.summary = parts[1..].join(" "),
+            Some("image") if parts.len() >= 2 => d.image = Some(parts[1].clone()),
+            Some("published_at") if parts.len() >= 2 => {
+                d.published_at = parts.get(1).and_then(|v| v.parse().ok())
+            }
+            Some("d") if parts.len() >= 2 => d.slug = parts[1].clone(),
+            _ => {}
+        }
+    }
+    (!d.title.is_empty()).then_some(d)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,28 +206,4 @@ mod tests {
         let long = "word ".repeat(220 * 5);
         assert_eq!(reading_minutes(&long), 5);
     }
-}
-
-pub fn parse(ev: &Event) -> Option<ArticleData> {
-    let mut d = ArticleData {
-        title: String::new(),
-        summary: String::new(),
-        image: None,
-        published_at: None,
-        slug: String::new(),
-    };
-    for tag in ev.tags.clone().to_vec() {
-        let parts = tag.as_slice();
-        match parts.first().map(String::as_str) {
-            Some("title") if parts.len() >= 2 => d.title = parts[1..].join(" "),
-            Some("summary") if parts.len() >= 2 => d.summary = parts[1..].join(" "),
-            Some("image") if parts.len() >= 2 => d.image = Some(parts[1].clone()),
-            Some("published_at") if parts.len() >= 2 => {
-                d.published_at = parts.get(1).and_then(|v| v.parse().ok())
-            }
-            Some("d") if parts.len() >= 2 => d.slug = parts[1].clone(),
-            _ => {}
-        }
-    }
-    (!d.title.is_empty()).then_some(d)
 }

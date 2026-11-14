@@ -307,7 +307,7 @@ mod tests {
                 .lines()
                 .filter(|l| !l.trim().is_empty())
                 .map(|l| parse_frame(&serde_json::from_str(l).unwrap()))
-                .last()
+                .next_back()
                 .expect("fixture has frames");
             if name.starts_with("relay.primal.net") {
                 let Outcome::Count(r) = outcome else {
@@ -375,11 +375,11 @@ mod tests {
         };
         let mut a = [0u8; REGISTERS];
         let mut b = [0u8; REGISTERS];
-        for i in 0..100 {
-            a[i] = 4 + (i % 3) as u8;
+        for (i, slot) in a.iter_mut().enumerate().take(100) {
+            *slot = 4 + (i % 3) as u8;
         }
-        for i in 50..150 {
-            b[i] = 5 + (i % 2) as u8;
+        for (i, slot) in b.iter_mut().enumerate().skip(50).take(100) {
+            *slot = 5 + (i % 2) as u8;
         }
         let (merged, approx) = merge(&[mk(900, a), mk(800, b)]);
         assert!(approx, "a merged hll count is approximate by nature");
