@@ -20,6 +20,14 @@ relay trim no longer skips its own job: stale relays are evicted for real
 still hosting subscriptions are re-stamped instead of evicted, so the
 trimming can never kill the live bell.
 
+Relays that demand NIP-42 authentication are no longer treated as
+read-denials: purplepag.es (the profile and graph relay) walls every read
+behind a signed challenge, and answering that challenge is normal
+handshake, not a refusal. Auth challenges are answered with the session
+identity and the relay stays in the read rotation, so profile fetches keep
+using it; genuine refusals (paywalls, restrictions, bans) still stamp the
+relay read-dead, and denial log lines now include the relay's reason text.
+
 ## 0.9.0 - 2026-11-15
 
 Video tiles earned their picture. A note's video now previews its first

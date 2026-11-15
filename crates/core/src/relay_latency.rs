@@ -468,6 +468,17 @@ pub fn is_read_denial(reason: &str) -> bool {
     .any(|m| lower.contains(m))
 }
 
+/// An auth wall (NIP-42) rather than a refusal: the relay demands a
+/// signed challenge and is otherwise healthy and useful (purplepag.es,
+/// the profile/graph relay, walls every read). The SDK answers the
+/// challenge with the session identity (pool.rs PoolAuthenticator) and
+/// resubscribes the closed subs on success — blacklisting a wall stamps
+/// 12h of read-death on a relay that would happily serve profiles, so
+/// walls are logged, not punished.
+pub fn is_auth_wall(reason: &str) -> bool {
+    reason.to_lowercase().starts_with("auth-required:")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,6 +556,14 @@ mod tests {
         assert!(!is_read_denial(
             "CLOSED by relay: connection closed cleanly"
         ));
+        // The auth-wall split (the purplepag.es case): a NIP-42 demand
+        // is a wall, never punished; every other refusal prefix is a
+        // plain denial. is_read_denial still matches BOTH (the live
+        // loop's guard catches the family; the body splits it).
+        assert!(is_auth_wall("auth-required: sign in to read"));
+        assert!(!is_auth_wall("restricted: reads require a paid plan"));
+        assert!(!is_auth_wall("payment-required: send sats"));
+        assert!(!is_auth_wall("blocked: you are not welcome here"));
     }
 
     #[test]

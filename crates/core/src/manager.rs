@@ -6918,13 +6918,30 @@ impl Core {
                             if relay_latency::is_read_denial(message)
                     ) =>
                 {
-                    // An explicit REQ refusal (write-only blaster,
-                    // auth wall we won't sign for, paywall) — the
-                    // read-dead signal (pool.ts onclose →
+                    // A refusal-shaped CLOSED (pool.ts onclose →
                     // recordReadDenial; the broadcast stream delivers
-                    // every relay's CLOSED here).
-                    relay_latency::record_read_denial(relay_url.as_str());
-                    eprintln!("[core] live: read denial from {relay_url}");
+                    // every relay's CLOSED here). Split the shapes:
+                    let reason = match &*message {
+                        nostr::message::RelayMessage::Closed { message, .. } => message,
+                        _ => "",
+                    };
+                    if relay_latency::is_auth_wall(reason) {
+                        // An auth wall, not futility: the relay is
+                        // healthy and serves reads after NIP-42
+                        // (purplepag.es — the profile/graph relay —
+                        // walls every read). The SDK signs the challenge
+                        // with the session identity and resubscribes the
+                        // closed subs on success; stamping read-dead
+                        // here only starves profile fetches of a
+                        // working relay for 12h.
+                        eprintln!("[core] live: auth challenge from {relay_url}: {reason}");
+                    } else {
+                        // An explicit REQ refusal (write-only blaster,
+                        // paywall, a restriction we can't satisfy) —
+                        // the read-dead signal.
+                        relay_latency::record_read_denial(relay_url.as_str());
+                        eprintln!("[core] live: read denial from {relay_url}: {reason}");
+                    }
                     continue;
                 }
                 nostr_sdk::client::ClientNotification::Message { message, .. }
@@ -8672,6 +8689,54 @@ mod tests {
         assert!(
             matches!(got, Ok(Ok(_))),
             "bell never recovered from the CLOSED reply — notifications stay silent for the session"
+        );
+    }
+
+    /// Denial-shaped CLOSEDs split at the auth wall (the purplepag.es
+    /// case): `auth-required:` is the NIP-42 dance — the SDK answers it
+    /// with the session identity and resubscribes on success, so the
+    /// loop must NOT stamp read-death (the wall relay is healthy and
+    /// feeds profile fetches). Any other refusal prefix IS the read-dead
+    /// signal (12h stamp, routing scores it 0).
+    #[tokio::test]
+    async fn closed_denials_split_at_the_auth_wall() {
+        use std::time::Duration;
+
+        let (_guard, mock, pool, url) = crate::test_relay::pool_with_mock("core-auth-wall").await;
+        let alice = Keys::generate();
+
+        // Run the REAL loop; no follows (one sub only).
+        let live = tokio::sync::broadcast::Sender::new(64);
+        let live_on = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        tokio::spawn(Core::run_live(
+            pool.into(),
+            vec![Kind::TextNote],
+            vec![],
+            alice.public_key(),
+            live.clone(),
+            live_on.clone(),
+            epoch.clone(),
+            0,
+        ));
+        mock.wait_open_subs(1).await;
+
+        // The relay walls the sub. The SDK marks the sub closed (an
+        // authenticator is always attached) and waits for a successful
+        // auth to resubscribe; our loop logs the challenge, no stamp.
+        mock.closed_sub_reason(0, "auth-required: sign in to read");
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            !crate::relay_latency::is_read_dead(&url),
+            "an auth wall stamped read-dead — profile fetches lose a healthy relay for 12h"
+        );
+
+        // A real refusal IS the read-dead signal.
+        mock.closed_sub_reason(0, "restricted: reads require a paid plan");
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            crate::relay_latency::is_read_dead(&url),
+            "a real refusal was not stamped read-dead — the routing waste guard is broken"
         );
     }
 }

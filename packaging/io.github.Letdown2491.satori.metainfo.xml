@@ -32,6 +32,7 @@
     <release version="0.9.1" date="2026-11-15">
       <description>
         <p>The live notification subscriptions survive relay CLOSEDs: a relay answering CLOSED for the bell's subscription (subscription pressure, a relay restart, an auth flip) used to lose it for good, silently starving the bell dot and the new-notes pill for the rest of the session. The live loop now re-arms both subscriptions when a relay takes one away, and the routed relay trim evicts stale relays for real while re-stamping the relays still hosting subscriptions, so trimming can never kill the live bell.</p>
+        <p>Relays that demand NIP-42 authentication (purplepag.es, the profile and graph relay) are no longer treated as read-denials: challenges are answered with the session identity and the relay stays in the read rotation, so profile fetches keep using it, while genuine refusals still mark the relay read-dead and denial logs now include the relay's reason text.</p>
       </description>
     </release>
     <release version="0.9.0" date="2026-11-15">

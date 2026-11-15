@@ -201,12 +201,19 @@ impl MockRelay {
     /// The socket STAYS OPEN: CLOSED is an in-band reply, and the
     /// relay simply stops serving that subscription.
     pub fn closed_sub(&self, idx: usize) {
+        self.closed_sub_reason(idx, "no reason");
+    }
+
+    /// In-band CLOSED of the idx-th open subscription on every
+    /// connection, with a reason string (machine-readable prefix tests:
+    /// auth-required vs restricted vs bare).
+    pub fn closed_sub_reason(&self, idx: usize, reason: &str) {
         for (tx, subs) in self.conns.lock().unwrap().iter() {
             let Some(sub_id) = subs.lock().unwrap().get(idx).cloned() else {
                 continue;
             };
             let frame = Message::Text(
-                serde_json::json!(["CLOSED", sub_id, "no reason"])
+                serde_json::json!(["CLOSED", sub_id, reason])
                     .to_string()
                     .into(),
             );
