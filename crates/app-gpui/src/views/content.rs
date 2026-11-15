@@ -22,7 +22,7 @@ use satori_core::manager::Profile;
 use satori_core::nip::{article, fields, imeta};
 
 use super::nav::Nav;
-use crate::{media, theme};
+use crate::{icons, media, theme};
 
 /// Timeline column width. Deliberately 640 — the webapp's was 720
 /// (styles.css:100 `#app { max-width: 720px }`); at 12–14px desktop type,
@@ -877,7 +877,11 @@ pub fn article_data_cached(ev: &Event) -> Option<std::sync::Arc<article::Article
 /// reaction's emoji, or a stroke icon), avatar, name, optional verb (the
 /// caller styles it; zap sats ride in here emphasized), and the time,
 /// which is the third mode toggle (timefmt.rs) everywhere. The name opens
-/// the actor's profile when `open_profile` is given.
+/// the actor's profile when `open_profile` is given. `copy_id` (the
+/// note's NIP-21 URI) hangs the copy-the-id seal after the timestamp —
+/// None where the header announces an action on some other note
+/// (notification rows): the seal copies the note on screen, not the
+/// announcement.
 #[allow(clippy::too_many_arguments)]
 pub fn actor_header<V: EventEmitter<Nav> + 'static>(
     glyph: Option<AnyElement>,
@@ -888,6 +892,7 @@ pub fn actor_header<V: EventEmitter<Nav> + 'static>(
     time: String,
     id_prefix: String,
     open_profile: Option<PublicKey>,
+    copy_id: Option<String>,
     handle: Entity<V>,
 ) -> Div {
     // The name always carries an id (the click lives on it only when the
@@ -921,6 +926,66 @@ pub fn actor_header<V: EventEmitter<Nav> + 'static>(
         None => head = head.child(name_el.flex_1()),
     }
     head.child(time_toggle(format!("{id_prefix}-time"), time))
+        .children(copy_id.map(|payload| copy_seal(&id_prefix, payload)))
+}
+
+/// The header copy seal's flash: which payload was just copied and when.
+/// A plain static (item closures have no cx to read an entity), keyed by
+/// the payload — two different notes never share one. The repaint rides
+/// timefmt::Signal, which every timestamp-bearing view already observes
+/// for the mode cycle: one wake shows the check, the expiry wake turns
+/// it back. profile.rs's flash_copy acknowledgment, generalized.
+static COPIED: std::sync::Mutex<Option<(String, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+const COPY_FLASH: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn copied_now(payload: &str) -> bool {
+    COPIED
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|(p, _)| p == payload)
+}
+
+/// Copy `payload` (the note's NIP-21 URI) and flash the seal's glyph to a
+/// check for [`COPY_FLASH`].
+fn copy_id(payload: String, cx: &mut gpui::App) {
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(payload.clone()));
+    *COPIED.lock().unwrap() = Some((payload.clone(), std::time::Instant::now()));
+    cx.set_global(crate::timefmt::Signal);
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(COPY_FLASH).await;
+        if let Ok(mut held) = COPIED.lock()
+            && held.as_ref().is_some_and(|(p, _)| *p == payload)
+        {
+            *held = None;
+        }
+        // Wake the flash off even if a newer copy replaced it (that seal
+        // re-rendered anyway; the wake is one cheap repaint).
+        cx.update(|cx| cx.set_global(crate::timefmt::Signal));
+    })
+    .detach();
+}
+
+/// The seal after the timestamp: a quiet copy glyph that writes the
+/// note's NIP-21 URI (`nostr:nevent1…` / `nostr:naddr1…` — nip19.rs)
+/// and flashes a check while the flash lasts.
+pub(crate) fn copy_seal(id_prefix: &str, payload: String) -> impl IntoElement {
+    let flashed = copied_now(&payload);
+    div()
+        .id(SharedString::from(format!("{id_prefix}-copy")))
+        .cursor_pointer()
+        .text_color(rgb(theme::muted()))
+        .hover(|s| s.text_color(rgb(theme::ink())))
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            copy_id(payload.clone(), cx);
+        })
+        .child(if flashed {
+            icons::check_icon(theme::muted()).into_any_element()
+        } else {
+            icons::copy_icon(theme::muted()).into_any_element()
+        })
 }
 
 /// The timestamp tap target (timefmt.rs's third mode toggle: relative →
@@ -2041,9 +2106,20 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
                         .child(name),
                 )
                 .child(
-                    // The timestamp is the third mode toggle (timefmt.rs):
-                    // tap cycles relative → date → block height.
-                    time_toggle(SharedString::from(format!("{tag}-time-{idx}")), time),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(copy_seal(
+                            &format!("{tag}-{idx}"),
+                            satori_core::nip::nip19::uri(ev),
+                        ))
+                        // The timestamp is the third mode toggle (timefmt.rs):
+                        // tap cycles relative → date → block height.
+                        .child(time_toggle(
+                            SharedString::from(format!("{tag}-time-{idx}")),
+                            time,
+                        )),
                 ),
         )
         .child(

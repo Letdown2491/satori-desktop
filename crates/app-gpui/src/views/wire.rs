@@ -337,6 +337,7 @@ fn wire_card(
             time,
             format!("wire-{idx}"),
             Some(ev.pubkey),
+            Some(satori_core::nip::nip19::uri(ev)),
             handle.clone(),
         ));
     let id_hex = ev.id.to_string();

@@ -565,9 +565,20 @@ fn reply_row(
                         ),
                 )
                 .child(
-                    // The timestamp is the third mode toggle (timefmt.rs):
-                    // tap cycles relative → date → block height.
-                    content::time_toggle(SharedString::from(format!("reply-time-{idx}")), time),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(content::copy_seal(
+                            &format!("reply-{idx}"),
+                            satori_core::nip::nip19::uri(ev),
+                        ))
+                        // The timestamp is the third mode toggle (timefmt.rs):
+                        // tap cycles relative → date → block height.
+                        .child(content::time_toggle(
+                            SharedString::from(format!("reply-time-{idx}")),
+                            time,
+                        )),
                 ),
         )
         .child(

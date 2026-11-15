@@ -793,12 +793,22 @@ impl Render for ArticleView {
                                                                 .child(name),
                                                         ),
                                                 )
-                                                .child(content::time_toggle(
-                                                    SharedString::from(format!(
-                                                        "comment-time-{ci}"
-                                                    )),
-                                                    time,
-                                                )),
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_1()
+                                                        .child(content::copy_seal(
+                                                            &format!("comment-{ci}"),
+                                                            satori_core::nip::nip19::uri(&ev),
+                                                        ))
+                                                        .child(content::time_toggle(
+                                                            SharedString::from(format!(
+                                                                "comment-time-{ci}"
+                                                            )),
+                                                            time,
+                                                        )),
+                                                ),
                                         )
                                         .child(content::body(
                                             &ev,

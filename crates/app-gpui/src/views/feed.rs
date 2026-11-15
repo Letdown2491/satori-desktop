@@ -1188,6 +1188,7 @@ fn note_card(
             time,
             format!("note-{idx}"),
             Some(ev.pubkey),
+            Some(satori_core::nip::nip19::uri(&ev)),
             handle.clone(),
         ))
         // The reply context (nip10.ts replyContext, option B): the parent's
@@ -1569,6 +1570,9 @@ fn repost_card(
                     time,
                     format!("boost-{}", ev.id),
                     None,
+                    // The seal copies the boosted note (the note on screen),
+                    // not the kind-6 envelope.
+                    Some(satori_core::nip::nip19::uri(&note)),
                     handle.clone(),
                 ))
                 .child(

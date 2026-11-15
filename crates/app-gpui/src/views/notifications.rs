@@ -912,6 +912,9 @@ fn notif_card(
             time,
             format!("notif-{idx}"),
             Some(ev.pubkey),
+            // No id seal: the header announces an action on some other
+            // note — the seal would copy the announcement, not the note.
+            None,
             handle.clone(),
         ));
     if let Some(pid) = &parent_id
