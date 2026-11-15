@@ -636,16 +636,20 @@ impl Feed {
             // note belongs to.
             let ts = note.created_at.as_secs();
             self.oldest_ts = Some(self.oldest_ts.map_or(ts, |o: u64| o.min(ts)));
-            // Registry kinds render as rich cards (cards.rs card_for port).
-            // NIP-31's exception: an unknown kind whose `alt` tag says
-            // what it is renders the fallback card instead of vanishing —
-            // EXCEPT engagement noise (viewport's kinds): a reaction with
-            // an alt tag is still a reaction, and alt is attacker-writable.
-            if note.kind != Kind::TextNote
-                && !cards::is_feed_kind(note.kind)
-                && !satori_core::viewport::ENGAGEMENT_KINDS.contains(&u16::from(note.kind))
-                && satori_core::nip::fields::alt_description(&note).is_none()
-            {
+            // The unknown-kind policy (#52, the generic card): everything
+            // lands — a kind Satori hasn't heard of renders the muted
+            // "unrendered kind N" card (or NIP-31's alt line). Nothing
+            // arrives invisible. The never-feed exceptions are structural,
+            // not curational: engagement noise (reactions, zap requests —
+            // a reaction with an alt tag is still a reaction, and alt is
+            // attacker-writable; reposts ride their own guard below) and
+            // NIP-22 comments (kind 1111 is a REPLY by definition — it
+            // lives in threads and the bell, never in a roots feed).
+            let kind_num = u16::from(note.kind);
+            let noise = (satori_core::viewport::ENGAGEMENT_KINDS.contains(&kind_num)
+                && kind_num != 6)
+                || kind_num == 1111;
+            if note.kind != Kind::TextNote && !cards::is_feed_kind(note.kind) && noise {
                 continue;
             }
             // Amethyst's repost guard: a repost is not content of its own —
@@ -716,7 +720,7 @@ impl Feed {
 
     /// The bubbles' comment counts (one batched round per page of notes).
     fn want_counts(&mut self, cx: &mut Context<Self>) {
-        let mut ids: Vec<EventId> = Vec::new();
+        let mut targets: Vec<(EventId, satori_core::nip::comment::CommentTarget)> = Vec::new();
         for note in &self.notes {
             let id = note.id.to_string();
             if self.counts_asked.contains(&id) {
@@ -724,13 +728,19 @@ impl Feed {
             }
             self.counts_asked.insert(id.clone());
             self.counts_order.push_back(id);
-            ids.push(note.id);
+            // Mixed targets (#52): a parameterized picture/video hangs its
+            // comment thread off the a-tag ADDRESS, a note off its id —
+            // core counts each by its own grammar, keyed by note id.
+            targets.push((
+                note.id,
+                satori_core::nip::comment::CommentTarget::for_event(note),
+            ));
         }
-        if ids.is_empty() {
+        if targets.is_empty() {
             return;
         }
         self.trim_counts();
-        let rx = self.core.comment_counts(ids);
+        let rx = self.core.comment_counts(targets);
         self.pump(rx, cx);
     }
 
@@ -1098,6 +1108,33 @@ fn new_notes_label(n: usize) -> String {
     }
 }
 
+/// Where a row's click opens (both open sites — the note row and the
+/// repost's inner card — route through this). Articles open the reader;
+/// parameterized media (NIP-68/71 with a d tag) threads by ADDRESS
+/// (`CommentTarget::for_event`'s rule — the a-tag coordinate survives
+/// edits, and the comment thread hangs off it); everything else threads
+/// at the conversation's ROOT when the note is a reply (the reference
+/// never links the parent).
+fn thread_nav(ev: &Event) -> Nav {
+    let kind = u16::from(ev.kind);
+    if kind == 30023 {
+        return Nav::OpenArticle(ev.clone());
+    }
+    // for_event's Address arm also covers every other addressable kind,
+    // but those anchored fine by id before this door existed — only the
+    // parameterized media switch (their threads are unreachable by id).
+    if matches!(kind, 20..=22)
+        && let satori_core::nip::comment::CommentTarget::Address { kind, author, d } =
+            satori_core::nip::comment::CommentTarget::for_event(ev)
+    {
+        return Nav::OpenThreadAddr(kind, author, d);
+    }
+    let root = satori_core::nip::nip10::reply_root(ev)
+        .and_then(|(id, _)| EventId::from_hex(&id).ok())
+        .unwrap_or(ev.id);
+    Nav::OpenThread(root)
+}
+
 // The card takes the full render-time snapshot — one struct would hide the
 // shape, and GPUI's no-entity-reads-during-render rule makes them explicit.
 #[allow(clippy::too_many_arguments)]
@@ -1175,19 +1212,10 @@ fn note_card(
                 .on_click(move |_, _, cx| {
                     let ev = ev_for_open.clone();
                     handle_open.update(cx, |_feed, cx| {
-                        // Articles open the reader (the card body is the
-                        // door — the "Read" seal is a second one, for the
-                        // summary card's tail). Everything else threads —
-                        // at the conversation's ROOT when the note is a
-                        // reply (the reference never links the parent).
-                        if u16::from(ev.kind) == 30023 {
-                            cx.emit(Nav::OpenArticle((*ev).clone()));
-                        } else {
-                            let root = satori_core::nip::nip10::reply_root(&ev)
-                                .and_then(|(id, _)| EventId::from_hex(&id).ok())
-                                .unwrap_or(ev.id);
-                            cx.emit(Nav::OpenThread(root));
-                        }
+                        // The row's door (thread_nav): reader for articles,
+                        // address-thread for parameterized media, root
+                        // thread otherwise.
+                        cx.emit(thread_nav(&ev));
                     });
                 })
                 .child(cards::row_body(
@@ -1514,7 +1542,6 @@ fn repost_card(
                 .child(format!("{name} boosted"))
         },
         |note| {
-            let is_article = u16::from(note.kind) == 30023;
             // The action row speaks for the BOOSTED note: mirrors, picker
             // and counts keyed by its id, the same keys the toggles write.
             // Arc bump — the deep-clone discipline note_card keeps.
@@ -1559,14 +1586,7 @@ fn repost_card(
                         .on_click(move |_, _, cx| {
                             let note = open.clone().expect("inner held");
                             open_handle.update(cx, |_feed, cx| {
-                                if is_article {
-                                    cx.emit(Nav::OpenArticle((*note).clone()));
-                                } else {
-                                    let root = satori_core::nip::nip10::reply_root(&note)
-                                        .and_then(|(id, _)| EventId::from_hex(&id).ok())
-                                        .unwrap_or(note.id);
-                                    cx.emit(Nav::OpenThread(root));
-                                }
+                                cx.emit(thread_nav(&note));
                             });
                         })
                         .child(cards::row_body(

@@ -46,7 +46,21 @@ pub fn is_feed_kind(kind: Kind) -> bool {
     // matched, cards silently didn't. Numbers are variant-proof.
     matches!(
         u16::from(kind),
-        20 | 21 | 22 | 54 | 1068 | 30023 | 30402 | 30617 | 30818 | 31922 | 31923 | 9802 | 9041
+        20 | 21
+            | 22
+            | 54
+            | 1222
+            | 1244
+            | 1337
+            | 1068
+            | 30023
+            | 30402
+            | 30617
+            | 30818
+            | 31922
+            | 31923
+            | 9802
+            | 9041
     )
 }
 
@@ -64,6 +78,8 @@ pub fn row_body(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> 
     match u16::from(ev.kind) {
         21 | 22 => video_card(ev, ctx, feed),
         54 => podcast_card(ev, ctx, feed),
+        1222 | 1244 => voice_card(ev, ctx, feed),
+        1337 => code_card(ev),
         1068 => poll_card(ev, ctx, feed, st),
         30023 => article_card(ev, ctx, feed, st),
         30402 => classified_card(ev, ctx, feed, st),
@@ -76,10 +92,19 @@ pub fn row_body(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> 
             // Unknown-but-advertised (NIP-31): an `alt` tag describes the
             // event in its author's words — render that, muted, no
             // masquerading as a supported card.
-            if u16::from(ev.kind) != 1
-                && let Some(alt) = fields::alt_description(ev)
-            {
-                return alt_card(ev, &alt);
+            if u16::from(ev.kind) != 1 {
+                if let Some(alt) = fields::alt_description(ev) {
+                    return alt_card(ev, &alt);
+                }
+                // The unknown-kind policy (#52, the generic card): nothing
+                // arrives invisible. A kind Satori never heard of still
+                // announces itself, muted, under the actor header (the
+                // actor and the time ride it). The fetch lists stay
+                // curated — this catches the kinds that ride unfiltered
+                // paths (the bell's #p filter, store accumulation).
+                if !is_feed_kind(ev.kind) {
+                    return generic_card(ev);
+                }
             }
             // NIP-14/NIP-24: a kind-1 subject line rides above the body,
             // semibold ink — the row's headline when the author gave one.
@@ -904,6 +929,129 @@ fn highlight_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) 
     card
 }
 
+// --- voice (NIP-A0 kinds 1222/1244) ---------------------------------------
+
+fn voice_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
+    // The content IS the audio URL (NIP-A0 §Specification): the media
+    // section renders the voice row (imeta waveform + duration, playbin
+    // playback behind the M5 proxy); the body contributes no text — the
+    // URL folds into the row. The kicker names the shape; a 1244 reply's
+    // refs hang it in its thread.
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(kicker("♪ Voice"))
+        .child(content::body(ev, ctx, feed.clone()))
+}
+
+// --- code snippet (NIP-C0 kind 1337) --------------------------------------
+
+/// The NIP-C0 tags: `l` (language, lowercase), `name` (usually a
+/// filename), `extension`, `description`, `runtime`, `license`. One value
+/// each; a repeated tag means the author violated the NIP — first wins.
+fn code_tags(ev: &Event) -> Vec<(String, String)> {
+    let wanted = [
+        "l",
+        "name",
+        "extension",
+        "description",
+        "runtime",
+        "license",
+    ];
+    let mut out: Vec<(String, String)> = Vec::new();
+    for key in wanted {
+        for t in ev.tags.clone().to_vec() {
+            let parts = t.as_slice();
+            if parts.first().map(String::as_str) == Some(key)
+                && let Some(v) = parts.get(1)
+                && !v.is_empty()
+            {
+                out.push((key.to_string(), v.clone()));
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn code_card(ev: &Event) -> Div {
+    let tags = code_tags(ev);
+    let get = |k: &str| -> Option<String> {
+        tags.iter()
+            .find(|(key, _)| key == k)
+            .map(|(_, v)| v.clone())
+    };
+    let name = get("name");
+    let lang = get("l");
+    // The header: the filename (or language) names the chip; the
+    // description and runtime ride beneath, muted.
+    let header = name
+        .clone()
+        .unwrap_or_else(|| lang.clone().unwrap_or_default());
+    let mut card = div().w_full().flex().flex_col().gap_1();
+    card = card.child(kicker("⌨ Code"));
+    if !header.is_empty() {
+        card = card.child(serif_title(&header, 15.0));
+    }
+    let meta = [get("description"), get("runtime"), get("license")]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if !meta.is_empty() {
+        card = card.child(meta_line(meta));
+    }
+    // The snippet itself: mono on the panel wash, R_EMBED (the token's
+    // budget names code chips). The render is CAPPED — the content is
+    // attacker-controlled and the block must not eat a page.
+    const CODE_RENDER_CAP: usize = 2000;
+    let mut code = ev.content.clone();
+    if code.len() > CODE_RENDER_CAP {
+        code = code.chars().take(CODE_RENDER_CAP).collect();
+        code.push_str("\n…");
+    }
+    let copy_text = ev.content.clone();
+    let mut block = div()
+        .id(SharedString::from(format!("copy-code-{}", ev.id)))
+        .overflow_x_scroll()
+        .w_full()
+        .p_3()
+        .rounded(px(theme::R_EMBED))
+        .bg(rgb(theme::panel()))
+        .border_1()
+        .border_color(rgb(theme::hairline()))
+        .font_family(theme::MONO)
+        .text_size(px(theme::T_UI))
+        .line_height(relative(1.35))
+        .text_color(rgb(theme::ink()))
+        .child(code);
+    if !ev.content.is_empty() {
+        // Click-to-copy — the snippet is the payload, the tap takes it
+        // whole (sealed against the row's open-thread click).
+        block = block.cursor_pointer().on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+        });
+    }
+    card = card.child(block);
+    card
+}
+
+// --- unknown kinds (the #52 generic card) ---------------------------------
+
+/// The generic card: a kind Satori has never heard of still announces
+/// itself — one muted line, no masquerade. The actor header above it
+/// carries the actor and the time.
+fn generic_card(ev: &Event) -> Div {
+    div()
+        .w_full()
+        .text_size(px(theme::T_SMALL))
+        .text_color(rgb(theme::muted()))
+        .child(format!("unrendered kind {}", u16::from(ev.kind)))
+}
+
 /// First 8 chars + ellipsis. Char cut, not byte cut: the highlight's
 /// relay-controlled tag text (nip/highlight.rs p tags) once landed a byte
 /// slice at 8 mid-character on multi-byte names — a panic that took the
@@ -915,6 +1063,57 @@ fn short(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Fixture gate (D59) for the code-snippet rider (#52): a NIP-C0
+    /// kind-1337 event the way the NIP's example publishes it — content
+    /// the code, `l`/`name`/`extension`/`description`/`runtime`/`license`
+    /// tags, no d tag (not addressable). The tag grammar must surface
+    /// each attribute once, first value wins on a repeated tag, and the
+    /// kind is a feed kind (the store filters admit it, the card renders).
+    #[test]
+    fn code_snippet_fixture_parses_the_tag_grammar() {
+        let keys = Keys::generate();
+        let unsigned = UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::from_secs(1),
+            Kind::Custom(1337),
+            [
+                Tag::custom("l", ["rust"]),
+                Tag::custom("name", ["hello.rs"]),
+                Tag::custom("extension", ["rs"]),
+                Tag::custom("description", ["says hello"]),
+                Tag::custom("runtime", ["rustc 1.90"]),
+                Tag::custom("license", ["MIT"]),
+                // A repeated tag: first value wins (the NIP's one-value
+                // grammar; a second `l` is the author's error).
+                Tag::custom("l", ["python"]),
+            ],
+            "fn main() {\n    println!(\"hello\");\n}",
+        );
+        let ev = keys.sign_event(unsigned).unwrap();
+
+        assert!(is_feed_kind(ev.kind));
+        let tags = code_tags(&ev);
+        let get = |k: &str| {
+            tags.iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(get("l").as_deref(), Some("rust"), "first value wins");
+        assert_eq!(get("name").as_deref(), Some("hello.rs"));
+        assert_eq!(get("extension").as_deref(), Some("rs"));
+        assert_eq!(get("license").as_deref(), Some("MIT"));
+        assert_eq!(tags.len(), 6, "one entry per wanted tag");
+
+        // Not addressable: no d tag, kind < 30000 — the comment target is
+        // the event id (comments on snippets thread like notes).
+        assert!(matches!(
+            satori_core::nip::comment::CommentTarget::for_event(&ev),
+            satori_core::nip::comment::CommentTarget::Event { kind: 1337, .. }
+        ));
+    }
+
     #[test]
     fn short_cuts_on_char_boundaries() {
         // The regression: byte 8 of a CJK author tag is mid-character.

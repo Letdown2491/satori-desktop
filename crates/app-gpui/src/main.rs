@@ -3,6 +3,7 @@
 //!
 //! NOTE: shares the LMDB store with the GTK app — run one at a time until P4.
 
+mod audio;
 mod desktop;
 mod emoji;
 mod icons;

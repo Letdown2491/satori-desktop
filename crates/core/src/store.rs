@@ -19,11 +19,12 @@ type NostrResult<T> = Result<T, DbError>;
 
 /// The content-kind catalog (content-prefs.ts:40-55): label + the kinds it
 /// groups. All default visible; prefs.json `content_hidden` hides.
-pub const CATALOG: [(&str, &[u16]); 13] = [
+pub const CATALOG: [(&str, &[u16]); 14] = [
     ("Notes", &[1]),
     ("Reposts", &[6]),
     ("Pictures", &[20]),
     ("Videos", &[21, 22]),
+    ("Voice", &[1222, 1244]),
     ("Podcasts", &[54]),
     ("Polls", &[1068]),
     ("Articles", &[30023]),
@@ -55,12 +56,14 @@ pub fn visible_kinds() -> Vec<Kind> {
 
 /// The content kinds the following feed carries (content-prefs.ts catalog's
 /// default surface).
-pub const FEED_KINDS: [Kind; 15] = [
+pub const FEED_KINDS: [Kind; 17] = [
     Kind::TextNote,      // 1
     Kind::Repost,        // 6
     Kind::Custom(20),    // picture (NIP-68)
     Kind::Custom(21),    // short vertical video (NIP-71)
     Kind::Custom(22),    // video (NIP-71)
+    Kind::Custom(1222),  // voice root (NIP-A0)
+    Kind::Custom(1244),  // voice reply (NIP-A0)
     Kind::Custom(54),    // podcast episode (NIP-F4)
     Kind::Custom(1068),  // poll (NIP-88)
     Kind::Custom(30023), // article (NIP-23)

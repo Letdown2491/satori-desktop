@@ -140,9 +140,20 @@ pub(crate) fn is_video_url(url: &str) -> bool {
     )
 }
 
+/// Audio by extension (NIP-A0's common set plus the plain audio
+/// containers). `.mp4` is deliberately NOT here — it is a video extension
+/// first; inside a voice note (1222/1244) the kind decides, not the ext.
+fn is_audio_url(url: &str) -> bool {
+    matches!(
+        path_ext(url).as_deref(),
+        Some("mp3" | "ogg" | "oga" | "opus" | "wav" | "flac" | "m4a" | "aac" | "weba")
+    )
+}
+
 /// One entry of the media section, in reading order: a picture (lightbox
-/// tile) or a video (poster tile; Phase 3 — inline click-to-play, the
-/// imeta mime tells an extension-less blossom URL from a picture).
+/// tile), a video (poster tile; Phase 3 — inline click-to-play, the imeta
+/// mime tells an extension-less blossom URL from a picture), or an audio
+/// clip (NIP-A0 voice row: waveform + duration from imeta, playbin).
 #[derive(Clone)]
 pub enum MediaAsset {
     Picture {
@@ -154,12 +165,20 @@ pub enum MediaAsset {
         blurhash: Option<String>,
         mime: Option<String>,
     },
+    Audio {
+        url: String,
+        /// NIP-A0 imeta `duration` (seconds).
+        duration: Option<f64>,
+        /// NIP-A0 imeta `waveform` (amplitudes 0-100, already capped).
+        waveform: Option<Vec<u32>>,
+    },
 }
 impl MediaAsset {
     fn url(&self) -> &str {
         match self {
             MediaAsset::Picture { url } => url,
             MediaAsset::Video { url, .. } => url,
+            MediaAsset::Audio { url, .. } => url,
         }
     }
 }
@@ -199,13 +218,26 @@ fn media_assets_with(parsed: Option<&article::ArticleData>, ev: &Event) -> Vec<M
     {
         out.push(MediaAsset::Picture { url: cover });
     }
+    // NIP-A0 voice note: the content IS the audio URL, and the file rides
+    // audio mimes inside video-shaped extensions (.m4a/.mp4) — the kind
+    // decides, not the extension (the NIP's own example is .mp4).
+    let voice = matches!(u16::from(ev.kind), 1222 | 1244);
     for m in imeta::parse(ev) {
         if m.url.is_empty() {
             continue;
         }
         let video =
             m.mime.as_deref().is_some_and(|m| m.starts_with("video/")) || is_video_url(&m.url);
-        out.push(if video {
+        let audio = voice
+            || m.mime.as_deref().is_some_and(|m| m.starts_with("audio/"))
+            || is_audio_url(&m.url);
+        out.push(if voice || (audio && !video) {
+            MediaAsset::Audio {
+                url: m.url,
+                duration: m.duration,
+                waveform: m.waveform,
+            }
+        } else if video {
             MediaAsset::Video {
                 url: m.url,
                 poster: m.poster,
@@ -215,6 +247,19 @@ fn media_assets_with(parsed: Option<&article::ArticleData>, ev: &Event) -> Vec<M
         } else {
             MediaAsset::Picture { url: m.url }
         });
+    }
+    // A voice note whose imeta tag is missing entirely: the content URL
+    // still renders — as audio (NIP-A0 §Specification: content MUST be
+    // the audio URL).
+    if voice && !out.iter().any(|a| matches!(a, MediaAsset::Audio { .. })) {
+        let url = ev.content.trim();
+        if crate::views::content::web_url(url) {
+            out.push(MediaAsset::Audio {
+                url: url.to_string(),
+                duration: None,
+                waveform: None,
+            });
+        }
     }
     for para in ev.content.split('\n') {
         if let Some(Seg::Link(url)) = standalone(para) {
@@ -231,6 +276,12 @@ fn media_assets_with(parsed: Option<&article::ArticleData>, ev: &Event) -> Vec<M
                     poster: None,
                     blurhash: None,
                     mime: None,
+                }
+            } else if is_audio_url(&url) {
+                MediaAsset::Audio {
+                    url: url.clone(),
+                    duration: None,
+                    waveform: None,
                 }
             } else if is_image_url(&url) || path_ext(&url).is_none() {
                 MediaAsset::Picture { url: url.clone() }
@@ -265,6 +316,7 @@ fn media_urls_from(assets: &[MediaAsset], ev: &Event) -> Vec<String> {
         .iter()
         .flat_map(|a| match a {
             MediaAsset::Picture { url } => vec![url.clone()],
+            MediaAsset::Audio { .. } => vec![], // no prefetch: the waveform rides the imeta
             MediaAsset::Video {
                 url,
                 poster,
@@ -996,9 +1048,10 @@ pub fn body_with<V: EventEmitter<Nav> + 'static>(
             // section below; a link the cache couldn't decode (a blossom
             // page, say) degrades back to a plain link row here.
             Some(Seg::Link(url)) => {
-                if is_video_url(&url) || youtube_thumb(&url).is_some() {
+                if is_video_url(&url) || youtube_thumb(&url).is_some() || is_audio_url(&url) {
                     // The gallery section below renders the video tile
-                    // (poster + play overlay, opens the browser).
+                    // (poster + play overlay, opens the browser) or the
+                    // voice row (#52).
                 } else if ctx.media.not_media(&url)
                     || !(is_image_url(&url) || path_ext(&url).is_none())
                 {
@@ -1291,6 +1344,129 @@ fn video_tile(
     }
 }
 
+/// The NIP-A0 voice row (#52): waveform bars, the duration, and the play
+/// controls — all theme chrome (audio paints no frames, so there is no
+/// element swap like the video tile's; the row is the control). The bars
+/// ride the author's imeta waveform when it rode along, else a
+/// deterministic pattern hashed from the URL (the seg_id discipline: same
+/// URL, same shape every frame). The whole row is the toggle; ✕ and ↗ are
+/// sealed against it like the video controls.
+fn audio_row(url: &str, duration: Option<f64>, waveform: Option<&[u32]>) -> AnyElement {
+    let playing_now = crate::audio::playing(url);
+    let bar_color = if playing_now {
+        theme::vermilion()
+    } else {
+        theme::muted()
+    };
+
+    // The bars: the author's amplitudes, downsampled to at most 40 (the
+    // NIP says <100 values is plenty — 40 stays legible at row height),
+    // 2-18px on the 0-100 amplitude. The fallback hashes the URL into the
+    // same shape (a voice note whose imeta never arrived still reads as
+    // audio, not as a dead link).
+    let bars: Vec<f32> = match waveform {
+        Some(w) if !w.is_empty() => {
+            let step = w.len().div_ceil(40);
+            (0..w.len())
+                .step_by(step)
+                .map(|i| 2.0 + (w[i].min(100) as f32 / 100.0) * 16.0)
+                .collect()
+        }
+        _ => {
+            let mut h: u32 = 0x811c9dc5;
+            for b in url.as_bytes() {
+                h = h.wrapping_mul(0x01000193).wrapping_add(*b as u32);
+            }
+            (0..32)
+                .map(|i| {
+                    h = h
+                        .wrapping_mul(0x01000193)
+                        .wrapping_add(0x9e37_79b9 + i as u32);
+                    2.0 + (h % 100) as f32 / 100.0 * 16.0
+                })
+                .collect()
+        }
+    };
+
+    // The duration label: m:ss from the imeta seconds (absent = no label;
+    // the browser link still answers "how long").
+    let label = duration.map(|d| {
+        let d = d.round() as u64;
+        format!("{}:{:02}", d / 60, d % 60)
+    });
+
+    let row_url = url.to_string();
+    let browser_url = url.to_string();
+    let mut row =
+        div()
+            .id(seg_id("audio-row", url))
+            .cursor_pointer()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .rounded(px(theme::R_EMBED))
+            .border_1()
+            .border_color(rgb(theme::hairline()))
+            .bg(rgb(theme::panel()))
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                crate::audio::open(row_url.clone(), cx);
+            })
+            .child(div().flex().items_end().gap(px(2.0)).h(px(18.0)).children(
+                bars.into_iter().map(|h| {
+                    div()
+                        .w(px(3.0))
+                        .h(px(h))
+                        .rounded(px(1.5))
+                        .bg(rgb(bar_color))
+                }),
+            ))
+            .when_some(label, |d, l| {
+                d.child(
+                    div()
+                        .text_size(px(theme::T_SMALL))
+                        .text_color(rgb(theme::muted()))
+                        .child(l),
+                )
+            });
+    if crate::audio::active(url) {
+        // The live row's extras: pause-and-listen stays, the ✕ hands back
+        // the quiet waveform (the video controls' shape).
+        row = row.child(
+            div()
+                .id(seg_id("audio-close", url))
+                .cursor_pointer()
+                .text_size(px(theme::T_UI))
+                .text_color(rgb(theme::muted()))
+                .hover(|s| s.text_color(rgb(theme::ink())))
+                .on_click(|_, _, cx| {
+                    cx.stop_propagation();
+                    crate::audio::close(cx);
+                })
+                .child("✕"),
+        );
+    }
+    row = row.child(
+        div()
+            .id(seg_id("audio-browser", url))
+            .cursor_pointer()
+            .text_size(px(theme::T_UI))
+            .text_color(rgb(theme::muted()))
+            .hover(|s| s.text_color(rgb(theme::ink())))
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                if web_url(&browser_url) {
+                    cx.open_url(&browser_url);
+                }
+            })
+            .child("↗"),
+    );
+    row.into_any_element()
+}
+
 /// The gallery section: single image sized by its dim aspect (media_picture:
 /// height = width·h/w clamped to 560), several images as a horizontal strip
 /// (cards.rs gallery), every tile opening the lightbox.
@@ -1308,6 +1484,7 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
         .filter(|a| match a {
             MediaAsset::Picture { url } => !ctx.media.not_media(url),
             MediaAsset::Video { .. } => true,
+            MediaAsset::Audio { .. } => true,
         })
         .cloned()
         .collect();
@@ -1320,7 +1497,7 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
         .iter()
         .filter_map(|a| match a {
             MediaAsset::Picture { url } => Some(url.clone()),
-            MediaAsset::Video { .. } => None,
+            MediaAsset::Video { .. } | MediaAsset::Audio { .. } => None,
         })
         .collect();
 
@@ -1377,6 +1554,12 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
                 ctx,
             )
             .into_any_element(),
+            MediaAsset::Audio {
+                url,
+                duration,
+                waveform,
+                ..
+            } => audio_row(url, *duration, waveform.as_deref()).into_any_element(),
         });
     }
 
@@ -1466,6 +1649,14 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
                     height,
                     ctx,
                 ));
+            }
+            MediaAsset::Audio {
+                url,
+                duration,
+                waveform,
+                ..
+            } => {
+                strip = strip.child(audio_row(&url, duration, waveform.as_deref()));
             }
         }
     }
@@ -1900,6 +2091,89 @@ mod tests {
             ]
         );
         assert!(matches!(assets[0], MediaAsset::Picture { .. }));
+    }
+
+    /// Fixture gate (D59) for the voice rider (#52): a NIP-A0 root voice
+    /// message the way the NIP's own example publishes it — kind 1222,
+    /// content the audio URL, one imeta with `waveform` (space-separated
+    /// ints) and `duration`, and NO `m` attribute inside a video-shaped
+    /// .mp4 extension. The kind decides: the asset is Audio with the
+    /// metadata parsed, never a video tile.
+    #[test]
+    fn voice_note_fixture_classifies_as_audio() {
+        let keys = Keys::generate();
+        let unsigned = UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::from_secs(1_752_501_052),
+            Kind::Custom(1222),
+            [Tag::custom(
+                "imeta",
+                [
+                    "url https://blossom.primal.net/5fe7df0e46ee6b14b5a8b8b92939e84e3ca5e3950eb630299742325d5ed9891b.mp4",
+                    "waveform 0 7 35 8 100 100 49 8 4 16 8 10 7 2 20 10 100 100 100 100",
+                    "duration 8",
+                ],
+            )],
+            "https://blossom.primal.net/5fe7df0e46ee6b14b5a8b8b92939e84e3ca5e3950eb630299742325d5ed9891b.mp4",
+        );
+        let ev = keys.sign_event(unsigned).unwrap();
+        let assets = media_assets(&ev);
+        assert_eq!(assets.len(), 1, "the content URL folds into one row");
+        let MediaAsset::Audio {
+            duration, waveform, ..
+        } = &assets[0]
+        else {
+            panic!("a 1222 must classify as audio");
+        };
+        assert_eq!(duration.map(|d| d.round() as u64), Some(8));
+        assert_eq!(waveform.as_deref().map(|w| w.len()), Some(20));
+        assert_eq!(waveform.as_deref().unwrap()[2], 35);
+
+        // The same payload without ANY imeta: the content URL still
+        // renders as audio (the fallback rule).
+        let bare_keys = Keys::generate();
+        let bare = bare_keys
+            .sign_event(UnsignedEvent::new(
+                bare_keys.public_key(),
+                Timestamp::from_secs(1),
+                Kind::Custom(1222),
+                [],
+                "https://cdn.example.com/voice.m4a",
+            ))
+            .unwrap();
+        let assets = media_assets(&bare);
+        assert!(matches!(assets[0], MediaAsset::Audio { .. }));
+
+        // A non-voice note with the same .mp4 imeta stays VIDEO (the ext
+        // decides when the kind does not).
+        let video_keys = Keys::generate();
+        let video = video_keys
+            .sign_event(UnsignedEvent::new(
+                video_keys.public_key(),
+                Timestamp::from_secs(1),
+                Kind::Custom(20),
+                [Tag::custom(
+                    "imeta",
+                    ["url https://cdn.example.com/clip.mp4", "m video/mp4"],
+                )],
+                "caption",
+            ))
+            .unwrap();
+        assert!(matches!(media_assets(&video)[0], MediaAsset::Video { .. }));
+
+        // A plain note's standalone audio link (an .ogg) renders the voice
+        // row too — attachments beyond the NIP-A0 kinds.
+        let ogg_keys = Keys::generate();
+        let ogg = ogg_keys
+            .sign_event(UnsignedEvent::new(
+                ogg_keys.public_key(),
+                Timestamp::from_secs(1),
+                Kind::TextNote,
+                [],
+                "https://cdn.example.com/song.ogg",
+            ))
+            .unwrap();
+        assert!(matches!(media_assets(&ogg)[0], MediaAsset::Audio { .. }));
     }
 
     #[test]
