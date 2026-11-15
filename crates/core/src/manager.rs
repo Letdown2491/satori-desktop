@@ -2736,7 +2736,7 @@ impl Core {
                         Kind::Custom(30001),
                         Kind::Custom(31234),
                     ])
-                    .limit(2000);
+                    .limit(crate::outbox::QUERY_LIMIT);
                 active.pool.get(mine).await.unwrap_or_default()
             },
             async {
@@ -3759,7 +3759,7 @@ impl Core {
                         Filter::new()
                             .kinds([Kind::TextNote, Kind::Custom(1111)])
                             .events(ids)
-                            .limit(1000),
+                            .limit(crate::outbox::QUERY_LIMIT),
                     );
                 }
                 const ADDR_CHUNK: usize = 8;
@@ -3768,7 +3768,7 @@ impl Core {
                         Filter::new()
                             .kind(Kind::Custom(1111))
                             .custom_tags(SingleLetterTag::LOWERCASE_A, chunk.iter().cloned())
-                            .limit(1000),
+                            .limit(crate::outbox::QUERY_LIMIT),
                     );
                 }
                 // The shapes fetch concurrently (each READ_BUDGET-bounded);
@@ -3994,7 +3994,7 @@ impl Core {
                 let filter = Filter::new()
                     .kind(Kind::Custom(1018))
                     .event(poll_id)
-                    .limit(1000);
+                    .limit(crate::outbox::QUERY_LIMIT);
                 let mut votes: Vec<Event> = Vec::new();
                 for ev in active.pool.get(filter).await.unwrap_or_default() {
                     votes.push(ev);
@@ -4023,7 +4023,7 @@ impl Core {
                 let filter = Filter::new()
                     .kind(Kind::Custom(9735))
                     .custom_tag(SingleLetterTag::LOWERCASE_A, coord)
-                    .limit(1000);
+                    .limit(crate::outbox::QUERY_LIMIT);
                 let receipts: Vec<Event> = active
                     .pool
                     .get(filter)

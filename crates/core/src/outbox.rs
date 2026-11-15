@@ -79,6 +79,15 @@ pub fn parse_relay_list(ev: &nostr::prelude::Event) -> RelayList {
     }
 }
 
+/// The cap for content-shaped network queries (comment fetches, poll
+/// tallies, zap receipts, metadata/relay-list asks): 500, the strictest
+/// mainstream relay cap — purplepag.es refuses anything higher outright
+/// ("blocked: limit too high: 1000 (max 500)"), zeroing its contribution
+/// to the query, while permissive relays gain nothing that matters from
+/// the extra depth. A limit is an upper bound, not a target: every relay
+/// answers with however much it holds up to the cap.
+pub const QUERY_LIMIT: usize = 500;
+
 /// Routing-grade relay screening: the ONE ruleset lives in net_guard.rs
 /// (issue #11 lifted it here so the nwc + bunker paste-time screens reuse
 /// it). Re-exported for the pool/seen/hints callers.

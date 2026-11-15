@@ -616,7 +616,7 @@ impl Pool {
             let filter = Filter::new()
                 .kind(Kind::RelayList)
                 .authors(chunk)
-                .limit(3000);
+                .limit(crate::outbox::QUERY_LIMIT);
             if let Ok(events) = self.get(filter).await {
                 for ev in &events {
                     // (no explicit save: the SDK persists what it receives)

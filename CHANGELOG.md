@@ -29,7 +29,9 @@ NIP-42 auth challenge now leaves the relay in the read rotation (the
 query simply gets no contribution from it, or the challenge is answered
 with the session identity); genuine refusals (paywalls, restrictions,
 bans) still stamp the relay read-dead, and refusal log lines now include
-the relay's reason text.
+the relay's reason text. Our own network queries now cap at 500 events
+(the strictest mainstream relay limit), so strict relays answer them
+instead of refusing them.
 
 The routed fan-out no longer dials other people's personal firehose
 endpoints. A relay list entry like `wss://filter.nostr.wine/<npub>` is a
