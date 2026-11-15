@@ -297,12 +297,15 @@ fn media_assets_with(parsed: Option<&article::ArticleData>, ev: &Event) -> Vec<M
 }
 
 /// Every url worth fetching for this event: the pictures plus, per video,
-/// the first preview source that applies — the publisher's poster, else a
-/// blurhash decode (virtual key, no network), else a first-frame sniff
-/// (virtual key; the video FILE is never fetched, only a capped head).
-/// Strict Tor keeps the sniff off entirely (the facade rule): the tile
-/// stays bare. A cache may still hold a sniff from before the switch —
-/// painting already-fetched bytes breaks no new ground.
+/// the preview sources that apply — the publisher's poster, else the
+/// first-frame sniff (virtual key; the video FILE is never fetched, only a
+/// capped head, then a ranged fetch through the proxy if the head can't
+/// decode) AND the blurhash decode (virtual key, no network — the local
+/// filler while the sniff runs, or forever when it fails). Strict Tor
+/// keeps the sniff off entirely (the facade rule): the tile stays bare,
+/// blurhash is its only placeholder. A cache may still hold a sniff from
+/// before the switch — painting already-fetched bytes breaks no new
+/// ground.
 pub fn media_urls(ev: &Event) -> Vec<String> {
     media_urls_from(&media_assets(ev), ev)
 }
@@ -324,19 +327,23 @@ fn media_urls_from(assets: &[MediaAsset], ev: &Event) -> Vec<String> {
                 mime,
             } => match poster {
                 Some(p) => vec![p.clone()],
-                None => match blurhash {
-                    Some(h) => vec![crate::poster::blurhash_key(h)],
-                    None => {
-                        // inline_able already refuses the facade (strict
-                        // Tor) and YouTube pages (the sniffer would fetch
-                        // a web page for nothing) — no sniff for either.
-                        if !crate::video::inline_able(url, mime.as_deref()) {
-                            vec![]
-                        } else {
-                            vec![crate::poster::poster_key(url)]
-                        }
+                None => {
+                    // The sniff is the real preview (a frame beats an
+                    // impression); the blurhash is the local filler that
+                    // paints while the sniff runs or when it fails — both
+                    // keys queue, the paint ladder picks the best held.
+                    let mut keys = Vec::new();
+                    // inline_able refuses the facade (strict Tor) and
+                    // YouTube pages (the sniffer would fetch a web page
+                    // for nothing) — no sniff for either.
+                    if crate::video::inline_able(url, mime.as_deref()) {
+                        keys.push(crate::poster::poster_key(url));
                     }
-                },
+                    if let Some(h) = blurhash {
+                        keys.push(crate::poster::blurhash_key(h));
+                    }
+                    keys
+                }
             },
         })
         .collect();
@@ -1374,15 +1381,17 @@ fn video_tile(
             cx.stop_propagation();
             crate::video::open(url_for_open.clone(), mime_for_open.clone(), cx);
         });
-    // The preview ladder (D32): the publisher's poster (now OUR uploads
-    // embed one — D38's grab at attach time), a blurhash gradient, a
-    // locally sniffed first frame — any hit paints under the centered play
-    // mark; none means the quiet 16:9 panel, mark only (the filename row
-    // is gone — nobody read it).
+    // The preview ladder (D32, reordered D72): the publisher's poster (now
+    // OUR uploads embed one — D38's grab at attach time), then a locally
+    // sniffed first frame — a real frame beats an impression — and the
+    // blurhash gradient LAST: the local filler that paints while the sniff
+    // runs or when it fails. Any hit paints under the centered play mark;
+    // none means the quiet 16:9 panel, mark only (the filename row is gone
+    // — nobody read it).
     let shown = poster
         .and_then(|p| ctx.media.png(p))
-        .or_else(|| blurhash.and_then(|b| ctx.media.png(&crate::poster::blurhash_key(b))))
-        .or_else(|| ctx.media.png(&crate::poster::poster_key(url)));
+        .or_else(|| ctx.media.png(&crate::poster::poster_key(url)))
+        .or_else(|| blurhash.and_then(|b| ctx.media.png(&crate::poster::blurhash_key(b))));
     match shown {
         Some(png) => frame
             .child(
