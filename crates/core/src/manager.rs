@@ -6927,14 +6927,20 @@ impl Core {
                     };
                     if relay_latency::is_auth_wall(reason) {
                         // An auth wall, not futility: the relay is
-                        // healthy and serves reads after NIP-42
-                        // (purplepag.es — the profile/graph relay —
-                        // walls every read). The SDK signs the challenge
-                        // with the session identity and resubscribes the
-                        // closed subs on success; stamping read-dead
-                        // here only starves profile fetches of a
-                        // working relay for 12h.
+                        // healthy and serves reads after NIP-42. The
+                        // SDK signs the challenge with the session
+                        // identity and resubscribes the closed subs on
+                        // success; stamping read-dead here only starves
+                        // profile fetches of a working relay for 12h.
                         eprintln!("[core] live: auth challenge from {relay_url}: {reason}");
+                    } else if relay_latency::is_limit_rejection(reason) {
+                        // A limit rejection: our filter's cap exceeds
+                        // the relay's max (purplepag.es: "limit too
+                        // high: 1000 (max 500)"). The relay is healthy
+                        // and serves the query capped — the fetch
+                        // simply gets no contribution from it. Never a
+                        // read-dead stamp.
+                        eprintln!("[core] live: limit rejected by {relay_url}: {reason}");
                     } else {
                         // An explicit REQ refusal (write-only blaster,
                         // paywall, a restriction we can't satisfy) —
@@ -8729,6 +8735,17 @@ mod tests {
         assert!(
             !crate::relay_latency::is_read_dead(&url),
             "an auth wall stamped read-dead — profile fetches lose a healthy relay for 12h"
+        );
+
+        // A limit rejection is ALSO not futility (the purplepag.es
+        // case): our filter's cap exceeds the relay's max; the relay
+        // serves the query capped, and the other relays carry the
+        // fetch. No stamp.
+        mock.closed_sub_reason(0, "blocked: limit too high: 1000 (max 500)");
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            !crate::relay_latency::is_read_dead(&url),
+            "a limit rejection stamped read-dead — a parameter mismatch starved a healthy relay"
         );
 
         // A real refusal IS the read-dead signal.

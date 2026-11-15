@@ -479,6 +479,15 @@ pub fn is_auth_wall(reason: &str) -> bool {
     reason.to_lowercase().starts_with("auth-required:")
 }
 
+/// A limit rejection, not a refusal: the relay answers our query with
+/// "our cap is lower than your limit" (purplepag.es: "blocked: limit
+/// too high: 1000 (max 500)"). The relay is healthy and WILL serve the
+/// same query capped — punishing it stamps 12h of read-death on a
+/// relay that would happily serve profiles. Logged, never stamped.
+pub fn is_limit_rejection(reason: &str) -> bool {
+    reason.to_lowercase().contains("limit too high")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,6 +573,12 @@ mod tests {
         assert!(!is_auth_wall("restricted: reads require a paid plan"));
         assert!(!is_auth_wall("payment-required: send sats"));
         assert!(!is_auth_wall("blocked: you are not welcome here"));
+        // The limit-rejection split (purplepag.es: "blocked: limit too
+        // high: 1000 (max 500)") — a parameter mismatch, never punished.
+        assert!(is_limit_rejection(
+            "blocked: limit too high: 1000 (max 500)"
+        ));
+        assert!(!is_limit_rejection("blocked: you are not welcome here"));
     }
 
     #[test]

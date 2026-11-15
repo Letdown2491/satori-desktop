@@ -20,13 +20,16 @@ relay trim no longer skips its own job: stale relays are evicted for real
 still hosting subscriptions are re-stamped instead of evicted, so the
 trimming can never kill the live bell.
 
-Relays that demand NIP-42 authentication are no longer treated as
-read-denials: purplepag.es (the profile and graph relay) walls every read
-behind a signed challenge, and answering that challenge is normal
-handshake, not a refusal. Auth challenges are answered with the session
-identity and the relay stays in the read rotation, so profile fetches keep
-using it; genuine refusals (paywalls, restrictions, bans) still stamp the
-relay read-dead, and denial log lines now include the relay's reason text.
+Relays that refuse a query for a reason we can satisfy are no longer
+treated as read-denials. purplepag.es (the profile and graph relay)
+answered our wider queries with "limit too high: 1000 (max 500)", and
+every refusal stamped the relay read-dead for 12 hours, cutting profile
+fetches off from the one relay best at them. A limit rejection or a
+NIP-42 auth challenge now leaves the relay in the read rotation (the
+query simply gets no contribution from it, or the challenge is answered
+with the session identity); genuine refusals (paywalls, restrictions,
+bans) still stamp the relay read-dead, and refusal log lines now include
+the relay's reason text.
 
 ## 0.9.0 - 2026-11-15
 
