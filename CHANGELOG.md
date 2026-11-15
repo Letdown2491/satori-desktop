@@ -31,6 +31,13 @@ with the session identity); genuine refusals (paywalls, restrictions,
 bans) still stamp the relay read-dead, and refusal log lines now include
 the relay's reason text.
 
+The routed fan-out no longer dials other people's personal firehose
+endpoints. A relay list entry like `wss://filter.nostr.wine/<npub>` is a
+per-customer subscription: only the key in the path can answer its auth
+challenge, so a follow's endpoint was an endless
+authenticate-and-fail loop for us. Those entries now screen out of the
+routed set (our own, if we ever list one, still works).
+
 ## 0.9.0 - 2026-11-15
 
 Video tiles earned their picture. A note's video now previews its first

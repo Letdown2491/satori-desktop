@@ -585,6 +585,14 @@ impl Pool {
     /// served as-is for now (no background refresher yet — that lands with
     /// the seen-on memory slice).
     pub async fn relay_lists(&self, authors: &[PublicKey]) -> HashMap<String, RelayList> {
+        // The session key, for the personal-endpoint screen (only OUR
+        // filter endpoints answer to our auth; a follow's own firehose
+        // is a wall for us). The bunker signer caches its key after the
+        // handshake, so this is free after login.
+        let me: Option<PublicKey> = match self.identity.get() {
+            Some(signer) => signer.public_key().await.ok(),
+            None => None,
+        };
         let mut out: HashMap<String, RelayList> = HashMap::new();
         let mut missing: Vec<PublicKey> = Vec::new();
         // Store-side lookups batched: one query per 200 authors (the
@@ -592,7 +600,7 @@ impl Pool {
         // sequential LMDB round trip per follow.
         if let Ok(events) = self.store.relay_lists(authors).await {
             for ev in &events {
-                let list = self.routed_list(ev);
+                let list = self.routed_list(ev, me);
                 if !list.is_empty() {
                     out.insert(ev.pubkey.to_string(), list);
                 }
@@ -612,7 +620,7 @@ impl Pool {
             if let Ok(events) = self.get(filter).await {
                 for ev in &events {
                     // (no explicit save: the SDK persists what it receives)
-                    let list = self.routed_list(ev);
+                    let list = self.routed_list(ev, me);
                     if !list.is_empty() {
                         out.insert(ev.pubkey.to_string(), list);
                     }
@@ -623,13 +631,16 @@ impl Pool {
     }
 
     /// A follow's parsed relay list, screened for ROUTED use (routable):
-    /// wss only, public IP literals only. A list left empty by the screen
-    /// reads as "no list" — the author rides the indexers with the
-    /// listless, never a dialed private host.
-    fn routed_list(&self, ev: &Event) -> RelayList {
+    /// wss only, public IP literals only, and personal endpoints (the
+    /// filter.nostr.wine family) only when they are OURS. A list left
+    /// empty by the screen reads as "no list" — the author rides the
+    /// indexers with the listless, never a dialed private host.
+    fn routed_list(&self, ev: &Event, me: Option<PublicKey>) -> RelayList {
+        let ours =
+            |u: &String| outbox::personal_endpoint_owner(u).is_none_or(|owner| Some(owner) == me);
         let mut list = outbox::parse_relay_list(ev);
-        list.read.retain(|u| self.routable(u));
-        list.write.retain(|u| self.routable(u));
+        list.read.retain(|u| self.routable(u) && ours(u));
+        list.write.retain(|u| self.routable(u) && ours(u));
         list
     }
 
@@ -1270,6 +1281,52 @@ mod tests {
     /// is IN USE — it is re-stamped and spared, because removing it
     /// would silently kill the live sub (no CLOSED, no reconnect, no
     /// re-arm).
+    /// The routed fan-out never dials someone else's personal endpoint
+    /// (the filter.nostr.wine family): the <npub> in the path is the
+    /// CUSTOMER — only that key answers the NIP-42 challenge, so for us
+    /// the endpoint is a wall (every REQ answered "auth-required"). The
+    /// screen keeps our own (if we list one) and plain relays.
+    #[tokio::test]
+    async fn routed_list_skips_other_peoples_personal_endpoints() {
+        use nostr::nips::nip19::ToBech32;
+        let pool = Pool::open_for_tests().await.expect("pool opens");
+        let mine = Keys::generate();
+        let theirs = Keys::generate();
+        let their_url = format!(
+            "wss://filter.nostr.wine/{}?broadcast=true",
+            theirs.public_key().to_bech32().unwrap()
+        );
+        let my_url = format!(
+            "wss://filter.nostr.wine/{}?broadcast=true",
+            mine.public_key().to_bech32().unwrap()
+        );
+        let ev = EventBuilder::new(Kind::Custom(10002), "")
+            .tag(Tag::custom("r", ["wss://relay.damus.io"]))
+            .tag(Tag::custom("r", [their_url.as_str()]))
+            .tag(Tag::custom("r", [my_url.as_str()]))
+            .finalize(&theirs)
+            .unwrap();
+
+        // As the session key: plain relay + OUR endpoint survive; theirs
+        // is screened out.
+        let list = pool.routed_list(&ev, Some(mine.public_key()));
+        assert!(list.read.contains(&"wss://relay.damus.io".to_string()));
+        assert!(
+            list.read.contains(&my_url),
+            "our own personal endpoint was screened out"
+        );
+        assert!(
+            !list.read.contains(&their_url),
+            "a follow's personal firehose made it into the routed set — the auth-required wall"
+        );
+        assert!(!list.write.contains(&their_url));
+
+        // With no session key, every personal endpoint screens out.
+        let list = pool.routed_list(&ev, None);
+        assert!(list.read.contains(&"wss://relay.damus.io".to_string()));
+        assert!(!list.read.iter().any(|u| u.contains("filter.nostr.wine")));
+    }
+
     #[tokio::test]
     async fn trim_routed_evicts_idle_and_spares_subscribed() {
         let (_guard, mock, pool, url) = crate::test_relay::pool_with_mock("pool-trim-routed").await;

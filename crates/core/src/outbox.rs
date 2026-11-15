@@ -84,6 +84,28 @@ pub fn parse_relay_list(ev: &nostr::prelude::Event) -> RelayList {
 /// it). Re-exported for the pool/seen/hints callers.
 pub use crate::net_guard::{is_public_ip, routable_relay};
 
+/// The owner of a personal-endpoint relay url, if it is one: the
+/// per-customer filtered firehoses (nostr.wine's filter.nostr.wine and
+/// its kin) embed the CUSTOMER's npub in the url path
+/// (`wss://filter.nostr.wine/<npub>?broadcast=true`). Only that key can
+/// answer the NIP-42 challenge (and only while their subscription
+/// lasts) — for everyone else the endpoint answers every REQ with
+/// "auth-required", a challenge we cannot satisfy with our own key.
+/// The routed fan-out (which scrapes FOLLOWERS' relay lists) must never
+/// dial someone else's.
+pub fn personal_endpoint_owner(url: &str) -> Option<nostr::prelude::PublicKey> {
+    use nostr::nips::nip19::FromBech32;
+    let after_scheme = url.split_once("://")?.1;
+    let (_host, path) = after_scheme.split_once('/')?;
+    let first = path.split(['?', '/']).next()?;
+    let lower = first.to_lowercase();
+    let bech = lower.strip_prefix("nostr:").unwrap_or(&lower);
+    if !bech.starts_with("npub1") {
+        return None;
+    }
+    nostr::prelude::PublicKey::from_bech32(bech).ok()
+}
+
 // Caps (nip65.ts): 3 write relays per author considered; the greedy set-cover
 // stops at 70 relays; redundancy routes each author to up to
 // RELAYS_PER_AUTHOR_TARGET of their relays so a note on only one of them
@@ -267,6 +289,40 @@ pub fn route(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::nips::nip19::FromBech32;
+
+    #[test]
+    fn personal_endpoints_parse_to_their_path_npub() {
+        // The nostr.wine firehose shape, with and without the query.
+        let pk = nostr::prelude::PublicKey::from_bech32(
+            "npub1rtlqca8r6auyaw5n5h3l5422dm4sry5dzfee4696fqe8s6qgudks7djtfs",
+        )
+        .unwrap();
+        assert_eq!(
+            personal_endpoint_owner(
+                "wss://filter.nostr.wine/npub1rtlqca8r6auyaw5n5h3l5422dm4sry5dzfee4696fqe8s6qgudks7djtfs?broadcast=true"
+            ),
+            Some(pk)
+        );
+        assert_eq!(
+            personal_endpoint_owner(
+                "wss://filter.nostr.wine/npub1rtlqca8r6auyaw5n5h3l5422dm4sry5dzfee4696fqe8s6qgudks7djtfs"
+            ),
+            Some(pk)
+        );
+        // Plain relays, and a non-npub path, are nobody's endpoint.
+        assert_eq!(personal_endpoint_owner("wss://relay.damus.io"), None);
+        assert_eq!(
+            personal_endpoint_owner("wss://relay.example/some/path"),
+            None
+        );
+        // A path npub that isn't valid bech32 parses to nothing (never
+        // matches `me`, so it screens out either way).
+        assert_eq!(
+            personal_endpoint_owner("wss://filter.example/npub1notreal"),
+            None
+        );
+    }
 
     fn lists(pairs: &[(&str, &str)]) -> HashMap<String, RelayList> {
         pairs

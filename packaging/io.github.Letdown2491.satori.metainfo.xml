@@ -33,6 +33,7 @@
       <description>
         <p>The live notification subscriptions survive relay CLOSEDs: a relay answering CLOSED for the bell's subscription (subscription pressure, a relay restart, an auth flip) used to lose it for good, silently starving the bell dot and the new-notes pill for the rest of the session. The live loop now re-arms both subscriptions when a relay takes one away, and the routed relay trim evicts stale relays for real while re-stamping the relays still hosting subscriptions, so trimming can never kill the live bell.</p>
         <p>Relays that refuse a query for a satisfiable reason are no longer treated as read-denials: purplepag.es (the profile and graph relay) rejected our wider queries with "limit too high: 1000 (max 500)", and each refusal marked the relay read-dead for 12 hours, cutting profile fetches off from it. Limit rejections and NIP-42 auth challenges now leave the relay in the read rotation, while genuine refusals still mark it read-dead, and refusal logs now include the relay's reason text.</p>
+        <p>The routed fan-out no longer dials other people's personal firehose endpoints (filter.nostr.wine-style urls with a customer npub in the path): only that key can answer the auth challenge, so a follow's endpoint was an endless authenticate-and-fail loop. Our own endpoint, if listed, still works.</p>
       </description>
     </release>
     <release version="0.9.0" date="2026-11-15">
