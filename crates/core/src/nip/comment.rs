@@ -176,6 +176,24 @@ impl CommentTarget {
         }
     }
 
+    /// The a-tag coordinate for the Address arm — `Ref::value`'s grammar,
+    /// one home (the counts fetch and the tally both key off it; audit
+    /// duplication: the format! used to be hand-rolled in two places).
+    /// None for the Event arm (an event root has no coordinate).
+    pub fn address_string(&self) -> Option<String> {
+        match self {
+            CommentTarget::Address { kind, author, d } => Some(
+                Ref::Address {
+                    kind: *kind,
+                    author: *author,
+                    d: d.clone(),
+                }
+                .value(),
+            ),
+            CommentTarget::Event { .. } => None,
+        }
+    }
+
     /// Filters for fetching this target's comments (#e / #a exact
     /// matches). Capped: a viral target's whole comment history must not
     /// come back whole into the reader pane (audit-memory: the pane also
@@ -285,21 +303,7 @@ fn root_tags_of(root: &CommentTarget) -> Vec<Tag> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn keys() -> Keys {
-        Keys::generate()
-    }
-
-    fn sign(me: &Keys, kind: Kind, tags: Tags, content: &str) -> Event {
-        me.sign_event(UnsignedEvent::new(
-            me.public_key(),
-            Timestamp::now(),
-            kind,
-            tags,
-            content.to_string(),
-        ))
-        .unwrap()
-    }
+    use crate::test_support::{keys, sign};
 
     /// NIP-22 root preservation (#32's cross-client threading gap): a
     /// reply to a comment must carry the ORIGINAL thread's root tags —

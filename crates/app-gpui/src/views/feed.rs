@@ -753,23 +753,15 @@ impl Feed {
     /// order queue tracks ASKS (not just landings) — a miss would
     /// otherwise sit in `parents_asked` forever.
     fn trim_parents(&mut self) {
-        while self.parents_order.len() > PARENTS_CAP
-            && let Some(old) = self.parents_order.pop_front()
-        {
-            self.parents.remove(&old);
-            self.parents_asked.remove(&old);
-        }
+        content::fifo_trim(&mut self.parents, &mut self.parents_order, PARENTS_CAP);
+        self.parents_asked.retain(|k| self.parents.contains_key(k));
     }
 
     /// The comment-count cap: `trim_parents`' discipline for the
     /// bubbles' maps.
     fn trim_counts(&mut self) {
-        while self.counts_order.len() > COUNTS_CAP
-            && let Some(old) = self.counts_order.pop_front()
-        {
-            self.counts.remove(&old);
-            self.counts_asked.remove(&old);
-        }
+        content::fifo_trim(&mut self.counts, &mut self.counts_order, COUNTS_CAP);
+        self.counts_asked.retain(|k| self.counts.contains_key(k));
     }
 
     fn want_parents(&mut self, cx: &mut Context<Self>) {

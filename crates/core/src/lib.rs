@@ -11,6 +11,34 @@
 
 #![allow(dead_code)]
 
+/// The signed-event fixture kernel (D59): `keys()` + `sign()` — one home
+/// for the test helper that had three verbatim copies (comment.rs,
+/// goal.rs, manager.rs; audit duplication lens). Test-only.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use nostr::prelude::*;
+
+    pub fn keys() -> Keys {
+        Keys::generate()
+    }
+
+    pub fn sign(
+        me: &Keys,
+        kind: impl Into<Kind>,
+        tags: impl IntoIterator<Item = Tag>,
+        content: &str,
+    ) -> Event {
+        me.sign_event(UnsignedEvent::new(
+            me.public_key(),
+            Timestamp::now(),
+            kind.into(),
+            tags.into_iter().collect::<Tags>(),
+            content.to_string(),
+        ))
+        .unwrap()
+    }
+}
+
 pub mod blocktime;
 pub mod config;
 pub mod dedup;

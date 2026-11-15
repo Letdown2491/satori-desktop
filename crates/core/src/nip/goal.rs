@@ -62,17 +62,7 @@ pub fn raised_msat(goal: &Event, receipts: &[Event]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn sign(keys: &Keys, kind: u16, tags: Vec<Tag>, content: &str) -> Event {
-        keys.sign_event(UnsignedEvent::new(
-            keys.public_key(),
-            Timestamp::now(),
-            Kind::from_u16(kind),
-            tags,
-            content,
-        ))
-        .unwrap()
-    }
+    use crate::test_support::sign;
 
     /// A real NIP-57 zap receipt for `goal`: a signed 9734 request (a tag
     /// = the goal coordinate) embedded in the description, the paid

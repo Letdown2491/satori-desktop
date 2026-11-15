@@ -33,6 +33,8 @@ const PROFILE_CAP: usize = 2000;
 /// convention): dropped rows leave their embeds behind otherwise, and
 /// the wire's ingest rate is relay-paced.
 const QUOTES_CAP: usize = 4096;
+/// The in-flight author ledger's bound (the audit's memory lens).
+const PENDING_CAP: usize = 1024;
 
 /// The render snapshot (feed.rs's FeedSnap discipline, verbatim): the
 /// list closures are 'static, so they capture THIS instead of cloning
@@ -57,7 +59,12 @@ pub struct WireView {
     profiles_order: VecDeque<String>,
     /// Authors with a fetch in flight: one ask per author, ever in
     /// flight — a never-resolving kind-0 must not re-fire per note.
+    /// FIFO-capped like its siblings (the audit's memory lens: a
+    /// never-resolving author used to hold its hex for the view's
+    /// lifetime; the firehose grows those fast). Re-asking an evicted
+    /// author is harmless — one refetch.
     pending: HashSet<String>,
+    pending_order: VecDeque<String>,
     quotes: content::Quotes,
     quotes_order: VecDeque<String>,
     engagement: engagement::Engagement,
@@ -85,6 +92,7 @@ impl WireView {
             profiles: HashMap::new(),
             profiles_order: VecDeque::new(),
             pending: HashSet::new(),
+            pending_order: VecDeque::new(),
             quotes: HashMap::new(),
             quotes_order: VecDeque::new(),
             engagement,
@@ -174,14 +182,19 @@ impl WireView {
                 }
             }
             quotes::want_quotes(self, &ev, cx);
-            while self.quotes_order.len() > QUOTES_CAP {
-                if let Some(old) = self.quotes_order.pop_front() {
-                    self.quotes.remove(&old);
-                }
-            }
+            content::fifo_trim(&mut self.quotes, &mut self.quotes_order, QUOTES_CAP);
             let pk = ev.pubkey;
             self.rows.insert(0, Arc::new(ev));
-            if !self.profiles.contains_key(&pk.to_string()) && self.pending.insert(pk.to_string()) {
+            let hex = pk.to_string();
+            if !self.profiles.contains_key(&hex) && self.pending.insert(hex.clone()) {
+                self.pending_order.push_back(hex);
+                // FIFO by first ask: the set must not grow with the
+                // relay's count of never-resolving authors.
+                while self.pending_order.len() > PENDING_CAP
+                    && let Some(old) = self.pending_order.pop_front()
+                {
+                    self.pending.remove(&old);
+                }
                 unknown.push(pk);
             }
         }
@@ -213,17 +226,16 @@ impl WireView {
             for p in profs {
                 let hex = p.pubkey.clone();
                 self.pending.remove(&hex);
+                if let Some(pos) = self.pending_order.iter().position(|h| *h == hex) {
+                    self.pending_order.remove(pos);
+                }
                 if self.profiles.insert(hex.clone(), p).is_none() {
                     self.profiles_order.push_back(hex);
                 }
             }
             // FIFO by first sight: the map must not grow with the
             // relay's author count (the audit's memory lens).
-            while self.profiles_order.len() > PROFILE_CAP {
-                if let Some(old) = self.profiles_order.pop_front() {
-                    self.profiles.remove(&old);
-                }
-            }
+            content::fifo_trim(&mut self.profiles, &mut self.profiles_order, PROFILE_CAP);
             self.snap_dirty = true;
             cx.notify();
         }
@@ -277,6 +289,15 @@ impl quotes::Host for WireView {
     }
     fn profiles(&self) -> &HashMap<String, Profile> {
         &self.profiles
+    }
+    /// Re-ledger an embed that landed after its reservation was evicted
+    /// (the audit's memory lens): back onto the order queue, so the next
+    /// trim can evict it again — otherwise it sat outside the cap for
+    /// the view's lifetime, one owned Event per occurrence.
+    fn quote_landed(&mut self, bech: &str) {
+        if !self.quotes_order.iter().any(|b| b == bech) {
+            self.quotes_order.push_back(bech.to_string());
+        }
     }
 }
 
