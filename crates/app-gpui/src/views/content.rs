@@ -441,6 +441,28 @@ pub fn media_urls_cached(ev: &Event) -> std::sync::Arc<[String]> {
     urls
 }
 
+/// The og: preview images ALREADY LANDED for this event's link. The og
+/// fetch hands the image URL to the media cache once, at landing — a URL
+/// no sweep knew about, so once RAM eviction dropped the bytes NOTHING
+/// ever asked again: the card's thumbnail went dark mid-session (the
+/// disappearing-image class the owner keeps hitting; the og card paints
+/// `preview.image` directly). Every view's visible sweep appends this,
+/// which both re-fetches an evicted image (disk cache hit, near instant)
+/// and — via the same list — pins it while the row is on screen. Not
+/// memoized on purpose: the verdict arrives asynchronously; the parse
+/// memo's frozen answer would strand late landings.
+pub(crate) fn og_image_urls(ev: &Event) -> Vec<String> {
+    let mut out = Vec::new();
+    for link in body_parse_cached(ev).og_link.iter() {
+        if let Some(preview) = crate::og::get(link)
+            && let Some(img) = &preview.image
+        {
+            out.push(img.clone());
+        }
+    }
+    out
+}
+
 /// The thumbnail for a YouTube link (watch?v=, youtu.be/, shorts/) —
 /// video.rs reuses the shape as the "is a YouTube page" test: GStreamer
 /// can't stream watch pages, so they stay browser links.

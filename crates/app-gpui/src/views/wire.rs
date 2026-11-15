@@ -446,6 +446,7 @@ impl Render for WireView {
         let empty = snap.rows.is_empty();
         let host = self.relay.clone();
         let reduced_motion = actions::reduced_motion(cx);
+        let core = self.core.clone();
 
         div()
             .flex_1()
@@ -478,6 +479,32 @@ impl Render for WireView {
                         list(self.list.clone(), move |idx, _w, cx| {
                             match snap.rows.get(idx) {
                                 Some(ev) => {
+                                    // Evicted media comes back on render —
+                                    // on_notes only fetches at ARRIVAL, so a
+                                    // wire row's avatar (and any picture tile)
+                                    // whose bytes the cache dropped under
+                                    // pressure used to go dark forever (the
+                                    // disappearing-image class; feed.rs's
+                                    // item closure is the same backstop). No
+                                    // og: keys — the wire never fetches
+                                    // previews (on_notes's doc). fetch is a
+                                    // silent no-op for entries the cache
+                                    // holds; only a landing notifies.
+                                    if let Some(p) = snap.profiles.get(&ev.pubkey.to_string())
+                                        && !p.picture.is_empty()
+                                    {
+                                        media::fetch(
+                                            &core,
+                                            p.picture.clone(),
+                                            handle.entity_id(),
+                                            cx,
+                                        );
+                                    }
+                                    for u in content::media_urls_cached(ev).iter().cloned() {
+                                        if !u.is_empty() && !u.starts_with("og:") {
+                                            media::fetch(&core, u, handle.entity_id(), cx);
+                                        }
+                                    }
                                     let secs = ev.created_at.as_secs();
                                     let time = crate::timefmt::stamp(secs, cx);
                                     crate::timefmt::ensure(secs, cx);

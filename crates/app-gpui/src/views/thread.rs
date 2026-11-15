@@ -646,9 +646,25 @@ impl Render for ThreadView {
                     painted.push(url);
                 }
             }
+            // The og card's thumbnail paints preview.image — a URL the
+            // parse never knew. Re-request (and pin) it like any picture.
+            for url in content::og_image_urls(a) {
+                let fresh = !painted.contains(&url);
+                media::fetch(&self.core, url.clone(), viewer, cx);
+                if fresh {
+                    painted.push(url);
+                }
+            }
         }
         for (ev, _) in &self.replies {
             for url in content::media_urls_cached(ev).iter().cloned() {
+                let fresh = !painted.contains(&url);
+                media::fetch(&self.core, url.clone(), viewer, cx);
+                if fresh {
+                    painted.push(url);
+                }
+            }
+            for url in content::og_image_urls(ev) {
                 let fresh = !painted.contains(&url);
                 media::fetch(&self.core, url.clone(), viewer, cx);
                 if fresh {

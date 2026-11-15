@@ -1557,6 +1557,9 @@ fn card_media_urls(ev: &Event, profiles: &HashMap<String, Profile>) -> Vec<Strin
             urls.push(p.picture.clone());
         }
         urls.extend(content::media_urls_cached(note).iter().cloned());
+        // The landed og:image rides the sweep: the card paints it, so an
+        // eviction must come back (and pin) like every other picture.
+        urls.extend(content::og_image_urls(note));
     }
     let mut urls: Vec<String> = Vec::new();
     if u16::from(ev.kind) == 6 {
@@ -1841,7 +1844,49 @@ fn trim_target(len: usize, visible_end: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::trim_target;
+    use super::*;
+    use crate::og;
+    use satori_core::media::LinkPreview;
+
+    fn ev_with(content: &str) -> Event {
+        use nostr::prelude::*;
+        let keys = Keys::generate();
+        let unsigned = UnsignedEvent::new(
+            keys.public_key(),
+            Timestamp::from_secs(1),
+            Kind::TextNote,
+            [],
+            content.to_string(),
+        );
+        keys.sign_event(unsigned).unwrap()
+    }
+
+    /// The disappearing-image regression (owner, Nov 2026): the og card
+    /// paints `preview.image`, a URL NO view's re-request sweep knew — so
+    /// once the RAM cache evicted the bytes, nothing ever asked again and
+    /// the card's thumbnail went dark for the session. The invariant: a
+    /// landed preview's image rides the same sweep every other painted
+    /// picture rides (card_media_urls feeds both the feed's item-closure
+    /// re-request and pin_window's pin set).
+    #[test]
+    fn landed_og_image_rides_the_sweep_set() {
+        let ev = ev_with("read this\n\nhttps://ex.example/page");
+        let image = "https://img.example/thumb.png";
+        og::seed_test_preview(
+            "https://ex.example/page",
+            LinkPreview {
+                site: "ex.example".into(),
+                title: "A page".into(),
+                description: None,
+                image: Some(image.to_string()),
+            },
+        );
+        let urls = card_media_urls(&ev, &HashMap::new());
+        assert!(
+            urls.iter().any(|u| u == image),
+            "the landed og:image must ride the visible sweep: {urls:?}"
+        );
+    }
 
     #[test]
     fn window_stays_while_under_the_ceiling() {

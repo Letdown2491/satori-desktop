@@ -47,6 +47,13 @@ extension-less web pages (a wiki slug, an App Store link used to render as
 a broken picture tile that suppressed its own card), and flaky preview
 fetches give up after five tries instead of retrying forever.
 
+The disappearing-image class is closed for its remaining roots. Preview
+thumbnails now come back when memory pressure drops them (they used to go
+dark for the whole session once evicted), the notifications pane re-asks
+for evicted images as its rows render (it only fetched at arrival before,
+so anything evicted never recovered), and the relay wire pane does the
+same for its rows.
+
 The multicolumn workspace's add-column button moved from the end of the
 column row (where adding a column meant scrolling the row first) into the
 sidebar, above Settings. It shows while the workspace is up and the menu

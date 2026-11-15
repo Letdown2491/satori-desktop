@@ -35,6 +35,21 @@ const BACKOFF_MAX: Duration = Duration::from_secs(300);
 /// (a 256 KiB ranged GET per URL per 5 min, per flaky link).
 const RETRY_CAP: u8 = 5;
 
+/// TEST SEAM ONLY: plant a Ready verdict in the store. The regression
+/// tests need a landed preview without a Core/gpui App around — the
+/// store's own discipline (land-over-Loading-only) is exercised by the
+/// real pipeline, this only opens the lock.
+#[cfg(test)]
+pub(crate) fn seed_test_preview(page_url: &str, preview: LinkPreview) {
+    let mut store = store().lock().unwrap();
+    store
+        .map
+        .insert(page_url.to_string(), State::Ready(Arc::new(preview)));
+    store.order.push_back(page_url.to_string());
+    let store = &mut *store;
+    crate::views::content::fifo_trim(&mut store.map, &mut store.order, FIFO_CAP);
+}
+
 enum State {
     Loading(Vec<EntityId>),
     Ready(Arc<LinkPreview>),
