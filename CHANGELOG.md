@@ -102,7 +102,16 @@ deep-copying it per frame, relay URLs pass the same screening
 everywhere they are typed, restored or dialed, and five hand-copied
 code shapes collapsed into shared kernels, and the render-riders cycle
 collapsed the fourteen publish call sites and the two schedule paths
-onto shared task kernels.
+onto shared task kernels. The riders and the refactor got the same
+five-lens audit, and its findings landed: a voice row's tap on a
+non-https attacker URL no longer hands the link to a desktop handler;
+the comment-count fetches batch instead of firing one subscription per
+picture (unbounded on the bookmarks pane); a double-tap on a voice row
+can no longer spawn two players mid-build; the relay column's quote
+embeds and in-flight author ledger are capped so nothing rides outside
+its bounds for the session's life; and the guard sequence both players
+share, the FIFO trim, and the signed-event test fixture are one kernel
+each instead of hand-copies.
 
 ## 0.7.1 - 2026-11-13
 
