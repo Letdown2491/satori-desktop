@@ -10,6 +10,7 @@ mod icons;
 mod input;
 mod markdown;
 mod media;
+mod media_guard;
 mod poster;
 mod prefs;
 mod theme;

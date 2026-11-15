@@ -373,11 +373,8 @@ pub fn media_urls_cached(ev: &Event) -> std::sync::Arc<[String]> {
         return hit.clone();
     }
     let urls: std::sync::Arc<[String]> = media_urls(ev).into();
-    if memo.map.len() >= CAP
-        && let Some(oldest) = memo.order.pop_front()
-    {
-        memo.map.remove(&oldest);
-    }
+    let memo = &mut *memo;
+    fifo_trim(&mut memo.map, &mut memo.order, CAP);
     memo.order.push_back(key.clone());
     memo.map.insert(key, urls.clone());
     urls
@@ -452,6 +449,23 @@ fn display_url(url: &str) -> String {
 /// through uris.rs or the login flow, never through this.
 pub(crate) fn web_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// The FIFO-cap kernel (the audit's duplication lens: the bound-trim
+/// idiom had eight hand-copies across five files — seen.rs's convention,
+/// UI-side). Maps and order queues grow in lockstep (insert both, evict
+/// both), so one loop serves the pre-insert evict (`len >= cap` evicts
+/// exactly once) and the batched trim alike.
+pub(crate) fn fifo_trim<V>(
+    map: &mut std::collections::HashMap<String, V>,
+    order: &mut std::collections::VecDeque<String>,
+    cap: usize,
+) {
+    while order.len() > cap
+        && let Some(oldest) = order.pop_front()
+    {
+        map.remove(&oldest);
+    }
 }
 
 // --- word-flow tokens ------------------------------------------------------
@@ -812,11 +826,8 @@ fn body_parse_cached(ev: &Event) -> std::sync::Arc<BodyParse> {
         article: parsed_article,
         emoji: std::sync::Arc::new(emoji_map(ev)),
     });
-    if memo.map.len() >= CAP
-        && let Some(oldest) = memo.order.pop_front()
-    {
-        memo.map.remove(&oldest);
-    }
+    let memo = &mut *memo;
+    fifo_trim(&mut memo.map, &mut memo.order, CAP);
     memo.order.push_back(key.clone());
     memo.map.insert(key, parsed.clone());
     parsed
@@ -971,11 +982,8 @@ pub(crate) fn repost_inner_cached(ev: &Event) -> Option<std::sync::Arc<Event>> {
         return inner.clone();
     }
     let inner = repost_inner(ev).map(std::sync::Arc::new);
-    if memo.map.len() >= CAP
-        && let Some(oldest) = memo.order.pop_front()
-    {
-        memo.map.remove(&oldest);
-    }
+    let memo = &mut *memo;
+    fifo_trim(&mut memo.map, &mut memo.order, CAP);
     memo.order.push_back(key.clone());
     memo.map.insert(key, inner.clone());
     inner

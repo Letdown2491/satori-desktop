@@ -3692,16 +3692,33 @@ impl Core {
     ) -> FeedRx {
         self.feed_task(move |active| {
             Box::pin(async move {
-                // Two filter shapes per page: one batched #e filter for the
-                // event-target rows, one exact-#a filter per addressable row
-                // (CommentTarget::fetch_filters' grammar — a parameterized
-                // picture's comment thread hangs off the ADDRESS).
+                // Two filter shapes per page, BOTH batched (one REQ each):
+                // a #e OR-list for the event-target rows and #a OR-lists
+                // for the addressable rows (a parameterized picture's
+                // comment thread hangs off the ADDRESS). The addresses
+                // chunk at 8 per filter — the fan-out is bounded by page
+                // size, not by row count (audit usage/security: the old
+                // per-row REQ fired one subscription per picture row, and
+                // Bookmarks mode had no page bound at all). custom_tags
+                // serializes a NIP-01 OR list — the same form the quotes
+                // fetch rides (.custom_tags(LOWERCASE_Q, ...)).
+                let mut ids: Vec<EventId> = Vec::new();
+                let mut addrs: Vec<String> = Vec::new();
+                let mut addr_rows: std::collections::HashMap<String, EventId> =
+                    std::collections::HashMap::new();
+                for (row, t) in &targets {
+                    match t {
+                        crate::nip::comment::CommentTarget::Event { .. } => ids.push(*row),
+                        _ => {
+                            let a = t
+                                .address_string()
+                                .expect("only the Address arm falls out of for_event's else");
+                            addrs.push(a.clone());
+                            addr_rows.insert(a, *row);
+                        }
+                    }
+                }
                 let mut filters = Vec::new();
-                let ids: Vec<EventId> = targets
-                    .iter()
-                    .filter(|(_, t)| matches!(t, crate::nip::comment::CommentTarget::Event { .. }))
-                    .map(|(id, _)| *id)
-                    .collect();
                 if !ids.is_empty() {
                     filters.push(
                         Filter::new()
@@ -3710,23 +3727,18 @@ impl Core {
                             .limit(1000),
                     );
                 }
-                let mut addr_rows: std::collections::HashMap<String, EventId> =
-                    std::collections::HashMap::new();
-                for (row, t) in &targets {
-                    if let crate::nip::comment::CommentTarget::Address { kind, author, d } = t {
-                        let a = format!("{kind}:{author}:{d}");
-                        filters.push(
-                            Filter::new()
-                                .kind(Kind::Custom(1111))
-                                .custom_tag(SingleLetterTag::LOWERCASE_A, a.clone())
-                                .limit(500),
-                        );
-                        addr_rows.insert(a, *row);
-                    }
+                const ADDR_CHUNK: usize = 8;
+                for chunk in addrs.chunks(ADDR_CHUNK) {
+                    filters.push(
+                        Filter::new()
+                            .kind(Kind::Custom(1111))
+                            .custom_tags(SingleLetterTag::LOWERCASE_A, chunk.iter().cloned())
+                            .limit(1000),
+                    );
                 }
-                // Per-shape fetches run concurrently (nostr 0.45 has no
-                // OR-composition for filters; 1 + one per addressable row,
-                // each READ_BUDGET-bounded in parallel).
+                // The shapes fetch concurrently (each READ_BUDGET-bounded);
+                // the tally dedups by id — a both-shapes comment comes back
+                // from two filters.
                 let gets: Vec<_> = filters.into_iter().map(|f| active.pool.get(f)).collect();
                 let rows: Vec<Event> = futures_util::future::join_all(gets)
                     .await
@@ -4056,12 +4068,10 @@ impl Core {
     /// else — and the same undo window as every publish (hold_and_commit;
     /// the shell's toast carries the countdown and the Undo).
     pub fn repost(self: &Arc<Self>, target: &Event) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
+        let core = Arc::clone(self);
         let target = target.clone();
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
                 let note = u16::from(target.kind) == 1;
                 let mut tags = vec![
                     seen::hint_tag(target.id, &target.pubkey),
@@ -4078,15 +4088,18 @@ impl Core {
                     format!("nostr:{}", target.id.to_bech32().unwrap_or_default()),
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
+                // Same undo window as every publish (hold_and_commit — the
+                // comment/poll_vote shape; the audit's duplication lens:
+                // this was the 15th site the #81 collapse missed).
                 match active.undo.hold_duration() {
                     Some(hold) => {
-                        let token = this.hold_seq.fetch_add(1, Ordering::SeqCst);
+                        let token = core.hold_seq.fetch_add(1, Ordering::SeqCst);
                         let _ = tx.send(PublishEvent::Held {
                             token,
                             event: signed.clone(),
                             hold_secs: hold.as_secs(),
                         });
-                        this.hold_and_commit(
+                        core.hold_and_commit(
                             Arc::new(active.clone()),
                             token,
                             signed,
@@ -4095,22 +4108,11 @@ impl Core {
                         )
                         .await;
                     }
-                    None => {
-                        Self::commit(&active, &signed, &tx).await?;
-                        let _ = tx.send(PublishEvent::Committed { token: 0 });
-                    }
+                    None => Self::commit(active, &signed, tx).await?,
                 }
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// Resolve a note/nevent bech32 to its event (embed/quote previews).
@@ -4771,20 +4773,12 @@ impl Core {
         quote: Option<Event>,
         imetas: Vec<Vec<String>>,
     ) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res = this
-                .post_note_inner(&tx, content, reply_to, mentions, quote, imetas)
-                .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            }
-        });
-        rx
+        self.stream_task(move |this, tx| {
+            Box::pin(async move {
+                this.post_note_inner(tx, content, reply_to, mentions, quote, imetas)
+                    .await
+            })
+        })
     }
 
     /// Tag + content building for a note — shared by the immediate path
@@ -5217,20 +5211,12 @@ impl Core {
         imeta: Vec<Vec<String>>,
         content_warning: Option<String>,
     ) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res = this
-                .post_picture_inner(&tx, title, content, imeta, content_warning)
-                .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            }
-        });
-        rx
+        self.stream_task(move |this, tx| {
+            Box::pin(async move {
+                this.post_picture_inner(tx, title, content, imeta, content_warning)
+                    .await
+            })
+        })
     }
 
     /// Post a NIP-71 video (kind 22, the general video; kind 21 is the
@@ -5246,20 +5232,12 @@ impl Core {
         imeta: Vec<Vec<String>>,
         content_warning: Option<String>,
     ) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res = this
-                .post_video_inner(&tx, title, content, imeta, content_warning)
-                .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            }
-        });
-        rx
+        self.stream_task(move |this, tx| {
+            Box::pin(async move {
+                this.post_video_inner(tx, title, content, imeta, content_warning)
+                    .await
+            })
+        })
     }
 
     /// The NIP-71 kind-22 tag build, shared by the instant path and the
@@ -6551,7 +6529,10 @@ impl Core {
                 let n = tokio::select! {
                     _ = idle.tick() => {
                         if tx.receiver_count() == 0 {
-                            eprintln!("[core] wire: {} unwatched; unsubscribing", url);
+                            eprintln!(
+                                "[core] wire: {} unwatched; unsubscribing",
+                                crate::pool::clean_reason(&url)
+                            );
                             break;
                         }
                         continue;
@@ -7015,6 +6996,35 @@ impl Core {
                 });
             } else {
                 let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
+    }
+
+    /// The streaming sibling of publish_task (the audit's duplication
+    /// lens): the same spawn + handshake scaffold, but `work` owns its
+    /// tail — progress-bearing publishes (the composer's post_note/
+    /// post_picture/post_video inner fns stream per-relay events) send
+    /// their own Committed, so stream_task only routes the Failed arm.
+    fn stream_task<F>(self: &Arc<Self>, work: F) -> PublishRx
+    where
+        F: for<'a> FnOnce(
+                &'a Arc<Core>,
+                &'a mpsc::UnboundedSender<PublishEvent>,
+            )
+                -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
+            + Send
+            + 'static,
+    {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res = work(&this, &tx).await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
             }
         });
         rx
@@ -8347,20 +8357,7 @@ mod tests {
     #[test]
     fn comment_count_fixtures_tally_by_target_shape() {
         use crate::nip::comment::CommentTarget;
-
-        fn keys() -> Keys {
-            Keys::generate()
-        }
-        fn sign(me: &Keys, kind: Kind, tags: Vec<Tag>, content: &str) -> Event {
-            me.sign_event(UnsignedEvent::new(
-                me.public_key(),
-                Timestamp::now(),
-                kind,
-                Tags::from_list(tags),
-                content.to_string(),
-            ))
-            .unwrap()
-        }
+        use crate::test_support::{keys, sign};
 
         let author = keys();
         let commenter = keys();

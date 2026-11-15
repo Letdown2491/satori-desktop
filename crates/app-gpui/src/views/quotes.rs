@@ -26,6 +26,13 @@ pub trait Host: Sized + 'static {
     /// (its render snapshot must rebuild); a no-op where render reads
     /// the mirror directly.
     fn touched(&mut self) {}
+    /// The embed re-ledgers on LANDING (the audit's memory lens): a host
+    /// that FIFO-trims its quotes map by an order queue must re-track a
+    /// key that landed after its reservation was evicted, or the embed
+    /// sits outside the cap for the view's lifetime (one owned Event per
+    /// occurrence, on the relay firehose where the window is easy).
+    /// Default no-op — hosts without an order queue need nothing.
+    fn quote_landed(&mut self, _bech: &str) {}
 }
 
 /// Queue event fetches for standalone note/nevent references (embeds).
@@ -64,6 +71,7 @@ fn pump_quote<H: Host>(bech: String, mut rx: FeedRx, cx: &mut Context<H>) {
                             name,
                         }),
                     );
+                    host.quote_landed(&bech);
                     host.touched();
                     cx.notify();
                 });

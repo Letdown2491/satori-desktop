@@ -951,8 +951,11 @@ fn voice_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
 /// The NIP-C0 tags: `l` (language, lowercase), `name` (usually a
 /// filename), `extension`, `description`, `runtime`, `license`. One value
 /// each; a repeated tag means the author violated the NIP — first wins.
+/// ONE pass over the tags, by reference (the audit's perf lens: the
+/// six-key loop used to deep-clone the attacker-controlled tag list six
+/// times per visible card per frame); wanted order rules the output.
 fn code_tags(ev: &Event) -> Vec<(String, String)> {
-    let wanted = [
+    const WANTED: [&str; 6] = [
         "l",
         "name",
         "extension",
@@ -960,20 +963,23 @@ fn code_tags(ev: &Event) -> Vec<(String, String)> {
         "runtime",
         "license",
     ];
-    let mut out: Vec<(String, String)> = Vec::new();
-    for key in wanted {
-        for t in ev.tags.clone().to_vec() {
-            let parts = t.as_slice();
-            if parts.first().map(String::as_str) == Some(key)
-                && let Some(v) = parts.get(1)
-                && !v.is_empty()
-            {
-                out.push((key.to_string(), v.clone()));
-                break;
-            }
+    let mut found: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for t in ev.tags.iter() {
+        let parts = t.as_slice();
+        let (Some(key), Some(v)) = (parts.first(), parts.get(1)) else {
+            continue;
+        };
+        if v.is_empty() {
+            continue;
+        }
+        if let Some(w) = WANTED.iter().find(|w| **w == key) {
+            found.entry(w).or_insert(v);
         }
     }
-    out
+    WANTED
+        .iter()
+        .filter_map(|k| found.get(k).map(|v| ((*k).to_string(), v.to_string())))
+        .collect()
 }
 
 fn code_card(ev: &Event) -> Div {
@@ -1005,14 +1011,20 @@ fn code_card(ev: &Event) -> Div {
     }
     // The snippet itself: mono on the panel wash, R_EMBED (the token's
     // budget names code chips). The render is CAPPED — the content is
-    // attacker-controlled and the block must not eat a page.
+    // attacker-controlled and the block must not eat a page. The content
+    // rides ONE Arc<str> shared by the child and the copy closure (the
+    // audit's perf/memory lenses: two full-content deep clones per
+    // visible card per frame; the clip borrows, the closure bumps).
     const CODE_RENDER_CAP: usize = 2000;
-    let mut code = ev.content.clone();
-    if code.len() > CODE_RENDER_CAP {
-        code = code.chars().take(CODE_RENDER_CAP).collect();
+    let content: std::sync::Arc<str> = ev.content.as_str().into();
+    let clipped = if content.chars().count() > CODE_RENDER_CAP {
+        let mut code: String = content.chars().take(CODE_RENDER_CAP).collect();
         code.push_str("\n…");
-    }
-    let copy_text = ev.content.clone();
+        code
+    } else {
+        content.to_string()
+    };
+    let copy_text = content;
     let mut block = div()
         .id(SharedString::from(format!("copy-code-{}", ev.id)))
         .overflow_x_scroll()
@@ -1026,13 +1038,13 @@ fn code_card(ev: &Event) -> Div {
         .text_size(px(theme::T_UI))
         .line_height(relative(1.35))
         .text_color(rgb(theme::ink()))
-        .child(code);
+        .child(clipped);
     if !ev.content.is_empty() {
         // Click-to-copy — the snippet is the payload, the tap takes it
         // whole (sealed against the row's open-thread click).
         block = block.cursor_pointer().on_click(move |_, _, cx| {
             cx.stop_propagation();
-            cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));
         });
     }
     card = card.child(block);

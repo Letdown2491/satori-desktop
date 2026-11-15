@@ -8,6 +8,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use std::collections::HashSet;
 
+use super::content::fifo_trim;
+
 use gpui::{
     Context, Entity, EventEmitter, FontWeight, ListAlignment, ListOffset, ListScrollEvent,
     ListState, Render, SharedString, Window, div, img, list, prelude::*, px, rgb,
@@ -168,11 +170,8 @@ fn action_parts(t: NotifType, ev: &Event) -> (&'static str, Option<String>) {
             }
         }
     };
-    if memo.map.len() >= CAP
-        && let Some(oldest) = memo.order.pop_front()
-    {
-        memo.map.remove(&oldest);
-    }
+    let memo = &mut *memo;
+    fifo_trim(&mut memo.map, &mut memo.order, CAP);
     memo.order.push_back(key.clone());
     memo.map.insert(key, parts.clone());
     parts

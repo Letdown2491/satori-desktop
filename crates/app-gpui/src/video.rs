@@ -21,6 +21,7 @@ use std::sync::RwLock;
 use gpui::px;
 use gpui_video_player::Video;
 
+use crate::media_guard::Gate;
 use crate::views::content;
 
 /// The at-most-one player: the URL it plays + the pipeline handle + the
@@ -36,10 +37,12 @@ struct Player {
 
 static ACTIVE: RwLock<Option<Player>> = RwLock::new(None);
 
-/// A player that has been asked for but hasn't finished building (Video::new
-/// blocks up to ~5s on the pipeline's caps) — the tile renders a breathing
-/// play mark instead of sitting dead-silent between tap and first frame.
-static OPENING: RwLock<Option<String>> = RwLock::new(None);
+/// Is a player for `url` still being built? (The tile's breathing state.)
+/// The slot itself lives in the shared door (media_guard::OPENING — the
+/// audit's duplication lens); this is the video-side read.
+pub fn opening(url: &str) -> bool {
+    crate::media_guard::opening(url)
+}
 
 /// The wake-up global (theme.rs ThemeSignal pattern): set when the player
 /// opens/toggles/closes — every video-bearing view observes it and
@@ -60,15 +63,6 @@ pub fn active(url: &str) -> Option<Video> {
     let guard = ACTIVE.read().ok()?;
     let p = guard.as_ref()?;
     (p.url == url).then(|| p.video.clone())
-}
-
-/// Is a player for `url` still being built? (The tile's breathing state.)
-pub fn opening(url: &str) -> bool {
-    OPENING
-        .read()
-        .ok()
-        .map(|g| g.as_deref() == Some(url))
-        .unwrap_or(false)
 }
 
 /// Can this video play inline (Phase 3 §5)? Video by extension or imeta
@@ -94,137 +88,75 @@ pub fn inline_able(url: &str, mime: Option<&str>) -> bool {
 }
 
 /// Tap on a video tile: open the inline player when the URL is inline-able,
-/// else the browser (the honest link the tile showed before Phase 3).
+/// else the browser (the honest link the tile showed before Phase 3). The
+/// guards are the shared media door (media_guard.rs) — audio is this
+/// function's sibling, not its copy.
 pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
-    // The browser allow-list (audit security M2): feed-derived URLs only
-    // ever open as http(s).
     let openable = crate::views::content::web_url(&url);
-    if !openable || !inline_able(&url, mime.as_deref()) {
-        if openable {
-            cx.open_url(&url);
-        }
-        return;
-    }
-    let Ok(parsed) = url::Url::parse(&url) else {
-        // Not a real URL at all — the browser can sort it out or not.
-        cx.open_url(&url);
-        return;
-    };
-    // Already open or opening — a second tap on the same tile is a no-op,
+    // Already open or building — a second tap on the same tile is a no-op,
     // not a second pipeline.
-    if active(&url).is_some() || opening(&url) {
+    let already = active(&url).is_some() || crate::media_guard::opening(&url);
+    let Gate::Door(door) = crate::media_guard::gate(
+        &url,
+        openable && inline_able(&url, mime.as_deref()),
+        already,
+        "[video]",
+        cx,
+    ) else {
         return;
-    }
-    // The tile breathes while the pipeline builds (Signal wakes the views).
-    if let Ok(mut g) = OPENING.write() {
-        *g = Some(url.clone());
-    }
-    cx.set_global(Signal);
-    // M5 WP3: the guarded door. Playbin never sees the origin URL — its
-    // souphttpsrc resolves and redirects outside every guard we have.
-    // No door, no dial: degrade to the browser link, fail closed.
-    let proxy = match satori_core::video_proxy::spawn(url.clone()) {
-        Ok(proxy) => proxy,
-        Err(e) => {
-            eprintln!("[video] proxy spawn failed ({e}); degrading to browser");
-            if let Ok(mut g) = OPENING.write() {
-                *g = None;
-            }
-            cx.open_url(&url);
-            cx.set_global(Signal);
-            return;
-        }
     };
-    let proxied = match url::Url::parse(&proxy.uri()) {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("[video] proxy uri unparseable ({e}); degrading to browser");
-            if let Ok(mut g) = OPENING.write() {
-                *g = None;
-            }
-            cx.open_url(&url);
-            cx.set_global(Signal);
-            return;
-        }
-    };
-    // Video::new blocks up to ~5s (playbin state + caps) — the background
-    // executor, never the UI thread.
+    let crate::media_guard::Door {
+        parsed,
+        proxy,
+        proxied,
+    } = *door;
     cx.spawn(async move |cx| {
-        // Dial-time screen (audit security, D59 cycle) — now the UX layer
-        // of a two-layer guard. WP3's proxy enforces the invariant at the
-        // socket (every origin fetch rides media::client's pinned
-        // resolution); this pre-check decides the HANDOFF before any
-        // player is built: an origin name that rebinds private degrades to
-        // the browser link instead of a dead inline player. A DNS miss is
-        // weather — the proxy's fetch reports it honestly; only the guard
-        // speaking (NonPublic) refuses.
-        let host = parsed.host_str().map(str::to_string);
-        let allowed = match host.as_deref() {
-            Some(h) => match satori_core::net_guard::resolve_pinned_public(h, 443).await {
-                Ok(_) => true,
-                Err(satori_core::net_guard::NetGuardError::Resolve(_)) => true,
-                Err(satori_core::net_guard::NetGuardError::NonPublic(_)) => false,
-            },
-            None => false,
-        };
-        if !allowed {
-            eprintln!("[video] dial-time screen refused {host:?}; degrading to browser");
+        if !crate::media_guard::screened(parsed.host_str().map(str::to_string), "[video]").await {
             cx.update(|cx| {
-                if let Ok(mut g) = OPENING.write()
-                    && g.as_deref() == Some(&url)
-                {
-                    *g = None;
-                }
+                crate::media_guard::clear(&url);
                 cx.open_url(&url);
+                cx.set_global(Signal);
             });
             return;
         }
+        // Video::new blocks up to ~5s (playbin state + caps) — the
+        // background executor, never the UI thread.
         let res = cx
             .background_executor()
             .spawn(async move { Video::new(&proxied) })
             .await;
-        cx.update(|cx| {
-            // Whatever the outcome, the wait is over.
-            if let Ok(mut g) = OPENING.write()
-                && g.as_deref() == Some(&url)
-            {
-                *g = None;
+        cx.update(|cx| match res {
+            Ok(video) => {
+                // One player per process: a replaced player's Drop joins
+                // its worker — defer that off the UI thread.
+                crate::media_guard::land(
+                    &ACTIVE,
+                    &url,
+                    Player {
+                        url: url.clone(),
+                        video,
+                        _proxy: Some(proxy),
+                    },
+                );
             }
-            match res {
-                Ok(video) => {
-                    // One player per process: a replaced player's Drop joins
-                    // its worker — defer that off the UI thread.
-                    let old = {
-                        let mut guard = match ACTIVE.write() {
-                            Ok(g) => g,
-                            Err(_) => return,
-                        };
-                        guard.replace(Player {
-                            url: url.clone(),
-                            video,
-                            _proxy: Some(proxy),
-                        })
-                    };
-                    if let Some(old) = old {
-                        std::thread::spawn(move || drop(old));
-                    }
-                }
-                // The pipeline failed (missing plugins, dead URL): the honest
-                // fallback is the browser — the pre-Phase-3 behavior. The
-                // url is event-borne: sanitized before the log (a \n could
-                // forge lines, an ESC inject terminal escapes).
-                Err(e) => {
-                    eprintln!(
-                        "[video] pipeline failed for {}: {e:?}; degrading to browser",
-                        satori_core::pool::clean_reason(&url)
-                    );
-                    if crate::views::content::web_url(&url) {
-                        cx.open_url(&url);
-                    }
+            // The pipeline failed (missing plugins, dead URL): the honest
+            // fallback is the browser — the pre-Phase-3 behavior. The
+            // url is event-borne: sanitized before the log (a \n could
+            // forge lines, an ESC inject terminal escapes).
+            Err(e) => {
+                eprintln!(
+                    "[video] pipeline failed for {}: {e:?}; degrading to browser",
+                    satori_core::pool::clean_reason(&url)
+                );
+                crate::media_guard::clear(&url);
+                if crate::views::content::web_url(&url) {
+                    cx.open_url(&url);
                 }
             }
-            cx.set_global(Signal);
         });
+        // Whatever the outcome, the wait is over — the breathing mark
+        // retires.
+        cx.update(|cx| cx.set_global(Signal));
     })
     .detach();
 }

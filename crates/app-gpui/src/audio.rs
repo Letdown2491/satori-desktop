@@ -17,6 +17,7 @@ use std::sync::RwLock;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 
+use crate::media_guard::Gate;
 use crate::views::content;
 
 struct Audio {
@@ -56,60 +57,43 @@ pub fn playing(url: &str) -> bool {
 
 /// Tap on a voice row: open the inline player (strict Tor and non-https
 /// degrade to the browser — the facade rule; the mime/ext gate already
-/// happened at classification), else the browser.
+/// happened at classification), else the browser. The guards are the
+/// shared media door (media_guard.rs): the allow-list, the build-window
+/// registry, the M5 proxy and the dial-time screen — audio differs from
+/// video only in the pipeline it builds.
 pub fn open(url: String, cx: &mut gpui::App) {
-    if !content::web_url(&url) || !url.starts_with("https://") {
-        cx.open_url(&url);
-        return;
-    }
-    if crate::prefs::privacy_mode() == satori_core::privacy::PrivacyMode::Strict {
-        cx.open_url(&url);
-        return;
-    }
     // Already live — a second tap on the same row toggles, not rebuilds
-    // (the row drives its play glyph off `active`).
+    // (the row drives its play glyph off `active`); while the pipeline
+    // BUILDS the shared opening registry no-ops the taps (audit
+    // usage/security: the unguarded window admitted two pipelines).
     if active(&url) {
         toggle(cx);
         return;
     }
-    // M5 WP3: the guarded door. Playbin never sees the origin URL — its
-    // souphttpsrc resolves and redirects outside every guard we have.
-    // No door, no dial: degrade to the browser link, fail closed.
-    let proxy = match satori_core::video_proxy::spawn(url.clone()) {
-        Ok(proxy) => proxy,
-        Err(e) => {
-            eprintln!("[audio] proxy spawn failed ({e}); degrading to browser");
-            cx.open_url(&url);
-            return;
-        }
+    let inline = content::web_url(&url)
+        && url.starts_with("https://")
+        && crate::prefs::privacy_mode() != satori_core::privacy::PrivacyMode::Strict;
+    let Gate::Door(door) = crate::media_guard::gate(
+        &url,
+        inline,
+        crate::media_guard::opening(&url),
+        "[audio]",
+        cx,
+    ) else {
+        return;
     };
-    let proxied = match url::Url::parse(&proxy.uri()) {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("[audio] proxy uri unparseable ({e}); degrading to browser");
-            cx.open_url(&url);
-            return;
-        }
-    };
+    let crate::media_guard::Door {
+        parsed,
+        proxy,
+        proxied,
+    } = *door;
     cx.spawn(async move |cx| {
-        // Dial-time screen (the video player's pre-check): an origin name
-        // that rebinds private degrades to the browser instead of a dead
-        // inline player. A DNS miss is weather — the proxy's fetch reports
-        // it honestly; only the guard speaking (NonPublic) refuses.
-        let allowed = match url::Url::parse(&url)
-            .ok()
-            .and_then(|u| u.host_str().map(str::to_string))
-        {
-            Some(h) => match satori_core::net_guard::resolve_pinned_public(&h, 443).await {
-                Ok(_) => true,
-                Err(satori_core::net_guard::NetGuardError::Resolve(_)) => true,
-                Err(satori_core::net_guard::NetGuardError::NonPublic(_)) => false,
-            },
-            None => false,
-        };
-        if !allowed {
-            eprintln!("[audio] dial-time screen refused; degrading to browser");
-            cx.update(|cx| cx.open_url(&url));
+        if !crate::media_guard::screened(parsed.host_str().map(str::to_string), "[audio]").await {
+            cx.update(|cx| {
+                crate::media_guard::clear(&url);
+                cx.open_url(&url);
+                cx.set_global(crate::video::Signal);
+            });
             return;
         }
         let res = cx
@@ -127,25 +111,22 @@ pub fn open(url: String, cx: &mut gpui::App) {
         cx.update(|cx| match res {
             Ok(pipeline) => {
                 let _ = pipeline.set_state(gst::State::Playing);
-                let old = {
-                    let mut guard = match ACTIVE.write() {
-                        Ok(g) => g,
-                        Err(_) => return,
-                    };
-                    guard.replace(Audio {
+                crate::media_guard::land(
+                    &ACTIVE,
+                    &url,
+                    Audio {
                         url: url.clone(),
                         pipeline,
                         _proxy: proxy,
-                    })
-                };
-                if let Some(old) = old {
-                    std::thread::spawn(move || drop(old));
-                }
+                    },
+                );
                 cx.set_global(crate::video::Signal);
             }
             Err(e) => {
                 eprintln!("[audio] pipeline failed: {e}; degrading to browser");
+                crate::media_guard::clear(&url);
                 cx.open_url(&url);
+                cx.set_global(crate::video::Signal);
             }
         });
     })
