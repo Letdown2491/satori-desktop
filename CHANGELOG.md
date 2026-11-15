@@ -6,6 +6,24 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
+## Unreleased
+
+Video tiles earned their picture. A note's video now previews its first
+frame instead of a bare box: the sniff pipeline finally reads the frame it
+prerolls, big files answer a ranged head request, and files whose decode
+tables live at the file's end (moov-at-end mp4s, every GIF-to-MP4
+conversion) ride the same guarded range-proxy inline playback uses to pull
+exactly the bytes the decoder asks for. GIF-encoded-as-mp4 clips play
+inline now too: the vendored video player accepts the zero-framerate caps
+those converters emit and no longer drops every frame that arrives without
+a duration. The head-sniff's download cap tightened from 2MB to 1MB (files
+that need more fall through to ranged fetching rather than over-fetching
+blind).
+
+Every note timestamp gained a copy button: one tap puts a `nostr:nevent1…`
+(or `naddr1…` for addressable kinds) URI on the clipboard, with a short
+flash to confirm the copy.
+
 ## 0.8.0 - 2026-11-14
 
 The interop pass continues on two fronts: what a note can ask for, and

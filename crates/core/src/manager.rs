@@ -1432,11 +1432,12 @@ impl Core {
         url: String,
         cap: usize,
         sniff: impl FnOnce(&[u8]) -> std::result::Result<(u32, u32, Vec<u8>), ()> + Send + 'static,
+        sniff_uri: impl FnOnce(&str) -> std::result::Result<(u32, u32, Vec<u8>), ()> + Send + 'static,
     ) -> mpsc::UnboundedReceiver<
         std::result::Result<crate::media::DecodedImage, crate::media::MediaError>,
     > {
         self.task_once(move || {
-            Box::pin(async move { crate::media::fetch_poster(url, cap, sniff).await })
+            Box::pin(async move { crate::media::fetch_poster(url, cap, sniff, sniff_uri).await })
         })
     }
 
@@ -7895,7 +7896,7 @@ mod tests {
         // that off the real $HOME (the guard isolates it, lock held).
         let _env = crate::test_env::EnvGuard::new("poster");
         let core = Arc::new(Core::new());
-        let mut rx = core.fetch_poster("not a url".into(), 16, |_| Err(()));
+        let mut rx = core.fetch_poster("not a url".into(), 16, |_| Err(()), |_| Err(()));
         let verdict = std::thread::spawn(move || rx.blocking_recv())
             .join()
             .unwrap();

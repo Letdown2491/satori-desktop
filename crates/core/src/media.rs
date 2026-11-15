@@ -182,10 +182,15 @@ pub(crate) fn client() -> &'static reqwest::Client {
 /// GET through the guarded client with the status→verdict mapping: 429/5xx
 /// and every transport-level failure are Transient; the other 4xx are
 /// verdicts (a 404 will not heal by Tuesday).
-async fn guarded_get(url: &str) -> Result<reqwest::Response, MediaError> {
-    let res = http()
-        .get(url)
-        .timeout(ATTEMPT_BUDGET)
+async fn guarded_get(url: &str, range: Option<usize>) -> Result<reqwest::Response, MediaError> {
+    let mut req = http().get(url).timeout(ATTEMPT_BUDGET);
+    if let Some(cap) = range {
+        // A ranged GET: a server that honors it replies 206 with a
+        // within-cap content-length, so read_capped's declared-length
+        // rejection never fires for a big file we only wanted the head of.
+        req = req.header(reqwest::header::RANGE, format!("bytes=0-{}", cap - 1));
+    }
+    let res = req
         .send()
         .await
         // Timeouts, connect failures, TLS hiccups: all weather, all transient.
@@ -220,8 +225,11 @@ pub(crate) async fn read_capped(
 }
 
 /// GET + byte cap + bounded transient retries. Permanent verdicts return at
-/// once — nothing below this layer ever re-sees a network error.
-async fn fetch_capped(url: &str, cap: usize) -> Result<Vec<u8>, MediaError> {
+/// once — nothing below this layer ever re-sees a network error. `range`
+/// turns the GET into `bytes=0-<cap-1>` (the poster head fetch: big files
+/// answer 206 with a within-cap length instead of tripping read_capped's
+/// declared-length rejection); image fetches stay full-body.
+async fn fetch_capped(url: &str, cap: usize, range: bool) -> Result<Vec<u8>, MediaError> {
     let mut wait = Duration::from_millis(600);
     for attempt in 0..RETRY_ATTEMPTS {
         // One gate slot per ATTEMPT, not per URL: the permit is released
@@ -229,7 +237,7 @@ async fn fetch_capped(url: &str, cap: usize) -> Result<Vec<u8>, MediaError> {
         // whole retry cycle and starve the queue behind it.
         let outcome = {
             let _permit = gate().acquire().await.map_err(|_| MediaError::Transient)?;
-            match guarded_get(url).await {
+            match guarded_get(url, range.then_some(cap)).await {
                 // The permit is held through the body read — the transfer
                 // is the thing being bounded.
                 Ok(res) => return read_capped(res, cap).await,
@@ -322,7 +330,7 @@ pub async fn fetch_image(url: &str) -> Result<DecodedImage, MediaError> {
     match read_cache_off_rt(path.clone()).await {
         Ok(cached) => decode_async(cached).await,
         Err(_) => {
-            let body = fetch_capped(url, MAX_IMAGE_BYTES).await?;
+            let body = fetch_capped(url, MAX_IMAGE_BYTES, false).await?;
             // Validate BEFORE the disk write. The write used to precede the
             // decode, so an HTML error page or truncated body keyed as an
             // image stayed there forever — a broken avatar that survived
@@ -349,20 +357,25 @@ pub fn purge_legacy_cache() {
     }
 }
 
-/// The whole poster job (D32): cache read-through, the capped guarded head
-/// fetch, the injected sniffer, the store. Runs ON a tokio runtime — every
-/// call below (reqwest, `spawn_blocking`) needs that context, so the UI
-/// awaits the verdict through `Core::fetch_poster`'s channel: `fetch_image`'s
-/// exact seam. (The first cut of this let the UI poll these futures on
-/// gpui's executor — no tokio context there, thread 'main panicked at
-/// `read_cache_off_rt`, the app died the day D32 shipped.) The sniffer is
-/// injected because gstreamer lives in the UI crate; it blocks (a bounded
-/// decode) and runs on the blocking pool, never on the 2-worker relay
-/// runtime itself.
+/// The whole poster job (D32, D72's fourth rung): cache read-through, the
+/// capped guarded head fetch + injected byte sniffer, and — when the head
+/// can't decode (the moov atom at the file's END makes the head useless to
+/// any demuxer, however big) — the injected URL sniffer: the same guarded
+/// door inline playback uses (video_proxy's range requests), letting
+/// GStreamer pull exactly the bytes it needs, tail included. Runs ON a
+/// tokio runtime — every call below (reqwest, `spawn_blocking`) needs that
+/// context, so the UI awaits the verdict through `Core::fetch_poster`'s
+/// channel: `fetch_image`'s exact seam. (The first cut of this let the UI
+/// poll these futures on gpui's executor — no tokio context there, thread
+/// 'main panicked at `read_cache_off_rt`, the app died the day D32
+/// shipped.) The sniffers are injected because gstreamer lives in the UI
+/// crate; both block (a bounded decode) and run on the blocking pool,
+/// never on the 2-worker relay runtime itself.
 pub async fn fetch_poster(
     url: String,
     cap: usize,
     sniff: impl FnOnce(&[u8]) -> std::result::Result<(u32, u32, Vec<u8>), ()> + Send + 'static,
+    sniff_uri: impl FnOnce(&str) -> std::result::Result<(u32, u32, Vec<u8>), ()> + Send + 'static,
 ) -> Result<DecodedImage, MediaError> {
     if !is_safe_media_url(&url) {
         return Err(MediaError::NotMedia);
@@ -373,15 +386,50 @@ pub async fn fetch_poster(
     }
     // The head bytes are a partial media file BY DESIGN — they validate as
     // nothing and so never touch the image cache; only the sniffed frame
-    // (`poster_store`) earns a cache slot.
-    let head = fetch_capped(&url, cap).await?;
+    // (`poster_store`) earns a cache slot. The GET is ranged, so a big file
+    // answers 206 within the cap; a server that IGNORES Range answers 200
+    // with its full declared length and read_capped rejects it — not fatal,
+    // the ranged sniff below has its own door.
+    let head = fetch_capped(&url, cap, true).await;
+    // The head's verdict survives its bytes being moved into the sniffer:
+    // if the ranged sniff also misses, this (a 404 = NotMedia, not weather)
+    // is the honest thing to return.
+    let head_verdict: Option<MediaError> = head.as_ref().err().copied();
     // JoinError = the sniff task itself died (a bug, but the tile staying
     // bare beats the app following it down); Err(()) = no decodable frame
-    // (moov at the end, audio-only) — transient, the backoff decides.
-    let frame = tokio::task::spawn_blocking(move || sniff(&head))
-        .await
-        .map_err(|_| MediaError::Transient)?
-        .map_err(|_| MediaError::Transient)?;
+    // from these bytes (moov at the end, audio-only) — fall through to the
+    // ranged sniff before calling it transient.
+    let frame = match head {
+        Ok(head) => tokio::task::spawn_blocking(move || sniff(&head))
+            .await
+            .map_err(|_| MediaError::Transient)?
+            .ok(),
+        // The head fetch itself failed (over-cap declared length, 404,
+        // dead server): not the end — the ranged sniff fetches exactly the
+        // bytes the demuxer asks for, no head needed.
+        Err(_) => None,
+    };
+    let frame = match frame {
+        Some(frame) => frame,
+        None => {
+            // The ranged sniff fetches through the same pinned client the
+            // player uses (the URL already passed the safe-URL gate); a
+            // miss here returns the head's verdict when there was one —
+            // a 404 is NotMedia, not weather — else transient, the
+            // backoff decides.
+            let url = url.clone();
+            match tokio::task::spawn_blocking(move || sniff_uri(&url))
+                .await
+                .map_err(|_| MediaError::Transient)?
+            {
+                Ok(frame) => frame,
+                Err(()) => match head_verdict {
+                    Some(verdict) => return Err(verdict),
+                    None => return Err(MediaError::Transient),
+                },
+            }
+        }
+    };
     let (_, _, png) = frame;
     poster_store(&url, &png).await;
     decode_async(png).await

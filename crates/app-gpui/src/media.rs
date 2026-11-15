@@ -666,6 +666,7 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                                     video,
                                     crate::poster::POSTER_HEAD_BYTES,
                                     crate::poster::sniff_png,
+                                    crate::poster::sniff_uri,
                                 );
                                 {
                                     let mut rx = rx;
