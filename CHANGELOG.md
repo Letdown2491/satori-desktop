@@ -6,7 +6,7 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
-## Unreleased (0.9.0)
+## 0.9.0 - 2026-11-15
 
 Video tiles earned their picture. A note's video now previews its first
 frame instead of a bare box: the sniff pipeline finally reads the frame it
