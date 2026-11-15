@@ -259,6 +259,11 @@ pub fn wire_icon(color: u32) -> impl IntoElement {
     icon(wire, color, 20.0)
 }
 
+/// The add-column button (rail slot in columns mode).
+pub fn plus_icon(color: u32) -> impl IntoElement {
+    icon(plus, color, 20.0)
+}
+
 // The ensō — the brush circle with a gap, drawn as a slightly spiralling
 // arc that tapers toward the tail (the brush lifting off). It opens every
 // session: the waiting mark of the login flow.
@@ -422,6 +427,14 @@ fn arrow_up(b: &mut PathBuilder, g: &Grid) {
     b.move_to(g.p(6.5, 11.0));
     b.line_to(g.p(12.0, 5.5));
     b.line_to(g.p(17.5, 11.0));
+}
+
+/// The add-column button (D68's rail slot): a plain plus.
+fn plus(b: &mut PathBuilder, g: &Grid) {
+    b.move_to(g.p(12.0, 5.0));
+    b.line_to(g.p(12.0, 19.0));
+    b.move_to(g.p(5.0, 12.0));
+    b.line_to(g.p(19.0, 12.0));
 }
 
 /// The columns workspace (D68): a triptych — three pane strokes.

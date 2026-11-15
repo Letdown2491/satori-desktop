@@ -171,7 +171,17 @@ impl WireView {
         self.snap_dirty = true;
         let mut unknown: Vec<PublicKey> = Vec::new();
         for ev in notes {
+            // The og: keys are NOT fetched here (audit system-usage #1):
+            // on_notes runs per firehose batch — previewing every link the
+            // relays push at us is third-party contact at the attacker's
+            // posting rate (a crafted note stream induces arbitrary-origin
+            // fetches per second). The wire pane is a live monitor: rows
+            // scroll by in seconds, and it keeps its links as bare rows —
+            // no preview cards.
             for url in content::media_urls_cached(&ev).iter().cloned() {
+                if url.starts_with("og:") {
+                    continue;
+                }
                 media::fetch(&self.core, url, cx.entity_id(), cx);
             }
             // Ledger the refs want_quotes is about to add (new keys only),

@@ -24,6 +24,34 @@ Every note timestamp gained a copy button: one tap puts a `nostr:nevent1…`
 (or `naddr1…` for addressable kinds) URI on the clipboard, with a short
 flash to confirm the copy.
 
+Notes with a plain link now show a preview card: the page's og: metadata
+(site, title, description, thumbnail) fetched when the note scrolls into
+view, capped and parsed defensively, with the thumbnail riding the ordinary
+image cache. Strict Tor keeps previews off entirely. Links in note bodies
+are cleaned up too: the well-known tracking params (fbclid, gclid, the
+utm_* family and friends) are stripped before display, before click-through,
+and before any preview fetch, so your clicks don't share their tags with
+trackers.
+
+Clicking the "new notes" chip is fast now: the notes the live feed already
+saved paint immediately, and the relay round deepens in the background,
+while the chip reads "Loading new notes…" until they land. In multicolumn
+view the chip appears on the notes timeline only (it used to double up on
+the articles column). Feeds start up faster for the same reason: page
+landings no longer wait on a metadata round trip for authors the profile
+cache has never seen; names and avatars patch in as they resolve. Behind
+the scenes, the trust-graph's list fetch fires once per launch instead of
+once per pane, and link previews load when a note scrolls into view rather
+than for every note the relays push, preview cards now appear for
+extension-less web pages (a wiki slug, an App Store link used to render as
+a broken picture tile that suppressed its own card), and flaky preview
+fetches give up after five tries instead of retrying forever.
+
+The multicolumn workspace's add-column button moved from the end of the
+column row (where adding a column meant scrolling the row first) into the
+sidebar, above Settings. It shows while the workspace is up and the menu
+it opens sits beside the rail.
+
 ## 0.8.0 - 2026-11-14
 
 The interop pass continues on two fronts: what a note can ask for, and

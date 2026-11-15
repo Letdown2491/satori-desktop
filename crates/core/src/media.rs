@@ -459,6 +459,379 @@ async fn poster_store(url: &str, png: &[u8]) {
         .ok();
 }
 
+// --- link previews (og: metadata cards) -------------------------------------
+
+/// Tracking/analytics params stripped from body-text links (display,
+/// click-through, and preview fetches): the ad/analytics click-ids plus
+/// the utm_* family. The TS reference's conservative set (content.ts
+/// TRACKING_PARAMS): every entry is a well-known tracker that never
+/// changes page content, so removing one can't break a link — a search
+/// page's `s=` or a YouTube timestamp (`t=`) stay untouched. "Your clicks
+/// don't carry their tags."
+const TRACKING_PARAMS: [&str; 21] = [
+    "fbclid",
+    "gclid",
+    "gbraid",
+    "wbraid",
+    "dclid",
+    "msclkid",
+    "yclid",
+    "twclid",
+    "igshid",
+    "ttclid",
+    "mc_eid",
+    "mc_cid",
+    "mkt_tok",
+    "oly_anon_id",
+    "oly_enc_id",
+    "vero_id",
+    "_hsenc",
+    "_hsmi",
+    "mibextid",
+    "fb_action_ids",
+    "s_cid",
+];
+
+/// The link without its tracking params. Unparseable / non-http(s) /
+/// tracker-free URLs return verbatim; a parseable URL re-serializes only
+/// when something was removed.
+pub fn strip_tracking_params(url: &str) -> String {
+    let Ok(mut u) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+    if !matches!(u.scheme(), "http" | "https") {
+        return url.to_string();
+    }
+    let trackers: Vec<String> = u
+        .query_pairs()
+        .map(|(k, _)| k.into_owned())
+        .filter(|k| {
+            TRACKING_PARAMS.iter().any(|t| t.eq_ignore_ascii_case(k))
+                || k.to_ascii_lowercase().starts_with("utm_")
+        })
+        .collect();
+    if trackers.is_empty() {
+        return url.to_string();
+    }
+    // Rebuild the query without the trackers (the serializer has no
+    // per-pair remove): keep every non-tracker pair verbatim.
+    let kept: Vec<(String, String)> = u
+        .query_pairs()
+        .filter(|(k, _)| {
+            !TRACKING_PARAMS.iter().any(|t| t.eq_ignore_ascii_case(k))
+                && !k.to_ascii_lowercase().starts_with("utm_")
+        })
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    u.set_query(None);
+    if !kept.is_empty() {
+        u.query_pairs_mut().extend_pairs(kept);
+    }
+    u.into()
+}
+
+/// The HTML head fetch cap: og: meta tags live in `<head>`, which even
+/// bloated pages fit in — the read cuts at `</head>` anyway. A server that
+/// declares a bigger length answers a 206 (the GET is ranged).
+pub const OG_CAP: usize = 256 * 1024;
+
+/// What a link preview card paints: all fields attacker-writable, so the
+/// renderer caps them before display.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LinkPreview {
+    pub title: String,
+    pub description: Option<String>,
+    /// og:site_name, else the page's bare host.
+    pub site: String,
+    /// og:image / twitter:image when the page offers one (absolute http(s)).
+    pub image: Option<String>,
+}
+
+/// Fetch + extract a link's preview metadata: cache read-through (a
+/// preview survives restarts), one ranged guarded GET (the head of the
+/// HTML is all a `<meta>` scan needs), parse validated BEFORE the disk
+/// write (the fetch_image discipline — a poisoned cache entry would kill
+/// the card forever). The verdict mapping is the media path's: 404 et al
+/// are NotMedia (terminal for the session), 429/5xx/network are Transient.
+pub async fn fetch_link_preview(url: &str) -> Result<LinkPreview, MediaError> {
+    // Defense in depth: the UI gates strict mode twice (the mode-keyed
+    // memo and og::fetch's entry check) — the core seam gates it too, so
+    // no caller can bypass the facade rule (a preview is third-party
+    // bytes; strict fetches none).
+    if crate::privacy::privacy_mode() == crate::privacy::PrivacyMode::Strict {
+        return Err(MediaError::NotMedia);
+    }
+    // The stripped form is the cache key: the same link with and without
+    // utm noise shares one preview, and no tracker lands in the store.
+    let url = strip_tracking_params(url);
+    if !is_safe_media_url(&url) {
+        return Err(MediaError::NotMedia);
+    }
+    let path = cache_path(&cache_key(&format!("og\x00{url}")));
+    // A corrupt entry is a miss (the write below replaces it).
+    if let Ok(bytes) = read_cache_off_rt(path.clone()).await
+        && let Ok(preview) = serde_json::from_slice::<LinkPreview>(&bytes)
+    {
+        return Ok(preview);
+    }
+    let head = fetch_capped(&url, OG_CAP, true).await?;
+    // JoinError = the parse task died (a bug; the card staying absent beats
+    // the app following it down).
+    let preview = tokio::task::spawn_blocking(move || extract_preview(&head, &url))
+        .await
+        .map_err(|_| MediaError::Transient)?
+        .ok_or(MediaError::NotMedia)?;
+    let json = serde_json::to_vec(&preview).unwrap_or_default();
+    tokio::task::spawn_blocking(move || write_cache(&path, &json))
+        .await
+        .ok();
+    Ok(preview)
+}
+
+/// The og: extraction: scan the (capped, `</head>`-cut) HTML for meta tags
+/// carrying og:/twitter: card fields, fall back to `<title>`. None when the
+/// page offers no title at all — nothing worth a card. A hand parser on
+/// purpose: the input is attacker-written HTML, the fields we want are a
+/// fixed handful, and a general HTML dependency is a parser-of-attacker-
+/// input surface the audit would flag.
+fn extract_preview(head: &[u8], url: &str) -> Option<LinkPreview> {
+    let text = String::from_utf8_lossy(head);
+    // Everything we want lives before </head> (case-insensitive); cut there
+    // so <body> prose can never smuggle a <meta> in. ASCII-only lowering:
+    // full Unicode `to_lowercase` changes byte lengths (Ⅰ → i), skewing
+    // every offset used to slice the ORIGINAL — a char-boundary panic on
+    // hostile pages, silent mis-scoping otherwise.
+    let lower = text.to_ascii_lowercase();
+    let scope = lower
+        .find("</head")
+        .map(|end| &text[..end])
+        .unwrap_or(&text);
+
+    let mut title = None;
+    let mut description = None;
+    let mut image = None;
+    let mut site = None;
+    for tag in meta_tags(scope) {
+        let props = tag_attrs(&tag);
+        let kind = props.iter().find(|(k, _)| k == "property" || k == "name");
+        let Some((_, kind)) = kind else { continue };
+        let content = props
+            .iter()
+            .find(|(k, _)| k == "content")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        // First tag wins (publishers repeat og: tags per attachment).
+        match kind.as_str() {
+            "og:title" | "twitter:title" => {
+                title.get_or_insert(content);
+            }
+            "og:description" | "twitter:description" => {
+                description.get_or_insert(content);
+            }
+            "og:image" | "twitter:image" => {
+                image.get_or_insert(content);
+            }
+            "og:site_name" => {
+                site.get_or_insert(content);
+            }
+            _ => {}
+        }
+    }
+    // No og: title: the page's <title> still names it.
+    let title = title.or_else(|| html_title(scope)).map(|t| cap(&t, 200))?;
+
+    // The image must be an absolute http(s) URL: a relative one would need
+    // resolving against an attacker-chosen base, a data:/javascript: one is
+    // not a picture. The IMAGE fetch re-validates everything again.
+    let image = image
+        .filter(|i| i.starts_with("https://") || i.starts_with("http://"))
+        .map(|i| cap(&i, 2048));
+
+    // The site: og:site_name, else the URL's bare host (no scheme, no path).
+    let site = site
+        .map(|s| cap(&s, 100))
+        .or_else(|| host_of(url))
+        .unwrap_or_default();
+
+    Some(LinkPreview {
+        title,
+        description: description.map(|d| cap(&d, 300)),
+        site,
+        image,
+    })
+}
+
+fn cap(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(max).collect();
+        format!("{cut}\u{2026}")
+    }
+}
+
+fn host_of(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    (!host.is_empty()).then(|| host.trim_start_matches("www.").to_string())
+}
+
+/// Each `<meta …>` tag in `scope`, as its raw tag text. Case-insensitive
+/// opener scan; the tag ends at the first `>` (og: tags are never quoted-
+/// gt inside). ASCII-only lowering keeps the found offsets valid slice
+/// indices into `scope` (Unicode case expansion would skew them).
+fn meta_tags(scope: &str) -> Vec<String> {
+    let lower = scope.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(start) = lower[from..].find("<meta").map(|i| i + from) {
+        let after = start + "<meta".len();
+        // A tag boundary check: `<meta` must not be `<metaxy` — the next
+        // char is whitespace, `>` or `/`.
+        if lower[after..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        {
+            from = after;
+            continue;
+        }
+        match lower[after..].find('>') {
+            Some(end) => {
+                out.push(scope[after..after + end].to_string());
+                from = after + end + 1;
+            }
+            None => break, // truncated head — the cap ran out mid-tag
+        }
+    }
+    out
+}
+
+/// A tag's attributes: lowercased names, entity-decoded values. Quoted and
+/// unquoted values both parse; junk is skipped, never panicked on.
+fn tag_attrs(tag: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let b = tag.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        // Attribute name: skip anything that isn't one.
+        while i < b.len() && !b[i].is_ascii_alphanumeric() && b[i] != b'/' {
+            i += 1;
+        }
+        let name_start = i;
+        while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b':' || b[i] == b'-') {
+            i += 1;
+        }
+        if i == name_start {
+            i += 1;
+            continue;
+        }
+        let name = tag[name_start..i].to_ascii_lowercase();
+        // Optional `=` + value (quoted or a bare token).
+        let mut j = i;
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        let value = if j < b.len() && b[j] == b'=' {
+            j += 1;
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < b.len() && (b[j] == b'"' || b[j] == b'\'') {
+                let quote = b[j];
+                j += 1;
+                let vstart = j;
+                while j < b.len() && b[j] != quote {
+                    j += 1;
+                }
+                let v = &tag[vstart..j.min(b.len())];
+                i = (j + 1).min(b.len());
+                decode_entities(v)
+            } else {
+                let vstart = j;
+                while j < b.len() && !b[j].is_ascii_whitespace() && b[j] != b'>' {
+                    j += 1;
+                }
+                i = j;
+                decode_entities(&tag[vstart..j])
+            }
+        } else {
+            i = j;
+            String::new()
+        };
+        out.push((name, value));
+    }
+    out
+}
+
+/// The handful of entities HTML previews actually carry (&amp; &lt; &gt;
+/// &quot; &#39; and the numeric forms); unknown entities stay verbatim —
+/// a mangled title beats a mangled everything.
+fn decode_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'&' {
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        let Some(semi) = s[i..].find(';').map(|p| i + p) else {
+            out.push('&');
+            i += 1;
+            continue;
+        };
+        let ent = &s[i + 1..semi];
+        let decoded = match ent {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some(' '),
+            numeric if ent.starts_with("#x") || ent.starts_with("#X") => {
+                u32::from_str_radix(&numeric[2..], 16)
+                    .ok()
+                    .and_then(char::from_u32)
+            }
+            numeric if ent.starts_with('#') => {
+                numeric[1..].parse::<u32>().ok().and_then(char::from_u32)
+            }
+            _ => None,
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                i = semi + 1;
+            }
+            None => {
+                out.push('&');
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The `<title>` text (first one, entity-decoded, whitespace-collapsed).
+/// ASCII-only lowering keeps the found offsets valid slice indices into
+/// `scope` (Unicode case expansion would skew them).
+fn html_title(scope: &str) -> Option<String> {
+    let lower = scope.to_ascii_lowercase();
+    let start = lower.find("<title")?;
+    let after = scope[start..].find('>')? + start + 1;
+    let end = lower[after..].find("</title")? + after;
+    let raw = scope[after..end].trim();
+    (!raw.is_empty()).then(|| raw.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
 pub fn cache_key(url: &str) -> String {
     let mut h = Sha256::new();
     h.update(url.as_bytes());
@@ -615,8 +988,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static WRITE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// LRU trim of the media cache by mtime (avatar-cache.ts: 200MB cap,
-/// draining to 150MB). Best-effort; runs inline on the fetch path.
+/// draining to 150MB). Best-effort; runs inline on the fetch path. A file
+/// COUNT cap rides along: og previews are ~200 bytes of JSON each — the
+/// byte floor is ~a million files away, so the all-tiny og population
+/// needs its own bound.
 fn trim_cache(cap: u64, floor: u64) {
+    const FILE_CAP: usize = 50_000;
     let dir = match std::fs::read_dir(config::media_cache_dir()) {
         Ok(d) => d,
         Err(_) => return,
@@ -628,11 +1005,21 @@ fn trim_cache(cap: u64, floor: u64) {
             Some((e.path(), m.len(), m.modified().ok()?))
         })
         .collect();
-    let total: u64 = entries.iter().map(|(_, s, _)| s).sum();
+    entries.sort_by_key(|(_, _, m)| *m);
+    let mut total: u64 = entries.iter().map(|(_, s, _)| s).sum();
+    let mut remaining = total;
+    if entries.len() > FILE_CAP {
+        let excess = entries.len() - FILE_CAP;
+        for (path, size, _) in entries.iter().take(excess) {
+            if std::fs::remove_file(path).is_ok() {
+                remaining -= size;
+            }
+        }
+        total = remaining;
+    }
     if total < cap {
         return;
     }
-    entries.sort_by_key(|(_, _, m)| *m);
     let mut remaining = total;
     for (path, size, _) in entries {
         if remaining < floor {
@@ -824,5 +1211,169 @@ mod tests {
             decode_async(png_header(15000, 15000)).await,
             Err(MediaError::NotMedia)
         ));
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    // --- tracking params ---------------------------------------------------
+
+    #[test]
+    fn strip_removes_known_trackers_and_utm_family() {
+        assert_eq!(
+            strip_tracking_params(
+                "https://ex.com/p?utm_source=rss&utm_medium=feed&id=7&fbclid=AbCd"
+            ),
+            "https://ex.com/p?id=7"
+        );
+        // Case-insensitive match on the well-known set (FBclid, GCLId…).
+        assert_eq!(
+            strip_tracking_params("https://ex.com/a?FBCLID=x&keep=1"),
+            "https://ex.com/a?keep=1"
+        );
+        // UTM_ prefix is case-insensitive too.
+        assert_eq!(
+            strip_tracking_params("https://ex.com/a?UTM_CAMPAIGN=x"),
+            "https://ex.com/a"
+        );
+        // Every param stripped: the bare query goes with it (the url crate
+        // normalizes the empty path to `/`, like JS's URL.toString()).
+        assert_eq!(
+            strip_tracking_params("https://ex.com/a?gclid=1"),
+            "https://ex.com/a"
+        );
+        // The whole conservative set survives one pass.
+        let all = [
+            "fbclid",
+            "gclid",
+            "gbraid",
+            "wbraid",
+            "dclid",
+            "msclkid",
+            "yclid",
+            "twclid",
+            "igshid",
+            "ttclid",
+            "mc_eid",
+            "mc_cid",
+            "mkt_tok",
+            "oly_anon_id",
+            "oly_enc_id",
+            "vero_id",
+            "_hsenc",
+            "_hsmi",
+            "mibextid",
+            "fb_action_ids",
+            "s_cid",
+        ];
+        let q: Vec<String> = all.iter().map(|k| format!("{k}=z")).collect();
+        assert_eq!(
+            strip_tracking_params(&format!("https://ex.com?{}", q.join("&"))),
+            "https://ex.com/"
+        );
+    }
+
+    #[test]
+    fn strip_touches_nothing_else() {
+        // Content-bearing params stay (a search page's `s=`, YouTube's `t=`).
+        assert_eq!(
+            strip_tracking_params("https://ex.com/?s=nostr"),
+            "https://ex.com/?s=nostr"
+        );
+        assert_eq!(
+            strip_tracking_params("https://youtu.be/x?t=42"),
+            "https://youtu.be/x?t=42"
+        );
+        // No query / non-http(s) / unparseable: verbatim.
+        assert_eq!(
+            strip_tracking_params("https://ex.com/plain"),
+            "https://ex.com/plain"
+        );
+        assert_eq!(
+            strip_tracking_params("ftp://ex.com?fbclid=1"),
+            "ftp://ex.com?fbclid=1"
+        );
+        assert_eq!(
+            strip_tracking_params("not a url?fbclid=1"),
+            "not a url?fbclid=1"
+        );
+    }
+
+    // --- meta extraction ---------------------------------------------------
+
+    #[test]
+    fn og_tags_fill_the_card() {
+        let head = b"<html><head><meta property=\"og:site_name\" content=\"Example\">\
+<meta property=\"og:title\" content=\"Hello World\">\
+<meta property=\"og:description\" content=\"A page\">\
+<meta property=\"og:image\" content=\"https://img.ex/i.png\">\
+<meta property=\"og:ignoreme\" content=\"x\">\
+</head><body>prose must not scan</body></html>";
+        let p = extract_preview(head, "https://ex.com/p").unwrap();
+        assert_eq!(p.title, "Hello World");
+        assert_eq!(p.description.as_deref(), Some("A page"));
+        assert_eq!(p.site, "Example");
+        assert_eq!(p.image.as_deref(), Some("https://img.ex/i.png"));
+    }
+
+    #[test]
+    fn twitter_tags_fallback_and_title_fallback() {
+        // twitter: card fields stand in for og:.
+        let head = b"<head><meta name=\"twitter:title\" content=\"Tw Title\">\
+<meta name=\"twitter:image\" content=\"https://img.ex/t.png\"></head>";
+        let p = extract_preview(head, "https://ex.com/t").unwrap();
+        assert_eq!(p.title, "Tw Title");
+        assert_eq!(p.image.as_deref(), Some("https://img.ex/t.png"));
+        assert_eq!(p.site, "ex.com", "host fallback carries the site");
+
+        // No card tags at all: the page <title> names it, no image.
+        let head = b"<html><head><title>Bare Title</title></head></html>";
+        let p = extract_preview(head, "https://ex.com/b").unwrap();
+        assert_eq!(p.title, "Bare Title");
+        assert!(p.image.is_none());
+        assert!(p.description.is_none());
+    }
+
+    #[test]
+    fn body_never_smuggles_a_meta() {
+        // og: tags after </head> are prose, not metadata.
+        let head = b"<html><head><title>Real</title></head>\
+<body><meta property=\"og:title\" content=\"Injected\"></body></html>";
+        let p = extract_preview(head, "https://ex.com/i").unwrap();
+        assert_eq!(p.title, "Real");
+    }
+
+    #[test]
+    fn entities_decode_and_relative_images_reject() {
+        let head =
+            b"<head><meta property=\"og:title\" content=\"Fish &amp; Chips &#39;n&#39; Sauce\">\
+<meta property=\"og:image\" content=\"/relative.png\"></head>";
+        let p = extract_preview(head, "https://ex.com/e").unwrap();
+        assert_eq!(p.title, "Fish & Chips 'n' Sauce");
+        assert!(
+            p.image.is_none(),
+            "relative og:image needs an attacker base"
+        );
+    }
+
+    #[test]
+    fn a_titleless_page_is_no_card() {
+        assert!(extract_preview(b"<head></head>", "https://ex.com/none").is_none());
+        assert!(extract_preview(b"", "https://ex.com/none").is_none());
+    }
+
+    #[test]
+    fn fields_carry_source_caps() {
+        let long = "x".repeat(400);
+        let head = format!(
+            "<head><meta property=\"og:title\" content=\"{long}\">\
+<meta property=\"og:image\" content=\"https://img.ex/{}\"></head>",
+            "y".repeat(3000)
+        );
+        let p = extract_preview(head.as_bytes(), "https://ex.com/cap").unwrap();
+        assert_eq!(p.title.chars().count(), 201); // 200 + the ellipsis
+        assert_eq!(p.image.as_ref().unwrap().chars().count(), 2049);
     }
 }
