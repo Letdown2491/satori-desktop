@@ -2426,12 +2426,9 @@ impl Core {
     /// key, `d` = prefs.json key verbatim, content NIP-44-encrypted to
     /// self — the same private-by-default semantics as the NIP-51 lists.
     pub fn publish_app_data(self: &Arc<Self>, key: &str, value: serde_json::Value) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
         let key = key.to_string();
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
                 let me = active.me();
                 let content = active
                     .signer
@@ -2445,20 +2442,10 @@ impl Core {
                     content,
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit(&active, &signed, &tx).await?;
+                Self::commit(active, &signed, tx).await?;
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     // --- feed ------------------------------------------------------------------
@@ -3858,11 +3845,9 @@ impl Core {
         mentions: Vec<PublicKey>,
         imetas: Vec<Vec<String>>,
     ) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        let core = Arc::clone(self);
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
                 let mut tags = match &parent {
                     Some(p) => crate::nip::comment::reply_tags(p, &target),
                     None => target.root_tags(),
@@ -3897,13 +3882,13 @@ impl Core {
                 // toast — one seam, hold_and_commit).
                 match active.undo.hold_duration() {
                     Some(hold) => {
-                        let token = this.hold_seq.fetch_add(1, Ordering::SeqCst);
+                        let token = core.hold_seq.fetch_add(1, Ordering::SeqCst);
                         let _ = tx.send(PublishEvent::Held {
                             token,
                             event: signed.clone(),
                             hold_secs: hold.as_secs(),
                         });
-                        this.hold_and_commit(
+                        core.hold_and_commit(
                             Arc::new(active.clone()),
                             token,
                             signed,
@@ -3913,22 +3898,12 @@ impl Core {
                         .await;
                     }
                     None => {
-                        Self::commit(&active, &signed, &tx).await?;
+                        Self::commit(active, &signed, tx).await?;
                     }
                 }
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// Tallies for a poll: kind:1018 ballots #e=poll id.
@@ -3993,12 +3968,9 @@ impl Core {
 
     /// Vote in a poll (NIP-88 kind:1018; re-voting replaces your ballot).
     pub fn poll_vote(self: &Arc<Self>, poll: &Event, option_ids: Vec<String>) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
         let poll = poll.clone();
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
                 // The vote's e tag hints the poll author's most-recent
                 // seen relay (actions.ts:118) so clients that never saw
                 // the poll can still ask where it lives.
@@ -4012,31 +3984,18 @@ impl Core {
                 let unsigned =
                     UnsignedEvent::new(active.me(), Timestamp::now(), Kind::Custom(1018), tags, "");
                 let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit(&active, &signed, &tx).await?;
+                Self::commit(active, &signed, tx).await?;
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// RSVP to a calendar event (NIP-52 kind:31925).
     pub fn rsvp(self: &Arc<Self>, calendar: &Event, status: &str) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
         let calendar = calendar.clone();
         let status = status.to_string();
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
                 let data = crate::nip::calendar::parse(&calendar)
                     .ok_or_else(|| LoginError::Resume("bad calendar event".into()))?;
                 let a = crate::nip::calendar::a_tag(&data, &calendar.pubkey);
@@ -4053,20 +4012,10 @@ impl Core {
                     "",
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit(&active, &signed, &tx).await?;
+                Self::commit(active, &signed, tx).await?;
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// Repost (NIP-18): kind 6 for notes, kind 16 + a `k` tag for anything
@@ -4981,11 +4930,8 @@ impl Core {
         post: PostKind,
         scheduled_at: u64,
     ) -> mpsc::UnboundedReceiver<ScheduleEvent> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<String> = async {
-                let active = this.active().await?;
+        self.schedule_task(scheduled_at, move |active| {
+            Box::pin(async move {
                 let me = active.me();
                 // The composer's tab decides: a photo post schedules as the
                 // SAME kind-20 picture event an instant post makes
@@ -5024,18 +4970,8 @@ impl Core {
                         crate::scheduled::MAX_PER_USER
                     ))
                 })
-            }
-            .await;
-            match res {
-                Ok(token) => {
-                    let _ = tx.send(ScheduleEvent::Scheduled { token, scheduled_at });
-                }
-                Err(e) => {
-                    let _ = tx.send(ScheduleEvent::Failed { error: e.to_string() });
-                }
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// The active account's pending scheduled posts, soonest first (the
@@ -5054,14 +4990,11 @@ impl Core {
         draft: crate::nip::article::ArticleDraft,
         scheduled_at: u64,
     ) -> mpsc::UnboundedReceiver<ScheduleEvent> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<String> = async {
+        self.schedule_task(scheduled_at, move |active| {
+            Box::pin(async move {
                 if draft.title.trim().is_empty() || draft.body.trim().is_empty() {
                     return Err(LoginError::Other("an article needs a title and a body".into()));
                 }
-                let active = this.active().await?;
                 let me = active.me();
                 let unsigned = UnsignedEvent::new(
                     me,
@@ -5077,18 +5010,8 @@ impl Core {
                         crate::scheduled::MAX_PER_USER
                     ))
                 })
-            }
-            .await;
-            match res {
-                Ok(token) => {
-                    let _ = tx.send(ScheduleEvent::Scheduled { token, scheduled_at });
-                }
-                Err(e) => {
-                    let _ = tx.send(ScheduleEvent::Failed { error: e.to_string() });
-                }
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// Cancel a scheduled post before its time (scheduled.ts
@@ -5192,11 +5115,9 @@ impl Core {
         multi: bool,
         ends_in_secs: Option<u64>,
     ) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        let core = Arc::clone(self);
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
                 const ID_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
                 let mut tag_list: Vec<Tag> = Vec::new();
                 for (n, label) in options.iter().enumerate() {
@@ -5230,13 +5151,13 @@ impl Core {
                 let signed = active.signer.sign_event(unsigned).await?;
                 match active.undo.hold_duration() {
                     Some(hold) => {
-                        let token = this.hold_seq.fetch_add(1, Ordering::SeqCst);
+                        let token = core.hold_seq.fetch_add(1, Ordering::SeqCst);
                         let _ = tx.send(PublishEvent::Held {
                             token,
                             event: signed.clone(),
                             hold_secs: hold.as_secs(),
                         });
-                        this.hold_and_commit(
+                        core.hold_and_commit(
                             Arc::new(active.clone()),
                             token,
                             signed,
@@ -5245,21 +5166,11 @@ impl Core {
                         )
                         .await;
                     }
-                    None => Self::commit(&active, &signed, &tx).await?,
+                    None => Self::commit(active, &signed, tx).await?,
                 }
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// Post a NIP-68 picture (kind:20). `imeta` carries one or more full NIP-92
@@ -5481,17 +5392,15 @@ impl Core {
     /// `d` identifier is random when the draft doesn't carry one. Same
     /// undo window as notes/pictures.
     pub fn post_article(self: &Arc<Self>, draft: crate::nip::article::ArticleDraft) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
+        let core = Arc::clone(self);
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
                 if draft.title.trim().is_empty() {
                     return Err(LoginError::Other("an article needs a title".into()));
                 }
                 if draft.body.trim().is_empty() {
                     return Err(LoginError::Other("an article needs a body".into()));
                 }
-                let active = this.active().await?;
                 let me = active.me();
                 let now = Timestamp::now().as_secs();
                 let unsigned = UnsignedEvent::new(
@@ -5505,13 +5414,13 @@ impl Core {
                 // Same undo window as notes/pictures (hold_and_commit).
                 match active.undo.hold_duration() {
                     Some(hold) => {
-                        let token = this.hold_seq.fetch_add(1, Ordering::SeqCst);
+                        let token = core.hold_seq.fetch_add(1, Ordering::SeqCst);
                         let _ = tx.send(PublishEvent::Held {
                             token,
                             event: signed.clone(),
                             hold_secs: hold.as_secs(),
                         });
-                        this.hold_and_commit(
+                        core.hold_and_commit(
                             Arc::new(active.clone()),
                             token,
                             signed,
@@ -5520,21 +5429,11 @@ impl Core {
                         )
                         .await;
                     }
-                    None => Self::commit(&active, &signed, &tx).await?,
+                    None => Self::commit(active, &signed, tx).await?,
                 }
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// Upload a blob to your Blossom servers (upload.ts). Emits
@@ -5634,11 +5533,8 @@ impl Core {
     /// Publish the media-server list (kind:10063, BUD-03) to your write
     /// relays — routes/settings.ts postMedia + upload.ts serverListTemplate.
     pub fn set_media_servers(self: &Arc<Self>, servers: Vec<String>) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
                 let me = active.me();
                 let tags: Vec<Tag> = servers
                     .iter()
@@ -5652,20 +5548,10 @@ impl Core {
                     "",
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit(&active, &signed, &tx).await?;
+                Self::commit(active, &signed, tx).await?;
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// The undo window: sleep-or-cancel, then the backstop commit (ports
@@ -5839,13 +5725,11 @@ impl Core {
     /// glyphs. Negative reactions stay unsent, unshown, unnotified —
     /// the house posture, deliberately kept.
     pub fn react(self: &Arc<Self>, target: &Event, content: &str) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
+        let core = Arc::clone(self);
         let target = target.clone();
         let content = content.to_string();
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
                 let unsigned = UnsignedEvent::new(
                     active.me(),
                     Timestamp::now(),
@@ -5857,21 +5741,11 @@ impl Core {
                     content,
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit(&active, &signed, &tx).await?;
-                this.own_liked.lock().unwrap().insert(target.id.to_string());
+                Self::commit(active, &signed, tx).await?;
+                core.own_liked.lock().unwrap().insert(target.id.to_string());
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// Bookmark (NIP-51). Private by default: kind 10003 with the id in a
@@ -5879,12 +5753,10 @@ impl Core {
     /// Public scope (D38): kind 30001 d="bookmarks", the id as a plain e-tag
     /// — which list the star writes is the settings pref's job.
     pub fn bookmark(self: &Arc<Self>, target: &Event, public: bool) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
+        let core = Arc::clone(self);
         let target = target.clone();
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
                 let me = active.me();
                 if !public {
                     // Private: the content array is the list (nip44); the
@@ -5897,7 +5769,7 @@ impl Core {
                         .await
                         .ok()
                         .flatten();
-                    let mut ids: Vec<String> = this
+                    let mut ids: Vec<String> = core
                         .own_bookmarked
                         .lock()
                         .unwrap()
@@ -5917,7 +5789,7 @@ impl Core {
                         content,
                     );
                     let signed = active.signer.sign_event(unsigned).await?;
-                    Self::commit(&active, &signed, &tx).await?;
+                    Self::commit(active, &signed, tx).await?;
                 } else {
                     // Public: NIP-51 kind 30001 d="bookmarks" — the e-tags
                     // ARE the list (my event only — others' 30001s are
@@ -5943,36 +5815,24 @@ impl Core {
                     let unsigned =
                         UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(30001), raw, "");
                     let signed = active.signer.sign_event(unsigned).await?;
-                    Self::commit(&active, &signed, &tx).await?;
+                    Self::commit(active, &signed, tx).await?;
                 }
-                this.own_bookmarked
+                core.own_bookmarked
                     .lock()
                     .unwrap()
                     .insert(target.id.to_string());
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// Un-bookmark (D38): RMW BOTH lists — the private 10003 (content array
     /// plus any plain e-tags it carries) and the public 30001
     /// d="bookmarks" — publishing only a list that actually held the id.
     pub fn unbookmark(self: &Arc<Self>, id: EventId) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        let core = Arc::clone(self);
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
                 let me = active.me();
                 let hex = id.to_string();
                 // Private list: decrypt, drop the id, re-encrypt — only if
@@ -6018,7 +5878,7 @@ impl Core {
                             content,
                         );
                         let signed = active.signer.sign_event(unsigned).await?;
-                        Self::commit(&active, &signed, &tx).await?;
+                        Self::commit(active, &signed, tx).await?;
                     }
                 }
                 // Public list: rebuild the stored tags without the id's
@@ -6038,23 +5898,13 @@ impl Core {
                         let unsigned =
                             UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(30001), raw, "");
                         let signed = active.signer.sign_event(unsigned).await?;
-                        Self::commit(&active, &signed, &tx).await?;
+                        Self::commit(active, &signed, tx).await?;
                     }
                 }
-                this.own_bookmarked.lock().unwrap().remove(&hex);
+                core.own_bookmarked.lock().unwrap().remove(&hex);
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// The own bookmarks hydrated (D38): the merged id set (private 10003 +
@@ -6389,11 +6239,9 @@ impl Core {
     /// Publish the NIP-65 relay list (kind:10002 RMW) and swap it in live:
     /// new reads join the pool, removed writes stop receiving publishes.
     pub fn set_relays(self: &Arc<Self>, read: Vec<String>, write: Vec<String>) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        let core = Arc::clone(self);
+        self.publish_task(move |active, _tx| {
+            Box::pin(async move {
                 let me = active.me();
                 let mut tags: Vec<Tag> = Vec::new();
                 for url in &read {
@@ -6412,9 +6260,9 @@ impl Core {
                 }
                 let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::RelayList, tags, "");
                 let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit_broadcast(&active, &signed).await?;
+                Self::commit_broadcast(active, &signed).await?;
                 {
-                    let mut a = this.active.lock().unwrap();
+                    let mut a = core.active.lock().unwrap();
                     if let Some(a) = a.as_mut() {
                         a.read_relays = read.clone();
                         a.write_relays = write.clone();
@@ -6423,29 +6271,17 @@ impl Core {
                 // New reads join the pool; reads the user dropped are
                 // retired live (they used to drain only on restart).
                 active.pool.set_reads(&read).await;
-                this.spawn_relay_info(&read);
+                core.spawn_relay_info(&read);
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// Follow / unfollow (NIP-02 kind:3 read-modify-write).
     pub fn set_following(self: &Arc<Self>, who: PublicKey, follow: bool) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        let core = Arc::clone(self);
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
                 let me = active.me();
                 let mut follows = active.follows.clone();
                 if follow {
@@ -6459,37 +6295,25 @@ impl Core {
                 let unsigned =
                     UnsignedEvent::new(me, Timestamp::now(), Kind::ContactList, tags, "");
                 let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit(&active, &signed, &tx).await?;
+                Self::commit(active, &signed, tx).await?;
                 {
-                    let mut a = this.active.lock().unwrap();
+                    let mut a = core.active.lock().unwrap();
                     if let Some(a) = a.as_mut() {
                         a.follows = follows;
                     }
                 }
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// Mute / unmute (NIP-51 kind:10000, content encrypted to self).
     pub fn set_muted(self: &Arc<Self>, who: PublicKey, mute: bool) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        let core = Arc::clone(self);
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
                 let me = active.me();
-                let mut mutes = this.muted.lock().unwrap().clone();
+                let mut mutes = core.muted.lock().unwrap().clone();
                 let hex = who.to_string();
                 if mute {
                     mutes.insert(hex.clone());
@@ -6501,22 +6325,12 @@ impl Core {
                 let unsigned =
                     UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(10000), [], content);
                 let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit(&active, &signed, &tx).await?;
+                Self::commit(active, &signed, tx).await?;
                 // Keep the WoT qualification's mute screen in step.
-                crate::wot::set_muted(this.muted.lock().unwrap().clone());
+                crate::wot::set_muted(core.muted.lock().unwrap().clone());
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// The own kind:0 content string, RAW (D38: the edit form prefills
@@ -6583,11 +6397,8 @@ impl Core {
     /// profile rides every known relay, outbox retries it — kind 0 is
     /// coordinate-keyed, D36).
     pub fn set_profile(self: &Arc<Self>, patch: ProfileEdit) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        self.publish_task(move |active, _tx| {
+            Box::pin(async move {
                 let me = active.me();
                 let stored = active
                     .pool
@@ -6603,30 +6414,17 @@ impl Core {
                 let unsigned =
                     UnsignedEvent::new(me, Timestamp::now(), Kind::Metadata, [], content);
                 let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit_broadcast(&active, &signed).await?;
+                Self::commit_broadcast(active, &signed).await?;
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// Delete own post (NIP-09 kind:5) + local tombstone.
     pub fn delete(self: &Arc<Self>, target: &Event) -> PublishRx {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let this = Arc::clone(self);
         let target = target.clone();
-        self.rt.spawn(async move {
-            let res: Result<()> = async {
-                let active = this.active().await?;
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
                 let unsigned = UnsignedEvent::new(
                     active.me(),
                     Timestamp::now(),
@@ -6635,7 +6433,7 @@ impl Core {
                     "",
                 );
                 let signed = active.signer.sign_event(unsigned).await?;
-                Self::commit(&active, &signed, &tx).await?;
+                Self::commit(active, &signed, tx).await?;
                 // Own deletion accepted: PIN the tombstone (deletions.ts
                 // recordDeletion(ev, pin=true)) — immune to relay-fed
                 // eviction, so the deleted note can't resurrect through
@@ -6644,18 +6442,8 @@ impl Core {
                 deletions::record(&signed, true);
                 let _ = active.pool.store.delete_event(target.id).await;
                 Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                let _ = tx.send(PublishEvent::Failed {
-                    token: 0,
-                    error: e.to_string(),
-                });
-            } else {
-                let _ = tx.send(PublishEvent::Committed { token: 0 });
-            }
-        });
-        rx
+            })
+        })
     }
 
     /// Listen for push signals (bell dot, new-notes pill). Broadcast —
@@ -7154,6 +6942,86 @@ impl Core {
                 }
                 Err(e) => {
                     let _ = tx.send(FeedEvent::Failed(e.to_string()));
+                }
+            }
+        });
+        rx
+    }
+
+    /// The PublishRx active-session scaffold — feed_task's twin for the
+    /// publish side (#31's deferred DRY list, the census's category C):
+    /// spawn + the session handshake + the Ok/Failed routing. `work` gets
+    /// the resolved session AND the sender (progress sends mid-body are
+    /// normal: commit() reports per-relay) and returns the outcome; an
+    /// error routes as PublishEvent::Failed, success as Committed (both
+    /// token 0, the single-shot shape). (Multi-variant tails — Restored,
+    /// poll tallies, the composer's progress fns — keep their own spawn.)
+    fn publish_task<F>(self: &Arc<Self>, work: F) -> PublishRx
+    where
+        F: for<'a> FnOnce(
+                &'a Active,
+                &'a mpsc::UnboundedSender<PublishEvent>,
+            )
+                -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
+            + Send
+            + 'static,
+    {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<()> = async {
+                let active = this.active().await?;
+                work(&active, &tx).await
+            }
+            .await;
+            if let Err(e) = res {
+                let _ = tx.send(PublishEvent::Failed {
+                    token: 0,
+                    error: e.to_string(),
+                });
+            } else {
+                let _ = tx.send(PublishEvent::Committed { token: 0 });
+            }
+        });
+        rx
+    }
+
+    /// The ScheduleRx scaffold (the schedule_note/schedule_article twin —
+    /// publish_task's third cousin, #31's DRY list): spawn + session
+    /// handshake + the Scheduled/Failed routing. `work` returns the
+    /// scheduled token.
+    fn schedule_task<F>(
+        self: &Arc<Self>,
+        scheduled_at: u64,
+        work: F,
+    ) -> mpsc::UnboundedReceiver<ScheduleEvent>
+    where
+        F: for<'a> FnOnce(
+                &'a Active,
+            )
+                -> std::pin::Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>
+            + Send
+            + 'static,
+    {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let res: Result<String> = async {
+                let active = this.active().await?;
+                work(&active).await
+            }
+            .await;
+            match res {
+                Ok(token) => {
+                    let _ = tx.send(ScheduleEvent::Scheduled {
+                        token,
+                        scheduled_at,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(ScheduleEvent::Failed {
+                        error: e.to_string(),
+                    });
                 }
             }
         });
