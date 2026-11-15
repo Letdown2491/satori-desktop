@@ -6,7 +6,7 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
-## Unreleased
+## Unreleased (0.9.0)
 
 Video tiles earned their picture. A note's video now previews its first
 frame instead of a bare box: the sniff pipeline finally reads the frame it
@@ -42,7 +42,7 @@ landings no longer wait on a metadata round trip for authors the profile
 cache has never seen; names and avatars patch in as they resolve. Behind
 the scenes, the trust-graph's list fetch fires once per launch instead of
 once per pane, and link previews load when a note scrolls into view rather
-than for every note the relays push, preview cards now appear for
+than for every note the relays push. Preview cards now appear for
 extension-less web pages (a wiki slug, an App Store link used to render as
 a broken picture tile that suppressed its own card), and flaky preview
 fetches give up after five tries instead of retrying forever.
