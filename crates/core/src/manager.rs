@@ -3686,22 +3686,56 @@ impl Core {
     /// Addressable parents (pictures with a d tag, articles) are keyed by
     /// ADDRESS, not event id — their counts ride the address-carrying
     /// path, not this one (#32's notifications-door item).
-    pub fn comment_counts(self: &Arc<Self>, ids: Vec<EventId>) -> FeedRx {
+    pub fn comment_counts(
+        self: &Arc<Self>,
+        targets: Vec<(EventId, crate::nip::comment::CommentTarget)>,
+    ) -> FeedRx {
         self.feed_task(move |active| {
             Box::pin(async move {
-                let filter = Filter::new()
-                    .kinds([Kind::TextNote, Kind::Custom(1111)])
-                    .events(ids.clone())
-                    .limit(1000);
-                let id_set: std::collections::HashSet<EventId> = ids.iter().copied().collect();
-                let mut per_note: std::collections::HashMap<EventId, u32> =
+                // Two filter shapes per page: one batched #e filter for the
+                // event-target rows, one exact-#a filter per addressable row
+                // (CommentTarget::fetch_filters' grammar — a parameterized
+                // picture's comment thread hangs off the ADDRESS).
+                let mut filters = Vec::new();
+                let ids: Vec<EventId> = targets
+                    .iter()
+                    .filter(|(_, t)| matches!(t, crate::nip::comment::CommentTarget::Event { .. }))
+                    .map(|(id, _)| *id)
+                    .collect();
+                if !ids.is_empty() {
+                    filters.push(
+                        Filter::new()
+                            .kinds([Kind::TextNote, Kind::Custom(1111)])
+                            .events(ids)
+                            .limit(1000),
+                    );
+                }
+                let mut addr_rows: std::collections::HashMap<String, EventId> =
                     std::collections::HashMap::new();
-                for r in active.pool.get(filter).await.unwrap_or_default() {
-                    if let Some(pid) = parent_in_set(&r, &id_set) {
-                        *per_note.entry(pid).or_default() += 1;
+                for (row, t) in &targets {
+                    if let crate::nip::comment::CommentTarget::Address { kind, author, d } = t {
+                        let a = format!("{kind}:{author}:{d}");
+                        filters.push(
+                            Filter::new()
+                                .kind(Kind::Custom(1111))
+                                .custom_tag(SingleLetterTag::LOWERCASE_A, a.clone())
+                                .limit(500),
+                        );
+                        addr_rows.insert(a, *row);
                     }
                 }
-                Ok(FeedEvent::CommentCounts(per_note.into_iter().collect()))
+                // Per-shape fetches run concurrently (nostr 0.45 has no
+                // OR-composition for filters; 1 + one per addressable row,
+                // each READ_BUDGET-bounded in parallel).
+                let gets: Vec<_> = filters.into_iter().map(|f| active.pool.get(f)).collect();
+                let rows: Vec<Event> = futures_util::future::join_all(gets)
+                    .await
+                    .into_iter()
+                    .flat_map(|r| r.unwrap_or_default())
+                    .collect();
+                Ok(FeedEvent::CommentCounts(
+                    count_comment_targets(rows, &targets).into_iter().collect(),
+                ))
             })
         })
     }
@@ -7553,6 +7587,57 @@ fn parent_in_set(ev: &Event, ids: &std::collections::HashSet<EventId>) -> Option
     ev.tags.event_ids().last().filter(|pid| ids.contains(pid))
 }
 
+/// The comment-count tally (pure — the feed_task body above only fetches):
+/// each row says how its comments hang off it. Event targets count kinds
+/// 1/1111 whose parent e-tag is the row (the NIP-10 reply rule); address
+/// targets count kind-1111 comments hung off the exact a-tag ADDRESS
+/// (NIP-22: a parameterized picture's comments never reference the event
+/// id). A comment naming BOTH shapes credits the address row (an
+/// addressable parent hangs by `a`; the `e` is a convenience mark).
+fn count_comment_targets(
+    rows: Vec<Event>,
+    targets: &[(EventId, crate::nip::comment::CommentTarget)],
+) -> std::collections::HashMap<EventId, u32> {
+    // The same comment can come back from two of the fetches (a
+    // both-shapes comment matches the #e batch AND its #a filter):
+    // dedup by id before tallying.
+    let rows: Vec<Event> = rows
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let id_set: std::collections::HashSet<EventId> = targets
+        .iter()
+        .filter(|(_, t)| matches!(t, crate::nip::comment::CommentTarget::Event { .. }))
+        .map(|(id, _)| *id)
+        .collect();
+    let mut addr_rows: std::collections::HashMap<String, EventId> =
+        std::collections::HashMap::new();
+    for (row, t) in targets {
+        if let crate::nip::comment::CommentTarget::Address { kind, author, d } = t {
+            addr_rows.insert(format!("{kind}:{author}:{d}"), *row);
+        }
+    }
+    let mut per_note: std::collections::HashMap<EventId, u32> = std::collections::HashMap::new();
+    for r in rows {
+        let mut credited = false;
+        for t in r.tags.clone().to_vec() {
+            if t.as_slice().first().map(String::as_str) == Some("a")
+                && let Some(v) = t.as_slice().get(1)
+                && let Some(row) = addr_rows.get(v)
+            {
+                *per_note.entry(*row).or_default() += 1;
+                credited = true;
+                break;
+            }
+        }
+        if !credited && let Some(pid) = parent_in_set(&r, &id_set) {
+            *per_note.entry(pid).or_default() += 1;
+        }
+    }
+    per_note
+}
+
 #[cfg(test)]
 /// Test-only local-key login — the user-facing nsec door is gone (D17: the
 /// app never handles the master key), but the logout/re-login flow tests
@@ -8251,5 +8336,139 @@ mod tests {
             got.iter().all(|p| p.pubkey != "pk03"),
             "you never mention yourself"
         );
+    }
+
+    /// Fixture gate (D59) for the card comment counts (#52): the rows
+    /// relays answer the counts fetch with — kind-1 replies and NIP-22
+    /// comments on a note (parent e-tag), kind-1111 comments on a
+    /// parameterized picture (parent a-tag ADDRESS, the shape Amethyst
+    /// publishes for NIP-68 media), plus the both-shapes comment and a
+    /// wrong-d decoy. Signed events, real wire shapes.
+    #[test]
+    fn comment_count_fixtures_tally_by_target_shape() {
+        use crate::nip::comment::CommentTarget;
+
+        fn keys() -> Keys {
+            Keys::generate()
+        }
+        fn sign(me: &Keys, kind: Kind, tags: Vec<Tag>, content: &str) -> Event {
+            me.sign_event(UnsignedEvent::new(
+                me.public_key(),
+                Timestamp::now(),
+                kind,
+                Tags::from_list(tags),
+                content.to_string(),
+            ))
+            .unwrap()
+        }
+
+        let author = keys();
+        let commenter = keys();
+
+        // Row 1: a plain note; two comments (a kind-1 NIP-10 reply and a
+        // kind-1111 NIP-22 comment — both hang off the event id).
+        let note = sign(&author, Kind::TextNote, Vec::new(), "hello feed");
+        let reply = sign(
+            &commenter,
+            Kind::TextNote,
+            vec![Tag::event(note.id), Tag::public_key(note.pubkey)],
+            "a plain reply",
+        );
+        let note_comment = sign(
+            &commenter,
+            Kind::Custom(1111),
+            vec![
+                Tag::custom("E", [note.id.to_string()]),
+                Tag::custom("e", [note.id.to_string()]),
+                Tag::custom("K", ["1"]),
+                Tag::custom("k", ["1"]),
+                Tag::custom("P", [note.pubkey.to_string()]),
+                Tag::custom("p", [note.pubkey.to_string()]),
+            ],
+            "a NIP-22 comment",
+        );
+
+        // Row 2: a parameterized picture (kind 20 + d). Its comment hangs
+        // off the ADDRESS — the event id appears nowhere in the refs.
+        let pic = sign(
+            &author,
+            Kind::Custom(20),
+            vec![
+                Tag::custom("d", ["blossom-x"]),
+                Tag::custom("m", ["image/jpeg"]),
+                Tag::custom("imeta", ["url https://cdn.example.com/x.jpg m image/jpeg"]),
+            ],
+            "caption",
+        );
+        let pic_target = crate::nip::comment::CommentTarget::for_event(&pic);
+        let CommentTarget::Address {
+            kind: pk, d: pd, ..
+        } = &pic_target
+        else {
+            panic!("parameterized picture targets the address");
+        };
+        assert_eq!((*pk, pd.as_str()), (20, "blossom-x"));
+        let pic_comment = sign(
+            &commenter,
+            Kind::Custom(1111),
+            pic_target.root_tags(),
+            "love this",
+        );
+        // The comment's a-tag value must be the exact address string the
+        // counts fetch filters on.
+        let a_val = pic_comment
+            .tags
+            .clone()
+            .to_vec()
+            .iter()
+            .find(|t| t.as_slice().first().map(String::as_str) == Some("a"))
+            .map(|t| t.as_slice()[1].to_string())
+            .unwrap();
+        assert_eq!(a_val, format!("20:{}:blossom-x", pic.pubkey));
+
+        // A comment on a DIFFERENT d (same kind and author) — the decoy
+        // that proves the address match is exact, not prefix-loose.
+        let decoy = sign(
+            &commenter,
+            Kind::Custom(1111),
+            crate::nip::comment::CommentTarget::Address {
+                kind: 20,
+                author: pic.pubkey,
+                d: "blossom-y".into(),
+            }
+            .root_tags(),
+            "on the other picture",
+        );
+
+        // A comment naming BOTH shapes (the a-tag address AND a
+        // convenience e-tag of the picture event): credits the address
+        // row once.
+        let both = sign(
+            &commenter,
+            Kind::Custom(1111),
+            vec![
+                Tag::custom("A", [format!("20:{}:blossom-x", pic.pubkey)]),
+                Tag::custom("a", [format!("20:{}:blossom-x", pic.pubkey)]),
+                Tag::custom("e", [pic.id.to_string()]),
+                Tag::custom("p", [pic.pubkey.to_string()]),
+            ],
+            "both refs",
+        );
+
+        let targets = vec![
+            (note.id, CommentTarget::for_event(&note)),
+            (pic.id, pic_target),
+        ];
+        let got = count_comment_targets(
+            vec![reply, note_comment, pic_comment, decoy, both],
+            &targets,
+        );
+        assert_eq!(got.get(&note.id), Some(&2), "note: reply + NIP-22 comment");
+        assert_eq!(
+            got.get(&pic.id),
+            Some(&2),
+            "picture: address comment + both-shapes, decoy excluded"
+        );
+        assert_eq!(got.len(), 2, "no stray rows counted");
     }
 }

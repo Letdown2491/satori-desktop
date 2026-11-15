@@ -19,6 +19,13 @@ pub struct ImageMeta {
     /// gradient decoded client-side); the last-resort tile background
     /// when no poster URL rides the tag.
     pub blurhash: Option<String>,
+    /// `waveform <int int …>` (NIP-A0): amplitude values over time,
+    /// space separated full integers — the voice row's shape without
+    /// downloading the file.
+    pub waveform: Option<Vec<u32>>,
+    /// `duration <secs>` (NIP-A0): audio length in seconds (fractional
+    /// values tolerated — the NIP's own example is a whole number).
+    pub duration: Option<f64>,
 }
 
 pub fn parse(ev: &Event) -> Vec<ImageMeta> {
@@ -34,6 +41,8 @@ pub fn parse(ev: &Event) -> Vec<ImageMeta> {
         let mut mime = None;
         let mut thumb = None;
         let mut blurhash = None;
+        let mut waveform = None;
+        let mut duration = None;
         for entry in parts.iter().skip(1) {
             // One `"key value"` element, split at the first space; a bare
             // element (no space) carries nothing (imeta.ts:20-23).
@@ -53,6 +62,18 @@ pub fn parse(ev: &Event) -> Vec<ImageMeta> {
                     thumb = (!val.is_empty()).then(|| val.to_string());
                 }
                 "blurhash" => blurhash = (!val.is_empty()).then(|| val.to_string()),
+                // NIP-A0: the voice preview pair. Waveform values are
+                // whole ints (0-100 in the example); anything unparseable
+                // is skipped, the attribute rides one element.
+                "waveform" => {
+                    let vals: Vec<u32> = val
+                        .split_whitespace()
+                        .filter_map(|v| v.parse().ok())
+                        .take(128)
+                        .collect();
+                    waveform = (!vals.is_empty()).then_some(vals);
+                }
+                "duration" => duration = val.parse().ok(),
                 _ => {} // unknown attribute — its value rides one element
             }
         }
@@ -66,6 +87,8 @@ pub fn parse(ev: &Event) -> Vec<ImageMeta> {
             mime,
             poster: thumb,
             blurhash,
+            waveform,
+            duration,
         };
         // The TS returns a Map keyed by URL: a later imeta tag for the same
         // URL replaces the earlier meta.
