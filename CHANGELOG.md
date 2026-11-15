@@ -6,21 +6,6 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
-## Unreleased
-
-The render riders (#52) close the interop pass's last open surfaces.
-
-Pictures and videos with a `d` tag now show comment counts on their
-action row, and clicking one opens the comment thread by its address
-(NIP-22) — the thread was unreachable by id before. Voice notes render
-as a row with the author's waveform and duration, and play inline
-(NIP-A0): one player at a time, the same guarded door as the video
-player, strict Tor degrading to the browser link. Code snippets (NIP-C0)
-render in a monospace card with the file's name, language, description
-and license, and a tap copies the code. A kind the app has never heard
-of now renders as a quiet "unrendered kind N" line instead of
-vanishing; nothing arrives invisible.
-
 ## 0.8.0 - 2026-11-14
 
 The interop pass continues on two fronts: what a note can ask for, and
@@ -86,6 +71,18 @@ Two follow-up fixes from the first days with it: repost rows carry
 the boosted note's action bar (the envelope used to render bare), and
 the columns' add and remove buttons read at full ink.
 
+The render riders close the interop pass's last open surfaces.
+Pictures and videos with a `d` tag now show comment counts on their
+action row, and clicking one opens the comment thread by its address
+(NIP-22) — the thread was unreachable by id before. Voice notes render
+as a row with the author's waveform and duration, and play inline
+(NIP-A0): one player at a time, the same guarded door as the video
+player, strict Tor degrading to the browser link. Code snippets (NIP-C0)
+render in a monospace card with the file's name, language, description
+and license, and a tap copies the code. A kind the app has never heard
+of now renders as a quiet "unrendered kind N" line instead of
+vanishing; nothing arrives invisible.
+
 Under the hood, the interop batch got its five-lens audit (the same
 performance / system usage / memory / security / duplication pass as
 the previous two cycles) and the findings landed: the feed's
@@ -103,7 +100,9 @@ exits with the view and the relay task unsubscribes on an idle
 check), the wire column snapshots its data like the feed's instead of
 deep-copying it per frame, relay URLs pass the same screening
 everywhere they are typed, restored or dialed, and five hand-copied
-code shapes collapsed into shared kernels.
+code shapes collapsed into shared kernels, and the render-riders cycle
+collapsed the fourteen publish call sites and the two schedule paths
+onto shared task kernels.
 
 ## 0.7.1 - 2026-11-13
 
