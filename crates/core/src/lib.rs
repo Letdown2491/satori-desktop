@@ -86,6 +86,9 @@ pub mod wallet;
 pub mod wot;
 
 #[cfg(test)]
+pub(crate) mod test_relay;
+
+#[cfg(test)]
 pub(crate) mod test_env {
     use std::ffi::OsString;
     use std::path::PathBuf;

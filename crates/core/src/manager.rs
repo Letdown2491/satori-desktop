@@ -6776,7 +6776,6 @@ impl Core {
     /// Follows are snapshotted at start — a mid-session follow change rides
     /// the next refresh's fetches until the next session.
     async fn start_live(&self, kinds: Vec<Kind>) {
-        use futures_util::StreamExt as _;
         // Resolve the session BEFORE arming the flag: a failed resolve must
         // not wedge live_on true (it used to — the sub could never re-arm).
         let Ok(active) = self.active().await else {
@@ -6785,162 +6784,253 @@ impl Core {
         if self.live_on.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        let pool = active.pool.clone();
-        let live = self.live.clone();
-        let live_on = self.live_on.clone();
-        let live_epoch = Arc::clone(&self.live_epoch);
         // Captured at arm time; a mismatch at loop time means this session
         // was signed out and the loop tears its sub down below.
-        let my_epoch = live_epoch.load(std::sync::atomic::Ordering::SeqCst);
+        let my_epoch = self.live_epoch.load(std::sync::atomic::Ordering::SeqCst);
         let me = active.me();
         let follows = active.follows.clone();
-        self.rt.spawn(async move {
-            let now = Timestamp::now();
-            // NIP-01: an empty list can never match — the follows-scoped
-            // filters join only when there are follows to scope by.
+        self.rt.spawn(Self::run_live(
+            active.pool.clone(),
+            kinds,
+            follows,
+            me,
+            self.live.clone(),
+            self.live_on.clone(),
+            self.live_epoch.clone(),
+            my_epoch,
+        ));
+    }
+
+    /// Minimum gap between live re-arms: a relay CLOSED storm must not
+    /// spin REQs (a relay under subscription pressure would answer every
+    /// re-subscribe with another CLOSED).
+    const REARM_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// The live bell's consume loop, spawned once per session by
+    /// start_live. Owns the session's two subscriptions — the me-scoped
+    /// bell filters on the read set, and the follows' fan-out over the
+    /// outbox — and re-arms them when a relay takes one away.
+    ///
+    /// Why re-arm: a relay answering CLOSED (no machine-readable prefix —
+    /// subscription pressure, a relay restart, an auth flip) makes the
+    /// SDK REMOVE the subscription from that relay, and reconnects never
+    /// re-send removed subs (nostr-sdk `should_resubscribe`: None =>
+    /// false). Without a re-arm, every relay that closes the live sub
+    /// once stops delivering notifications for the rest of the session —
+    /// the bell and the new-notes pill both starve, silently.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn run_live(
+        pool: Arc<Pool>,
+        kinds: Vec<Kind>,
+        follows: Vec<PublicKey>,
+        me: PublicKey,
+        live: tokio::sync::broadcast::Sender<Live>,
+        live_on: Arc<std::sync::atomic::AtomicBool>,
+        live_epoch: Arc<std::sync::atomic::AtomicU64>,
+        my_epoch: u64,
+    ) {
+        use futures_util::StreamExt as _;
+        let now = Timestamp::now();
+        // NIP-01: an empty list can never match — the follows-scoped
+        // filters join only when there are follows to scope by. Bumped to
+        // a fresh window on every re-arm (a stale `since` would replay
+        // the whole session into the bell).
+        let bell_filters = |since: Timestamp| -> Vec<Filter> {
             let mut filters = vec![
                 Filter::new()
                     .kinds([Kind::TextNote, Kind::Custom(1111), Kind::Custom(9735)])
                     .pubkey(me)
-                    .since(now),
+                    .since(since),
             ];
             if !follows.is_empty() {
                 filters.push(
                     Filter::new()
                         .kind(Kind::EventDeletion)
                         .authors(follows.clone())
-                        .since(now),
+                        .since(since),
                 );
             }
-            let output = match pool.client().subscribe(filters).await {
-                Ok(o) => o,
+            filters
+        };
+        let mut filters = bell_filters(now);
+        let mut output = match pool.client().subscribe(filters.clone()).await {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("[core] live: subscribe failed ({e}); re-arming");
+                live_on.store(false, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+        };
+        // The follows' notes ride the OUTBOX (each author from the
+        // relays they write to — routed live fan-out, feeds.ts): a
+        // second subscription, merged into the same notification
+        // stream. Failure degrades to the main read set (indexers +
+        // own inbox relays), not to a dead bell.
+        let mut routed = if follows.is_empty() {
+            None
+        } else {
+            match pool
+                .subscribe_routed(kinds.clone(), &follows, Some(now))
+                .await
+            {
+                Ok(o) => Some(o),
                 Err(e) => {
-                    eprintln!("[core] live: subscribe failed ({e}); re-arming");
-                    live_on.store(false, std::sync::atomic::Ordering::SeqCst);
-                    return;
+                    eprintln!("[core] live: outbox fan-out failed ({e}); indexers only");
+                    None
                 }
-            };
-            // The follows' notes ride the OUTBOX (each author from the
-            // relays they write to — routed live fan-out, feeds.ts): a
-            // second subscription, merged into the same notification
-            // stream. Failure degrades to the main read set (indexers +
-            // own inbox relays), not to a dead bell.
-            let routed = if follows.is_empty() {
-                None
-            } else {
-                match pool
-                    .subscribe_routed(kinds.clone(), &follows, Some(now))
-                    .await
+            }
+        };
+        let mut notifications = pool.client().notifications();
+        // Debounce for the CLOSED re-arm below (None = never re-armed).
+        let mut last_rearm: Option<std::time::Instant> = None;
+        while let Some(n) = notifications.next().await {
+            // Session changed (sign-out, or a different account): drop
+            // the stale identity's subscription. The check runs before
+            // anything touches the store or the bell. live_on is left
+            // alone here — sign-out already reset it, and storing
+            // again could clobber a NEWER session's armed flag.
+            if live_epoch.load(std::sync::atomic::Ordering::SeqCst) != my_epoch {
+                eprintln!("[core] live: session changed; unsubscribing");
+                let _ = pool.client().unsubscribe(output.id()).await;
+                if let Some(r) = &routed {
+                    let _ = pool.client().unsubscribe(r.id()).await;
+                }
+                return;
+            }
+            let event = match n {
+                nostr_sdk::client::ClientNotification::Event {
+                    relay_url,
+                    subscription_id,
+                    event,
+                    ..
+                } if output.id() == &subscription_id
+                    || routed
+                        .as_ref()
+                        .map(|r| r.id() == &subscription_id)
+                        .unwrap_or(false) =>
                 {
-                    Ok(o) => Some(o),
-                    Err(e) => {
-                        eprintln!("[core] live: outbox fan-out failed ({e}); indexers only");
-                        None
-                    }
+                    (relay_url, *event)
                 }
-            };
-            let mut notifications = pool.client().notifications();
-            while let Some(n) = notifications.next().await {
-                // Session changed (sign-out, or a different account): drop
-                // the stale identity's subscription. The check runs before
-                // anything touches the store or the bell. live_on is left
-                // alone here — sign-out already reset it, and storing
-                // again could clobber a NEWER session's armed flag.
-                if live_epoch.load(std::sync::atomic::Ordering::SeqCst) != my_epoch {
-                    eprintln!("[core] live: session changed; unsubscribing");
+                nostr_sdk::client::ClientNotification::Message { relay_url, message }
+                    if matches!(
+                        &*message,
+                        nostr::message::RelayMessage::Closed { message, .. }
+                            if relay_latency::is_read_denial(message)
+                    ) =>
+                {
+                    // An explicit REQ refusal (write-only blaster,
+                    // auth wall we won't sign for, paywall) — the
+                    // read-dead signal (pool.ts onclose →
+                    // recordReadDenial; the broadcast stream delivers
+                    // every relay's CLOSED here).
+                    relay_latency::record_read_denial(relay_url.as_str());
+                    eprintln!("[core] live: read denial from {relay_url}");
+                    continue;
+                }
+                nostr_sdk::client::ClientNotification::Message { message, .. }
+                    if matches!(
+                        &*message,
+                        nostr::message::RelayMessage::Closed { subscription_id, .. }
+                            if **subscription_id == *output.id()
+                                || routed
+                                    .as_ref()
+                                    .is_some_and(|r| r.id() == &**subscription_id)
+                    ) =>
+                {
+                    // A relay closed one of OUR live subs without a
+                    // denial prefix — the SDK has already removed it,
+                    // and no reconnect will bring it back. Unsubscribe
+                    // the stale ids (other relays may still serve the
+                    // old id) and re-arm both subs on a fresh window.
+                    if last_rearm.is_some_and(|t| t.elapsed() < Self::REARM_COOLDOWN) {
+                        continue;
+                    }
+                    last_rearm = Some(std::time::Instant::now());
+                    eprintln!("[core] live: a relay closed a live sub; re-arming");
                     let _ = pool.client().unsubscribe(output.id()).await;
                     if let Some(r) = &routed {
                         let _ = pool.client().unsubscribe(r.id()).await;
                     }
-                    return;
-                }
-                let event = match n {
-                    nostr_sdk::client::ClientNotification::Event {
-                        relay_url,
-                        subscription_id,
-                        event,
-                        ..
-                    } if output.id() == &subscription_id
-                        || routed
-                            .as_ref()
-                            .map(|r| r.id() == &subscription_id)
-                            .unwrap_or(false) =>
-                    {
-                        (relay_url, *event)
+                    filters = bell_filters(Timestamp::now());
+                    match pool.client().subscribe(filters.clone()).await {
+                        Ok(o) => output = o,
+                        Err(e) => {
+                            eprintln!("[core] live: re-arm subscribe failed ({e})");
+                            break;
+                        }
                     }
-                    nostr_sdk::client::ClientNotification::Message { relay_url, message }
-                        if matches!(
-                            &*message,
-                            nostr::message::RelayMessage::Closed { message, .. }
-                                if relay_latency::is_read_denial(message)
-                        ) =>
-                    {
-                        // An explicit REQ refusal (write-only blaster,
-                        // auth wall we won't sign for, paywall) — the
-                        // read-dead signal (pool.ts onclose →
-                        // recordReadDenial; the broadcast stream delivers
-                        // every relay's CLOSED here).
-                        relay_latency::record_read_denial(relay_url.as_str());
-                        eprintln!("[core] live: read denial from {relay_url}");
-                        continue;
+                    if !follows.is_empty() {
+                        routed = match pool
+                            .subscribe_routed(kinds.clone(), &follows, Some(Timestamp::now()))
+                            .await
+                        {
+                            Ok(o) => Some(o),
+                            Err(e) => {
+                                eprintln!(
+                                    "[core] live: re-arm fan-out failed ({e}); indexers only"
+                                );
+                                None
+                            }
+                        };
                     }
-                    nostr_sdk::client::ClientNotification::Shutdown => break,
-                    _ => continue,
-                };
-                let (relay_url, event) = event;
-                // Seen-on memory (seen-relays.ts recordSeenOn): which
-                // relays we ACTUALLY receive each author from — the live
-                // bell is the same drain the TS wrapped around its
-                // subscription's onevent. The author-keyed hint store
-                // (WS1, RelayHintStore.kt) feeds off the same drain.
-                seen::record(&event.pubkey, &[relay_url.as_str()]);
-                seen_event::record(&event.id, relay_url.as_str());
-                hints::observe(&event, relay_url.as_str());
-                // Same proof-of-life mark (the live dot, §4.4).
-                crate::relay_latency::mark_delivery(relay_url.as_str());
-                // The chokepoint lives here too (pool.ts onevent):
-                // kind:5s are recorded as tombstones; expired copies
-                // (NIP-40) and author-deleted content (NIP-09) never
-                // ping the bell. The SDK has already persisted the
-                // event either way — the tombstone store is how it
-                // stops rendering.
-                if u16::from(event.kind) == 5 {
-                    deletions::record(&event, false);
                     continue;
                 }
-                if nip40::is_expired(&event) || deletions::is_deleted(&event) {
-                    continue;
-                }
-                // WoT graph feed (issue #2 WS1): live contact lists
-                // apply to the two-hop graph incrementally.
-                if u16::from(event.kind) == 3 {
-                    crate::wot::observe(&event);
-                }
-                // Duplicate-content gate (issue #2 WS2, AntiSpamFilter
-                // .kt): a hidden spammer's events never ping the bell
-                // (the SDK has already persisted them — the gate keeps
-                // them out of every view; the record rides with it).
-                if crate::dedup::observe(&event, relay_url.as_str()) {
-                    continue;
-                }
-                let sig = if event.tags.clone().public_keys().any(|pk| pk == me) {
-                    Some(Live::Mention)
-                } else {
-                    Some(Live::Post)
-                };
-                if let Some(sig) = sig {
-                    let _ = live.send(sig);
-                }
+                nostr_sdk::client::ClientNotification::Shutdown => break,
+                _ => continue,
+            };
+            let (relay_url, event) = event;
+            // Seen-on memory (seen-relays.ts recordSeenOn): which
+            // relays we ACTUALLY receive each author from — the live
+            // bell is the same drain the TS wrapped around its
+            // subscription's onevent. The author-keyed hint store
+            // (WS1, RelayHintStore.kt) feeds off the same drain.
+            seen::record(&event.pubkey, &[relay_url.as_str()]);
+            seen_event::record(&event.id, relay_url.as_str());
+            hints::observe(&event, relay_url.as_str());
+            // Same proof-of-life mark (the live dot, §4.4).
+            crate::relay_latency::mark_delivery(relay_url.as_str());
+            // The chokepoint lives here too (pool.ts onevent):
+            // kind:5s are recorded as tombstones; expired copies
+            // (NIP-40) and author-deleted content (NIP-09) never
+            // ping the bell. The SDK has already persisted the
+            // event either way — the tombstone store is how it
+            // stops rendering.
+            if u16::from(event.kind) == 5 {
+                deletions::record(&event, false);
+                continue;
             }
-            // The stream ended without a Shutdown (client teardown): the
-            // bell used to stay armed-dead until the next login (audit
-            // perf L1) — drop the flag so a later bootstrap re-arms, but
-            // only if no newer arm took over (that one owns the flag).
-            if live_epoch.load(std::sync::atomic::Ordering::SeqCst) == my_epoch {
-                live_on.store(false, std::sync::atomic::Ordering::SeqCst);
+            if nip40::is_expired(&event) || deletions::is_deleted(&event) {
+                continue;
             }
-            eprintln!("[core] live stream ended (relay disconnects resume via fetches)");
-        });
+            // WoT graph feed (issue #2 WS1): live contact lists
+            // apply to the two-hop graph incrementally.
+            if u16::from(event.kind) == 3 {
+                crate::wot::observe(&event);
+            }
+            // Duplicate-content gate (issue #2 WS2, AntiSpamFilter
+            // .kt): a hidden spammer's events never ping the bell
+            // (the SDK has already persisted them — the gate keeps
+            // them out of every view; the record rides with it).
+            if crate::dedup::observe(&event, relay_url.as_str()) {
+                continue;
+            }
+            let sig = if event.tags.clone().public_keys().any(|pk| pk == me) {
+                Some(Live::Mention)
+            } else {
+                Some(Live::Post)
+            };
+            if let Some(sig) = sig {
+                let _ = live.send(sig);
+            }
+        }
+        // The stream ended without a Shutdown (client teardown): the
+        // bell used to stay armed-dead until the next login (audit
+        // perf L1) — drop the flag so a later bootstrap re-arms, but
+        // only if no newer arm took over (that one owns the flag).
+        if live_epoch.load(std::sync::atomic::Ordering::SeqCst) == my_epoch {
+            live_on.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        eprintln!("[core] live stream ended (relay disconnects resume via fetches)");
     }
 
     /// The fire-once task scaffold (#31 DRY): spawn on the runtime, route
@@ -8502,5 +8592,86 @@ mod tests {
             "picture: address comment + both-shapes, decoy excluded"
         );
         assert_eq!(got.len(), 2, "no stray rows counted");
+    }
+
+    /// The notifications hole (user report: "after a while I quit getting
+    /// new note notifications"): a relay answering CLOSED for a live sub
+    /// makes the SDK REMOVE it (no re-send on reconnect), so the bell and
+    /// the new-notes pill starve silently for the rest of the session.
+    /// run_live must re-arm the subs when that happens — here: green
+    /// delivery, CLOSED, server kick + reconnect, then delivery AGAIN.
+    #[tokio::test]
+    async fn live_rearms_after_a_relay_closed_reply() {
+        use std::time::Duration;
+        let (_guard, mock, pool, _url) = crate::test_relay::pool_with_mock("core-live-rearm").await;
+        let alice = Keys::generate();
+
+        // Seed alice's NIP-65 so subscribe_routed routes the fan-out to
+        // the mock (an empty store would fall back to the real indexers).
+        let list = EventBuilder::new(Kind::RelayList, "")
+            .tag(Tag::custom("r", [mock.url().as_str()]))
+            .finalize(&alice)
+            .unwrap();
+        mock.publish(&list);
+        let seeded = pool
+            .client()
+            .fetch_events(
+                Filter::new()
+                    .kind(Kind::RelayList)
+                    .author(alice.public_key()),
+            )
+            .timeout(Duration::from_secs(5))
+            .await
+            .unwrap_or_default();
+        assert!(!seeded.is_empty(), "relay-list seed did not cache");
+
+        // Run the REAL loop: me = alice, follows = alice.
+        let live = tokio::sync::broadcast::Sender::new(64);
+        let live_on = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        tokio::spawn(Core::run_live(
+            pool.into(),
+            vec![Kind::TextNote],
+            vec![alice.public_key()],
+            alice.public_key(),
+            live.clone(),
+            live_on.clone(),
+            epoch.clone(),
+            0,
+        ));
+        let mut sigs = live.subscribe();
+
+        // Both REQs up (the bell filters + the routed fan-out).
+        mock.wait_open_subs(2).await;
+
+        // GREEN: a fresh note pings the bell.
+        let n1 = EventBuilder::new(Kind::TextNote, "before the closed")
+            .finalize(&alice)
+            .unwrap();
+        mock.publish(&n1);
+        let got = tokio::time::timeout(Duration::from_secs(3), sigs.recv()).await;
+        assert!(
+            matches!(got, Ok(Ok(_))),
+            "live bell dead BEFORE the closed reply — the harness is wrong"
+        );
+
+        // The relay closes the routed sub (in band), then drops the
+        // socket entirely (a restart / idle cull). The SDK reconnects.
+        mock.closed_sub(1);
+        mock.kick();
+        mock.wait_conns_seen(2).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // RED before the fix / GREEN after: a fresh note pings the bell
+        // again (the CLOSED sub was re-armed).
+        let n2 = EventBuilder::new(Kind::TextNote, "after the closed")
+            .finalize(&alice)
+            .unwrap();
+        mock.publish(&n2);
+        let got = tokio::time::timeout(Duration::from_secs(8), sigs.recv()).await;
+        assert!(
+            matches!(got, Ok(Ok(_))),
+            "bell never recovered from the CLOSED reply — notifications stay silent for the session"
+        );
     }
 }

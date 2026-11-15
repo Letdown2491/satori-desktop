@@ -157,8 +157,9 @@ fn extended_cover_seeded(
 /// the client's set grew for the process lifetime, sockets/fds/timers and
 /// all). Routed relays idle for over ROUTED_IDLE are evicted at the next
 /// routed call, the set is capped at ROUTED_CAP (oldest use first), and
-/// session teardown sweeps them all. A routed live sub on an evicted relay
-/// goes quiet until the next re-arm — the price of bounded fds.
+/// session teardown sweeps them all. A relay still hosting subscriptions
+/// (the live bell) is re-stamped instead — evicting it would kill the
+/// live sub silently.
 const ROUTED_IDLE: Duration = Duration::from_secs(3600);
 const ROUTED_CAP: usize = 60;
 
@@ -235,6 +236,12 @@ pub struct Pool {
     /// (socks.rs). Held for the pool's lifetime; dropping it stops the
     /// listener. None only in tests that never connect.
     screening: Option<crate::socks::ScreeningSocks>,
+    #[cfg(test)]
+    /// Test-only loopback exemption for the route screen (routable):
+    /// lets the live-sub tests drive the real REQ plumbing against a
+    /// local mock relay. Per-INSTANCE, so parallel screen tests that
+    /// assert loopback refusal never observe it.
+    allow_loopback: bool,
     pub store: Store,
     identity: PoolIdentity,
     /// Relays added for ROUTED reads (url -> last routed use), evicted when
@@ -302,12 +309,35 @@ impl Pool {
             client,
             store,
             identity,
+            #[cfg(test)]
+            allow_loopback: false,
             routed: Mutex::new(HashMap::new()),
             reads: Mutex::new(BTreeSet::new()),
             writes: Mutex::new(BTreeSet::new()),
             foreign_inflight: Mutex::new(HashMap::new()),
             screening: Some(screening),
         })
+    }
+
+    /// Test-only pool wired for loopback mock relays: the route screen
+    /// (routable) also passes ws://127.0.0.1 urls, so the real REQ/target
+    /// plumbing can run against a local mock. Production pools are built
+    /// exclusively through open(), where the exemption is false.
+    #[cfg(test)]
+    pub async fn open_for_tests() -> Result<Self, SdkError> {
+        let mut pool = Self::open().await?;
+        pool.allow_loopback = true;
+        Ok(pool)
+    }
+
+    /// The route screen, through the pool: the real net_guard ruleset,
+    /// plus the test instance's loopback exemption.
+    fn routable(&self, url: &str) -> bool {
+        #[cfg(test)]
+        if self.allow_loopback && url.starts_with("ws://127.0.0.1") {
+            return true;
+        }
+        outbox::routable_relay(url)
     }
 
     /// Attach the session identity: NIP-42 AUTH challenges are answered as
@@ -406,30 +436,52 @@ impl Pool {
 
     /// Idle/cap eviction of routed relays — bounds sockets, fds and timers
     /// within a session (the teardown sweep bounds them across sessions).
+    /// A relay still hosting subscriptions is IN USE (the live bell pins
+    /// its outbox relays at arm time): it is re-stamped and spared —
+    /// removing it would silently kill the live sub (no CLOSED, no
+    /// reconnect, no re-arm).
     async fn trim_routed(&self) {
-        let victims: Vec<String> = {
+        let mut victims: Vec<String> = {
             let mut map = self.routed.lock().unwrap();
             let now = Instant::now();
-            map.retain(|_, at| now.duration_since(*at) < ROUTED_IDLE);
-            if map.len() <= ROUTED_CAP {
-                Vec::new()
-            } else {
+            let mut stale: Vec<String> = map
+                .iter()
+                .filter(|(_, at)| now.duration_since(**at) >= ROUTED_IDLE)
+                .map(|(u, _)| u.clone())
+                .collect();
+            for u in &stale {
+                map.remove(u);
+            }
+            let mut over: Vec<String> = Vec::new();
+            if map.len() > ROUTED_CAP {
                 let mut by_age: Vec<(String, Instant)> =
                     map.iter().map(|(u, t)| (u.clone(), *t)).collect();
                 by_age.sort_by_key(|(_, t)| *t);
-                let over = by_age
+                over = by_age
                     .into_iter()
                     .take(map.len() - ROUTED_CAP)
                     .map(|(u, _)| u)
-                    .collect::<Vec<_>>();
+                    .collect();
                 for u in &over {
                     map.remove(u);
                 }
-                over
             }
+            stale.extend(over);
+            stale
         };
-        for url in victims {
-            let _ = self.client.remove_relay(&url).force().await;
+        for url in victims.drain(..) {
+            // In use? Re-stamp, don't evict.
+            if let Some(relay) = self.client.relay(&url).await.unwrap_or(None)
+                && !relay.subscriptions().await.is_empty()
+            {
+                self.routed
+                    .lock()
+                    .unwrap()
+                    .insert(url.clone(), Instant::now());
+                continue;
+            }
+            let res = self.client.remove_relay(&url).force().await;
+            eprintln!("[core] routed: evicted {url} ({res:?})");
         }
     }
 
@@ -540,7 +592,7 @@ impl Pool {
         // sequential LMDB round trip per follow.
         if let Ok(events) = self.store.relay_lists(authors).await {
             for ev in &events {
-                let list = Self::routed_list(ev);
+                let list = self.routed_list(ev);
                 if !list.is_empty() {
                     out.insert(ev.pubkey.to_string(), list);
                 }
@@ -560,7 +612,7 @@ impl Pool {
             if let Ok(events) = self.get(filter).await {
                 for ev in &events {
                     // (no explicit save: the SDK persists what it receives)
-                    let list = Self::routed_list(ev);
+                    let list = self.routed_list(ev);
                     if !list.is_empty() {
                         out.insert(ev.pubkey.to_string(), list);
                     }
@@ -570,14 +622,14 @@ impl Pool {
         out
     }
 
-    /// A follow's parsed relay list, screened for ROUTED use
-    /// (outbox::routable_relay): wss only, public IP literals only. A list
-    /// left empty by the screen reads as "no list" — the author rides the
-    /// indexers with the listless, never a dialed private host.
-    fn routed_list(ev: &Event) -> RelayList {
+    /// A follow's parsed relay list, screened for ROUTED use (routable):
+    /// wss only, public IP literals only. A list left empty by the screen
+    /// reads as "no list" — the author rides the indexers with the
+    /// listless, never a dialed private host.
+    fn routed_list(&self, ev: &Event) -> RelayList {
         let mut list = outbox::parse_relay_list(ev);
-        list.read.retain(|u| outbox::routable_relay(u));
-        list.write.retain(|u| outbox::routable_relay(u));
+        list.read.retain(|u| self.routable(u));
+        list.write.retain(|u| self.routable(u));
         list
     }
 
@@ -602,7 +654,7 @@ impl Pool {
             // idempotent — the pool rejects un-added urls at REQ time).
             // The route itself is already screened (relay_lists), this is
             // the belt to that suspenders.
-            if !outbox::routable_relay(url.as_str()) {
+            if !self.routable(url.as_str()) {
                 continue;
             }
             // The mid-session shard skip (feeds.ts fetchRoutedPage): a
@@ -696,7 +748,7 @@ impl Pool {
         for url in urls {
             // Same screen + read-scoped add as fetch_route (an un-added
             // url is rejected at REQ time).
-            if !outbox::routable_relay(url) || relay_latency::is_read_dead(url) {
+            if !self.routable(url) || relay_latency::is_read_dead(url) {
                 continue;
             }
             self.add_routed(url).await;
@@ -796,7 +848,7 @@ impl Pool {
             // Same screen as fetch_route (defense in depth); the
             // mid-session shard skip drops read-dead relays here too —
             // the live bell stops paying for dead sockets (feeds.ts).
-            if !outbox::routable_relay(url.as_str()) || relay_latency::is_read_dead(url.as_str()) {
+            if !self.routable(url.as_str()) || relay_latency::is_read_dead(url.as_str()) {
                 continue;
             }
             self.add_routed(url.as_str()).await;
@@ -1207,5 +1259,97 @@ mod tests {
         let (read, write) = pool.nip65(ev.pubkey).await.unwrap();
         println!("nip65 split: {} read, {} write", read.len(), write.len());
         assert!(!read.is_empty() || !write.is_empty());
+    }
+
+    /// The routed-eviction semantics, both halves (the "notifications
+    /// stop after a while" investigation turned this up): a stale relay
+    /// (idle > ROUTED_IDLE) with NO active subscriptions is evicted from
+    /// the client for real (the audit's fd bound — this used to be a
+    /// silent no-op: retain forgot the stamp but never removed the
+    /// relay); a stale relay still hosting the live bell's subscriptions
+    /// is IN USE — it is re-stamped and spared, because removing it
+    /// would silently kill the live sub (no CLOSED, no reconnect, no
+    /// re-arm).
+    #[tokio::test]
+    async fn trim_routed_evicts_idle_and_spares_subscribed() {
+        let (_guard, mock, pool, url) = crate::test_relay::pool_with_mock("pool-trim-routed").await;
+        // A second mock that will carry NO subscriptions.
+        let mock2 = crate::test_relay::MockRelay::spawn().await;
+        let url2 = mock2.url();
+        crate::net_guard::allow_direct_url(&url2);
+
+        let alice = Keys::generate();
+
+        // The bell's two subs ride mock (as start_live arms them); mock2
+        // joins the routed map only (added AFTER the subs, so it hosts
+        // none).
+        let _main = pool
+            .client()
+            .subscribe(vec![
+                Filter::new()
+                    .kind(Kind::TextNote)
+                    .pubkey(alice.public_key()),
+            ])
+            .await
+            .expect("main sub");
+        pool.add_routed(&url).await;
+        let _routed = pool
+            .client()
+            .subscribe(ReqTarget::manual(vec![(
+                url.as_str(),
+                vec![
+                    Filter::new()
+                        .kinds(vec![Kind::TextNote])
+                        .author(alice.public_key()),
+                ],
+            )]))
+            .await
+            .expect("routed sub");
+        pool.add_routed(&url2).await;
+
+        let mut notifications = pool.client().notifications();
+        mock.wait_open_subs(2).await;
+
+        // GREEN: the pipe works — a published note lands on the stream.
+        let n1 = EventBuilder::new(Kind::TextNote, "before the trim")
+            .finalize(&alice)
+            .unwrap();
+        mock.publish(&n1);
+        assert!(
+            crate::test_relay::delivered(&mut notifications, n1.id).await,
+            "live delivery broken even BEFORE the trim — the harness is wrong"
+        );
+
+        // Age every routed stamp past ROUTED_IDLE, then trim the way
+        // every routed call does (fetch_route, subscribe_routed,
+        // get_routed all open with it).
+        {
+            let mut map = pool.routed.lock().unwrap();
+            for at in map.values_mut() {
+                *at = Instant::now() - ROUTED_IDLE - Duration::from_secs(1);
+            }
+        }
+        pool.trim_routed().await;
+
+        // The subscribed relay is spared (re-stamped, still connected).
+        assert!(
+            pool.client().relay(&url).await.unwrap().is_some(),
+            "trim evicted a relay still hosting the live subs — the bell would die silently"
+        );
+        // The idle, subscription-free relay is gone for real.
+        assert!(
+            pool.client().relay(&url2).await.unwrap().is_none(),
+            "trim did NOT evict the stale idle relay — the fd bound is a no-op"
+        );
+
+        // The spared relay's live subs still deliver.
+        let n2 = EventBuilder::new(Kind::TextNote, "after the trim")
+            .finalize(&alice)
+            .unwrap();
+        mock.publish(&n2);
+        assert!(
+            crate::test_relay::delivered(&mut notifications, n2.id).await,
+            "delivery died across the trim — the sparing broke the live sub"
+        );
     }
 }

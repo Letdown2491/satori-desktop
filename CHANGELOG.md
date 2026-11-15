@@ -6,6 +6,20 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
+## 0.9.1 - 2026-11-15
+
+The live notification subscriptions survive relay CLOSEDs. A relay that
+answers CLOSED for one of the live bell's subscriptions (subscription
+pressure, a relay restart, an auth flip) used to lose that subscription for
+good: the SDK removes a CLOSED subscription and never re-sends it on
+reconnect, so the bell dot and the new-notes pill starved silently for the
+rest of the session. The live loop now re-arms both subscriptions when a
+relay takes one away (debounced to one re-arm per minute), and the routed
+relay trim no longer skips its own job: stale relays are evicted for real
+(a silent no-op let the client's relay set grow unbounded), while relays
+still hosting subscriptions are re-stamped instead of evicted, so the
+trimming can never kill the live bell.
+
 ## 0.9.0 - 2026-11-15
 
 Video tiles earned their picture. A note's video now previews its first
