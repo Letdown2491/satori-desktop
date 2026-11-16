@@ -279,9 +279,14 @@ impl MockRelay {
     /// Broadcast an event to every connection with an open
     /// subscription, framed under that connection's first sub id.
     pub fn publish(&self, event: &Event) {
+        let mut conns = self.conns.lock().unwrap();
+        // Prune dead connections first (memory-lens audit): kick() +
+        // reconnect used to leave every dead sender in the vec forever,
+        // and publish/closed_sub iterated them on every call.
+        conns.retain(|(tx, _)| !tx.is_closed());
         self.events.lock().unwrap().push(event.clone());
         let wire = serde_json::to_value(event).expect("event serializes");
-        for (tx, subs) in self.conns.lock().unwrap().iter() {
+        for (tx, subs) in conns.iter() {
             let guard = subs.lock().unwrap();
             let Some(sub_id) = guard.first() else {
                 continue;

@@ -292,13 +292,7 @@ fn notif_tier_enabled() -> bool {
 /// recipient), reactions and reposts (p = the author, e = the note) all
 /// clear it naturally — anything else was never addressed to me.
 fn notif_about_me(ev: &Event, me: &PublicKey, my_notes: &HashSet<EventId>) -> bool {
-    use nostr::nips::nip19::FromBech32;
-    let key = |raw: &str| -> Option<PublicKey> {
-        let bare = raw.strip_prefix("nostr:").unwrap_or(raw);
-        PublicKey::from_hex(bare)
-            .ok()
-            .or_else(|| PublicKey::from_bech32(bare).ok())
-    };
+    let key = crate::outbox::parse_pubkey_ref;
     for t in ev.tags.iter() {
         let v = t.as_slice();
         let (Some(kind), Some(value)) = (v.first().map(String::as_str), v.get(1)) else {
@@ -2818,7 +2812,7 @@ impl Core {
                     let filter = Filter::new()
                         .kind(Kind::EventDeletion)
                         .authors(follows.clone())
-                        .limit(500);
+                        .limit(crate::outbox::QUERY_LIMIT);
                     let _ = active.pool.get(filter).await;
                 }
                 0usize
@@ -3183,7 +3177,7 @@ impl Core {
                         .kind(Kind::EventDeletion)
                         .authors(active.follows.clone())
                         .until(Timestamp::from(until))
-                        .limit(500);
+                        .limit(crate::outbox::QUERY_LIMIT);
                     let _ = active.pool.get(del_filter).await;
                     notes = this.project_page(active, Some(until), &kinds).await?;
                 }
@@ -3671,6 +3665,10 @@ impl Core {
                 cached_suppressed.append(&mut suppressed);
                 let mut seen_sup = HashSet::new();
                 cached_suppressed.retain(|s| seen_sup.insert(s.event.id));
+                // RAM wears the same cap as the disk ledger (the memory
+                // lens: the boot load and the flusher truncate; the
+                // in-memory store must not hold more than it writes).
+                cached_suppressed.truncate(SUPPRESSED_CAP);
                 *SUPPRESSED.lock().unwrap() = cached_suppressed;
                 suppressed_dirty(); // the receipts ledger persists (D48)
                 let notifs = kept;
@@ -4743,7 +4741,7 @@ impl Core {
                         .kind(Kind::EventDeletion)
                         .author(who)
                         .until(Timestamp::from(until))
-                        .limit(500);
+                        .limit(crate::outbox::QUERY_LIMIT);
                     let _ = active.pool.get(del_filter).await;
                     notes = active
                         .pool
@@ -6863,6 +6861,26 @@ impl Core {
     /// re-subscribe with another CLOSED).
     const REARM_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
 
+    /// The escalation ceiling (perf-lens audit): a relay that never
+    /// stops CLOSEing the re-armed sub doubles its cooldown each time —
+    /// 60s, 2m, 4m … capped here — so a hostile or broken relay cannot
+    /// pin the session into a teardown/rebuild cycle every minute
+    /// forever. Any delivered bell event resets the escalation (the
+    /// storm is over; the subs are demonstrably live again).
+    const REARM_COOLDOWN_MAX: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+    /// Membership test shared by the Event and CLOSED arms (DRYness
+    /// audit): one definition of "one of the live bell's subscriptions",
+    /// so a third live sub updates both guards in lockstep instead of
+    /// two hand-maintained copies.
+    fn live_sub_id(
+        output: &Output<SubscriptionId>,
+        routed: &Option<Output<SubscriptionId>>,
+        sid: &SubscriptionId,
+    ) -> bool {
+        output.id() == sid || routed.as_ref().is_some_and(|r| r.id() == sid)
+    }
+
     /// The live bell's consume loop, spawned once per session by
     /// start_live. Owns the session's two subscriptions — the me-scoped
     /// bell filters on the read set, and the follows' fan-out over the
@@ -6940,6 +6958,9 @@ impl Core {
         let mut notifications = pool.client().notifications();
         // Debounce for the CLOSED re-arm below (None = never re-armed).
         let mut last_rearm: Option<std::time::Instant> = None;
+        // Consecutive re-arms without an intervening delivery: drives
+        // the escalating cooldown. Reset on every delivered bell event.
+        let mut rearm_backoff: u32 = 0;
         while let Some(n) = notifications.next().await {
             // Session changed (sign-out, or a different account): drop
             // the stale identity's subscription. The check runs before
@@ -6960,14 +6981,7 @@ impl Core {
                     subscription_id,
                     event,
                     ..
-                } if output.id() == &subscription_id
-                    || routed
-                        .as_ref()
-                        .map(|r| r.id() == &subscription_id)
-                        .unwrap_or(false) =>
-                {
-                    (relay_url, *event)
-                }
+                } if Self::live_sub_id(&output, &routed, &subscription_id) => (relay_url, *event),
                 nostr_sdk::client::ClientNotification::Message { relay_url, message }
                     if matches!(
                         &*message,
@@ -6989,7 +7003,10 @@ impl Core {
                         // identity and resubscribes the closed subs on
                         // success; stamping read-dead here only starves
                         // profile fetches of a working relay for 12h.
-                        eprintln!("[core] live: auth challenge from {relay_url}: {reason}");
+                        eprintln!(
+                            "[core] live: auth challenge from {relay_url}: {}",
+                            crate::pool::clean_reason(reason)
+                        );
                     } else if relay_latency::is_limit_rejection(reason) {
                         // A limit rejection: our filter's cap exceeds
                         // the relay's max (purplepag.es: "limit too
@@ -6997,13 +7014,19 @@ impl Core {
                         // and serves the query capped — the fetch
                         // simply gets no contribution from it. Never a
                         // read-dead stamp.
-                        eprintln!("[core] live: limit rejected by {relay_url}: {reason}");
+                        eprintln!(
+                            "[core] live: limit rejected by {relay_url}: {}",
+                            crate::pool::clean_reason(reason)
+                        );
                     } else {
                         // An explicit REQ refusal (write-only blaster,
                         // paywall, a restriction we can't satisfy) —
                         // the read-dead signal.
                         relay_latency::record_read_denial(relay_url.as_str());
-                        eprintln!("[core] live: read denial from {relay_url}: {reason}");
+                        eprintln!(
+                            "[core] live: read denial from {relay_url}: {}",
+                            crate::pool::clean_reason(reason)
+                        );
                     }
                     continue;
                 }
@@ -7014,7 +7037,7 @@ impl Core {
                             status: false,
                             message,
                             ..
-                        } if message.to_lowercase().contains("auth")
+                        } if relay_latency::is_auth_rejection(message)
                     ) =>
                 {
                     // Our SIGNED auth event was refused (unpaid
@@ -7027,17 +7050,17 @@ impl Core {
                         nostr::message::RelayMessage::Ok { message, .. } => message.to_string(),
                         _ => String::new(),
                     };
-                    eprintln!("[core] live: auth rejected by {relay_url}: {reason}");
+                    eprintln!(
+                        "[core] live: auth rejected by {relay_url}: {}",
+                        crate::pool::clean_reason(&reason)
+                    );
                     continue;
                 }
                 nostr_sdk::client::ClientNotification::Message { message, .. }
                     if matches!(
                         &*message,
                         nostr::message::RelayMessage::Closed { subscription_id, .. }
-                            if **subscription_id == *output.id()
-                                || routed
-                                    .as_ref()
-                                    .is_some_and(|r| r.id() == &**subscription_id)
+                            if Self::live_sub_id(&output, &routed, subscription_id)
                     ) =>
                 {
                     // A relay closed one of OUR live subs without a
@@ -7045,10 +7068,18 @@ impl Core {
                     // and no reconnect will bring it back. Unsubscribe
                     // the stale ids (other relays may still serve the
                     // old id) and re-arm both subs on a fresh window.
-                    if last_rearm.is_some_and(|t| t.elapsed() < Self::REARM_COOLDOWN) {
+                    // Escalating cooldown (perf-lens audit): each
+                    // consecutive re-arm doubles the gap, capped; the
+                    // count resets the moment a bell event delivers.
+                    let cooldown = Self::REARM_COOLDOWN
+                        .checked_mul(1 << rearm_backoff.min(5))
+                        .unwrap_or(Self::REARM_COOLDOWN_MAX)
+                        .min(Self::REARM_COOLDOWN_MAX);
+                    if last_rearm.is_some_and(|t| t.elapsed() < cooldown) {
                         continue;
                     }
                     last_rearm = Some(std::time::Instant::now());
+                    rearm_backoff += 1;
                     eprintln!("[core] live: a relay closed a live sub; re-arming");
                     let _ = pool.client().unsubscribe(output.id()).await;
                     if let Some(r) = &routed {
@@ -7092,6 +7123,9 @@ impl Core {
             hints::observe(&event, relay_url.as_str());
             // Same proof-of-life mark (the live dot, §4.4).
             crate::relay_latency::mark_delivery(relay_url.as_str());
+            // A delivery proves the re-armed subs are live: a CLOSED
+            // storm is over, so the escalation restarts from 60s.
+            rearm_backoff = 0;
             // The chokepoint lives here too (pool.ts onevent):
             // kind:5s are recorded as tombstones; expired copies
             // (NIP-40) and author-deleted content (NIP-09) never

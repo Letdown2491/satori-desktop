@@ -93,6 +93,26 @@ pub const QUERY_LIMIT: usize = 500;
 /// it). Re-exported for the pool/seen/hints callers.
 pub use crate::net_guard::{is_public_ip, routable_relay};
 
+/// A key mention in a tag value or url path: optional `nostr:` prefix,
+/// hex or bech32 (npub). The one parser for "is this string MY key"
+/// (the notifications verifier and the personal-endpoint screen share
+/// it, so a spelling one accepts the other accepts too).
+pub fn parse_pubkey_ref(raw: &str) -> Option<nostr::prelude::PublicKey> {
+    use nostr::nips::nip19::FromBech32;
+    let bare = raw.strip_prefix("nostr:").unwrap_or(raw);
+    nostr::prelude::PublicKey::from_hex(bare)
+        .ok()
+        .or_else(|| nostr::prelude::PublicKey::from_bech32(bare).ok())
+}
+
+/// Relay hosts known to run per-customer filtered firehoses. The
+/// personal-endpoint screen only exempts urls on these hosts (the
+/// security-lens audit: an attacker's relay could otherwise carry OUR
+/// npub in its path — `wss://attacker.example/<my-npub>` — and sail
+/// past the ours check into the routed set). Fail-closed: a future
+/// provider gets added here or stays screened out.
+const PERSONAL_ENDPOINT_HOSTS: [&str; 1] = ["filter.nostr.wine"];
+
 /// The owner of a personal-endpoint relay url, if it is one: the
 /// per-customer filtered firehoses (nostr.wine's filter.nostr.wine and
 /// its kin) embed the CUSTOMER's npub in the url path
@@ -103,16 +123,17 @@ pub use crate::net_guard::{is_public_ip, routable_relay};
 /// The routed fan-out (which scrapes FOLLOWERS' relay lists) must never
 /// dial someone else's.
 pub fn personal_endpoint_owner(url: &str) -> Option<nostr::prelude::PublicKey> {
-    use nostr::nips::nip19::FromBech32;
     let after_scheme = url.split_once("://")?.1;
-    let (_host, path) = after_scheme.split_once('/')?;
-    let first = path.split(['?', '/']).next()?;
-    let lower = first.to_lowercase();
-    let bech = lower.strip_prefix("nostr:").unwrap_or(&lower);
-    if !bech.starts_with("npub1") {
+    let (host, path) = after_scheme.split_once('/')?;
+    // Host check first, allocation-free: this runs per relay url of
+    // every author in the routing fan-out, and plain wss://host urls
+    // (the overwhelming case) exit here without a single allocation.
+    let host = host.to_lowercase();
+    if !PERSONAL_ENDPOINT_HOSTS.contains(&host.as_str()) {
         return None;
     }
-    nostr::prelude::PublicKey::from_bech32(bech).ok()
+    let first = path.split(['?', '/']).next()?;
+    parse_pubkey_ref(first)
 }
 
 // Caps (nip65.ts): 3 write relays per author considered; the greedy set-cover
@@ -329,6 +350,15 @@ mod tests {
         // matches `me`, so it screens out either way).
         assert_eq!(
             personal_endpoint_owner("wss://filter.example/npub1notreal"),
+            None
+        );
+        // The host gate (the security-lens audit): an attacker's relay
+        // carrying OUR npub in its path is not a personal endpoint —
+        // the owner only counts on known firehose hosts.
+        assert_eq!(
+            personal_endpoint_owner(
+                "wss://attacker.example/npub1rtlqca8r6auyaw5n5h3l5422dm4sry5dzfee4696fqe8s6qgudks7djtfs"
+            ),
             None
         );
     }

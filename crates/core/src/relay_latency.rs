@@ -488,6 +488,14 @@ pub fn is_limit_rejection(reason: &str) -> bool {
     reason.to_lowercase().contains("limit too high")
 }
 
+/// Our SIGNED auth event was refused: the OK(false) message carries
+/// "auth" (unpaid tier, an unwelcome key). The third refusal shape,
+/// homed beside its siblings (DRYness audit) — the live loop matched
+/// it inline, invisible to this module's tests.
+pub fn is_auth_rejection(ok_message: &str) -> bool {
+    ok_message.to_lowercase().contains("auth")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,6 +587,20 @@ mod tests {
             "blocked: limit too high: 1000 (max 500)"
         ));
         assert!(!is_limit_rejection("blocked: you are not welcome here"));
+    }
+
+    #[test]
+    fn auth_rejection_shape() {
+        // Our SIGNED auth came back OK-false: the third refusal shape
+        // (the DRYness audit homed it beside its siblings).
+        assert!(is_auth_rejection("auth-required: subscription expired"));
+        assert!(is_auth_rejection("bad auth event"));
+        // Signer-leg failures and ordinary refusals don't match — an
+        // unanswered challenge NEVER produces an OK, so anything here
+        // that isn't auth-shaped must not log "auth rejected".
+        assert!(!is_auth_rejection("blocked: you are not welcome here"));
+        assert!(!is_auth_rejection("restricted: reads require a paid plan"));
+        assert!(!is_auth_rejection("limit too high: 1000 (max 500)"));
     }
 
     #[test]

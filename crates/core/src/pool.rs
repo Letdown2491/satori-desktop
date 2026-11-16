@@ -334,7 +334,14 @@ impl Pool {
     /// plus the test instance's loopback exemption.
     fn routable(&self, url: &str) -> bool {
         #[cfg(test)]
-        if self.allow_loopback && url.starts_with("ws://127.0.0.1") {
+        if self.allow_loopback
+            // Host must BE 127.0.0.1, not merely start with it (the
+            // security-lens audit: "ws://127.0.0.1.evil.com" is a DNS
+            // name that passes a prefix test).
+            && url::Url::parse(url).is_ok_and(|u| {
+                u.host_str() == Some("127.0.0.1") && u.scheme() == "ws"
+            })
+        {
             return true;
         }
         outbox::routable_relay(url)
@@ -469,9 +476,15 @@ impl Pool {
             stale.extend(over);
             stale
         };
+        // One snapshot (perf-lens audit): the in-use check below used
+        // to await `client.relay()` per victim, serially, ahead of
+        // every routed call — the over-cap branch could span tens of
+        // victims.
+        let relays = self.client.relays().await;
         for url in victims.drain(..) {
             // In use? Re-stamp, don't evict.
-            if let Some(relay) = self.client.relay(&url).await.unwrap_or(None)
+            let relay = relays.iter().find(|(k, _)| k.as_str() == url);
+            if let Some((_, relay)) = relay
                 && !relay.subscriptions().await.is_empty()
             {
                 self.routed

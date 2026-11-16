@@ -47,6 +47,16 @@ challenge-sign-accept dance delivers (so a challenge line that repeats
 forever pins the failure to the signer leg, e.g. a bunker that won't
 sign kind 22242).
 
+The notifications page now verifies that each row is actually about you.
+The mention query asks relays for notes carrying your key in a p tag, but
+the answers were trusted as-is: a relay that mis-serves the filter could
+paint strangers' notes as "mentioned you" (the @geek report). Every row
+is now checked client-side: your key in a p tag, your key in an
+addressed a tag, or a reference to one of your recent notes. Zaps,
+reactions, and reposts all clear this check naturally; nothing a relay
+injects does. The live bell already verified exactly this and is
+unchanged.
+
 ## 0.9.0 - 2026-11-15
 
 Video tiles earned their picture. A note's video now previews its first
