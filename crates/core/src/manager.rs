@@ -280,6 +280,59 @@ fn notif_tier_enabled() -> bool {
 /// split leaves it false so overlapping phases don't double-count (the
 /// cached phase still wears the flood GATE via `reply_flooded` — the
 /// phase-equality rule).
+/// Is this event actually ABOUT me? The "@geek" report: the page showed
+/// "mentioned you" rows with nothing to do with me — the mention query
+/// asks relays for #p=me, but the ANSWERS were trusted, so a relay
+/// mis-serving the filter (a firehose under our subscription id, an
+/// indexer that ignores p) injected strangers' notes. The live bell
+/// never had this hole (`run_live` verifies p == me exactly); the page
+/// now verifies too: a p tag carrying MY key (hex or bech32, with or
+/// without the `nostr:` prefix), an a tag whose pubkey field is me, or
+/// an e/q tag referencing one of my recent notes. Zaps (9735, p = the
+/// recipient), reactions and reposts (p = the author, e = the note) all
+/// clear it naturally — anything else was never addressed to me.
+fn notif_about_me(ev: &Event, me: &PublicKey, my_notes: &HashSet<EventId>) -> bool {
+    use nostr::nips::nip19::FromBech32;
+    let key = |raw: &str| -> Option<PublicKey> {
+        let bare = raw.strip_prefix("nostr:").unwrap_or(raw);
+        PublicKey::from_hex(bare)
+            .ok()
+            .or_else(|| PublicKey::from_bech32(bare).ok())
+    };
+    for t in ev.tags.iter() {
+        let v = t.as_slice();
+        let (Some(kind), Some(value)) = (v.first().map(String::as_str), v.get(1)) else {
+            continue;
+        };
+        match kind {
+            "p" => {
+                if key(value).is_some_and(|k| k == *me) {
+                    return true;
+                }
+            }
+            // NIP-01 parameterized replaceable reference: kind:pubkey:d
+            "a" => {
+                if let Some((_, pk)) = value.split_once(':')
+                    && key(pk).is_some_and(|k| k == *me)
+                {
+                    return true;
+                }
+            }
+            // e/q referencing one of my recent notes (reply, quote,
+            // poll vote on my poll)
+            "e" | "q"
+                if EventId::from_hex(value)
+                    .ok()
+                    .is_some_and(|id| my_notes.contains(&id)) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn split_wot_tier(
     notifs: Vec<Event>,
     my_notes: &HashSet<EventId>,
@@ -3593,6 +3646,10 @@ impl Core {
                     .filter(|ev| {
                         ev.pubkey != me
                             && seen.insert(ev.id)
+                            // The @geek gate: the relay's answer to the
+                            // #p=me filter must BE about me (the bell
+                            // already verified; the page now does too).
+                            && notif_about_me(ev, &me, &my_note_ids)
                             && !muted.contains(&ev.pubkey.to_string())
                             // A stranger's thumbs-down is pure agitation
                             // (notifications.ts): never shown. +/emoji stay.
@@ -8718,6 +8775,95 @@ mod tests {
         assert!(
             matches!(got, Ok(Ok(_))),
             "bell never recovered from the CLOSED reply — notifications stay silent for the session"
+        );
+    }
+
+    /// The notifications page verifies its rows (the @geek report:
+    /// "messages that say they mentioned me that have nothing to do
+    /// with me"). The mention query asks relays for #p=me — but the
+    /// answers are trusted, so a relay that mis-serves the filter (its
+    /// firehose under our subscription id) painted strangers' notes as
+    /// "mentioned you". The union must verify each row is actually
+    /// about me: p/a tags carrying MY key, or e/q tags referencing one
+    /// of my recent notes. The mock relay ignores p tags entirely (it
+    /// matches kind+author only) — exactly the misbehaving shape.
+    #[test]
+    fn notifications_page_drops_junk_mentions() {
+        let _serial = crate::wot::test_serial();
+        let env = crate::test_env::EnvGuard::new("notif-junk");
+        let core = Arc::new(Core::new());
+        core.logout();
+        let secret_path = env.dir().join("test-nsec");
+        let secret = "e1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554";
+        let _ = std::fs::write(&secret_path, secret);
+        core.rt
+            .block_on(core.login_nsec_inner(secret))
+            .expect("login");
+        let me = core.pubkey().expect("pubkey after login");
+
+        let junk = core.rt.block_on(async {
+            // Wire the misbehaving mock into the SESSION's pool, and
+            // load it with junk + a control BEFORE the queries run (the
+            // mock replays its store on REQ).
+            let (mock, url) = {
+                let active = core.active().await.expect("session");
+                let mock = crate::test_relay::MockRelay::spawn().await;
+                let url = mock.url();
+                crate::net_guard::allow_direct_url(&url);
+                active
+                    .pool
+                    .connect_reads(vec![url.clone()])
+                    .await
+                    .expect("mock joins");
+                (mock, url)
+            };
+            let geek = Keys::generate();
+            let speaker = Keys::generate();
+            // JUNK: a note mentioning @geek (p = geek, no e/q) —
+            // nothing to do with me, exactly the report.
+            let junk = EventBuilder::new(Kind::TextNote, "hey @geek nice post")
+                .tag(Tag::custom("p", [geek.public_key().to_string()]))
+                .finalize(&geek)
+                .unwrap();
+            mock.publish(&junk);
+            // CONTROL: a true mention (p = me, no e/q) from another
+            // author.
+            let real = EventBuilder::new(Kind::TextNote, "hi @you")
+                .tag(Tag::custom("p", [me.to_string()]))
+                .finalize(&speaker)
+                .unwrap();
+            mock.publish(&real);
+
+            let mut rx = core.notifications();
+            // The task emits the cached paint, then the relay phase;
+            // the queries are READ_BUDGET(4s)-bounded per stream. Take
+            // the LAST Notifications emit within a generous window.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut notifs = Vec::new();
+            loop {
+                let got = tokio::time::timeout_at(deadline, rx.recv()).await;
+                match got {
+                    Ok(Some(FeedEvent::Notifications(list, _))) => notifs = list,
+                    Ok(Some(_)) => continue,
+                    Ok(None) | Err(_) => break,
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+            }
+            crate::net_guard::disallow_direct_url(&url);
+            (junk.id, real.id, notifs)
+        });
+        let (junk_id, real_id, notifs) = junk;
+
+        assert!(
+            notifs.iter().any(|e| e.id == real_id),
+            "the TRUE mention (p=me) never reached the page — the pipeline is broken"
+        );
+        assert!(
+            !notifs.iter().any(|e| e.id == junk_id),
+            "a stranger's note (p=geek, nothing to do with me) painted as a mention — \
+             the page trusted a relay's answer to the #p=me filter"
         );
     }
 
