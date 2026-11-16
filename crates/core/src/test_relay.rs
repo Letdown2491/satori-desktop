@@ -23,6 +23,20 @@ pub struct MockRelay {
 
 impl MockRelay {
     pub async fn spawn() -> Self {
+        Self::spawn_with_auth(false).await
+    }
+
+    /// An auth-gated mock (the relay.nostr.build shape): every REQ
+    /// before a valid NIP-42 auth gets an ["AUTH", challenge] frame and
+    /// a `CLOSED ... auth-required` reply; the REQ is NOT registered.
+    /// A signed kind-22242 event carrying the challenge (sig verified,
+    /// relay tag checked) marks the connection authenticated, and a
+    /// subsequent REQ is accepted.
+    pub async fn spawn_auth_gated() -> Self {
+        Self::spawn_with_auth(true).await
+    }
+
+    async fn spawn_with_auth(auth_required: bool) -> Self {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind loopback mock relay");
@@ -60,6 +74,11 @@ impl MockRelay {
                 });
                 // Inbound pump: REQ/CLOSE bookkeeping, EOSE replies.
                 let (tx_in, subs_in, events_in) = (tx.clone(), subs.clone(), events_accept.clone());
+                // Per-connection NIP-42 state (auth-gated mode): the
+                // challenge this conn was issued + whether a valid auth
+                // event landed.
+                let authed = Arc::new(Mutex::new(false));
+                let challenge = Arc::new(Mutex::new(String::new()));
                 tokio::spawn(async move {
                     // Pings/Pongs/Binary frames must NOT end the pump
                     // (the SDK pings its relays) — skip, don't exit.
@@ -76,9 +95,89 @@ impl MockRelay {
                         let Some(kind) = arr.first().and_then(|v| v.as_str()) else {
                             continue;
                         };
+                        if auth_required && kind == "AUTH" {
+                            // ["AUTH", <event>]: the client's NIP-42
+                            // answer. Verify kind, challenge, relay tag,
+                            // and the signature itself.
+                            let want_challenge = challenge.lock().unwrap().clone();
+                            let parsed = arr
+                                .get(1)
+                                .and_then(|v| serde_json::from_value::<Event>(v.clone()).ok());
+                            let valid = parsed.as_ref().is_some_and(|ev| {
+                                let tags_ok = ev.tags.iter().any(|t| {
+                                    t.as_slice().first().map(String::as_str) == Some("challenge")
+                                        && t.as_slice().get(1) == Some(&want_challenge)
+                                }) && ev.tags.iter().any(|t| {
+                                    t.as_slice().first().map(String::as_str) == Some("relay")
+                                        && t.as_slice().get(1).map(String::as_str)
+                                            == Some(format!("ws://{addr}").as_str())
+                                });
+                                u16::from(ev.kind) == 22242 && tags_ok && ev.verify().is_ok()
+                            });
+                            if valid {
+                                *authed.lock().unwrap() = true;
+                                if let Some(ev) = parsed {
+                                    let ok = Message::Text(
+                                        serde_json::json!(["OK", ev.id.to_string(), true, ""])
+                                            .to_string()
+                                            .into(),
+                                    );
+                                    let _ = tx_in.send(ok);
+                                }
+                            } else {
+                                let bad = Message::Text(
+                                    serde_json::json!([
+                                        "OK",
+                                        parsed.map(|e| e.id.to_string()).unwrap_or_default(),
+                                        false,
+                                        "invalid auth event"
+                                    ])
+                                    .to_string()
+                                    .into(),
+                                );
+                                let _ = tx_in.send(bad);
+                            }
+                            continue;
+                        }
                         let Some(sub_id) = arr.get(1).and_then(|v| v.as_str()) else {
                             continue;
                         };
+                        if auth_required && kind == "REQ" && !*authed.lock().unwrap() {
+                            // Unauthenticated REQ: issue the challenge
+                            // (if not yet issued) and refuse the sub —
+                            // the relay.nostr.build shape.
+                            let issued = challenge.lock().unwrap().clone();
+                            let challenge_str = if issued.is_empty() {
+                                let c = format!(
+                                    "challenge-{}",
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_nanos())
+                                        .unwrap_or(0)
+                                );
+                                *challenge.lock().unwrap() = c.clone();
+                                c
+                            } else {
+                                issued
+                            };
+                            let auth_frame = Message::Text(
+                                serde_json::json!(["AUTH", challenge_str])
+                                    .to_string()
+                                    .into(),
+                            );
+                            let _ = tx_in.send(auth_frame);
+                            let closed = Message::Text(
+                                serde_json::json!([
+                                    "CLOSED",
+                                    sub_id,
+                                    "auth-required: authenticate before subscribing"
+                                ])
+                                .to_string()
+                                .into(),
+                            );
+                            let _ = tx_in.send(closed);
+                            continue;
+                        }
                         match kind {
                             "REQ" => {
                                 subs_in.lock().unwrap().push(sub_id.to_string());
@@ -311,6 +410,28 @@ pub async fn pool_with_mock(tag: &str) -> (LiveGuard, MockRelay, Pool, String) {
     let url = mock.url();
     crate::net_guard::allow_direct_url(&url);
     let pool = Pool::open_for_tests().await.expect("pool opens");
+    pool.connect_reads(vec![url.clone()]).await.expect("reads");
+    (
+        LiveGuard {
+            _env: env,
+            url: url.clone(),
+        },
+        mock,
+        pool,
+        url,
+    )
+}
+
+/// Same preamble against an AUTH-GATED mock (relay.nostr.build shape),
+/// with a LOCAL signing identity attached before the connect so
+/// PoolAuthenticator can answer challenges.
+pub async fn pool_with_auth_mock(tag: &str) -> (LiveGuard, MockRelay, Pool, String) {
+    let env = crate::test_env::EnvGuard::new(tag);
+    let mock = MockRelay::spawn_auth_gated().await;
+    let url = mock.url();
+    crate::net_guard::allow_direct_url(&url);
+    let pool = Pool::open_for_tests().await.expect("pool opens");
+    pool.set_identity(crate::signer::Signer::Local(Keys::generate()));
     pool.connect_reads(vec![url.clone()]).await.expect("reads");
     (
         LiveGuard {

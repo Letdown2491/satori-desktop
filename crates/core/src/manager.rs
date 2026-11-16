@@ -6950,6 +6950,29 @@ impl Core {
                     }
                     continue;
                 }
+                nostr_sdk::client::ClientNotification::Message { relay_url, message }
+                    if matches!(
+                        &*message,
+                        nostr::message::RelayMessage::Ok {
+                            status: false,
+                            message,
+                            ..
+                        } if message.to_lowercase().contains("auth")
+                    ) =>
+                {
+                    // Our SIGNED auth event was refused (unpaid
+                    // subscription, a key the relay won't accept) — the
+                    // AUTH went out and came back no. Distinct from an
+                    // unanswered challenge: that one means the SIGNER
+                    // leg never even produced an auth event (a bunker
+                    // that won't sign kind 22242).
+                    let reason = match &*message {
+                        nostr::message::RelayMessage::Ok { message, .. } => message.to_string(),
+                        _ => String::new(),
+                    };
+                    eprintln!("[core] live: auth rejected by {relay_url}: {reason}");
+                    continue;
+                }
                 nostr_sdk::client::ClientNotification::Message { message, .. }
                     if matches!(
                         &*message,

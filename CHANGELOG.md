@@ -40,6 +40,13 @@ challenge, so a follow's endpoint was an endless
 authenticate-and-fail loop for us. Those entries now screen out of the
 routed set (our own, if we ever list one, still works).
 
+Auth flows gained observability: a relay refusing our signed auth event
+(unpaid tier, an unwelcome key) now logs as "auth rejected" instead of
+vanishing, and a mock auth-gated relay test proves the full
+challenge-sign-accept dance delivers (so a challenge line that repeats
+forever pins the failure to the signer leg, e.g. a bunker that won't
+sign kind 22242).
+
 ## 0.9.0 - 2026-11-15
 
 Video tiles earned their picture. A note's video now previews its first

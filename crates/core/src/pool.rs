@@ -1327,6 +1327,45 @@ mod tests {
         assert!(!list.read.iter().any(|u| u.contains("filter.nostr.wine")));
     }
 
+    /// The NIP-42 dance completes end-to-end: an auth-gated relay (the
+    /// relay.nostr.build shape — "authenticate with AUTH before
+    /// subscribing") challenges the first REQ, PoolAuthenticator signs
+    /// with the session identity, the relay validates the kind-22242
+    /// event (challenge, relay tag, SIGNATURE) and accepts — a publish
+    /// then delivers. Proves the machinery behind "auth challenge"
+    /// lines can succeed; such a line repeating forever means the
+    /// SIGNER leg failed (e.g. a bunker that won't sign 22242).
+    #[tokio::test]
+    async fn auth_gated_relay_signs_and_delivers() {
+        let (_guard, mock, pool, _url) =
+            crate::test_relay::pool_with_auth_mock("pool-auth-dance").await;
+        let alice = Keys::generate();
+
+        let mut notifications = pool.client().notifications();
+        let _sub = pool
+            .client()
+            .subscribe(vec![
+                Filter::new()
+                    .kind(Kind::TextNote)
+                    .author(alice.public_key()),
+            ])
+            .await
+            .expect("sub");
+
+        // The sub registers only AFTER the dance completes: challenge →
+        // signed AUTH → OK → resubscribe. This wait bounds the dance.
+        mock.wait_open_subs(1).await;
+
+        let n1 = EventBuilder::new(Kind::TextNote, "post-auth")
+            .finalize(&alice)
+            .unwrap();
+        mock.publish(&n1);
+        assert!(
+            crate::test_relay::delivered(&mut notifications, n1.id).await,
+            "auth-gated relay never delivered — the NIP-42 dance failed"
+        );
+    }
+
     #[tokio::test]
     async fn trim_routed_evicts_idle_and_spares_subscribed() {
         let (_guard, mock, pool, url) = crate::test_relay::pool_with_mock("pool-trim-routed").await;
