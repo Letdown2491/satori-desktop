@@ -3387,7 +3387,16 @@ impl Core {
     /// service's background warm instead; the reactive machinery (the
     /// panes' ensure_profiles pumps) patches names/avatars as they land.
     async fn profiles_for(active: &Active, notes: &[Event]) -> Vec<Profile> {
-        let authors: Vec<PublicKey> = notes.iter().map(|e| e.pubkey).collect();
+        // Authors PLUS everyone a body @-mentions (nip19::mention_pks):
+        // mention names used to resolve only where a view pumped them
+        // (feed/reader/thread), so the same note showed @name in the
+        // timeline and @npub1… in the notifications pane or on a profile.
+        // The store cache answers what it has; the misses warm in the
+        // background (the service dedups against its own seen-set).
+        let mut authors: Vec<PublicKey> = notes.iter().map(|e| e.pubkey).collect();
+        for note in notes {
+            authors.extend(crate::nip::nip19::mention_pks(&note.content));
+        }
         let cached = active
             .pool
             .store
@@ -3486,23 +3495,12 @@ impl Core {
                 // holds the union.
                 let my_note_ids: HashSet<EventId> = ids.iter().copied().collect();
                 let (kept, mut cached_suppressed) = split_wot_tier(cached, &my_note_ids, false);
-                cached = kept;
-                {
-                    let authors: Vec<PublicKey> = cached.iter().map(|e| e.pubkey).collect();
-                    let profiles = active
-                        .pool
-                        .store
-                        .profiles(&authors)
-                        .await
-                        .unwrap_or_default()
-                        .iter()
-                        .filter_map(Profile::from_event)
-                        .collect();
-                    // A clone rides the instant paint; `cached` stays here
-                    // for the final union (below) — the second emit must be
-                    // a SUPERSET of the first, never a replacement.
-                    let _ = tx.send(FeedEvent::Notifications(cached.clone(), profiles));
-                }
+                let cached = kept;
+                let profiles = Self::profiles_for(&active, &cached).await;
+                // A clone rides the instant paint; `cached` stays here
+                // for the final union (below) — the second emit must be
+                // a SUPERSET of the first, never a replacement.
+                let _ = tx.send(FeedEvent::Notifications(cached.clone(), profiles));
 
                 let since = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -3673,15 +3671,7 @@ impl Core {
                 suppressed_dirty(); // the receipts ledger persists (D48)
                 let notifs = kept;
 
-                let authors: Vec<PublicKey> = notifs.iter().map(|e| e.pubkey).collect();
-                let cached = active
-                    .pool
-                    .store
-                    .profiles(&authors)
-                    .await
-                    .unwrap_or_default();
-                let profiles: Vec<Profile> =
-                    cached.iter().filter_map(Profile::from_event).collect();
+                let profiles = Self::profiles_for(&active, &notifs).await;
 
                 // Dot state: anything newer than the high-water?
                 let high_water = crate::read_state::load().notif;

@@ -38,7 +38,7 @@ gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 gpui-video-player = { path = "vendor/gpui-video-player" }
 
 [workspace.package]
-version = "0.9.1"
+version = "0.9.2"
 edition = "2024"
 license = "MIT"
 authors = ["Letdown2491"]

@@ -48,6 +48,39 @@ pub fn entity(ev: &Event) -> String {
     bech.unwrap_or_else(|_| ev.id.to_string())
 }
 
+/// The pubkeys @-mentioned in `content`: the inline bech32 entities
+/// (`nostr:npub1…`, `npub1…`, `nprofile1…`) a note body carries. This is
+/// the HYDRATION-side scan — the page builders run it so mention names
+/// ship with the payload and warm in the background (content.ts
+/// mentionPubkeys); the app's `content.rs` owns the render-side token
+/// classification and must agree with it.
+///
+/// Deliberately whitespace-token-shaped, like the renderer: punctuation
+/// hugging a mention ("(see nostr:npub1…).") splits off, a token that is
+/// anything but a pubkey entity (a link, a nevent) returns nothing.
+pub fn mention_pks(content: &str) -> Vec<PublicKey> {
+    let mut out: Vec<PublicKey> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for token in content.split_whitespace() {
+        // The renderer's punctuation split ("(see nostr:npub1…)." keeps
+        // the entity): trim the same trailing set.
+        let core = token.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}', '"']);
+        let bech = core.strip_prefix("nostr:").unwrap_or(core);
+        let Ok(entity) = Nip19::from_bech32(bech) else {
+            continue;
+        };
+        let pk = match entity {
+            Nip19::Pubkey(pk) => pk,
+            Nip19::Profile(p) => p.public_key,
+            _ => continue,
+        };
+        if seen.insert(pk) {
+            out.push(pk);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +123,24 @@ mod tests {
         };
         assert_eq!(c.coordinate.identifier, "the-slug");
         assert_eq!(c.coordinate.public_key, ev.pubkey);
+    }
+
+    #[test]
+    fn mention_scan_finds_pubkeys_only() {
+        let alice = Keys::generate();
+        let bob = Keys::generate();
+        let content = format!(
+            "hi {} and nostr:{}! (also {}) plus https://x.example/npub1decoy and {}",
+            alice.public_key().to_bech32().unwrap(),
+            bob.public_key().to_bech32().unwrap(),
+            bob.public_key().to_bech32().unwrap(),
+            "nevent1qqst8cujky046negxgwwm5yn3wn3lfv8xy42wyhn6pq9y4nP0ar3su2sp6dcxuz",
+        );
+        let pks = mention_pks(&content);
+        assert_eq!(pks, vec![alice.public_key(), bob.public_key()]);
+        // Punctuation hugs, `nostr:` prefixes and bare npubs all resolve;
+        // links, nevents and plain words yield nothing.
+        assert!(mention_pks("no mentions here").is_empty());
+        assert!(mention_pks("a link https://x.example/a and a word").is_empty());
     }
 }

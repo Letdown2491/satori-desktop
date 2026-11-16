@@ -264,6 +264,26 @@ impl ProfileView {
         .detach();
     }
 
+    /// Hydrate the note bodies' mention names — their notes render full
+    /// bodies (word_flow), and a body mention used to stay @npub1… unless
+    /// the person was hydrated by some other pane. The page payload
+    /// carries mentions now too (profiles_for scans them); this pump
+    /// patches the ones that land after the paint (thread.rs want_names,
+    /// same seam).
+    fn want_names(&self, notes: &[Event], cx: &mut Context<Self>) {
+        let mut seen = HashSet::new();
+        let missing: Vec<PublicKey> = notes
+            .iter()
+            .flat_map(|n| content::mention_pks(&n.content))
+            .filter(|pk| {
+                !self.profiles.contains_key(&pk.to_string()) && seen.insert(pk.to_string())
+            })
+            .collect();
+        if !missing.is_empty() {
+            self.pump(self.core.ensure_profiles(missing), cx);
+        }
+    }
+
     /// D38: the edit form just landed a fresh kind 0 — swap the header's
     /// copy (name/about/picture/banner re-derive at render; a changed
     /// NIP-05 re-fires its memo, a changed picture refetches by URL).
@@ -300,6 +320,7 @@ impl ProfileView {
                 }
                 self.status.clear();
                 self.error = None;
+                self.want_names(&self.notes, cx);
             }
             // The strips' next page (endless scroll): dedupe by id — the
             // store page may hand back rows the page boundary already
@@ -313,12 +334,14 @@ impl ProfileView {
                 for p in &page.profiles {
                     self.profiles.insert(p.pubkey.clone(), p.clone());
                 }
+                let fresh = self.notes.len();
                 for n in page.notes {
                     if self.note_ids.insert(n.id) {
                         self.want_media(&n, cx);
                         self.notes.push(n);
                     }
                 }
+                self.want_names(&self.notes[fresh..], cx);
                 self.oldest_ts = self.notes.last().map(|n| n.created_at.as_secs());
                 self.refresh_strips();
                 self.status.clear();
@@ -329,6 +352,13 @@ impl ProfileView {
             FeedEvent::Failed(e) => {
                 // §4.3: transient — Retry re-asks the profile + strips.
                 self.error = Some(states::PaneError::transient("The profile", &e));
+            }
+            FeedEvent::Profiles(profiles) => {
+                // The mention pump's landings (want_names): merge; the
+                // trailing notify repaints the bodies.
+                for p in profiles {
+                    self.profiles.insert(p.pubkey.clone(), p);
+                }
             }
             _ => {}
         }

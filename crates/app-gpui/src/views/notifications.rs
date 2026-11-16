@@ -433,6 +433,7 @@ impl NotificationsView {
                 self.me = self.core.me().unwrap_or_default();
                 self.want_parents(cx);
                 self.want_receipt_names(cx);
+                self.want_body_names(&notifs, cx);
                 self.status.clear();
                 self.error = None;
             }
@@ -440,6 +441,16 @@ impl NotificationsView {
                 // The resolver's answer (store-first, relay for misses) —
                 // whispers fill in as these land.
                 self.parents.extend(p);
+                cx.notify();
+            }
+            FeedEvent::Profiles(profiles) => {
+                // The name pumps' landings (want_body_names,
+                // want_receipt_names): merge and repaint — without this
+                // arm every pump's events fell through to `_ => {}` and
+                // receipt/mention names never patched.
+                for p in profiles {
+                    self.profiles.insert(p.pubkey.clone(), p);
+                }
                 cx.notify();
             }
             FeedEvent::Failed(e) => {
@@ -646,6 +657,38 @@ impl NotificationsView {
             .children(menu)
             .into_any_element();
         Some(strip)
+    }
+
+    /// The row bodies' names: each notification's author AND everyone its
+    /// content @-mentions — rows render full note bodies (content::body),
+    /// and a body mention used to stay @npub1… forever unless the same
+    /// person happened to be hydrated by another pane (the core payload
+    /// carries authors only; the page payload now carries mentions too —
+    /// this pump patches the ones that land after the paint). Same seam
+    /// as feed.rs's mention pump (content.ts mentionPubkeys).
+    fn want_body_names(&mut self, notifs: &[Event], cx: &mut Context<Self>) {
+        let mut seen = HashSet::new();
+        let missing: Vec<PublicKey> = notifs
+            .iter()
+            .flat_map(|n| {
+                let mut pks = vec![n.pubkey];
+                pks.extend(content::mention_pks(&n.content));
+                pks
+            })
+            .filter(|pk| {
+                !self.profiles.contains_key(&pk.to_string()) && seen.insert(pk.to_string())
+            })
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let mut rx = self.core.ensure_profiles(missing);
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                let _ = this.update(cx, |this, cx| this.on_event(ev, 0, cx));
+            }
+        })
+        .detach();
     }
 
     /// WS4 receipts: resolve the suppressed authors' names so the audit
@@ -904,6 +947,19 @@ fn notif_card(
             .into_any_element(),
     };
 
+    // The copy-id seal rides the timestamp and copies THE NOTE ON SCREEN,
+    // not the announcement: body rows (reply/mention/quote) carry the note
+    // itself, a repost row carries the boosted note. Receipt rows that show
+    // no note (reaction, zap) get none.
+    let seal =
+        if !matches!(t, NotifType::Reaction | NotifType::Repost) && !ev.content.trim().is_empty() {
+            Some(satori_core::nip::nip19::uri(ev))
+        } else if t == NotifType::Repost {
+            content::repost_inner_cached(ev).map(|n| satori_core::nip::nip19::uri(&n))
+        } else {
+            None
+        };
+
     let mut row = div()
         .w_full()
         .flex()
@@ -920,9 +976,7 @@ fn notif_card(
             time,
             format!("notif-{idx}"),
             Some(ev.pubkey),
-            // No id seal: the header announces an action on some other
-            // note — the seal would copy the announcement, not the note.
-            None,
+            seal,
             handle.clone(),
         ));
     if let Some(pid) = &parent_id

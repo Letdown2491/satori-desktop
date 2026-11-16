@@ -6,6 +6,24 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
+## 0.9.2 - 2026-11-16
+
+@mentions inside note bodies now show people's names everywhere, not just
+in the notes and articles timelines. A mention in a note is a raw npub
+token that the renderer turns into a name by looking the person up; the
+page fetches only ever looked up note AUTHORS, so the same note showed
+@name in the timeline and @npub1… in the notifications page or on a
+profile (it worked sometimes, when another pane happened to have fetched
+that person). The page builders now include everyone a body mentions, and
+the notifications and profile views patch names in as they land. Fixing
+this also un-broke the notifications page's receipt names, whose update
+channel was silently dropped.
+
+Notification rows carry the copy-the-event-id seal that notes and
+articles already have: it sits on the timestamp and copies the note on
+screen (the boosted note for a repost; receipts that show no note get no
+seal).
+
 ## 0.9.1 - 2026-11-15
 
 The live notification subscriptions survive relay CLOSEDs. A relay that

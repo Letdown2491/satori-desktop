@@ -977,9 +977,10 @@ pub fn article_data_cached(ev: &Event) -> Option<std::sync::Arc<article::Article
 /// which is the third mode toggle (timefmt.rs) everywhere. The name opens
 /// the actor's profile when `open_profile` is given. `copy_id` (the
 /// note's NIP-21 URI) hangs the copy-the-id seal after the timestamp —
-/// None where the header announces an action on some other note
-/// (notification rows): the seal copies the note on screen, not the
-/// announcement.
+/// the seal copies the note on screen, so a caller whose header announces
+/// an action on a DIFFERENT note than the body shown passes None (or the
+/// shown note's URI; notifications rows pass the body's note, the boosted
+/// note for a repost).
 #[allow(clippy::too_many_arguments)]
 pub fn actor_header<V: EventEmitter<Nav> + 'static>(
     glyph: Option<AnyElement>,
