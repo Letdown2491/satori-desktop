@@ -2099,12 +2099,6 @@ impl Render for Shell {
             .when_some(self.reply_overlay.clone(), |d, sheet| {
                 d.child(card_overlay("reply", sheet, 560., Some(560.), cx))
             })
-            // The me menu (D78): catcher + card over the avatar slot — at
-            // the ROOT, not the workspace: the avatar leads the rail in
-            // BOTH view modes, and mounted inside workspace() the menu
-            // never rendered in single-pane mode (the click set the flag
-            // and nothing appeared — D80's owner report).
-            .when(self.me_menu, |d| d.child(self.me_menu_card(cx)))
     }
 }
 
@@ -2160,6 +2154,12 @@ impl Shell {
                     ),
                 |d| d.child(self.floating_top(cx)),
             )
+            // The me menu (D78): catcher + card over the avatar slot. It
+            // mounts in BOTH content wrappers (this and workspace) — the
+            // wrapper's left edge is the rail's right edge, which a
+            // root-level anchor can't know (the root row centers the
+            // rail+content group).
+            .when(self.me_menu, |d| d.child(self.me_menu_card(cx)))
     }
 
     /// The columns workspace (D68): the pinned streams side by side, each
@@ -2387,6 +2387,10 @@ impl Shell {
             // The add-column menu: an absolute card over the + slot; Esc
             // closes (back()'s workspace branch), a pick pins and closes.
             .when(self.add_menu, |d| d.child(self.add_menu_card(cx)))
+            // The me menu (D78): the second content mount (pane_column
+            // carries the other; the wrapper's left edge is the rail's
+            // right edge in both modes).
+            .when(self.me_menu, |d| d.child(self.me_menu_card(cx)))
     }
 
     /// The add-column menu: the kinds not already pinned, one row each.
@@ -2477,13 +2481,14 @@ impl Shell {
         ));
         let mut card = div()
             .absolute()
-            // Anchored under the rail's avatar slot. The menu mounts at
-            // the SHELL root (both view modes), and the rail is the root
-            // row's first 52px — the workspace-relative left(12) this
-            // card was written with put it over the rail itself in
-            // single-pane mode. 52 (rail) + 12 (the + menu's gap) = 64.
+            // Anchored under the rail's avatar slot: the menu mounts inside
+            // the CONTENT wrapper (pane_column / workspace — whichever mode
+            // is up), whose left edge is the rail's right edge. The root
+            // row centers the rail+content group, so a root-level offset
+            // can't know where the rail is (D80 owner report: the card
+            // drifted into the empty left margin in single-pane mode).
             .top(px(52.0))
-            .left(px(64.0))
+            .left(px(12.0))
             .w(px(160.0))
             .rounded(px(theme::R_EMBED))
             .border_1()
