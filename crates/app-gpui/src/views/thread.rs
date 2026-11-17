@@ -12,8 +12,8 @@ use std::{
 };
 
 use gpui::{
-    Context, Entity, EventEmitter, FontWeight, ListAlignment, ListState, Render, SharedString,
-    Window, div, list, prelude::*, px, rgb,
+    Context, Entity, EventEmitter, FontWeight, ListAlignment, ListScrollEvent, ListState, Render,
+    SharedString, Window, div, list, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, ParentNote, Profile};
@@ -60,6 +60,10 @@ pub struct ThreadView {
     /// the data changed.
     snap: Option<ThreadSnap>,
     snap_dirty: bool,
+    /// The visible reply-row window (notifications.rs's fields): the
+    /// scroll stream keeps it current; the media pins read it.
+    first_visible_start: usize,
+    last_visible_end: usize,
 }
 
 /// The render-time snapshot: everything the item closure reads, rebuilt
@@ -185,10 +189,26 @@ impl ThreadView {
             engagement,
             snap: None,
             snap_dirty: true,
+            first_visible_start: 0,
+            last_visible_end: 0,
         };
         // The wallet broadcast (D20): the thread's bolts follow every zap,
         // theirs or the sheet's, wherever it started.
         engagement::pump_wallet(&view.core, &cx.entity(), cx);
+        // The visible window (notifications.rs's shape): the scroll stream
+        // tracks which reply rows are on screen so the media pins stay
+        // window-scoped (D60's rule — the thread was the last whole-set
+        // pinner, and a photo thread blew the per-owner cap, leaving the
+        // tail unpinned: the flash-then-refetch flicker).
+        let this = cx.entity().downgrade();
+        view.list
+            .set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
+                let _ = this.update(cx, |n, cx| {
+                    n.first_visible_start = ev.visible_range.start;
+                    n.last_visible_end = ev.visible_range.end;
+                    n.pin_window(cx);
+                });
+            });
         view
     }
 
@@ -239,6 +259,11 @@ impl ThreadView {
     }
 
     fn on_event(&mut self, ev: FeedEvent, cx: &mut Context<Self>) {
+        // The reflow guard (feed.rs's Reflow): reset() clears the scroll
+        // anchor and wipes the rows' measures — a reset on a patch event
+        // (profiles, parents, failures: same row count) yanks and blinks
+        // the pane for nothing. Only a real row-count change resets.
+        let before = self.replies.len();
         match ev {
             FeedEvent::One(Some(note), profile) => {
                 // An article landing as a thread anchor (quote embed, reply
@@ -305,7 +330,9 @@ impl ThreadView {
             }
             _ => {}
         }
-        self.list.reset(self.replies.len());
+        if self.replies.len() != before {
+            self.list.reset(self.replies.len());
+        }
         self.touch();
         cx.notify();
     }
@@ -316,6 +343,64 @@ impl ThreadView {
         for url in content::media_urls_cached(note).iter().cloned() {
             media::fetch(&self.core, url, cx.entity_id(), cx);
         }
+    }
+
+    /// Sweep + pin the visible window's media (feed/notifications.rs's
+    /// pin_window discipline). Called at render (landings) and from the
+    /// scroll stream — the two moments the on-screen set changes. The set:
+    /// every profile avatar (byte-free in the pin budget), the anchor
+    /// card's media + og thumbnails (it never scrolls out), and the
+    /// VISIBLE reply rows' media + og thumbnails. Off-screen reply images
+    /// age out of the cache and return on scroll-back like any pane's.
+    fn pin_window(&mut self, cx: &mut Context<Self>) {
+        let viewer = cx.entity_id();
+        let win_start = self.first_visible_start.min(self.replies.len());
+        let win_end = self
+            .last_visible_end
+            .max(win_start + 8)
+            .min(self.replies.len());
+        let mut painted: Vec<String> = Vec::new();
+        for p in self.profiles.values() {
+            media::fetch(&self.core, p.picture.clone(), viewer, cx);
+            if !p.picture.is_empty() && !painted.contains(&p.picture) {
+                painted.push(p.picture.clone());
+            }
+        }
+        for a in self.anchor.as_ref().into_iter() {
+            for url in content::media_urls_cached(a).iter().cloned() {
+                let fresh = !painted.contains(&url);
+                media::fetch(&self.core, url.clone(), viewer, cx);
+                if fresh {
+                    painted.push(url);
+                }
+            }
+            // The og card's thumbnail paints preview.image — a URL the
+            // parse never knew. Re-request (and pin) it like any picture.
+            for url in content::og_image_urls(a) {
+                let fresh = !painted.contains(&url);
+                media::fetch(&self.core, url.clone(), viewer, cx);
+                if fresh {
+                    painted.push(url);
+                }
+            }
+        }
+        for (ev, _) in &self.replies[win_start..win_end] {
+            for url in content::media_urls_cached(ev).iter().cloned() {
+                let fresh = !painted.contains(&url);
+                media::fetch(&self.core, url.clone(), viewer, cx);
+                if fresh {
+                    painted.push(url);
+                }
+            }
+            for url in content::og_image_urls(ev) {
+                let fresh = !painted.contains(&url);
+                media::fetch(&self.core, url.clone(), viewer, cx);
+                if fresh {
+                    painted.push(url);
+                }
+            }
+        }
+        media::repin(viewer, painted, cx);
     }
 
     fn name_for(&self, ev: &Event) -> String {
@@ -624,55 +709,14 @@ impl Render for ThreadView {
         let status = self.status.clone();
         let replies_empty = self.replies.is_empty();
         let media = media::Snapshot::new(cx);
-        // Evicted media comes back on render — a thread is bounded content,
-        // so sweep everything it paints (Ready/not-media URLs are silent
-        // no-ops in fetch; only a landing notifies, so no render loop).
-        // The same set PINS against eviction: a thread is read idly for
-        // minutes, renders stop, only renders touch — without pins the
-        // next landing burst took exactly the images on screen.
-        let viewer = cx.entity_id();
-        let mut painted: Vec<String> = Vec::new();
-        for p in self.profiles.values() {
-            media::fetch(&self.core, p.picture.clone(), viewer, cx);
-            if !p.picture.is_empty() && !painted.contains(&p.picture) {
-                painted.push(p.picture.clone());
-            }
-        }
-        for a in self.anchor.as_ref().into_iter() {
-            for url in content::media_urls_cached(a).iter().cloned() {
-                let fresh = !painted.contains(&url);
-                media::fetch(&self.core, url.clone(), viewer, cx);
-                if fresh {
-                    painted.push(url);
-                }
-            }
-            // The og card's thumbnail paints preview.image — a URL the
-            // parse never knew. Re-request (and pin) it like any picture.
-            for url in content::og_image_urls(a) {
-                let fresh = !painted.contains(&url);
-                media::fetch(&self.core, url.clone(), viewer, cx);
-                if fresh {
-                    painted.push(url);
-                }
-            }
-        }
-        for (ev, _) in &self.replies {
-            for url in content::media_urls_cached(ev).iter().cloned() {
-                let fresh = !painted.contains(&url);
-                media::fetch(&self.core, url.clone(), viewer, cx);
-                if fresh {
-                    painted.push(url);
-                }
-            }
-            for url in content::og_image_urls(ev) {
-                let fresh = !painted.contains(&url);
-                media::fetch(&self.core, url.clone(), viewer, cx);
-                if fresh {
-                    painted.push(url);
-                }
-            }
-        }
-        media::repin(cx.entity_id(), painted, cx);
+        // The media discipline (D60's rule, finally thread-wide): sweep +
+        // pin the VISIBLE window — avatars and the anchor card (it never
+        // scrolls out) always, the replies' rows only while on screen. The
+        // old whole-set pin capped out on photo threads (two 24MP photos
+        // are the whole per-owner budget) and the unpinned TAIL — replies
+        // currently on screen — died to the next landing's eviction sweep:
+        // the flash-then-refetch flicker.
+        self.pin_window(cx);
         // Rebuild the render snapshot only when the DATA changed (any
         // mutation sets snap_dirty): the reply tree, profiles, quotes and
         // the engagement mirrors used to deep-clone per repaint (the

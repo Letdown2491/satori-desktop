@@ -30,6 +30,13 @@ rail now opens a small menu: View profile, Bookmarks, Drafts, and Lists
 you picked). One fewer icon in the rail, and your things live in one
 obvious place: under you.
 
+Threads stop flashing their images. A thread pinned every picture it
+contained against memory pressure, and on photo-heavy threads that pin
+silently ran out partway down: the pictures on screen lost their
+protection and blinked out and back as you scrolled. Threads now protect
+exactly what is on screen, like every other page, and the reply list no
+longer re-animates itself when names and context land in the background.
+
 ## 0.9.1 - 2026-11-15
 
 The live notification subscriptions survive relay CLOSEDs. A relay that

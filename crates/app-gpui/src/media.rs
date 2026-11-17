@@ -992,6 +992,50 @@ mod tests {
         );
     }
 
+    /// The thread flicker's cache seam (the owner's recurring report):
+    /// a thread used to pin its WHOLE painted set (the D60 bounded-content
+    /// exception), but the per-owner cap (PIN_OWNER_MAX_BYTES) cuts the
+    /// TAIL once the landed sizes sum past it — two 24MP photos are the
+    /// whole budget. The tail's urls ride normal eviction: idle past the
+    /// grace window (a thread is read for minutes), any foreign landing
+    /// under pressure evicted them WHILE ON SCREEN — and the pane wasn't
+    /// even re-rendered by the eviction (the landing notifies its own
+    /// view): the user's next scroll repainted a placeholder flash, the
+    /// sweep re-fetched, the image popped back. Fixed caller-side (D79):
+    /// the thread now pins its visible window, which can never reach the
+    /// cap. This test locks the cache's CONTRACT side for that fix — a
+    /// caller that over-pins still loses its tail, so no future pane may
+    /// grow a whole-set pin past the budget and expect screen-persistence.
+    #[test]
+    fn a_thread_over_the_pin_cap_lets_its_tail_go_dark() {
+        let cache = Cache::default();
+        // The thread's real sequence: repin fires BEFORE the images land
+        // (unknown sizes count 0 — everything pins), the landings arrive,
+        // the next render's repin re-caps with real sizes.
+        cache.pin_set(1, vec!["anchor".into(), "r1".into(), "r2".into()]);
+        insert(&cache, "anchor", 3535, 3535, Duration::from_secs(130)); // 50MB
+        insert(&cache, "r1", 3535, 3535, Duration::from_secs(130)); // 50MB
+        insert(&cache, "r2", 1770, 1770, Duration::from_secs(130)); // 12.5MB
+        // The re-cap: 100MB of the 96MB budget consumed by anchor + r1 —
+        // r2 (still on screen, a visible reply) rides normal eviction now.
+        cache.pin_set(1, vec!["anchor".into(), "r1".into(), "r2".into()]);
+        assert!(
+            !cache.pinned.borrow().contains("r2"),
+            "the tail unpin: the flicker's precondition"
+        );
+        // Idle past the grace, a foreign landing (wire, another column)
+        // pushes the big class over budget — evict runs inside ITS
+        // landing.
+        insert(&cache, "foreign", 3535, 3535, Duration::from_secs(1)); // 50MB
+        let dropped = cache.evict();
+        assert!(
+            dropped
+                .iter()
+                .any(|_| !cache.map.borrow().contains_key("r2")),
+            "the on-screen reply image is the victim: the flicker"
+        );
+    }
+
     /// The refcount (D62): a url shared by two owners stays pinned while
     /// EITHER lives; releasing both frees it. The old flat set let the
     /// first repin unpin the other pane's copy.
