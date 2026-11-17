@@ -33,7 +33,7 @@ pub(crate) struct LibraryView {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum LibTab {
+pub(crate) enum LibTab {
     Bookmarks,
     Drafts,
     Lists,
@@ -42,7 +42,10 @@ enum LibTab {
 impl EventEmitter<Nav> for LibraryView {}
 
 impl LibraryView {
-    pub(crate) fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
+    /// `tab` is the entry point's preselected surface: the shell's me menu
+    /// (D78) opens the pane straight onto Bookmarks/Drafts/Lists; the tab
+    /// strip stays, so the user can still wander between the three.
+    pub(crate) fn new(core: Arc<Core>, tab: LibTab, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
         let bookmarks = cx.new(|cx| Feed::bookmarks(core.clone(), cx));
         // Forward the child feed's navs upward (the shell only subscribes
@@ -56,13 +59,26 @@ impl LibraryView {
         .detach();
         Self {
             core,
-            tab: LibTab::Bookmarks,
+            tab,
             bookmarks,
             lists: Vec::new(),
             open_list: None,
             members: HashMap::new(),
             deep: false,
         }
+        // A straight-into-Lists entry pre-fires the query (the
+        // tab_btn path re-queries on every Lists visit; the pane's
+        // own load_lists below owns the pump).
+        .also_lists(cx)
+    }
+
+    /// The Lists entry's pre-fired query (a `new` tail — `load_lists`
+    /// needs `&mut self`).
+    fn also_lists(mut self, cx: &mut Context<Self>) -> Self {
+        if self.tab == LibTab::Lists {
+            self.load_lists(cx);
+        }
+        self
     }
 
     /// Rail re-click / the back-to-top whisper: the active tab's list is

@@ -22,7 +22,7 @@ use super::{
     content,
     edit_profile::EditProfileView,
     feed::Feed,
-    library::LibraryView,
+    library::{LibTab, LibraryView},
     nav::Nav,
     notifications::NotificationsView,
     profile::ProfileView,
@@ -300,6 +300,9 @@ pub struct Shell {
     focused_col: usize,
     /// The add-column menu's open flag (the workspace's + affordance).
     add_menu: bool,
+    /// The me menu's open flag (D78): the avatar's click opens the user's
+    /// own surfaces — profile, bookmarks, drafts, lists.
+    me_menu: bool,
     /// The column a drag is over right now (phase 2 reorder cue): its
     /// header lights vermilion; cleared on drop.
     reorder_over: Option<usize>,
@@ -344,6 +347,7 @@ impl Shell {
             columns: Vec::new(),
             focused_col: 0,
             add_menu: false,
+            me_menu: false,
             reorder_over: None,
             row_scroll: ScrollHandle::new(),
             tag_input: cx.new(|cx| Input::single_line("#", cx)),
@@ -510,9 +514,9 @@ impl Shell {
     }
 
     /// The Library pane (D38): Bookmarks | Drafts | Lists — the user's own
-    /// stuff in one place.
-    fn open_library(&mut self, cx: &mut Context<Self>) {
-        let view = cx.new(|cx| LibraryView::new(self.core.clone(), cx));
+    /// stuff in one place. `tab` is the me menu's entry point (D78).
+    fn open_library(&mut self, tab: LibTab, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| LibraryView::new(self.core.clone(), tab, cx));
         self.subscribe_nav(&view, cx);
         self.push_drill(Pane::Library(view), cx);
     }
@@ -704,6 +708,7 @@ impl Shell {
         self.columns_on = false;
         self.save_layout();
         self.add_menu = false;
+        self.me_menu = false;
         for col in self.columns.drain(..) {
             col.pane.release_media(cx);
         }
@@ -1348,6 +1353,13 @@ impl Shell {
             cx.notify();
             return;
         }
+        // The me menu owns Esc while it's up (the catcher owns clicks) —
+        // in either view mode, before anything pops.
+        if self.me_menu {
+            self.me_menu = false;
+            cx.notify();
+            return;
+        }
         // The workspace owns the view when no drill is up: Esc closes the
         // add-column menu if it's open, and nothing pops.
         if self.workspace_up() {
@@ -1596,12 +1608,15 @@ impl Shell {
             // avatar (16px page band + 12px note-card padding).
             .pt(px(19.0))
             .gap_1()
-            // The user's avatar is the Profile spot (D38): clicking opens
-            // the own profile, re-clicking the active one scrolls it back
-            // up; the tick marks it (Home remains the Feed spot's re-click
-            // — go_home below). It LEADS the rail — including in columns
-            // mode, where the toggle follows it (owner correction: the
-            // toggle-first order was their earlier mistake).
+            // The user's avatar is the me menu (D78): the user's own
+            // surfaces hang off their mark — profile, bookmarks, drafts,
+            // lists — replacing the Library rail slot. Re-click when the
+            // own profile is already the top pane scrolls it back up (the
+            // old avatar-direct behavior's remnant); the tick marks it
+            // (Home remains the Feed spot's re-click — go_home below). It
+            // LEADS the rail — including in columns mode, where the toggle
+            // follows it (owner correction: the toggle-first order was
+            // their earlier mistake).
             .child(self.rail_button(
                 "rail-profile",
                 "Profile",
@@ -1610,8 +1625,9 @@ impl Shell {
                 cx.listener(move |shell, _, _, cx| {
                     if shell.active_spot(cx) == Some(Spot::Profile) {
                         shell.pane_to_top(cx);
-                    } else if let Some(me) = shell.me {
-                        shell.open_profile(me, cx);
+                    } else {
+                        shell.me_menu = !shell.me_menu;
+                        cx.notify();
                     }
                 }),
             ))
@@ -1651,17 +1667,6 @@ impl Shell {
                     }),
                 ))
             })
-            .child(self.rail_button(
-                "rail-library",
-                "Library",
-                icons::book_icon(ink(active == Some(Spot::Library))),
-                active == Some(Spot::Library),
-                cx.listener(move |shell, _, _, cx| {
-                    if shell.active_spot(cx) != Some(Spot::Library) {
-                        shell.open_library(cx);
-                    }
-                }),
-            ))
             .when(!self.rail_hides(&ColumnKind::Search), |d| {
                 d.child(self.rail_button(
                     "rail-search",
@@ -2376,6 +2381,8 @@ impl Shell {
             // The add-column menu: an absolute card over the + slot; Esc
             // closes (back()'s workspace branch), a pick pins and closes.
             .when(self.add_menu, |d| d.child(self.add_menu_card(cx)))
+            // The me menu (D78): catcher + card over the avatar slot.
+            .when(self.me_menu, |d| d.child(self.me_menu_card(cx)))
     }
 
     /// The add-column menu: the kinds not already pinned, one row each.
@@ -2440,6 +2447,86 @@ impl Shell {
                 cx.listener(move |shell, _, _, cx| shell.add_relay_column(cx)),
             ));
         card
+    }
+
+    /// The me menu (D78): the avatar's click opens the user's own surfaces
+    /// — profile, bookmarks, drafts, lists — the Library rail slot retired
+    /// (the Library pane stays; each row opens it pre-tabbed). A
+    /// full-viewport catcher closes on any outside click; Esc closes in
+    /// back(). The rows ride add_menu_card's row anatomy (hover tint, not
+    /// the ink swap — the text stays readable).
+    fn me_menu_card(&self, cx: &mut Context<Self>) -> Div {
+        let mut layer = div().absolute().inset_0();
+        // The catcher: any click that isn't on the card closes the menu.
+        // It sits UNDER the card (the card is a later child), so the
+        // card's own rows win.
+        layer = layer.child(
+            div()
+                .id("me-menu-catcher")
+                .size_full()
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.me_menu = false;
+                    cx.notify();
+                })),
+        );
+        let mut card = div()
+            .absolute()
+            // Anchored under the rail's avatar slot (add_menu_card's
+            // anchor, mirrored at the top).
+            .top(px(52.0))
+            .left(px(12.0))
+            .w(px(160.0))
+            .rounded(px(theme::R_EMBED))
+            .border_1()
+            .border_color(rgb(theme::hairline()))
+            .bg(rgb(theme::washi()))
+            .py(px(4.0));
+        card = card.child(Self::me_row(
+            "View profile",
+            "me-view-profile",
+            cx.listener(move |shell, _, _, cx| {
+                shell.me_menu = false;
+                if let Some(me) = shell.me {
+                    shell.open_profile(me, cx);
+                }
+            }),
+        ));
+        for (label, id, tab) in [
+            ("Bookmarks", "me-bookmarks", LibTab::Bookmarks),
+            ("Drafts", "me-drafts", LibTab::Drafts),
+            ("Lists", "me-lists", LibTab::Lists),
+        ] {
+            card = card.child(Self::me_row(
+                label,
+                id,
+                cx.listener(move |shell, _, _, cx| {
+                    shell.me_menu = false;
+                    shell.open_library(tab, cx);
+                }),
+            ));
+        }
+        layer = layer.child(card);
+        layer
+    }
+
+    /// One me-menu row: text only (the + menu carries the icon duty; the
+    /// user's own surfaces need no second glyph language).
+    fn me_row(
+        label: &'static str,
+        id: &'static str,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> AnyElement {
+        div()
+            .id(SharedString::from(id))
+            .cursor_pointer()
+            .px(px(12.0))
+            .py(px(8.0))
+            .text_size(px(theme::T_UI))
+            .text_color(rgb(theme::ink()))
+            .hover(|s| s.bg(rgb(theme::hairline())))
+            .on_click(on_click)
+            .child(label)
+            .into_any_element()
     }
 
     /// One + menu input row: the label, the field, the Add button.
