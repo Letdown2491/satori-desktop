@@ -2099,6 +2099,12 @@ impl Render for Shell {
             .when_some(self.reply_overlay.clone(), |d, sheet| {
                 d.child(card_overlay("reply", sheet, 560., Some(560.), cx))
             })
+            // The me menu (D78): catcher + card over the avatar slot — at
+            // the ROOT, not the workspace: the avatar leads the rail in
+            // BOTH view modes, and mounted inside workspace() the menu
+            // never rendered in single-pane mode (the click set the flag
+            // and nothing appeared — D80's owner report).
+            .when(self.me_menu, |d| d.child(self.me_menu_card(cx)))
     }
 }
 
@@ -2381,8 +2387,6 @@ impl Shell {
             // The add-column menu: an absolute card over the + slot; Esc
             // closes (back()'s workspace branch), a pick pins and closes.
             .when(self.add_menu, |d| d.child(self.add_menu_card(cx)))
-            // The me menu (D78): catcher + card over the avatar slot.
-            .when(self.me_menu, |d| d.child(self.me_menu_card(cx)))
     }
 
     /// The add-column menu: the kinds not already pinned, one row each.
