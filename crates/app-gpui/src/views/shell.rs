@@ -2463,22 +2463,27 @@ impl Shell {
         let mut layer = div().absolute().inset_0();
         // The catcher: any click that isn't on the card closes the menu.
         // It sits UNDER the card (the card is a later child), so the
-        // card's own rows win.
-        layer = layer.child(
-            div()
-                .id("me-menu-catcher")
-                .size_full()
-                .on_click(cx.listener(|shell, _, _, cx| {
-                    shell.me_menu = false;
-                    cx.notify();
-                })),
-        );
+        // card's own rows win — and it OCCLUDES: gpui's hit-test collects
+        // every hitbox under the pointer, so a plain catcher let a click
+        // on the avatar fire BOTH handlers (catcher closes, avatar
+        // toggles back open — the menu never closed). BlockMouse cuts the
+        // hit-test at the catcher: the rail under it never sees the
+        // click.
+        layer = layer.child(div().id("me-menu-catcher").size_full().occlude().on_click(
+            cx.listener(|shell, _, _, cx| {
+                shell.me_menu = false;
+                cx.notify();
+            }),
+        ));
         let mut card = div()
             .absolute()
-            // Anchored under the rail's avatar slot (add_menu_card's
-            // anchor, mirrored at the top).
+            // Anchored under the rail's avatar slot. The menu mounts at
+            // the SHELL root (both view modes), and the rail is the root
+            // row's first 52px — the workspace-relative left(12) this
+            // card was written with put it over the rail itself in
+            // single-pane mode. 52 (rail) + 12 (the + menu's gap) = 64.
             .top(px(52.0))
-            .left(px(12.0))
+            .left(px(64.0))
             .w(px(160.0))
             .rounded(px(theme::R_EMBED))
             .border_1()
