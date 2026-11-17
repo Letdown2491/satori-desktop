@@ -80,7 +80,7 @@ impl Engagement {
 /// What the engine needs from its host view. The two optional flourishes
 /// were feed.rs's only deltas from the verbatim twins: the snapshot
 /// invalidation ([`Host::touched`]) and the Bookmarks row-drop
-/// ([`Host::unbookmark_committed`], the Library's D38 list).
+/// ([`Host::unbookmark_committed`], the Bookmarks page's D38 list).
 pub trait Host: EventEmitter<Nav> + Sized + 'static {
     /// The host's mirror field.
     fn engagement(&mut self) -> &mut Engagement;
@@ -91,8 +91,8 @@ pub trait Host: EventEmitter<Nav> + Sized + 'static {
     /// snapshot must rebuild); a no-op where render reads the mirrors
     /// directly.
     fn touched(&mut self) {}
-    /// A COMMITTED unbookmark dropped the row? Only the Library's
-    /// Bookmarks list is the bookmark set's projection (D38); everywhere
+    /// A COMMITTED unbookmark dropped the row? Only the Bookmarks
+    /// page's list is the bookmark set's projection (D38); everywhere
     /// else only the star unfills.
     fn unbookmark_committed(&mut self, _id: EventId, _cx: &mut Context<Self>) {}
 }
@@ -286,8 +286,8 @@ pub fn toggle_bookmark<H: Host>(host: &mut H, ev: &Event, cx: &mut Context<H>) {
                     });
                 }
                 PublishEvent::Committed { .. } if !adding => {
-                    // Unbookmarking from the Library's list drops the row
-                    // (D38); everywhere else only the star unfills.
+                    // Unbookmarking from the Bookmarks page's list drops
+                    // the row (D38); everywhere else only the star unfills.
                     let _ = this.update(cx, |host, cx| host.unbookmark_committed(ev_id, cx));
                 }
                 _ => {}

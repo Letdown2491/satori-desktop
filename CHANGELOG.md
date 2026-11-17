@@ -24,11 +24,11 @@ articles already have: it sits on the timestamp and copies the note on
 screen (the boosted note for a repost; receipts that show no note get no
 seal).
 
-The Library has left the sidebar. Your profile picture at the top of the
-rail now opens a small menu: View profile, Bookmarks, Drafts, and Lists
-(the Library page itself is unchanged, opened straight onto whichever one
-you picked). One fewer icon in the rail, and your things live in one
-obvious place: under you.
+The Library has left the sidebar, and then the Library itself left. Your
+profile picture at the top of the rail now opens a small menu: View
+profile, Bookmarks, Drafts, and Lists, and each one is its own page with
+its own name and back button. One fewer icon in the rail, and your
+things live in one obvious place: under you.
 
 Threads stop flashing their images. A thread pinned every picture it
 contained against memory pressure, and on photo-heavy threads that pin

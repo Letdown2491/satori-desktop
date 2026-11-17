@@ -1698,7 +1698,7 @@ impl Composer {
             .collect()
     }
 
-    /// D38: fill the buffer from a reopened Library draft — overwrites
+    /// D38: fill the buffer from a reopened Drafts page draft — overwrites
     /// whatever the session stash restored (the synced slot was spent at
     /// tap time; the close saves whatever the user does with it).
     /// v1.4: the entry's attachment imetas restore with it.

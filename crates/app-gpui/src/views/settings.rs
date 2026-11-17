@@ -1357,7 +1357,7 @@ impl SettingsView {
                     "Bookmarks",
                     "Private bookmarks are nip44-encrypted (kind 10003). Public ones \
                      are a plain NIP-51 list (kind 30001) anyone can read; both show \
-                     in the Library.",
+                     in the Bookmarks page.",
                 )
                 .child(
                     div()

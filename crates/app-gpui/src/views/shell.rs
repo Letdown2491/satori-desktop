@@ -20,9 +20,10 @@ use satori_core::manager::{Core, FeedEvent, Profile, PublishEvent};
 use super::{
     composer::{Composer, Draft, Surface},
     content,
+    drafts::DraftsView,
     edit_profile::EditProfileView,
     feed::Feed,
-    library::{LibTab, LibraryView},
+    lists::ListsView,
     nav::Nav,
     notifications::NotificationsView,
     profile::ProfileView,
@@ -44,10 +45,13 @@ impl Pane {
     /// urls still pinned by another surface ride on.
     fn release_media(&self, cx: &mut Context<Shell>) {
         let id = match self {
-            Pane::Feed(e) | Pane::Articles(e) | Pane::Hashtag(e) => e.entity_id(),
+            Pane::Feed(e) | Pane::Articles(e) | Pane::Hashtag(e) | Pane::Bookmarks(e) => {
+                e.entity_id()
+            }
             Pane::Thread(e) => e.entity_id(),
             Pane::Profile(e) => e.entity_id(),
-            Pane::Library(e) => e.entity_id(),
+            Pane::Drafts(e) => e.entity_id(),
+            Pane::Lists(e) => e.entity_id(),
             Pane::Notifications(e) => e.entity_id(),
             Pane::Search(e) => e.entity_id(),
             Pane::Article(e) => e.entity_id(),
@@ -72,8 +76,13 @@ pub enum Pane {
     Profile(Entity<ProfileView>),
     /// The profile edit form (D38) — the own-profile header's button.
     EditProfile(Entity<EditProfileView>),
-    /// The Library pane (D38): Bookmarks | Drafts | Lists.
-    Library(Entity<LibraryView>),
+    /// The Bookmarks page (D38's own set, D81 split from the Library):
+    /// a Feed in Bookmarks mode.
+    Bookmarks(Entity<Feed>),
+    /// The Drafts page (D81): the synced encrypted drafts (NIP-78).
+    Drafts(Entity<DraftsView>),
+    /// The Lists page (D81): the own NIP-51 lists.
+    Lists(Entity<ListsView>),
     Notifications(Entity<NotificationsView>),
     Search(Entity<SearchView>),
     Settings(Entity<SettingsView>),
@@ -513,12 +522,26 @@ impl Shell {
         self.push_drill(Pane::Articles(view), cx);
     }
 
-    /// The Library pane (D38): Bookmarks | Drafts | Lists — the user's own
-    /// stuff in one place. `tab` is the me menu's entry point (D78).
-    fn open_library(&mut self, tab: LibTab, cx: &mut Context<Self>) {
-        let view = cx.new(|cx| LibraryView::new(self.core.clone(), tab, cx));
+    /// The Bookmarks page (D38): the merged own set (private 10003 +
+    /// public 30001 d="bookmarks") — a Feed in Bookmarks mode.
+    fn open_bookmarks(&mut self, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| Feed::bookmarks(self.core.clone(), cx));
         self.subscribe_nav(&view, cx);
-        self.push_drill(Pane::Library(view), cx);
+        self.push_drill(Pane::Bookmarks(view), cx);
+    }
+
+    /// The Drafts page (D38's sync, D81 its own pane).
+    fn open_drafts(&mut self, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| DraftsView::new(self.core.clone(), cx));
+        self.subscribe_nav(&view, cx);
+        self.push_drill(Pane::Drafts(view), cx);
+    }
+
+    /// The Lists page (D38's NIP-51 pass, D81 its own pane).
+    fn open_lists(&mut self, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| ListsView::new(self.core.clone(), cx));
+        self.subscribe_nav(&view, cx);
+        self.push_drill(Pane::Lists(view), cx);
     }
 
     /// Reopen a synced draft (D38): the composer with its context back, the
@@ -1427,7 +1450,9 @@ impl Shell {
         match self.stack.last() {
             Some(Pane::Feed(_)) => "Feed".into(),
             Some(Pane::Articles(_)) => "Articles".into(),
-            Some(Pane::Library(_)) => "Library".into(),
+            Some(Pane::Bookmarks(_)) => "Bookmarks".into(),
+            Some(Pane::Drafts(_)) => "Drafts".into(),
+            Some(Pane::Lists(_)) => "Lists".into(),
             Some(Pane::Hashtag(f)) => f.read(cx).header().into(),
             Some(Pane::Thread(_)) => "Thread".into(),
             Some(Pane::Profile(_)) => "Profile".into(),
@@ -1476,8 +1501,6 @@ enum Spot {
     /// The user's avatar (D38) — ticks when the top pane is the OWN
     /// profile; a visit to someone else's profile doesn't tick it.
     Profile,
-    /// The Library pane (D38).
-    Library,
     Feed,
     Articles,
     Search,
@@ -1509,7 +1532,6 @@ impl Shell {
             // The avatar spot is the OWN profile only — a visit to someone
             // else's profile pane is not the spot.
             Some(Pane::Profile(view)) if view.read(cx).is_me => Some(Spot::Profile),
-            Some(Pane::Library(_)) => Some(Spot::Library),
             _ => None,
         }
     }
@@ -1534,9 +1556,11 @@ impl Shell {
     /// pane switches; Nav::PaneDeep is only the repaint signal).
     fn pane_deep(pane: &Pane, cx: &Context<Self>) -> bool {
         match pane {
-            Pane::Feed(view) | Pane::Articles(view) | Pane::Hashtag(view) => view.read(cx).deep,
+            Pane::Feed(view)
+            | Pane::Articles(view)
+            | Pane::Hashtag(view)
+            | Pane::Bookmarks(view) => view.read(cx).deep,
             Pane::Notifications(view) => view.read(cx).deep,
-            Pane::Library(view) => view.read(cx).deep,
             // The profile pane's notes list is an embedded feed; the view
             // mirrors the child's flag (PaneDeep forwarding).
             Pane::Profile(view) => view.read(cx).deep,
@@ -1554,14 +1578,14 @@ impl Shell {
             return;
         }
         match self.stack.last().cloned() {
-            Some(Pane::Feed(view)) | Some(Pane::Articles(view)) | Some(Pane::Hashtag(view)) => {
+            Some(Pane::Feed(view))
+            | Some(Pane::Articles(view))
+            | Some(Pane::Hashtag(view))
+            | Some(Pane::Bookmarks(view)) => {
                 view.update(cx, |feed, _| feed.scroll_top());
             }
             Some(Pane::Notifications(view)) => {
                 view.update(cx, |n, _| n.scroll_top());
-            }
-            Some(Pane::Library(view)) => {
-                view.update(cx, |v, cx| v.scroll_top(cx));
             }
             Some(Pane::Profile(view)) => {
                 view.update(cx, |p, cx| p.scroll_top(cx));
@@ -1610,10 +1634,10 @@ impl Shell {
             .gap_1()
             // The user's avatar is the me menu (D78): the user's own
             // surfaces hang off their mark — profile, bookmarks, drafts,
-            // lists — replacing the Library rail slot. Re-click when the
-            // own profile is already the top pane scrolls it back up (the
-            // old avatar-direct behavior's remnant); the tick marks it
-            // (Home remains the Feed spot's re-click — go_home below). It
+            // lists — replacing the Library rail slot. Its click toggles
+            // the menu in every state (from the own-profile pane too);
+            // the tick marks the active spot (Home remains the Feed
+            // spot's re-click — go_home below). It
             // LEADS the rail — including in columns mode, where the toggle
             // follows it (owner correction: the toggle-first order was
             // their earlier mistake).
@@ -1623,12 +1647,14 @@ impl Shell {
                 me_avatar,
                 active == Some(Spot::Profile),
                 cx.listener(move |shell, _, _, cx| {
-                    if shell.active_spot(cx) == Some(Spot::Profile) {
-                        shell.pane_to_top(cx);
-                    } else {
-                        shell.me_menu = !shell.me_menu;
-                        cx.notify();
-                    }
+                    // The avatar IS the me menu (D78): the click toggles
+                    // it in every state, including from the own-profile
+                    // pane (the pre-D78 re-click scroll-to-top remnant
+                    // swallowed the toggle there — D80 owner report).
+                    // Re-click with the menu open closes it: the catcher
+                    // occludes, so the toggle never double-fires.
+                    shell.me_menu = !shell.me_menu;
+                    cx.notify();
                 }),
             ))
             // The columns toggle second while the workspace is up (the
@@ -1859,6 +1885,12 @@ impl Shell {
     /// drill pins its tag, the profile drill pins its author (the
     /// @user column's entry point — owner call).
     fn column_pin(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        // Columns mode only: in single-pane there are no columns to pin
+        // INTO (the + Column pill rendered on every drilled profile
+        // otherwise — D80 owner report).
+        if !self.columns_on {
+            return None;
+        }
         let kind = match self.stack.last() {
             Some(Pane::Hashtag(view)) => {
                 let tag = view.read(cx).tag()?;
@@ -2149,8 +2181,8 @@ impl Shell {
                         Pane::Feed(_)
                             | Pane::Articles(_)
                             | Pane::Hashtag(_)
+                            | Pane::Bookmarks(_)
                             | Pane::Notifications(_)
-                            | Pane::Library(_)
                     ),
                 |d| d.child(self.floating_top(cx)),
             )
@@ -2459,7 +2491,7 @@ impl Shell {
 
     /// The me menu (D78): the avatar's click opens the user's own surfaces
     /// — profile, bookmarks, drafts, lists — the Library rail slot retired
-    /// (the Library pane stays; each row opens it pre-tabbed). A
+    /// (D81: each row opens its own page). A
     /// full-viewport catcher closes on any outside click; Esc closes in
     /// back(). The rows ride add_menu_card's row anatomy (hover tint, not
     /// the ink swap — the text stays readable).
@@ -2505,20 +2537,32 @@ impl Shell {
                 }
             }),
         ));
-        for (label, id, tab) in [
-            ("Bookmarks", "me-bookmarks", LibTab::Bookmarks),
-            ("Drafts", "me-drafts", LibTab::Drafts),
-            ("Lists", "me-lists", LibTab::Lists),
-        ] {
-            card = card.child(Self::me_row(
-                label,
-                id,
-                cx.listener(move |shell, _, _, cx| {
-                    shell.me_menu = false;
-                    shell.open_library(tab, cx);
-                }),
-            ));
-        }
+        // D81: three separate pages — each row its own pane, the Library
+        // container retired (the me menu was its only entry point).
+        card = card.child(Self::me_row(
+            "Bookmarks",
+            "me-bookmarks",
+            cx.listener(move |shell, _, _, cx| {
+                shell.me_menu = false;
+                shell.open_bookmarks(cx);
+            }),
+        ));
+        card = card.child(Self::me_row(
+            "Drafts",
+            "me-drafts",
+            cx.listener(move |shell, _, _, cx| {
+                shell.me_menu = false;
+                shell.open_drafts(cx);
+            }),
+        ));
+        card = card.child(Self::me_row(
+            "Lists",
+            "me-lists",
+            cx.listener(move |shell, _, _, cx| {
+                shell.me_menu = false;
+                shell.open_lists(cx);
+            }),
+        ));
         layer = layer.child(card);
         layer
     }
@@ -2609,7 +2653,9 @@ impl Shell {
         match pane {
             Pane::Feed(view) => view.clone().into_any_element(),
             Pane::Articles(view) => view.clone().into_any_element(),
-            Pane::Library(view) => view.clone().into_any_element(),
+            Pane::Bookmarks(view) => view.clone().into_any_element(),
+            Pane::Drafts(view) => view.clone().into_any_element(),
+            Pane::Lists(view) => view.clone().into_any_element(),
             Pane::Hashtag(view) => view.clone().into_any_element(),
             Pane::Thread(view) => view.clone().into_any_element(),
             Pane::Profile(view) => view.clone().into_any_element(),

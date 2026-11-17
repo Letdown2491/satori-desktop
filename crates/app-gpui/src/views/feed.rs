@@ -32,7 +32,7 @@ pub(crate) enum FeedMode {
     /// One author's notes — the profile page's Notes tab (an embedded Feed
     /// entity; the profile view only renders the header + media strips).
     Profile(PublicKey),
-    /// The Library pane's Bookmarks tab (D38): the own bookmark set
+    /// The Bookmarks page (D38, D81 its own pane): the own bookmark set
     /// (private 10003 + public 30001 merged), no paging.
     Bookmarks,
 }
@@ -213,8 +213,8 @@ impl Feed {
         Self::with_mode(core, FeedMode::Profile(who), cx)
     }
 
-    /// The Library pane's Bookmarks tab (D38): the merged own bookmark set
-    /// as timeline rows. One shot — the list is finite, no Older rounds.
+    /// The Bookmarks page (D38, D81 its own pane): the merged own bookmark
+    /// set as timeline rows. One shot — the list is finite, no Older rounds.
     pub fn bookmarks(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
         Self::with_mode(core, FeedMode::Bookmarks, cx)
     }
@@ -309,7 +309,7 @@ impl Feed {
                                 // hashtag — no new-notes pill on hashtag feeds.
                                 // Author feeds likewise: the pill would sit
                                 // under the profile's own header, noise. The
-                                // Library's bookmarks (D38) too: a follow's
+                                // The Bookmarks page (D38) too: a follow's
                                 // post is not a new bookmark. And ARTICLES:
                                 // in multicolumn view the reader watches both
                                 // timelines; a follow's fresh long-form lit
