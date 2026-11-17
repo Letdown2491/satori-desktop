@@ -477,8 +477,11 @@ pub fn cached_from_decoded(d: DecodedImage) -> Option<CachedImage> {
 /// paint the ≤128px thumb (media::avatar), so the thumb lives as its OWN
 /// small-class entry: photo pressure can never evict it, no matter how big
 /// the original decodes (a 4000×3000 avatar original is a 48MB BIG entry;
-/// the thumb the rail actually paints is 64KB and stays put).
-fn thumb_key(url: &str) -> String {
+/// the thumb the rail actually paints is 64KB and stays put). Views pin by
+/// this key (D80): pinning the original sized the pin budget at the FULL
+/// decode and ate it on avatar-heavy threads, unpinning the on-screen
+/// media the pin exists to protect.
+pub(crate) fn thumb_key(url: &str) -> String {
     format!("{url}\u{0}thumb")
 }
 

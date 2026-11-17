@@ -274,7 +274,7 @@ impl ProfileView {
         let mut seen = HashSet::new();
         let missing: Vec<PublicKey> = notes
             .iter()
-            .flat_map(|n| content::mention_pks(&n.content))
+            .flat_map(content::mention_pks_cached)
             .filter(|pk| {
                 !self.profiles.contains_key(&pk.to_string()) && seen.insert(pk.to_string())
             })

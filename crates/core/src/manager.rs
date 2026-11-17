@@ -3380,6 +3380,40 @@ impl Core {
         Ok(FeedPage { notes, profiles })
     }
 
+    /// The per-event mention scan memo (D80 perf lens): profiles_for runs
+    /// repeatedly over overlapping pages (the notifications task's cached
+    /// and union phases, endless-scroll paging), and each scan is a bech32
+    /// decode attempt per whitespace token — the render side already memos
+    /// its own twin (content.rs's media_urls_cached shape). Keyed by event
+    /// id, FIFO capped.
+    fn mention_pks_cached(note: &Event) -> Vec<PublicKey> {
+        const CAP: usize = 4096;
+        struct Memo {
+            map: HashMap<EventId, std::sync::Arc<[PublicKey]>>,
+            order: std::collections::VecDeque<EventId>,
+        }
+        static MEMO: std::sync::OnceLock<std::sync::Mutex<Memo>> = std::sync::OnceLock::new();
+        let memo = MEMO.get_or_init(|| {
+            std::sync::Mutex::new(Memo {
+                map: HashMap::new(),
+                order: std::collections::VecDeque::new(),
+            })
+        });
+        let mut memo = memo.lock().unwrap();
+        if let Some(hit) = memo.map.get(&note.id) {
+            return hit.to_vec();
+        }
+        let pks: std::sync::Arc<[PublicKey]> = crate::nip::nip19::mention_pks(&note.content).into();
+        if memo.map.len() >= CAP
+            && let Some(old) = memo.order.pop_front()
+        {
+            memo.map.remove(&old);
+        }
+        memo.order.push_back(note.id);
+        memo.map.insert(note.id, pks.clone());
+        pks.to_vec()
+    }
+
     /// Cached profiles for a page's authors. Missing metadata is NOT
     /// fetched here — this sat between the deep fetch and every page
     /// landing (bootstrap, badge click, older), gating the paint on a
@@ -3392,10 +3426,32 @@ impl Core {
         // (feed/reader/thread), so the same note showed @name in the
         // timeline and @npub1… in the notifications pane or on a profile.
         // The store cache answers what it has; the misses warm in the
-        // background (the service dedups against its own seen-set).
-        let mut authors: Vec<PublicKey> = notes.iter().map(|e| e.pubkey).collect();
-        for note in notes {
-            authors.extend(crate::nip::nip19::mention_pks(&note.content));
+        // background.
+        // D80 (security lens): mention pks are attacker-controlled — a
+        // hostile note can carry thousands of distinct npub tokens — so
+        // the collection is deduped across the page and the mention count
+        // CAPPED. Without the cap one page load scaled the warm set (and
+        // the chunked kind-0 queries behind it) with the attacker's
+        // tokens; the cap bounds it to a handful of round trips.
+        const MENTION_HYDRATE_CAP: usize = 512;
+        let mut seen: std::collections::HashSet<PublicKey> = std::collections::HashSet::new();
+        let mut authors: Vec<PublicKey> = Vec::with_capacity(notes.len());
+        for e in notes {
+            if seen.insert(e.pubkey) {
+                authors.push(e.pubkey);
+            }
+        }
+        let mut mentions = 0usize;
+        'scan: for note in notes {
+            for pk in Self::mention_pks_cached(note) {
+                if seen.insert(pk) {
+                    if mentions >= MENTION_HYDRATE_CAP {
+                        break 'scan;
+                    }
+                    mentions += 1;
+                    authors.push(pk);
+                }
+            }
         }
         let cached = active
             .pool
@@ -3404,9 +3460,13 @@ impl Core {
             .await
             .unwrap_or_default();
         let profiles: Vec<Profile> = cached.iter().filter_map(Profile::from_event).collect();
+        // The resolved set once, not a String allocation per (author ×
+        // profile) comparison (D80 perf lens).
+        let resolved: std::collections::HashSet<String> =
+            profiles.iter().map(|p| p.pubkey.clone()).collect();
         let missing: Vec<PublicKey> = authors
             .into_iter()
-            .filter(|a| !profiles.iter().any(|p| p.pubkey == a.to_string()))
+            .filter(|a| !resolved.contains(&a.to_string()))
             .collect();
         active.profiles.warm(missing);
         profiles

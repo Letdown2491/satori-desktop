@@ -463,6 +463,17 @@ pub(crate) fn og_image_urls(ev: &Event) -> Vec<String> {
     out
 }
 
+/// Every media URL one note paints, both kinds (the per-note core of the
+/// feed's `card_media_urls`, without the avatar/repost recursion): the
+/// memoized body media plus the og card's thumbnail. D80 (DRY lens): the
+/// sweep loops used to inline this exact pair four times in thread.rs
+/// alone, and the idiom had drifted across six files (two dedup shapes).
+pub(crate) fn note_media_urls(ev: &Event) -> impl Iterator<Item = String> {
+    let mut urls: Vec<String> = media_urls_cached(ev).iter().cloned().collect();
+    urls.extend(og_image_urls(ev));
+    urls.into_iter()
+}
+
 /// The thumbnail for a YouTube link (watch?v=, youtu.be/, shorts/) —
 /// video.rs reuses the shape as the "is a YouTube page" test: GStreamer
 /// can't stream watch pages, so they stay browser links.
@@ -1305,6 +1316,40 @@ pub(crate) fn mention_pks(content: &str) -> Vec<PublicKey> {
             _ => None,
         })
         .collect()
+}
+
+/// The page-pumps' mention scan, memoized per event id (media_urls_cached's
+/// shape; D80 perf lens): the pumps run on every landing over the whole
+/// visible set, and each scan is a bech32 decode attempt per token — a
+/// 200-row notifications page paid ~24k decode attempts per open, ×4 with
+/// the core's own rescans. The live-input paths (composer, reader) stay on
+/// the raw `mention_pks`.
+pub(crate) fn mention_pks_cached(ev: &Event) -> Vec<PublicKey> {
+    const CAP: usize = 4096;
+    struct PksMemo {
+        map: HashMap<EventId, std::sync::Arc<[PublicKey]>>,
+        order: std::collections::VecDeque<EventId>,
+    }
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<PksMemo>> = std::sync::OnceLock::new();
+    let memo = MEMO.get_or_init(|| {
+        std::sync::Mutex::new(PksMemo {
+            map: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        })
+    });
+    let mut memo = memo.lock().unwrap();
+    if let Some(hit) = memo.map.get(&ev.id) {
+        return hit.to_vec();
+    }
+    let pks: std::sync::Arc<[PublicKey]> = mention_pks(&ev.content).into();
+    if memo.map.len() >= CAP
+        && let Some(old) = memo.order.pop_front()
+    {
+        memo.map.remove(&old);
+    }
+    memo.order.push_back(ev.id);
+    memo.map.insert(ev.id, pks.clone());
+    pks.to_vec()
 }
 
 /// Schemeless, truncated link row for URLs that aren't media.

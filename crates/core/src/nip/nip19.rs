@@ -142,5 +142,15 @@ mod tests {
         // links, nevents and plain words yield nothing.
         assert!(mention_pks("no mentions here").is_empty());
         assert!(mention_pks("a link https://x.example/a and a word").is_empty());
+        // Malformed bech32 (D80 security lens): truncated, bad checksum,
+        // mixed case, multibyte bytes hugging the URI — decode failures
+        // are skips, never panics.
+        assert!(mention_pks("npub1trunc").is_empty());
+        assert!(mention_pks(
+            "nostr:npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+        )
+        .is_empty());
+        assert!(mention_pks("nostr:NPUB1典典").is_empty());
+        assert!(mention_pks("see nostr:npub1wсклад").is_empty());
     }
 }

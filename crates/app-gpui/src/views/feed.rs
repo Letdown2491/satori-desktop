@@ -729,7 +729,7 @@ impl Feed {
                 self.want_goal(&note, cx);
             }
             mention_candidates.push(note.pubkey);
-            mention_candidates.extend(content::mention_pks(&note.content));
+            mention_candidates.extend(content::mention_pks_cached(&note));
             self.note_ids.insert(note.id);
             self.notes.push(note);
         }

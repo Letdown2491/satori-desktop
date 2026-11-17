@@ -672,7 +672,7 @@ impl NotificationsView {
             .iter()
             .flat_map(|n| {
                 let mut pks = vec![n.pubkey];
-                pks.extend(content::mention_pks(&n.content));
+                pks.extend(content::mention_pks_cached(n));
                 pks
             })
             .filter(|pk| {
@@ -949,8 +949,11 @@ fn notif_card(
 
     // The copy-id seal rides the timestamp and copies THE NOTE ON SCREEN,
     // not the announcement: body rows (reply/mention/quote) carry the note
-    // itself, a repost row carries the boosted note. Receipt rows that show
-    // no note (reaction, zap) get none.
+    // itself, a repost row carries the boosted note. Rows with no note
+    // content (a bare reaction, a receipt) get none. (D80: the old comment
+    // claimed zaps were excluded too, but a zap row with a message shows
+    // it — the seal copying that note's id is consistent, so the code
+    // stays and the prose matches it.)
     let seal =
         if !matches!(t, NotifType::Reaction | NotifType::Repost) && !ev.content.trim().is_empty() {
             Some(satori_core::nip::nip19::uri(ev))

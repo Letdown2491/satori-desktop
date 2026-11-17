@@ -204,6 +204,15 @@ impl ThreadView {
         view.list
             .set_scroll_handler(move |ev: &ListScrollEvent, _w, cx| {
                 let _ = this.update(cx, |n, cx| {
+                    // Only a real window move runs the sweep: the list
+                    // emits scroll events on row patches too, and the
+                    // sweep per tick (fetch + LRU rotation + repin) was
+                    // this fix's own new cost (D80 perf lens).
+                    if ev.visible_range.start == n.first_visible_start
+                        && ev.visible_range.end == n.last_visible_end
+                    {
+                        return;
+                    }
                     n.first_visible_start = ev.visible_range.start;
                     n.last_visible_end = ev.visible_range.end;
                     n.pin_window(cx);
@@ -246,7 +255,7 @@ impl ThreadView {
             .iter()
             .flat_map(|n| {
                 let mut pks = vec![n.pubkey];
-                pks.extend(content::mention_pks(&n.content));
+                pks.extend(content::mention_pks_cached(n));
                 pks
             })
             .filter(|pk| {
@@ -283,6 +292,7 @@ impl ThreadView {
                 if let Some(p) = profile {
                     self.profiles.insert(p.pubkey.clone(), p);
                 }
+                self.touch();
                 self.want_media(&note, cx);
                 self.want_quotes(&note, cx);
                 self.want_names(std::slice::from_ref(&note), cx);
@@ -299,22 +309,33 @@ impl ThreadView {
                     self.profiles.insert(p.pubkey.clone(), p);
                 }
                 self.status.clear();
+                self.touch();
                 self.want_names(&replies, cx);
                 self.want_parents(&replies, cx);
             }
             FeedEvent::Profiles(profiles) => {
-                for p in profiles {
-                    self.profiles.insert(p.pubkey.clone(), p);
+                // The snapshot gate (D80 perf lens): only a real patch
+                // marks the snap dirty — an empty Profiles landing (core
+                // sends one when no session is active) used to force a
+                // full ThreadSnap deep clone for nothing.
+                if !profiles.is_empty() {
+                    for p in profiles {
+                        self.profiles.insert(p.pubkey.clone(), p);
+                    }
+                    self.touch();
                 }
             }
             FeedEvent::Failed(e) => {
                 // §4.3: transient — a relay round trip; Retry re-asks.
+                // status/error are read fresh at render, outside the snap:
+                // no touch.
                 self.error = Some(states::PaneError::transient("The thread", &e));
             }
             FeedEvent::Parents(p) => {
                 // Lazy parents landing (want_parents): the whisper upgrades
                 // from the generic line to author + snippet. The parent's
-                // author needs a name too — one ensure_profiles pump.
+                // author needs a name too — one ensure_profiles pump. The
+                // whisper is render-body state (not in the snap): no touch.
                 let mut missing: Vec<PublicKey> = Vec::new();
                 for (pid, note) in p {
                     self.parents.insert(pid, note.clone());
@@ -333,7 +354,6 @@ impl ThreadView {
         if self.replies.len() != before {
             self.list.reset(self.replies.len());
         }
-        self.touch();
         cx.notify();
     }
 
@@ -348,10 +368,17 @@ impl ThreadView {
     /// Sweep + pin the visible window's media (feed/notifications.rs's
     /// pin_window discipline). Called at render (landings) and from the
     /// scroll stream — the two moments the on-screen set changes. The set:
-    /// every profile avatar (byte-free in the pin budget), the anchor
-    /// card's media + og thumbnails (it never scrolls out), and the
-    /// VISIBLE reply rows' media + og thumbnails. Off-screen reply images
-    /// age out of the cache and return on scroll-back like any pane's.
+    /// the anchor card's media + og thumbnails (it never scrolls out), the
+    /// VISIBLE reply rows' media + og thumbnails, and the avatars on
+    /// screen (the anchor's author plus the visible rows' authors) keyed
+    /// by their ≤128px thumb. D80 (perf + resource lenses): the avatar
+    /// loop used to sweep the WHOLE profiles map — the mention pump fills
+    /// it with pks that never render here — with a fetch (and its O(cache)
+    /// LRU rotation) per profile per scroll tick; and pins rode the
+    /// originals' full decodes, so avatar-heavy threads ate the per-owner
+    /// budget and lost exactly the on-screen pins the window exists to
+    /// protect. Off-screen reply images age out of the cache and return on
+    /// scroll-back like any pane's.
     fn pin_window(&mut self, cx: &mut Context<Self>) {
         let viewer = cx.entity_id();
         let win_start = self.first_visible_start.min(self.replies.len());
@@ -360,42 +387,40 @@ impl ThreadView {
             .max(win_start + 8)
             .min(self.replies.len());
         let mut painted: Vec<String> = Vec::new();
-        for p in self.profiles.values() {
-            media::fetch(&self.core, p.picture.clone(), viewer, cx);
-            if !p.picture.is_empty() && !painted.contains(&p.picture) {
-                painted.push(p.picture.clone());
+        // On-screen avatars: collect first (the window borrow ends), fetch
+        // + pin by thumb key after — the thumb is the entry the avatar
+        // paints and it is near-byte-free in the pin budget.
+        let mut avatar_urls: Vec<String> = Vec::new();
+        if let Some(a) = self.anchor.as_ref()
+            && let Some(p) = self.profiles.get(&a.pubkey.to_string())
+            && !p.picture.is_empty()
+        {
+            avatar_urls.push(p.picture.clone());
+        }
+        for (ev, _) in self.replies[win_start..win_end].iter() {
+            if let Some(p) = self.profiles.get(&ev.pubkey.to_string())
+                && !p.picture.is_empty()
+                && !avatar_urls.contains(&p.picture)
+            {
+                avatar_urls.push(p.picture.clone());
             }
+        }
+        for url in avatar_urls {
+            media::fetch(&self.core, url.clone(), viewer, cx);
+            painted.push(media::thumb_key(&url));
         }
         for a in self.anchor.as_ref().into_iter() {
-            for url in content::media_urls_cached(a).iter().cloned() {
-                let fresh = !painted.contains(&url);
-                media::fetch(&self.core, url.clone(), viewer, cx);
-                if fresh {
-                    painted.push(url);
-                }
-            }
-            // The og card's thumbnail paints preview.image — a URL the
-            // parse never knew. Re-request (and pin) it like any picture.
-            for url in content::og_image_urls(a) {
-                let fresh = !painted.contains(&url);
-                media::fetch(&self.core, url.clone(), viewer, cx);
-                if fresh {
+            for url in content::note_media_urls(a) {
+                if !painted.contains(&url) {
+                    media::fetch(&self.core, url.clone(), viewer, cx);
                     painted.push(url);
                 }
             }
         }
-        for (ev, _) in &self.replies[win_start..win_end] {
-            for url in content::media_urls_cached(ev).iter().cloned() {
-                let fresh = !painted.contains(&url);
-                media::fetch(&self.core, url.clone(), viewer, cx);
-                if fresh {
-                    painted.push(url);
-                }
-            }
-            for url in content::og_image_urls(ev) {
-                let fresh = !painted.contains(&url);
-                media::fetch(&self.core, url.clone(), viewer, cx);
-                if fresh {
+        for (ev, _) in self.replies[win_start..win_end].iter() {
+            for url in content::note_media_urls(ev) {
+                if !painted.contains(&url) {
+                    media::fetch(&self.core, url.clone(), viewer, cx);
                     painted.push(url);
                 }
             }
