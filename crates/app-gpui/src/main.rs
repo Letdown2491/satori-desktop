@@ -240,6 +240,31 @@ fn main() {
         }
         return;
     }
+    // The boot gate (WS3, issue #4): the store-rebuild trigger, checked in
+    // the same exclusive window --vacuum uses (the store is not open yet).
+    // First boot just records a watermark; growth past 1.5x AND +64 MiB
+    // runs the verified offline rebuild here, so the cost lands as one
+    // slow boot per rebuild-cycle instead of an extent that only ever
+    // grows (296.5 MB -> 482 MB in the week after the 0.5.0 vacuum).
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("boot-gate runtime")
+        .block_on(satori_core::store::boot_gate())
+    {
+        Ok(Some(report)) => {
+            println!(
+                "boot gate: store rebuilt, {} events, data.mdb {:.1} MB -> {:.1} MB",
+                report.events,
+                report.bytes_before as f64 / 1048576.0,
+                report.bytes_after as f64 / 1048576.0
+            );
+        }
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("boot gate: rebuild failed (the live store is untouched): {err}");
+        }
+    }
     // The C side (glib, gstreamer, lmdb) keeps glibc malloc: cap its arena
     // count so its retention stays bounded too (default 8x ncores = 96
     // possible 64MB arenas). The malloc_trim loop below keeps cycling it.

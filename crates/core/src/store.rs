@@ -434,8 +434,11 @@ impl Store {
 //
 // Deliberately offline and explicit: `satori-desktop --vacuum` runs the
 // rebuild INSTEAD of the app (two writers on one LMDB is corruption),
-// prints the report, and exits. A boot-time threshold gate waits for
-// the trigger (issue #4: a month of week-over-week growth).
+// prints the report, and exits. The boot gate (`boot_gate`, below) runs
+// the same rebuild BEFORE the app opens the store when the extent has
+// grown past its watermark — the waited-for trigger fired Nov 19 2026
+// (296.5 MB -> 482 MB in one week; the plateau theory was wrong, the
+// weight is live heavyweight events and the extent only ever grows).
 
 /// What a vacuum moved: the event count and the physical store size
 /// before and after (data.mdb's extent; the 32GB map is sparse, the
@@ -573,11 +576,86 @@ async fn vacuum_at(dir: &std::path::Path) -> Result<VacuumReport, String> {
         let _ = std::fs::File::open(parent).and_then(|f| f.sync_all());
     }
 
+    // The gate measures growth FROM the last rebuild, manual or automatic.
+    record_watermark(dir, bytes_of(dir));
+
     Ok(VacuumReport {
         events: total,
         bytes_before,
         bytes_after: bytes_of(dir),
     })
+}
+
+// --- The boot gate (WS3, issue #4) --------------------------------------
+//
+// The threshold-gated rebuild the 0.5.0 comments waited for. Shape: a
+// watermark beside the store records the extent at the last rebuild (or
+// first observation); at boot, BEFORE the store opens (the same
+// exclusive window --vacuum uses), the gate compares the current extent
+// against it. Growth past BOTH thresholds runs the verified rebuild;
+// anything less is a no-op. Rarest-event slow boot instead of an extent
+// that only ever grows; a failed rebuild leaves the live store
+// untouched and retries next boot.
+
+/// Relative growth (the extent is 1.5x the watermark's)...
+const GATE_RATIO: f64 = 1.5;
+/// ...AND absolute growth past this: the floor keeps a small store from
+/// churning the rebuild path over noise.
+const GATE_FLOOR: u64 = 64 * 1024 * 1024;
+
+/// The watermark's path: beside the store (`events/` ->
+/// `events.watermark.json`).
+fn watermark_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.with_extension("watermark.json")
+}
+
+/// Record the gate's landing extent: measured FROM here.
+fn record_watermark(dir: &std::path::Path, bytes: u64) {
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(json) = serde_json::to_string(&serde_json::json!({ "bytes": bytes, "at": at })) {
+        let _ = std::fs::write(watermark_path(dir), json);
+    }
+}
+
+/// The boot-time gate: rebuild the store when it has grown past its
+/// watermark, before the app opens it. `Ok(None)` is every no-rebuild
+/// boot (under threshold, or the first observation, which only records
+/// the watermark — the gate rebuilds on measured growth since a
+/// rebuild, never on a hunch).
+pub async fn boot_gate() -> Result<Option<VacuumReport>, String> {
+    boot_gate_at(&config::events_dir(), GATE_RATIO, GATE_FLOOR).await
+}
+
+async fn boot_gate_at(
+    dir: &std::path::Path,
+    ratio: f64,
+    floor: u64,
+) -> Result<Option<VacuumReport>, String> {
+    let now_bytes = std::fs::metadata(dir.join("data.mdb"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if now_bytes == 0 {
+        // No store yet (fresh install): nothing to gate.
+        return Ok(None);
+    }
+    let base = std::fs::read_to_string(watermark_path(dir))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get("bytes").and_then(|b| b.as_u64()));
+    let Some(base) = base else {
+        record_watermark(dir, now_bytes);
+        return Ok(None);
+    };
+    let grown = now_bytes as f64 >= base as f64 * ratio;
+    let real = now_bytes.saturating_sub(base) >= floor;
+    if !grown || !real {
+        return Ok(None);
+    }
+    // vacuum_at records the new watermark on success.
+    Ok(Some(vacuum_at(dir).await?))
 }
 
 /// Machine notes (filters.ts:104-109): a kind:1 whose ENTIRE content is a
@@ -699,6 +777,111 @@ mod tests {
         let _store = rt.block_on(Store::open()).unwrap();
         assert!(!store_dir.with_extension("prev").exists());
         drop(_store);
+        drop(env);
+    }
+
+    /// Plant a small real store: a couple of events, env dropped (the
+    /// gate needs exclusive access, like at boot). The caller holds the
+    /// EnvGuard — taking it here too would self-deadlock on the
+    /// non-reentrant env lock.
+    fn planted_store(tag: &str) -> (std::path::PathBuf, Vec<Event>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store_dir = config::events_dir();
+        std::fs::create_dir_all(&store_dir).unwrap();
+        let db = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
+        let keys = Keys::generate();
+        let events = vec![note(&keys, "one", 1000), note(&keys, "two", 2000)];
+        for event in &events {
+            rt.block_on(db.save_event(event)).unwrap();
+        }
+        drop(db);
+        (store_dir, events)
+    }
+
+    #[test]
+    fn gate_first_observation_records_and_waits() {
+        let env = EnvGuard::new("gate-first");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (store_dir, events) = planted_store("gate-first");
+
+        // No watermark yet: record one, rebuild nothing.
+        let report = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
+        assert!(report.is_none());
+        let watermark =
+            std::fs::read_to_string(store_dir.with_extension("watermark.json")).unwrap();
+        let base: serde_json::Value = serde_json::from_str(&watermark).unwrap();
+        let extent = std::fs::metadata(store_dir.join("data.mdb")).unwrap().len();
+        assert_eq!(base.get("bytes").unwrap().as_u64().unwrap(), extent);
+
+        // A second boot under threshold: still nothing.
+        let report = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
+        assert!(report.is_none());
+        drop(env);
+        let _ = events;
+    }
+
+    #[test]
+    fn gate_rebuilds_past_threshold() {
+        let env = EnvGuard::new("gate-rebuild");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (store_dir, events) = planted_store("gate-rebuild");
+
+        // Plant a tiny pre-growth watermark: the real extent is far past
+        // both thresholds, so the gate rebuilds.
+        std::fs::write(
+            store_dir.with_extension("watermark.json"),
+            r#"{"bytes": 100, "at": 0}"#,
+        )
+        .unwrap();
+
+        let report = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
+        let report = report.expect("the gate rebuilds past its watermark");
+        assert_eq!(report.events, events.len());
+
+        // Every event survived, the watermark moved to the rebuilt
+        // extent, and the staging debris is gone.
+        let reopened = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
+        assert_eq!(rt.block_on(reopened.count(Filter::new())).unwrap(), 2);
+        drop(reopened);
+        let watermark =
+            std::fs::read_to_string(store_dir.with_extension("watermark.json")).unwrap();
+        let base: serde_json::Value = serde_json::from_str(&watermark).unwrap();
+        assert_eq!(
+            base.get("bytes").unwrap().as_u64().unwrap(),
+            std::fs::metadata(store_dir.join("data.mdb")).unwrap().len()
+        );
+        assert!(!store_dir.with_extension("vacuum").exists());
+        drop(env);
+    }
+
+    #[test]
+    fn gate_holds_under_threshold() {
+        let env = EnvGuard::new("gate-hold");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (store_dir, _) = planted_store("gate-hold");
+
+        // Watermark at the current extent: under ratio, no rebuild.
+        let extent = std::fs::metadata(store_dir.join("data.mdb")).unwrap().len();
+        std::fs::write(
+            store_dir.with_extension("watermark.json"),
+            format!(r#"{{"bytes": {extent}, "at": 0}}"#),
+        )
+        .unwrap();
+
+        let report = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
+        assert!(report.is_none());
         drop(env);
     }
 }
