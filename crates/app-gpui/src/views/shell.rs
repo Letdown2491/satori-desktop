@@ -25,6 +25,7 @@ use super::{
     feed::Feed,
     lists::ListsView,
     nav::Nav,
+    network::NetworkView,
     notifications::NotificationsView,
     profile::ProfileView,
     reader::ArticleView,
@@ -52,6 +53,7 @@ impl Pane {
             Pane::Profile(e) => e.entity_id(),
             Pane::Drafts(e) => e.entity_id(),
             Pane::Lists(e) => e.entity_id(),
+            Pane::Network(e) => e.entity_id(),
             Pane::Notifications(e) => e.entity_id(),
             Pane::Search(e) => e.entity_id(),
             Pane::Article(e) => e.entity_id(),
@@ -83,6 +85,9 @@ pub enum Pane {
     Drafts(Entity<DraftsView>),
     /// The Lists page (D81): the own NIP-51 lists.
     Lists(Entity<ListsView>),
+    /// The Network page (D83): followers seen / following / muted, the
+    /// per-row follow+mute management the profile pages couldn't scale to.
+    Network(Entity<NetworkView>),
     Notifications(Entity<NotificationsView>),
     Search(Entity<SearchView>),
     Settings(Entity<SettingsView>),
@@ -542,6 +547,13 @@ impl Shell {
         let view = cx.new(|cx| ListsView::new(self.core.clone(), cx));
         self.subscribe_nav(&view, cx);
         self.push_drill(Pane::Lists(view), cx);
+    }
+
+    /// The Network page (D83): followers seen / following / muted.
+    fn open_network(&mut self, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| NetworkView::new(self.core.clone(), cx));
+        self.subscribe_nav(&view, cx);
+        self.push_drill(Pane::Network(view), cx);
     }
 
     /// Reopen a synced draft (D38): the composer with its context back, the
@@ -1453,6 +1465,7 @@ impl Shell {
             Some(Pane::Bookmarks(_)) => "Bookmarks".into(),
             Some(Pane::Drafts(_)) => "Drafts".into(),
             Some(Pane::Lists(_)) => "Lists".into(),
+            Some(Pane::Network(_)) => "Network".into(),
             Some(Pane::Hashtag(f)) => f.read(cx).header().into(),
             Some(Pane::Thread(_)) => "Thread".into(),
             Some(Pane::Profile(_)) => "Profile".into(),
@@ -2563,6 +2576,14 @@ impl Shell {
                 shell.open_lists(cx);
             }),
         ));
+        card = card.child(Self::me_row(
+            "Network",
+            "me-network",
+            cx.listener(move |shell, _, _, cx| {
+                shell.me_menu = false;
+                shell.open_network(cx);
+            }),
+        ));
         layer = layer.child(card);
         layer
     }
@@ -2656,6 +2677,7 @@ impl Shell {
             Pane::Bookmarks(view) => view.clone().into_any_element(),
             Pane::Drafts(view) => view.clone().into_any_element(),
             Pane::Lists(view) => view.clone().into_any_element(),
+            Pane::Network(view) => view.clone().into_any_element(),
             Pane::Hashtag(view) => view.clone().into_any_element(),
             Pane::Thread(view) => view.clone().into_any_element(),
             Pane::Profile(view) => view.clone().into_any_element(),

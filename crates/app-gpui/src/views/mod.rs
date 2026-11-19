@@ -9,6 +9,7 @@ pub mod feed;
 pub mod lists;
 pub mod login;
 pub mod nav;
+pub mod network;
 pub mod notifications;
 pub mod profile;
 pub mod quotes;

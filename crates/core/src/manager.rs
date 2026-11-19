@@ -1382,6 +1382,91 @@ impl Core {
         crate::wot::shared_follows(who)
     }
 
+    // The contacts page's reads (Followers / Following / Muted). The own
+    // sets are process mirrors kept by set_following/set_muted; the
+    // followers reverse-lookup is a store scan.
+
+    /// The own follow set (the cached contact list's p-keys). Empty
+    /// signed-out.
+    pub fn follows(&self) -> Vec<PublicKey> {
+        self.active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|a| a.follows.clone())
+            .unwrap_or_default()
+    }
+
+    /// The own mute set (NIP-51 kind:10000, decrypted at session start).
+    pub fn mutes(&self) -> Vec<PublicKey> {
+        self.muted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|h| PublicKey::from_str(h).ok())
+            .collect()
+    }
+
+    /// Everyone the store has SEEN following me: latest kind-3 per author
+    /// that p-tags me, minus me. One-shot (own_metadata's shape). Only as
+    /// complete as the contact lists the relays have delivered — the page
+    /// says so; no global truth exists in Nostr to fetch.
+    pub fn followers_seen(
+        self: &Arc<Self>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<Vec<PublicKey>> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        self.rt.spawn(async move {
+            let out = async {
+                let active = this.active().await?;
+                let me = active.me();
+                // Candidates: cached kind-3s whose p index matches me.
+                let candidates = active
+                    .pool
+                    .store
+                    .lists_tagging(&me)
+                    .await
+                    .unwrap_or_default();
+                // Newest candidate per author (the store sorts newest
+                // first; keep the max created_at anyway — the index can
+                // hold several lists per author).
+                let mut newest: HashMap<PublicKey, Timestamp> = HashMap::new();
+                for ev in &candidates {
+                    let entry = newest.entry(ev.pubkey).or_insert(ev.created_at);
+                    if ev.created_at > *entry {
+                        *entry = ev.created_at;
+                    }
+                }
+                let mut verify: Vec<PublicKey> = newest.into_keys().collect();
+                verify.retain(|pk| *pk != me);
+                if verify.is_empty() {
+                    return Ok::<Vec<PublicKey>, LoginError>(verify);
+                }
+                // Verify against each author's NEWEST list (any p): the
+                // index also holds lists that named me before an
+                // un-follow, and only the newest one speaks for the
+                // author now.
+                let latest = active
+                    .pool
+                    .store
+                    .contact_lists(&verify)
+                    .await
+                    .unwrap_or_default();
+                let verified: Vec<PublicKey> = latest
+                    .into_iter()
+                    .filter(|ev| {
+                        let pks: Vec<PublicKey> = ev.tags.public_keys().collect();
+                        pks.contains(&me)
+                    })
+                    .map(|ev| ev.pubkey)
+                    .collect();
+                Ok(verified)
+            };
+            let _ = tx.send(out.await.unwrap_or_default());
+        });
+        rx
+    }
+
     /// The WoT graph's honest status for the settings surface (graph size,
     /// qualified set, last rebuild, staleness state).
     pub fn wot_status(&self) -> crate::wot::WotStatus {
