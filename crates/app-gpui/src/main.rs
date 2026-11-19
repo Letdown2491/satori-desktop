@@ -254,16 +254,18 @@ fn main() {
     // The boot gate (WS3, issue #4): the store-rebuild trigger, checked in
     // the same exclusive window --vacuum uses (the store is not open yet).
     // First boot just records a watermark; growth past 1.5x AND +64 MiB
-    // runs the verified offline rebuild here, so the cost lands as one
-    // slow boot per rebuild-cycle instead of an extent that only ever
-    // grows (296.5 MB -> 482 MB in the week after the 0.5.0 vacuum).
+    // used to run the verified offline rebuild here — D87 changed that
+    // (the owner, mid-rebuild: "the store optimization shouldn't run at
+    // startup"): the gate now STAGES a copy and defers the walk to the
+    // background (spawned at Pool::open); a later boot adopts the
+    // finished copy (delta + renames, bounded by one session's writes).
     match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("boot-gate runtime")
         .block_on(satori_core::store::boot_gate())
     {
-        Ok(Some(report)) => {
+        Ok(satori_core::store::GateAction::Swapped(report)) => {
             println!(
                 "boot gate: store rebuilt, {} events, data.mdb {:.1} MB -> {:.1} MB",
                 report.events,
@@ -271,7 +273,12 @@ fn main() {
                 report.bytes_after as f64 / 1048576.0
             );
         }
-        Ok(None) => {}
+        Ok(satori_core::store::GateAction::Deferred) => {
+            println!(
+                "boot gate: store rebuild deferred to the background; the slimmer store applies at a later launch"
+            );
+        }
+        Ok(satori_core::store::GateAction::Idle) => {}
         Err(err) => {
             eprintln!("boot gate: rebuild failed (the live store is untouched): {err}");
         }

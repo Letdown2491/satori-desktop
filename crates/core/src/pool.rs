@@ -280,6 +280,10 @@ impl Pool {
             .map_err(|e| SdkError::other(format!("screening transport: {e}")))?;
         let socks_addr = screening.addr();
         let store = Store::open().await?;
+        // D87: if the boot gate deferred the store rebuild, the walk
+        // runs here — beside the app, reading through this very handle.
+        // No-ops (cheap stat) unless the state file says a copy is due.
+        crate::store::spawn_deferred_vacuum(store.clone());
         // No keys live in the client: NIP-42 AUTH challenges are answered
         // with the session identity (set_identity, below) — the owner's
         // key, the only one strict relays honor for kinds 78/30078

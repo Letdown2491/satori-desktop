@@ -76,6 +76,10 @@ pub const FEED_KINDS: [Kind; 17] = [
     Kind::Custom(9041),  // zap goal (NIP-75)
 ];
 
+/// The app's LMDB store (nostr-lmdb). `Clone` is a handle clone — the
+/// env is one `Arc`; the deferred-vacuum walk takes one so it can read
+/// through the live env instead of opening a second one on the file.
+#[derive(Clone)]
 pub struct Store {
     db: Arc<NostrLmdb>,
 }
@@ -83,11 +87,22 @@ pub struct Store {
 impl Store {
     pub async fn open() -> NostrResult<Self> {
         std::fs::create_dir_all(config::events_dir()).map_err(|e| DbError::other(e.to_string()))?;
-        // A staging dir from a crashed vacuum is debris. (events.prev is
-        // NOT cleared here: only after the store below OPENS — clearing
-        // first let a failed open delete the previous generation, the
-        // only recoverable copy (D84 audit).)
-        let _ = std::fs::remove_dir_all(config::events_dir().with_extension("vacuum"));
+        // A staging dir from a crashed vacuum is debris — unless the
+        // state file says a deferred walk is mid-copy (D87): the walk
+        // resumes from its cursor instead of restarting from scratch
+        // (a session shorter than the copy would never converge). A
+        // `complete` state means the boot gate already adopted (the
+        // gate runs first); leftover staging there is stale.
+        // (events.prev is NOT cleared here: only after the store below
+        // OPENS — clearing first let a failed open delete the previous
+        // generation, the only recoverable copy (D84 audit).)
+        let pending = read_vacuum_state(&config::events_dir())
+            .and_then(|v| v.get("state").and_then(|s| s.as_str()).map(str::to_string))
+            .as_deref()
+            == Some("copying");
+        if !pending {
+            let _ = std::fs::remove_dir_all(config::events_dir().with_extension("vacuum"));
+        }
         let db = NostrLmdb::open(config::events_dir()).await?;
         // The rebuilt store opened: the previous generation is dead now.
         let _ = std::fs::remove_dir_all(config::events_dir().with_extension("prev"));
@@ -449,11 +464,19 @@ impl Store {
 //
 // Deliberately offline and explicit: `satori-desktop --vacuum` runs the
 // rebuild INSTEAD of the app (two writers on one LMDB is corruption),
-// prints the report, and exits. The boot gate (`boot_gate`, below) runs
-// the same rebuild BEFORE the app opens the store when the extent has
-// grown past its watermark — the waited-for trigger fired Nov 19 2026
-// (296.5 MB -> 482 MB in one week; the plateau theory was wrong, the
-// weight is live heavyweight events and the extent only ever grows).
+// prints the report, and exits. The boot gate (`boot_gate`, below) used
+// to run the same rebuild inline BEFORE the app opened the store — the
+// waited-for trigger fired Nov 19 2026 (296.5 MB -> 482 MB in one week;
+// the plateau theory was wrong, the weight is live heavyweight events
+// and the extent only ever grows) — and the 0.10.0 test round killed
+// that shape: the store doubled AGAIN in a day and the owner sat through
+// a multi-minute launch. D87: the gate only STAGES the copy (staging dir
+// + state file, instant); the walk runs in the background beside the
+// app (spawned at Pool::open, reading through the live store's own
+// handle — a second env on the same LMDB is how corruption happens);
+// the NEXT boot adopts the finished copy: delta since the copy's
+// cutoff, count verification, two renames. The launch cost is bounded
+// by one session's writes, not the store's size.
 
 /// What a vacuum moved: the event count and the physical store size
 /// before and after (data.mdb's extent; the 32GB map is sparse, the
@@ -496,6 +519,9 @@ async fn vacuum_at(dir: &std::path::Path) -> Result<VacuumReport, String> {
     if prev.exists() {
         std::fs::remove_dir_all(&prev).map_err(|e| e.to_string())?;
     }
+    // The explicit vacuum supersedes any deferred-walk bookkeeping: its
+    // own run replaces the staging copy wholesale.
+    let _ = std::fs::remove_file(dir.with_extension("vacuum.json"));
     std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
 
     // Both envs open here — the caller's contract is that the app is
@@ -587,15 +613,7 @@ async fn vacuum_at(dir: &std::path::Path) -> Result<VacuumReport, String> {
             .and_then(|f| f.sync_all())
             .map_err(|e| e.to_string())?;
     }
-
-    if prev.exists() {
-        std::fs::remove_dir_all(&prev).map_err(|e| e.to_string())?;
-    }
-    std::fs::rename(dir, &prev).map_err(|e| e.to_string())?;
-    std::fs::rename(&staging, dir).map_err(|e| e.to_string())?;
-    if let Some(parent) = dir.parent() {
-        let _ = std::fs::File::open(parent).and_then(|f| f.sync_all());
-    }
+    swap_staged(dir, &staging)?;
 
     // The gate measures growth FROM the last rebuild, manual or automatic.
     record_watermark(dir, bytes_of(dir));
@@ -607,16 +625,232 @@ async fn vacuum_at(dir: &std::path::Path) -> Result<VacuumReport, String> {
     })
 }
 
-// --- The boot gate (WS3, issue #4) --------------------------------------
+/// The swap half of every rebuild: the live store parks as
+/// `events.prev`, the staging copy takes its name. Same-filesystem
+/// renames: atomic, no copy. The caller synced the directories first.
+fn swap_staged(dir: &std::path::Path, staging: &std::path::Path) -> Result<(), String> {
+    let prev = dir.with_extension("prev");
+    if prev.exists() {
+        std::fs::remove_dir_all(&prev).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(dir, &prev).map_err(|e| e.to_string())?;
+    std::fs::rename(staging, dir).map_err(|e| e.to_string())?;
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::File::open(parent).and_then(|f| f.sync_all());
+    }
+    Ok(())
+}
+
+// --- The deferred rebuild (D87) -----------------------------------------
+//
+// The boot gate no longer rebuilds inline (the owner, mid-rebuild:
+// "the store optimization shouldn't run at startup... it should run
+// after the app has started"). Three phases now:
+//
+//   1. GATE (boot, exclusive window): past the thresholds, it stages —
+//      creates the staging dir + the state file — and returns
+//      `Deferred`. The app opens immediately.
+//   2. WALK (beside the app, spawned at Pool::open): copies every
+//      surviving event into staging through the LIVE store's own
+//      handle, resuming from the state file's cursor; marks the state
+//      `complete` when the walk reaches the epoch.
+//   3. ADOPT (a later boot's gate): the delta since the copy's cutoff
+//      migrates into staging, both counts must agree, then the swap is
+//      two renames + a watermark. Bounded by one session's writes.
+//
+// The state file (`events.vacuum.json`) is the handoff: the gate, the
+// walk, and `Store::open`'s debris policy all read it.
+
+/// The walk's created_at window (30 days, same as the blocking vacuum).
+const VACUUM_WINDOW: u64 = 30 * 24 * 3600;
+
+fn vacuum_state_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.with_extension("vacuum.json")
+}
+
+/// The state file's shape: `{state, cutoff, cursor, copied}` — state is
+/// `copying` (a walk is pending/resumable) or `complete` (staging is a
+/// full copy; the next boot adopts it). `None` = no file (or unparsable,
+/// which is treated the same: nothing trusted).
+fn read_vacuum_state(dir: &std::path::Path) -> Option<serde_json::Value> {
+    std::fs::read_to_string(vacuum_state_path(dir))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+fn write_vacuum_state(dir: &std::path::Path, state: &str, cutoff: u64, cursor: u64, copied: usize) {
+    let json = serde_json::json!({
+        "state": state,
+        "cutoff": cutoff,
+        "cursor": cursor,
+        "copied": copied,
+    });
+    if let Ok(json) = serde_json::to_string(&json) {
+        let _ = std::fs::write(vacuum_state_path(dir), json);
+    }
+}
+
+/// The gate's verdict. `Idle` is every ordinary boot; `Deferred` opens
+/// the app immediately with the walk running beside it; `Swapped`
+/// reports an adopted (or fallback-rebuilt) store.
+#[derive(Debug, Clone)]
+pub enum GateAction {
+    Idle,
+    Deferred,
+    Swapped(VacuumReport),
+}
+
+/// Phase 3: adopt a completed staging copy. The delta (events saved
+/// since the copy's cutoff — their created_at window was already
+/// walked) migrates into staging, then the counts must agree EXACTLY
+/// before the swap: a shortfall means old-dated backfill landed in
+/// already-walked windows, and the caller falls back to the full
+/// blocking rebuild rather than swap a lossy store in.
+async fn adopt_staged(dir: &std::path::Path) -> Result<VacuumReport, String> {
+    let staging = dir.with_extension("vacuum");
+    let bytes_of = |d: &std::path::Path| {
+        std::fs::metadata(d.join("data.mdb"))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    };
+    let bytes_before = bytes_of(dir);
+    let cutoff = read_vacuum_state(dir)
+        .and_then(|v| v.get("cutoff").and_then(|c| c.as_u64()))
+        .ok_or_else(|| "staged adoption: no cutoff in the state file".to_string())?;
+
+    let source = NostrLmdb::open(dir).await.map_err(|e| e.to_string())?;
+    let fresh = NostrLmdb::open(&staging).await.map_err(|e| e.to_string())?;
+
+    let delta = source
+        .query(Filter::new().since(Timestamp::from(cutoff)))
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut moved = 0usize;
+    for event in &delta {
+        fresh.save_event(event).await.map_err(|e| e.to_string())?;
+        moved += 1;
+    }
+
+    // The honesty check, stricter than the blocking vacuum's: staging
+    // plus the delta must hold exactly what the live store holds.
+    let fresh_count = fresh
+        .count(Filter::new())
+        .await
+        .map_err(|e| e.to_string())?;
+    let source_count = source
+        .count(Filter::new())
+        .await
+        .map_err(|e| e.to_string())?;
+    if fresh_count != source_count {
+        return Err(format!(
+            "staged adoption aborted: staging holds {fresh_count} events, the live store {source_count} (delta was {moved})"
+        ));
+    }
+
+    for d in [&staging, dir, staging.parent().unwrap_or(&staging)] {
+        std::fs::File::open(d)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())?;
+    }
+    swap_staged(dir, &staging)?;
+    // The adoption is the handoff's end: the state file goes with the
+    // staging dir it described.
+    let _ = std::fs::remove_file(vacuum_state_path(dir));
+
+    record_watermark(dir, bytes_of(dir));
+    Ok(VacuumReport {
+        events: fresh_count,
+        bytes_before,
+        bytes_after: bytes_of(dir),
+    })
+}
+
+/// Phase 2's spawn point: `Pool::open` calls this with the session's
+/// store handle. The walk no-ops unless the state file says a copy is
+/// pending, so unconditional spawning is safe.
+pub fn spawn_deferred_vacuum(store: Store) {
+    tokio::spawn(async move {
+        if let Err(err) = deferred_vacuum_walk(&store).await {
+            eprintln!("[core] deferred vacuum failed ({err}); the walk retries at the next launch");
+        }
+    });
+}
+
+/// The walk: copy every surviving event into the staging env, in
+/// created_at windows walked backwards from the state file's cursor
+/// (resume is free — saves are idempotent by id and the cursor only
+/// advances past whole completed windows). Reads go through the LIVE
+/// store's own handle; the staging env is a different LMDB file, so
+/// the two-envs-one-process hazard never crosses the same file.
+async fn deferred_vacuum_walk(store: &Store) -> Result<(), String> {
+    let dir = config::events_dir();
+    let staging = dir.with_extension("vacuum");
+    let state = read_vacuum_state(&dir);
+    let (cutoff, cursor, mut copied) = match state {
+        Some(v) if v.get("state").and_then(|s| s.as_str()) == Some("copying") => (
+            v.get("cutoff").and_then(|c| c.as_u64()).unwrap_or(0),
+            v.get("cursor").and_then(|c| c.as_u64()).unwrap_or(0),
+            v.get("copied").and_then(|c| c.as_u64()).unwrap_or(0) as usize,
+        ),
+        _ => return Ok(()), // stale spawn: nothing pending
+    };
+    if !staging.exists() {
+        // The debris policy kept this only if the state file said
+        // copying; a walk that outlived its staging starts the dir over
+        // (the cursor replays whole windows into the fresh env).
+        std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    }
+    let fresh = NostrLmdb::open(&staging).await.map_err(|e| e.to_string())?;
+
+    let now = Timestamp::now().as_secs();
+    let mut hi = cursor.min(now);
+    loop {
+        let lo = hi.saturating_sub(VACUUM_WINDOW - 1);
+        let filter = Filter::new()
+            .since(Timestamp::from(lo))
+            .until(Timestamp::from(hi));
+        let events = store.query(filter).await.map_err(|e| e.to_string())?;
+        for event in &events {
+            fresh.save_event(event).await.map_err(|e| e.to_string())?;
+        }
+        copied += events.len();
+        write_vacuum_state(&dir, "copying", cutoff, lo, copied);
+        if lo == 0 {
+            break;
+        }
+        hi = lo - 1;
+    }
+
+    // The tail catch (future-dated events, same as the blocking
+    // vacuum): idempotent on resume.
+    let tail = store
+        .query(Filter::new().since(Timestamp::from(now + 1)))
+        .await
+        .map_err(|e| e.to_string())?;
+    for event in &tail {
+        fresh.save_event(event).await.map_err(|e| e.to_string())?;
+    }
+    copied += tail.len();
+
+    write_vacuum_state(&dir, "complete", cutoff, 0, copied);
+    eprintln!(
+        "[core] deferred vacuum: copy complete ({copied} events staged); the slimmer store applies at the next launch"
+    );
+    Ok(())
+}
+
+// --- The boot gate (WS3, issue #4; deferred in D87) ---------------------
 //
 // The threshold-gated rebuild the 0.5.0 comments waited for. Shape: a
 // watermark beside the store records the extent at the last rebuild (or
 // first observation); at boot, BEFORE the store opens (the same
 // exclusive window --vacuum uses), the gate compares the current extent
-// against it. Growth past BOTH thresholds runs the verified rebuild;
-// anything less is a no-op. Rarest-event slow boot instead of an extent
-// that only ever grows; a failed rebuild leaves the live store
-// untouched and retries next boot.
+// against it. Growth past BOTH thresholds now STAGES the rebuild
+// instead of running it: the app opens immediately, the copy walks in
+// the background (spawned at Pool::open), and a later boot adopts the
+// finished staging copy (delta + count check + two renames). A failed
+// adoption falls back to the blocking rebuild; a crashed walk resumes
+// from its cursor.
 
 /// Relative growth (the extent is 1.5x the watermark's)...
 const GATE_RATIO: f64 = 1.5;
@@ -644,59 +878,120 @@ fn record_watermark(dir: &std::path::Path, bytes: u64) {
 /// The rebuild is silent and slow — a GUI launch shows nothing but a
 /// frozen icon, and a user who kills and relaunches pays the full copy
 /// again (the watermark has not moved). Best-effort desktop notification
-/// so the rare triggered rebuild explains itself (D84 audit). Absent
+/// so a triggered rebuild explains itself (D84 audit). Absent
 /// notify-send: a spawn error, ignored.
-fn notify_rebuild() {
+fn notify_rebuild(message: &str) {
     if cfg!(test) {
         return; // the gate tests run the real thresholds; no desktop spam
     }
     let _ = std::process::Command::new("notify-send")
-        .args([
-            "Satori",
-            "Optimizing the local store — this launch may take a moment.",
-        ])
+        .args(["Satori", message])
         .spawn();
 }
 
-/// The boot-time gate: rebuild the store when it has grown past its
-/// watermark, before the app opens it. `Ok(None)` is every no-rebuild
-/// boot (under threshold, or the first observation, which only records
-/// the watermark — the gate rebuilds on measured growth since a
-/// rebuild, never on a hunch).
-pub async fn boot_gate() -> Result<Option<VacuumReport>, String> {
+/// The boot-time gate: decide what this boot owes the store. `Idle` is
+/// every ordinary boot; a trigger past the thresholds no longer
+/// rebuilds inline (the owner, mid-rebuild: "the store optimization
+/// shouldn't run at startup") — it stages the copy and defers the walk
+/// to the app's own runtime; a boot that finds a COMPLETED staging copy
+/// adopts it (delta + renames, bounded by one session's writes).
+pub async fn boot_gate() -> Result<GateAction, String> {
     boot_gate_at(&config::events_dir(), GATE_RATIO, GATE_FLOOR).await
 }
 
-async fn boot_gate_at(
-    dir: &std::path::Path,
-    ratio: f64,
-    floor: u64,
-) -> Result<Option<VacuumReport>, String> {
-    let now_bytes = std::fs::metadata(dir.join("data.mdb"))
+async fn boot_gate_at(dir: &std::path::Path, ratio: f64, floor: u64) -> Result<GateAction, String> {
+    // Crash insurance first: the swap is two renames, and a crash
+    // between them leaves the live store absent with the previous
+    // generation parked. Restore it rather than boot onto an empty dir.
+    let mut now_bytes = std::fs::metadata(dir.join("data.mdb"))
         .map(|m| m.len())
         .unwrap_or(0);
     if now_bytes == 0 {
-        // No store yet (fresh install): nothing to gate.
-        return Ok(None);
+        let prev = dir.with_extension("prev");
+        if prev.join("data.mdb").exists() {
+            std::fs::rename(&prev, dir).map_err(|e| e.to_string())?;
+            now_bytes = std::fs::metadata(dir.join("data.mdb"))
+                .map(|m| m.len())
+                .unwrap_or(0);
+        }
     }
+    if now_bytes == 0 {
+        // No store yet (fresh install): nothing to gate.
+        return Ok(GateAction::Idle);
+    }
+
+    // Pending-work checks come before the thresholds: a staged copy is
+    // work regardless of what the extent says this boot (the extent
+    // only moves at an adoption).
+    match read_vacuum_state(dir)
+        .and_then(|v| v.get("state").and_then(|s| s.as_str()).map(str::to_string))
+    {
+        Some(state) if state == "complete" => {
+            // Phase 3: adopt. Any hard failure falls back to the full
+            // blocking rebuild — a shortfall in staging never swaps.
+            match adopt_staged(dir).await {
+                Ok(report) => {
+                    println!(
+                        "boot gate: staged store adopted, {} events, data.mdb {:.1} MB -> {:.1} MB",
+                        report.events,
+                        report.bytes_before as f64 / 1048576.0,
+                        report.bytes_after as f64 / 1048576.0
+                    );
+                    return Ok(GateAction::Swapped(report));
+                }
+                Err(err) => {
+                    eprintln!(
+                        "boot gate: staged adoption failed ({err}); running the full rebuild"
+                    );
+                    notify_rebuild("Optimizing the local store — this launch may take a moment.");
+                    return vacuum_at(dir).await.map(GateAction::Swapped);
+                }
+            }
+        }
+        Some(state) if state == "copying" => {
+            // Phase 2 resumes in the background (Pool::open spawns the
+            // walk); this boot stays instant.
+            return Ok(GateAction::Deferred);
+        }
+        _ => {}
+    }
+
     let base = std::fs::read_to_string(watermark_path(dir))
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         .and_then(|v| v.get("bytes").and_then(|b| b.as_u64()));
     let Some(base) = base else {
         record_watermark(dir, now_bytes);
-        return Ok(None);
+        return Ok(GateAction::Idle);
     };
     let grown = now_bytes as f64 >= base as f64 * ratio;
     let real = now_bytes.saturating_sub(base) >= floor;
     if !grown || !real {
-        return Ok(None);
+        return Ok(GateAction::Idle);
     }
-    // Say what is happening before the long copy: the launch looks
-    // frozen otherwise (D84 audit).
-    notify_rebuild();
-    // vacuum_at records the new watermark on success.
-    Ok(Some(vacuum_at(dir).await?))
+
+    // Phase 1: stage the copy and defer. Staging debris without a
+    // state file (a crashed --vacuum) is cleared; the state file's
+    // cutoff is this copy's delta anchor.
+    let staging = dir.with_extension("vacuum");
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    write_vacuum_state(dir, "copying", now, now, 0);
+    notify_rebuild(
+        "Satori is slimming its local store in the background; the slimmer store applies at your next launch.",
+    );
+    println!(
+        "boot gate: store {:.1} MB is {:.0}% past its watermark; the rebuild runs in the background and adopts at a later launch",
+        now_bytes as f64 / 1048576.0,
+        (now_bytes as f64 / base as f64 - 1.0) * 100.0
+    );
+    Ok(GateAction::Deferred)
 }
 
 /// Machine notes (filters.ts:104-109): a kind:1 whose ENTIRE content is a
@@ -889,8 +1184,8 @@ mod tests {
         let (store_dir, events) = planted_store("gate-first");
 
         // No watermark yet: record one, rebuild nothing.
-        let report = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
-        assert!(report.is_none());
+        let action = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
+        assert!(matches!(action, GateAction::Idle));
         let watermark =
             std::fs::read_to_string(store_dir.with_extension("watermark.json")).unwrap();
         let base: serde_json::Value = serde_json::from_str(&watermark).unwrap();
@@ -898,37 +1193,81 @@ mod tests {
         assert_eq!(base.get("bytes").unwrap().as_u64().unwrap(), extent);
 
         // A second boot under threshold: still nothing.
-        let report = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
-        assert!(report.is_none());
+        let action = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
+        assert!(matches!(action, GateAction::Idle));
         drop(env);
         let _ = events;
     }
 
+    /// The D87 regression: a trigger past the thresholds must NOT block
+    /// the boot. The gate stages (staging dir + state file, instant),
+    /// the walk runs beside the app through the live handle, and the
+    /// NEXT boot adopts the copy: delta migrated, counts verified, swap
+    /// done, watermark moved.
     #[test]
-    fn gate_rebuilds_past_threshold() {
-        let env = EnvGuard::new("gate-rebuild");
+    fn gate_defers_the_rebuild_and_adopts_at_next_boot() {
+        let env = EnvGuard::new("gate-defer");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let (store_dir, events) = planted_store("gate-rebuild");
+        let (store_dir, events) = planted_store("gate-defer");
 
-        // Plant a tiny pre-growth watermark: the real extent is far past
-        // both thresholds, so the gate rebuilds.
+        // Plant a tiny pre-growth watermark: the real extent is far
+        // past both thresholds, so the gate triggers.
         std::fs::write(
             store_dir.with_extension("watermark.json"),
             r#"{"bytes": 100, "at": 0}"#,
         )
         .unwrap();
 
-        let report = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
-        let report = report.expect("the gate rebuilds past its watermark");
-        assert_eq!(report.events, events.len());
+        // Boot 1: staged, not run. The live store opens untouched.
+        let action = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
+        assert!(matches!(action, GateAction::Deferred));
+        assert!(store_dir.with_extension("vacuum").exists());
+        assert!(store_dir.with_extension("vacuum.json").exists());
+        let opened = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
+        assert_eq!(rt.block_on(opened.count(Filter::new())).unwrap(), 2);
+        drop(opened);
 
-        // Every event survived, the watermark moved to the rebuilt
-        // extent, and the staging debris is gone.
+        // Phase 2: the walk, through the app's own handle. Store::open
+        // must KEEP an in-progress staging copy (the resume contract —
+        // a session shorter than the copy would never converge).
+        let store = rt.block_on(Store::open()).unwrap();
+        assert!(
+            store_dir.with_extension("vacuum").exists(),
+            "an in-progress staging copy must survive Store::open"
+        );
+        rt.block_on(deferred_vacuum_walk(&store)).unwrap();
+        drop(store);
+        let state: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(store_dir.with_extension("vacuum.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state.get("state").unwrap().as_str().unwrap(), "complete");
+        assert_eq!(state.get("copied").unwrap().as_u64().unwrap(), 2);
+
+        // Boot 2: adoption. The delta is empty (nothing new was saved),
+        // so the whole boot is the count check + two renames.
+        let action = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
+        let GateAction::Swapped(report) = action else {
+            panic!("a completed staging copy adopts at the next boot, got {action:?}")
+        };
+        assert_eq!(report.events, 2);
+        assert!(!store_dir.with_extension("vacuum").exists());
+        assert!(!store_dir.with_extension("vacuum.json").exists());
+
+        // Every event survived into the adopted store; the watermark
+        // moved to the rebuilt extent.
         let reopened = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
         assert_eq!(rt.block_on(reopened.count(Filter::new())).unwrap(), 2);
+        for event in &events {
+            assert!(
+                rt.block_on(reopened.event_by_id(&event.id))
+                    .unwrap()
+                    .is_some()
+            );
+        }
         drop(reopened);
         let watermark =
             std::fs::read_to_string(store_dir.with_extension("watermark.json")).unwrap();
@@ -937,7 +1276,47 @@ mod tests {
             base.get("bytes").unwrap().as_u64().unwrap(),
             std::fs::metadata(store_dir.join("data.mdb")).unwrap().len()
         );
-        assert!(!store_dir.with_extension("vacuum").exists());
+        drop(env);
+    }
+
+    /// The adoption's honesty check: if staging falls short of the live
+    /// store (old-dated backfill landing in already-walked windows),
+    /// the gate must fall back to the full rebuild instead of swapping
+    /// a lossy store in.
+    #[test]
+    fn gate_falls_back_when_staging_is_short() {
+        let env = EnvGuard::new("gate-fallback");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (store_dir, events) = planted_store("gate-fallback");
+
+        // Stage a copy that holds only ONE of the two events, marked
+        // complete: an honest-looking handoff with a hole in it.
+        std::fs::create_dir_all(store_dir.with_extension("vacuum")).unwrap();
+        let db = rt
+            .block_on(NostrLmdb::open(store_dir.with_extension("vacuum")))
+            .unwrap();
+        rt.block_on(db.save_event(&events[0])).unwrap();
+        drop(db);
+        std::fs::write(
+            store_dir.with_extension("vacuum.json"),
+            r#"{"state": "complete", "cutoff": 0, "cursor": 0, "copied": 1}"#,
+        )
+        .unwrap();
+
+        let action = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
+        let GateAction::Swapped(report) = action else {
+            panic!("the fallback runs a full rebuild, got {action:?}")
+        };
+        // The fallback rebuilt from the LIVE store: both events, and
+        // the state file is gone with its superseded staging.
+        assert_eq!(report.events, 2);
+        assert!(!store_dir.with_extension("vacuum.json").exists());
+        let reopened = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
+        assert_eq!(rt.block_on(reopened.count(Filter::new())).unwrap(), 2);
+        drop(reopened);
         drop(env);
     }
 
@@ -958,8 +1337,8 @@ mod tests {
         )
         .unwrap();
 
-        let report = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
-        assert!(report.is_none());
+        let action = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
+        assert!(matches!(action, GateAction::Idle));
         drop(env);
     }
 }
