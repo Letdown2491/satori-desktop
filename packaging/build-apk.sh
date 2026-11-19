@@ -50,11 +50,27 @@ chown -R builder:builder /home/builder
 # MSRV — see the spike notes at the top of this script).
 su builder -c "curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal"
 
-# Keypair: abuild signs, apk verifies. -a writes PACKAGER_PRIVKEY into
-# the builder's abuild.conf AND installs the pub key into /etc/apk/keys
-# (through the sudo above). The key is throwaway, per build; users
-# sideload with --allow-untrusted or trust the shipped .pub.
-su builder -c "abuild-keygen -a -n"
+# Keypair: abuild signs, apk verifies. With APK_SIGN_PRIVATE_KEY set (CI:
+# the GitHub secret; generate the pair yourself, `openssl genpkey` or
+# abuild-keygen on any machine), the SAME key signs every release, both
+# arches - users trust the shipped .pub ONCE and every future version
+# verifies clean. Unset (local builds): a throwaway per-build key, and
+# users sideload with --allow-untrusted or trust the shipped .pub.
+KEYNAME="satori-desktop@satori"
+if [ -n "${APK_SIGN_PRIVATE_KEY:-}" ]; then
+	umask 077
+	mkdir -p /home/builder/.abuild
+	printf '%s\n' "$APK_SIGN_PRIVATE_KEY" > "/home/builder/.abuild/$KEYNAME.rsa"
+	# The pub half is DERIVED from the private, so they can never drift.
+	openssl rsa -in "/home/builder/.abuild/$KEYNAME.rsa" -pubout \
+		> "/home/builder/.abuild/$KEYNAME.rsa.pub" 2>/dev/null
+	umask 022
+	grep -q "PACKAGER_PRIVKEY=" /home/builder/.abuild/abuild.conf 2>/dev/null || \
+		echo "PACKAGER_PRIVKEY=\"/home/builder/.abuild/$KEYNAME.rsa\"" >> /home/builder/.abuild/abuild.conf
+else
+	su builder -c "abuild-keygen -a -n"
+fi
+chown builder:builder /home/builder/.abuild/* 2>/dev/null || true
 cp /home/builder/.abuild/*.pub /etc/apk/keys/ 2>/dev/null || true
 
 # abuild fetches the tag tarball from GitHub (network), verifies

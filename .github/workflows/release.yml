@@ -182,8 +182,15 @@ jobs:
       - name: Build the apk (alpine 3.22, musl)
         # Digest-pinned (issue #14): the tag alpine:3.22 at the time of
         # pinning; Renovate proposes digest bumps via reviewed PRs.
+        # APK_SIGN_PRIVATE_KEY: the persistent abuild signing key (#24) —
+        # the same key signs every release, so users trust the shipped
+        # .pub once. Unset (local builds), the script falls back to a
+        # throwaway per-build key.
+        env:
+          APK_SIGN_PRIVATE_KEY: ${{ secrets.APK_SIGN_PRIVATE_KEY }}
         run: |
           podman run --rm -v "$PWD:/srv:Z" -w /srv \
+            -e APK_SIGN_PRIVATE_KEY \
             alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f \
             sh packaging/build-apk.sh "${GITHUB_REF_NAME#v}"
 

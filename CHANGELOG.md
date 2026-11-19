@@ -6,6 +6,19 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
+## Unreleased
+
+The apk is signed by a persistent key now: one keypair signs every
+release, on both architectures, so the "UNTRUSTED signature" warning apk
+shows on first install is fixed for good - trust the .pub once and every
+future version verifies clean. From this release on:
+
+    wget https://github.com/Letdown2491/satori-desktop/releases/download/v<VERSION>/satori-desktop-<VERSION>-<ARCH>.pub
+    sudo cp satori-desktop-<VERSION>-<ARCH>.pub /etc/apk/keys/
+    apk add ./satori-desktop-<VERSION>-<ARCH>.apk
+
+(If you were sideloading with `--allow-untrusted`, stop needing it.)
+
 ## 0.9.2 - 2026-11-16
 
 @mentions inside note bodies now show people's names everywhere, not just
