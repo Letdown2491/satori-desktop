@@ -6,16 +6,36 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
-## Unreleased
+## 0.10.0 - 2026-11-19
 
-The apk is signed by a persistent key now: one keypair signs every
+Your relationships live on one page now. Your profile picture at the top
+of the rail opens the me menu, and its new Network row opens a page with
+three segments: Followers (people the app has seen following you, seen
+through your relays' contact lists), Following (people you follow), and
+Muted (people you have silenced, which until now you could not see
+anywhere). Every row carries the actions that fit the relationship:
+follow or unfollow, mute or unmute, right there in the list, no more
+visiting each profile to manage who you hear from. Nostr has no global
+followers list to fetch, so the Followers segment shows what your relays
+have delivered and says so.
+
+The event store keeps itself lean. The store's file only ever grows,
+even after notes are deleted or pruned: the space stays allocated until
+the store is rebuilt. Satori has shipped an explicit offline rebuild
+(the `--vacuum` flag) since 0.5.0; the app now runs the same verified
+rebuild automatically, before the store opens, when the store has grown
+half again past its size at the last rebuild (at least 64 MiB of growth,
+so small stores never churn). The cost lands as one slow launch per
+rebuild cycle instead of a store that grows forever.
+
+Alpine packages are signed by a persistent key: one keypair signs every
 release, on both architectures, so the "UNTRUSTED signature" warning apk
-shows on first install is fixed for good - trust the .pub once and every
+showed on first install is fixed for good. Trust the .pub once and every
 future version verifies clean. From this release on:
 
-    wget https://github.com/Letdown2491/satori-desktop/releases/download/v<VERSION>/satori-desktop-<VERSION>-<ARCH>.pub
-    sudo cp satori-desktop-<VERSION>-<ARCH>.pub /etc/apk/keys/
-    apk add ./satori-desktop-<VERSION>-<ARCH>.apk
+    wget https://github.com/Letdown2491/satori-desktop/releases/download/v0.10.0/satori-desktop-0.10.0-<ARCH>.pub
+    sudo cp satori-desktop-0.10.0-<ARCH>.pub /etc/apk/keys/
+    apk add ./satori-desktop-0.10.0-<ARCH>.apk
 
 (If you were sideloading with `--allow-untrusted`, stop needing it.)
 
