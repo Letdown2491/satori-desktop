@@ -18,7 +18,12 @@ with one fallback fetch when it has none), keeps the parts of the old
 event a toggle does not touch (a follow list's relay hints, a mute
 list's public entries), and refuses to publish a removal when it has
 nothing to remove from. This is the same shape Amethyst ships, proven there by years of daily
-use.
+use. A second five-lens audit of the whole release then caught three
+last holes: an un-bookmark skipped the same protection, an unmute
+could silently come back the next time you muted someone else, and
+the background store rebuild held too much in memory at once on large
+stores. All three are fixed, and a failed store swap can no longer
+delete the backup copy it was recovering from.
 
 Your relationships live on one page now. Your profile picture at the top
 of the rail opens the me menu, and its new Network row opens a page with
