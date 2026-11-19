@@ -627,10 +627,18 @@ impl Profile {
         })
     }
 
-    /// Display name fallback chain: name → short npub (render/util.ts style).
+    /// Display name fallback chain: name → short npub (a REAL bech32
+    /// npub's tail — the old fallback mislabeled hex as npub; D84 audit
+    /// nit). render/util.ts style.
     pub fn display(&self) -> String {
         if self.name.is_empty() {
-            let npub = self.pubkey.clone();
+            let npub = PublicKey::from_str(&self.pubkey)
+                .ok()
+                .and_then(|pk| pk.to_bech32().ok())
+                .unwrap_or_default();
+            if npub.is_empty() {
+                return self.pubkey.clone();
+            }
             format!("npub1…{}", &npub[npub.len().saturating_sub(6)..])
         } else {
             self.name.clone()

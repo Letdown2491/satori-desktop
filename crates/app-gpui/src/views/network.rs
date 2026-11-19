@@ -11,7 +11,7 @@ use gpui::{
     AnyElement, Context, EventEmitter, Render, SharedString, Window, div, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, Profile};
+use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
 use std::{collections::HashMap, sync::Arc};
 
 use super::{content, nav::Nav};
@@ -61,51 +61,47 @@ impl NetworkView {
         self.follows = self.core.follows();
         self.mutes = self.core.mutes();
 
-        // The followers scan: one-shot receiver, and the landing batch
-        // joins the profile pump (lists.rs's reactive resolution).
+        // The one profiles pump, shared (D84 audit): batches land in the
+        // map until the channel closes (single batch by construction —
+        // ProfileService resolves each waiter exactly once).
+        let mut all: Vec<PublicKey> = self.follows.clone();
+        all.extend(self.mutes.iter().copied());
+        let weak = cx.entity().downgrade();
+        let rx = self.core.ensure_profiles(all);
+        cx.spawn(async move |_, cx| Self::pump_body(weak, rx, cx).await)
+            .detach();
+
+        // The followers scan: one-shot receiver; its batch joins the
+        // same pump (the scan lands once, so this spawns once).
+        let core = self.core.clone();
         let mut rx = self.core.followers_seen();
         cx.spawn(async move |this, cx| {
             while let Some(followers) = rx.recv().await {
+                let batch = core.ensure_profiles(followers.clone());
+                Self::pump_body(this.clone(), batch, cx).await;
                 let _ = this.update(cx, |this, cx| {
-                    if !followers.is_empty() {
-                        let mut rx = this.core.ensure_profiles(followers.clone());
-                        cx.spawn(async move |this, cx| {
-                            while let Some(ev) = rx.recv().await {
-                                if let FeedEvent::Profiles(ps) = ev {
-                                    let _ = this.update(cx, |this, cx| {
-                                        for p in ps {
-                                            this.profiles.insert(p.pubkey.clone(), p);
-                                        }
-                                        cx.notify();
-                                    });
-                                }
-                            }
-                        })
-                        .detach();
-                    }
                     this.followers = followers;
                     cx.notify();
                 });
             }
         })
         .detach();
+    }
 
-        let mut all: Vec<PublicKey> = self.follows.clone();
-        all.extend(self.mutes.iter().copied());
-        let mut rx = self.core.ensure_profiles(all);
-        cx.spawn(async move |this, cx| {
-            while let Some(ev) = rx.recv().await {
-                if let FeedEvent::Profiles(ps) = ev {
-                    let _ = this.update(cx, |this, cx| {
-                        for p in ps {
-                            this.profiles.insert(p.pubkey.clone(), p);
-                        }
-                        cx.notify();
-                    });
-                }
+    /// The one profiles pump: batch-and-notify until the channel closes.
+    /// Two load() sites want it (the union seed, the followers batch) —
+    /// one body, named (D84 audit).
+    async fn pump_body(this: gpui::WeakEntity<Self>, mut rx: FeedRx, cx: &mut gpui::AsyncApp) {
+        while let Some(ev) = rx.recv().await {
+            if let FeedEvent::Profiles(ps) = ev {
+                let _ = this.update(cx, |this, cx| {
+                    for p in ps {
+                        this.profiles.insert(p.pubkey.clone(), p);
+                    }
+                    cx.notify();
+                });
             }
-        })
-        .detach();
+        }
     }
 
     // The row actions: optimistic flips over the mirrors, publish events
@@ -256,27 +252,39 @@ impl Render for NetworkView {
         let media = media::Snapshot::new(cx);
         let viewer = cx.entity_id();
 
-        // Sort each segment by resolved name (unresolvable pks last),
-        // so the lists read instead of scrolling like a hash dump.
+        // Membership as sets: the per-row Vec::contains scans were
+        // O(n²) per paint (D84 audit H1). Sets rebuilt per render —
+        // bounded by the mirrors' sizes, still trivial.
+        let is_follow: std::collections::HashSet<PublicKey> =
+            self.follows.iter().copied().collect();
+        let is_muted: std::collections::HashSet<PublicKey> = self.mutes.iter().copied().collect();
+
+        // The ACTIVE tab's list only, with each name resolved once (a
+        // key per element, then a borrow sort — the old path re-ran an
+        // allocating key per comparison, on all three clones, every
+        // paint; D84 audit M1).
         let name_of = |pk: &PublicKey| -> String {
-            let hex = pk.to_string();
-            match self.profiles.get(&hex) {
+            match self.profiles.get(&pk.to_string()) {
                 Some(p) => p.display(),
                 None => String::new(),
             }
         };
-        let mut followers = self.followers.clone();
-        followers.sort_by_key(|pk| std::cmp::Reverse(name_of(pk)));
-        let mut follows = self.follows.clone();
-        follows.sort_by_key(|pk| std::cmp::Reverse(name_of(pk)));
-        let mut mutes = self.mutes.clone();
-        mutes.sort_by_key(|pk| std::cmp::Reverse(name_of(pk)));
+        let mut list: Vec<PublicKey> = match self.tab {
+            Tab::Followers => self.followers.clone(),
+            Tab::Following => self.follows.clone(),
+            Tab::Muted => self.mutes.clone(),
+        };
+        let mut keyed: Vec<(String, PublicKey)> =
+            list.drain(..).map(|pk| (name_of(&pk), pk)).collect();
+        keyed.sort_by(|a, b| b.0.cmp(&a.0));
 
-        // Repin the avatars this paint shows (lists.rs's discipline: the
-        // pane idles open, only renders touch the eviction window).
+        // Repin the avatars this paint shows — the ACTIVE tab's rows
+        // only (D84 audit: the three-tab crawl fetched avatars for rows
+        // never painted). lists.rs's discipline: the pane idles open,
+        // only renders touch the eviction window.
         let mut painted: Vec<String> = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for pk in followers.iter().chain(&follows).chain(&mutes) {
+        for (_, pk) in &keyed {
             if let Some(p) = self.profiles.get(&pk.to_string()) {
                 media::fetch(&self.core, p.picture.clone(), viewer, cx);
                 if !p.picture.is_empty() && seen.insert(p.picture.clone()) {
@@ -288,53 +296,43 @@ impl Render for NetworkView {
 
         // Per-segment rows: Followers (Follow?+Mute), Following
         // (Unfollow+Mute), Muted (Unmute).
-        let is_follow = |this: &Self, pk: &PublicKey| this.follows.contains(pk);
-        let is_muted = |this: &Self, pk: &PublicKey| this.mutes.contains(pk);
-        let rows: Vec<AnyElement> = match self.tab {
-            Tab::Followers => followers
-                .iter()
-                .enumerate()
-                .map(|(i, pk)| {
-                    let mut actions = Vec::new();
-                    if !is_muted(self, pk) {
-                        actions.push(("Mute", false, Action::Mute));
+        let rows: Vec<AnyElement> = keyed
+            .iter()
+            .enumerate()
+            .map(|(i, (_, pk))| {
+                let mut actions = Vec::new();
+                match self.tab {
+                    Tab::Followers => {
+                        if !is_muted.contains(pk) {
+                            actions.push(("Mute", false, Action::Mute));
+                        }
+                        if is_follow.contains(pk) {
+                            actions.push(("Following", false, Action::Unfollow));
+                        } else {
+                            actions.push(("Follow", true, Action::Follow));
+                        }
                     }
-                    if is_follow(self, pk) {
-                        actions.push(("Following", false, Action::Unfollow));
-                    } else {
-                        actions.push(("Follow", true, Action::Follow));
+                    Tab::Following => {
+                        if !is_muted.contains(pk) {
+                            actions.push(("Mute", false, Action::Mute));
+                        } else {
+                            actions.push(("Unmute", false, Action::Unmute));
+                        }
+                        actions.push(("Unfollow", false, Action::Unfollow));
                     }
-                    self.person_row(i, &media, pk, actions, cx)
-                })
-                .collect(),
-            Tab::Following => follows
-                .iter()
-                .enumerate()
-                .map(|(i, pk)| {
-                    let mut actions = Vec::new();
-                    if !is_muted(self, pk) {
-                        actions.push(("Mute", false, Action::Mute));
-                    } else {
+                    Tab::Muted => {
                         actions.push(("Unmute", false, Action::Unmute));
                     }
-                    actions.push(("Unfollow", false, Action::Unfollow));
-                    self.person_row(i, &media, pk, actions, cx)
-                })
-                .collect(),
-            Tab::Muted => mutes
-                .iter()
-                .enumerate()
-                .map(|(i, pk)| {
-                    let actions = vec![("Unmute", false, Action::Unmute)];
-                    self.person_row(i, &media, pk, actions, cx)
-                })
-                .collect(),
-        };
+                }
+                self.person_row(i, &media, pk, actions, cx)
+            })
+            .collect();
 
-        let (count, note): (usize, &str) = match self.tab {
-            Tab::Followers => (followers.len(), "seen through your relays' contact lists"),
-            Tab::Following => (follows.len(), ""),
-            Tab::Muted => (mutes.len(), "authors whose notes never surface"),
+        let count = rows.len();
+        let note: &str = match self.tab {
+            Tab::Followers if count > 0 => "seen through your relays' contact lists",
+            Tab::Followers => "",
+            _ => "",
         };
 
         div()
@@ -357,11 +355,15 @@ impl Render for NetworkView {
                     .border_color(rgb(theme::hairline()))
                     .child(self.tab_btn(
                         Tab::Followers,
-                        format!("Followers {}", followers.len()),
+                        format!("Followers {}", self.followers.len()),
                         cx,
                     ))
-                    .child(self.tab_btn(Tab::Following, format!("Following {}", follows.len()), cx))
-                    .child(self.tab_btn(Tab::Muted, format!("Muted {}", mutes.len()), cx)),
+                    .child(self.tab_btn(
+                        Tab::Following,
+                        format!("Following {}", self.follows.len()),
+                        cx,
+                    ))
+                    .child(self.tab_btn(Tab::Muted, format!("Muted {}", self.mutes.len()), cx)),
             )
             .when(!note.is_empty() && count > 0, |d| {
                 d.child(

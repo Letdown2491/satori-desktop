@@ -240,6 +240,17 @@ fn main() {
         }
         return;
     }
+    // NIP-21 (D25 follow-up): the .desktop handler passes a nostr: URI
+    // as argv. Own the single-instance socket FIRST — before the boot
+    // gate below (D84 audit): two near-simultaneous launches would
+    // otherwise both run the gate on one store, and the swap window is
+    // not guarded across processes. If another Satori is live, forward
+    // the URI to it and exit; never a second window.
+    let argv = std::env::args().nth(1).filter(|a| uri_target(a).is_some());
+    let uri_rx = match uris::acquire(argv.as_deref()) {
+        Instance::Forwarded => std::process::exit(0),
+        Instance::Primary(uri_rx) => uri_rx,
+    };
     // The boot gate (WS3, issue #4): the store-rebuild trigger, checked in
     // the same exclusive window --vacuum uses (the store is not open yet).
     // First boot just records a watermark; growth past 1.5x AND +64 MiB
@@ -276,7 +287,7 @@ fn main() {
     }
     // D35/P5: the snapshot moved the platform out of Application::new();
     // the Linux platform (wgpu renderer) comes from gpui_linux.
-    Application::with_platform(gpui_linux::current_platform(false)).run(|cx: &mut App| {
+    Application::with_platform(gpui_linux::current_platform(false)).run(move |cx: &mut App| {
         // Return glibc arena heap to the OS on a slow clock. gpui's image
         // work allocates/frees large blocks on many threads; glibc retains
         // the freed arenas (RSS stays at the high-water mark otherwise).
@@ -331,35 +342,29 @@ fn main() {
             eprintln!("[satori-gpui] resume error (surfaced on the login doors)");
         }
         // NIP-21 (D25 follow-up): the .desktop handler passes a nostr: URI
-        // as argv. Own the single-instance socket first — if another Satori
-        // is live, forward the URI to it and exit; never a second window.
-        let argv = std::env::args().nth(1).filter(|a| uri_target(a).is_some());
-        match uris::acquire(argv.as_deref()) {
-            Instance::Forwarded => std::process::exit(0),
-            Instance::Primary(uri_rx) => {
-                // TODO(port): crates/app/src/shell.rs window geometry + state — P1.
-                let bounds = Bounds::centered(None, size(px(460.), px(760.)), cx);
-                cx.open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
-                        titlebar: Some(gpui::TitlebarOptions {
-                            title: Some("Satori".into()),
-                            ..Default::default()
-                        }),
-                        // The window's Wayland app_id — byte-identical to the
-                        // .desktop file's ID so GNOME matches dash icon, grouping,
-                        // and startup notification to this window (D12).
-                        app_id: Some(satori_core::config::APP_ID.into()),
-                        ..Default::default()
-                    },
-                    |_window, cx| {
-                        let session_ok = session.is_some();
-                        cx.new(|cx| Root::new(core, session_ok, err, argv, uri_rx, cx))
-                    },
-                )
-                .expect("failed to open Satori window");
-                cx.activate(true);
-            }
-        }
+        // as argv. The single-instance socket was owned BEFORE the boot
+        // gate (D84 audit) — acquire ran at the top of main().
+        // TODO(port): crates/app/src/shell.rs window geometry + state — P1.
+        let bounds = Bounds::centered(None, size(px(460.), px(760.)), cx);
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("Satori".into()),
+                    ..Default::default()
+                }),
+                // The window's Wayland app_id — byte-identical to the
+                // .desktop file's ID so GNOME matches dash icon, grouping,
+                // and startup notification to this window (D12).
+                app_id: Some(satori_core::config::APP_ID.into()),
+                ..Default::default()
+            },
+            |_window, cx| {
+                let session_ok = session.is_some();
+                cx.new(|cx| Root::new(core, session_ok, err, argv, uri_rx, cx))
+            },
+        )
+        .expect("failed to open Satori window");
+        cx.activate(true);
     });
 }

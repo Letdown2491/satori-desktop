@@ -181,7 +181,7 @@ impl ListsView {
         let p = self.members.get(&hex);
         let (name, picture, nip05) = match p {
             Some(p) => (p.display(), p.picture.clone(), p.nip05.clone()),
-            None => (hex.clone(), String::new(), String::new()),
+            None => (content::short_bech32(&hex), String::new(), String::new()),
         };
         let who = *pk;
         div()

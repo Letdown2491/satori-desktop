@@ -59,7 +59,10 @@ su builder -c "curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain
 KEYNAME="satori-desktop@satori"
 if [ -n "${APK_SIGN_PRIVATE_KEY:-}" ]; then
 	umask 077
-	mkdir -p /home/builder/.abuild
+	# -o builder: the dir must be READABLE by the builder — a root-owned
+	# 0700 .abuild fails closed at abuild-sign (loud, but every release
+	# dies; D84 audit reproduced it in alpine:3.22).
+	install -d -o builder -g builder -m 0700 /home/builder/.abuild
 	printf '%s\n' "$APK_SIGN_PRIVATE_KEY" > "/home/builder/.abuild/$KEYNAME.rsa"
 	# The pub half is DERIVED from the private, so they can never drift.
 	openssl rsa -in "/home/builder/.abuild/$KEYNAME.rsa" -pubout \
@@ -70,8 +73,11 @@ if [ -n "${APK_SIGN_PRIVATE_KEY:-}" ]; then
 else
 	su builder -c "abuild-keygen -a -n"
 fi
-chown builder:builder /home/builder/.abuild/* 2>/dev/null || true
+chown -R builder:builder /home/builder/.abuild 2>/dev/null || true
 cp /home/builder/.abuild/*.pub /etc/apk/keys/ 2>/dev/null || true
+# The canary: fail HERE, at setup, if the builder cannot read the key —
+# not forty lines later inside abuild's signing step.
+su builder -c "test -r /home/builder/.abuild/$KEYNAME.rsa.pub"
 
 # abuild fetches the tag tarball from GitHub (network), verifies
 # checksums, builds, tests (check(): the core suite), and packages.

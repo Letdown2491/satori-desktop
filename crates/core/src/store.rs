@@ -83,12 +83,14 @@ pub struct Store {
 impl Store {
     pub async fn open() -> NostrResult<Self> {
         std::fs::create_dir_all(config::events_dir()).map_err(|e| DbError::other(e.to_string()))?;
-        // Post-vacuum hygiene (vacuum's swap left events.prev): this boot
-        // opened the REBUILT store, so the previous generation is dead.
-        // A staging dir from a crashed vacuum is debris too.
-        let _ = std::fs::remove_dir_all(config::events_dir().with_extension("prev"));
+        // A staging dir from a crashed vacuum is debris. (events.prev is
+        // NOT cleared here: only after the store below OPENS — clearing
+        // first let a failed open delete the previous generation, the
+        // only recoverable copy (D84 audit).)
         let _ = std::fs::remove_dir_all(config::events_dir().with_extension("vacuum"));
         let db = NostrLmdb::open(config::events_dir()).await?;
+        // The rebuilt store opened: the previous generation is dead now.
+        let _ = std::fs::remove_dir_all(config::events_dir().with_extension("prev"));
         Ok(Self { db: Arc::new(db) })
     }
 
@@ -481,9 +483,18 @@ async fn vacuum_at(dir: &std::path::Path) -> Result<VacuumReport, String> {
     };
     let bytes_before = bytes_of(dir);
 
-    // Staging from a crashed vacuum is debris: start clean.
+    // Staging from a crashed vacuum is debris: start clean. A stale
+    // events.prev goes too, BEFORE the copy (D84 audit): prev is the
+    // previous-previous generation by definition (the live store
+    // supersedes it, the boot clears it anyway) — keeping it through the
+    // copy let three store copies coexist (~3x the extent transiently,
+    // and disk-full during the copy is exactly the failure that makes
+    // the gated rebuild retry forever).
     if staging.exists() {
         std::fs::remove_dir_all(&staging).map_err(|e| e.to_string())?;
+    }
+    if prev.exists() {
+        std::fs::remove_dir_all(&prev).map_err(|e| e.to_string())?;
     }
     std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
 
@@ -499,26 +510,23 @@ async fn vacuum_at(dir: &std::path::Path) -> Result<VacuumReport, String> {
         .map_err(|e| e.to_string())?;
 
     // Copy in created_at windows, walking BACKWARDS from now: the hot
-    // 90 days first, then bookmark-preserved elders. The stop is
-    // EIGHT consecutive empty windows (~8 months past the oldest
-    // survivor) — cheap window queries against the created_at index.
+    // 90 days first, then bookmark-preserved elders. The walk runs to
+    // the epoch — an earlier draft stopped after eight consecutive
+    // empty windows (~8 months), which silently dropped anything older
+    // the prune had preserved (a bookmark past the stop vanished with
+    // nothing else in range; D84 audit). The empty-tail queries cost
+    // microseconds against the created_at index — ~640 windows to the
+    // epoch, capped by [lo == 0] below.
     const WINDOW: u64 = 30 * 24 * 3600;
-    const EMPTY_STOP: u64 = 8;
     let now = Timestamp::now().as_secs();
     let mut copied = 0usize;
-    let mut empty_run = 0u64;
     let mut hi = now;
-    while empty_run < EMPTY_STOP {
+    loop {
         let lo = hi.saturating_sub(WINDOW - 1);
         let filter = Filter::new()
             .since(Timestamp::from(lo))
             .until(Timestamp::from(hi));
         let events = source.query(filter).await.map_err(|e| e.to_string())?;
-        if events.is_empty() {
-            empty_run += 1;
-        } else {
-            empty_run = 0;
-        }
         for event in &events {
             fresh.save_event(event).await.map_err(|e| e.to_string())?;
         }
@@ -633,6 +641,23 @@ fn record_watermark(dir: &std::path::Path, bytes: u64) {
     }
 }
 
+/// The rebuild is silent and slow — a GUI launch shows nothing but a
+/// frozen icon, and a user who kills and relaunches pays the full copy
+/// again (the watermark has not moved). Best-effort desktop notification
+/// so the rare triggered rebuild explains itself (D84 audit). Absent
+/// notify-send: a spawn error, ignored.
+fn notify_rebuild() {
+    if cfg!(test) {
+        return; // the gate tests run the real thresholds; no desktop spam
+    }
+    let _ = std::process::Command::new("notify-send")
+        .args([
+            "Satori",
+            "Optimizing the local store — this launch may take a moment.",
+        ])
+        .spawn();
+}
+
 /// The boot-time gate: rebuild the store when it has grown past its
 /// watermark, before the app opens it. `Ok(None)` is every no-rebuild
 /// boot (under threshold, or the first observation, which only records
@@ -667,6 +692,9 @@ async fn boot_gate_at(
     if !grown || !real {
         return Ok(None);
     }
+    // Say what is happening before the long copy: the launch looks
+    // frozen otherwise (D84 audit).
+    notify_rebuild();
     // vacuum_at records the new watermark on success.
     Ok(Some(vacuum_at(dir).await?))
 }
@@ -790,6 +818,43 @@ mod tests {
         let _store = rt.block_on(Store::open()).unwrap();
         assert!(!store_dir.with_extension("prev").exists());
         drop(_store);
+        drop(env);
+    }
+
+    /// The D84 regression: the copy walk must reach past empty windows.
+    /// A note dated ~400 days ago, with nothing else in its range (the
+    /// steady state after the 90-day prune keeps only bookmarked
+    /// elders), must survive the rebuild — the old eight-empty-window
+    /// stop dropped it silently.
+    #[test]
+    fn vacuum_reaches_past_empty_windows() {
+        let env = EnvGuard::new("store-vacuum-old");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store_dir = config::events_dir();
+        std::fs::create_dir_all(&store_dir).unwrap();
+        let keys = Keys::generate();
+        let old = Timestamp::now().as_secs() - 400 * 24 * 3600;
+        let ancient = note(&keys, "bookmarked elder", old);
+        let recent = note(&keys, "fresh", Timestamp::now().as_secs() - 60);
+        let db = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
+        rt.block_on(db.save_event(&ancient)).unwrap();
+        rt.block_on(db.save_event(&recent)).unwrap();
+        drop(db);
+
+        let report = rt.block_on(vacuum()).unwrap();
+        assert_eq!(report.events, 2);
+
+        let reopened = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
+        assert!(
+            rt.block_on(reopened.event_by_id(&ancient.id))
+                .unwrap()
+                .is_some(),
+            "a note 400 days back, past eight empty windows, must survive"
+        );
+        drop(reopened);
         drop(env);
     }
 
