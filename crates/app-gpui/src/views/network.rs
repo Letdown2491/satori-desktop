@@ -1,11 +1,14 @@
-//! The Network page (D83): who you follow, who follows you, who you've
-//! muted — one me-menu row, one pane, three segments (the search.rs tab
-//! pattern). The row actions are the profile page's Follow/Mute buttons
-//! per row, optimistic with the publishes drained and ignored (P1).
+//! The Network page (D83): who you follow, who you've muted — one
+//! me-menu row, one pane, two segments (the search.rs tab pattern). The
+//! row actions are the profile page's Follow/Mute buttons per row,
+//! optimistic with the publishes drained and ignored (P1).
 //!
-//! Honesty note baked into the Followers header: Nostr has no followers
-//! event — the list is a reverse lookup over the contact lists the
-//! relays have delivered, so it says "seen", not global truth.
+//! D88: no Followers segment. Nostr has no followers event — the
+//! reverse lookup over relay-held contact lists undersold the real
+//! number by an order of magnitude (the owner: 5), and a feature that
+//! confidently shows a wrong list is worse than its absence. The
+//! lookup's 1,000-event relay seed (a store-growth suspect in the
+//! 1.5 GB day) went with it.
 
 use gpui::{
     AnyElement, Context, EventEmitter, Render, SharedString, Window, div, prelude::*, px, rgb,
@@ -21,8 +24,6 @@ use crate::{media, theme};
 pub(crate) struct NetworkView {
     core: Arc<Core>,
     tab: Tab,
-    /// People the store has SEEN following me (the reverse lookup).
-    followers: Vec<PublicKey>,
     /// The own follow set (the cached contact list's p-keys).
     follows: Vec<PublicKey>,
     /// The own mute set (kind:10000, decrypted at session start).
@@ -34,7 +35,6 @@ pub(crate) struct NetworkView {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Following,
-    Followers,
     Muted,
 }
 
@@ -46,7 +46,6 @@ impl NetworkView {
         let mut this = Self {
             core: core.clone(),
             tab: Tab::Following,
-            followers: Vec::new(),
             follows: core.follows(),
             mutes: core.mutes(),
             profiles: HashMap::new(),
@@ -55,9 +54,9 @@ impl NetworkView {
         this
     }
 
-    /// The three lists. The own sets are sync mirrors (one read each);
-    /// the followers reverse-lookup is a store scan (one-shot), and the
-    /// profiles resolve reactively over the union (lists.rs's pump).
+    /// The two lists. The own sets are sync mirrors (one read each),
+    /// and the profiles resolve reactively over the union (lists.rs's
+    /// pump).
     fn load(&mut self, cx: &mut Context<Self>) {
         self.follows = self.core.follows();
         self.mutes = self.core.mutes();
@@ -71,27 +70,10 @@ impl NetworkView {
         let rx = self.core.ensure_profiles(all);
         cx.spawn(async move |_, cx| Self::pump_body(weak, rx, cx).await)
             .detach();
-
-        // The followers scan: one-shot receiver; its batch joins the
-        // same pump (the scan lands once, so this spawns once).
-        let core = self.core.clone();
-        let mut rx = self.core.followers_seen();
-        cx.spawn(async move |this, cx| {
-            while let Some(followers) = rx.recv().await {
-                let batch = core.ensure_profiles(followers.clone());
-                Self::pump_body(this.clone(), batch, cx).await;
-                let _ = this.update(cx, |this, cx| {
-                    this.followers = followers;
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
     }
 
     /// The one profiles pump: batch-and-notify until the channel closes.
-    /// Two load() sites want it (the union seed, the followers batch) —
-    /// one body, named (D84 audit).
+    /// One body, named (D84 audit).
     async fn pump_body(this: gpui::WeakEntity<Self>, mut rx: FeedRx, cx: &mut gpui::AsyncApp) {
         while let Some(ev) = rx.recv().await {
             if let FeedEvent::Profiles(ps) = ev {
@@ -226,7 +208,6 @@ impl NetworkView {
                         // A button tap is NOT a row tap.
                         cx.stop_propagation();
                         handle.update(cx, |this, cx| match action {
-                            Action::Follow => this.set_follow(who, true, cx),
                             Action::Unfollow => this.set_follow(who, false, cx),
                             Action::Mute => this.set_mute(who, true, cx),
                             Action::Unmute => this.set_mute(who, false, cx),
@@ -242,7 +223,6 @@ impl NetworkView {
 /// A row action's kind — the id needs it, the click needs the dispatch.
 #[derive(Debug, Clone, Copy)]
 enum Action {
-    Follow,
     Unfollow,
     Mute,
     Unmute,
@@ -252,11 +232,9 @@ impl Render for NetworkView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewer = cx.entity_id();
 
-        // Membership as sets: the per-row Vec::contains scans were
-        // O(n²) per paint (D84 audit H1). Sets rebuilt per render —
-        // bounded by the mirrors' sizes, still trivial.
-        let is_follow: std::collections::HashSet<PublicKey> =
-            self.follows.iter().copied().collect();
+        // Membership as a set: the per-row Vec::contains scans were
+        // O(n²) per paint (D84 audit H1). Rebuilt per render — bounded
+        // by the mirror's size, still trivial.
         let is_muted: std::collections::HashSet<PublicKey> = self.mutes.iter().copied().collect();
 
         // The ACTIVE tab's list only, with each name resolved once (a
@@ -270,7 +248,6 @@ impl Render for NetworkView {
             }
         };
         let mut list: Vec<PublicKey> = match self.tab {
-            Tab::Followers => self.followers.clone(),
             Tab::Following => self.follows.clone(),
             Tab::Muted => self.mutes.clone(),
         };
@@ -289,14 +266,9 @@ impl Render for NetworkView {
         // exists per frame. The sort above stays per-paint (it feeds the
         // window offsets), but it's a borrow over pre-built keys.
         let count = keyed.len();
-        let note: &str = match self.tab {
-            Tab::Followers if count > 0 => "seen through your relays' contact lists",
-            _ => "",
-        };
         let tab = self.tab;
         let list: AnyElement = if count == 0 {
             placeholder(match tab {
-                Tab::Followers => "No followers seen yet.",
                 Tab::Following => "You aren't following anyone yet.",
                 Tab::Muted => "Your mute list is empty.",
             })
@@ -320,20 +292,10 @@ impl Render for NetworkView {
                                 painted.push(p.picture.clone());
                             }
                         }
-                        // Per-segment rows: Followers (Follow?+Mute),
-                        // Following (Unfollow+Mute), Muted (Unmute).
+                        // Per-segment rows: Following
+                        // (Unfollow+Mute), Muted (Unmute).
                         let mut actions: Vec<(&'static str, bool, Action)> = Vec::new();
                         match tab {
-                            Tab::Followers => {
-                                if !is_muted.contains(pk) {
-                                    actions.push(("Mute", false, Action::Mute));
-                                }
-                                if is_follow.contains(pk) {
-                                    actions.push(("Following", false, Action::Unfollow));
-                                } else {
-                                    actions.push(("Follow", true, Action::Follow));
-                                }
-                            }
                             Tab::Following => {
                                 if !is_muted.contains(pk) {
                                     actions.push(("Mute", false, Action::Mute));
@@ -380,23 +342,8 @@ impl Render for NetworkView {
                         format!("Following {}", self.follows.len()),
                         cx,
                     ))
-                    .child(self.tab_btn(
-                        Tab::Followers,
-                        format!("Followers {}", self.followers.len()),
-                        cx,
-                    ))
                     .child(self.tab_btn(Tab::Muted, format!("Muted {}", self.mutes.len()), cx)),
             )
-            .when(!note.is_empty() && count > 0, |d| {
-                d.child(
-                    div()
-                        .px_4()
-                        .pt_2()
-                        .text_size(px(theme::T_SMALL))
-                        .text_color(rgb(theme::muted()))
-                        .child(note),
-                )
-            })
             .child(
                 div()
                     .w_full()

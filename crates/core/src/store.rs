@@ -268,19 +268,6 @@ impl Store {
         Ok(out)
     }
 
-    /// Kind-3 contact lists that tag the given key (the followers page's
-    /// candidate scan): every cached list whose p index matches, ANY
-    /// author. NOT the follower set — an author who followed me at t1 and
-    /// un-followed at t2 still has the t1 list in the index — so the
-    /// caller verifies each candidate against the author's NEWEST list
-    /// (`contact_lists`, below). Newest-first per LMDB's sort.
-    pub async fn lists_tagging(&self, me: &PublicKey) -> NostrResult<Vec<Event>> {
-        let filter = Filter::new()
-            .kind(Kind::ContactList)
-            .custom_tag(SingleLetterTag::LOWERCASE_P, me.to_string());
-        Ok(self.query(filter).await?.into_iter().collect())
-    }
-
     /// Contact lists (kind 3) for a set of authors, newest per author —
     /// the WoT graph's source data (wot.rs rebuilds from these at
     /// bootstrap; same per-author cursor quirk as `relay_lists`).
