@@ -70,6 +70,19 @@ jobs:
           # header listing is the check).
           rpm -q --info target/generate-rpm/*.rpm || rpm2cpio target/generate-rpm/*.rpm | cpio -it | head
 
+      - name: Extract the release body from CHANGELOG.md
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          awk -v ver="$VER" '
+            $0 ~ "^## " ver { on = 1; next }
+            /^## / { on = 0 }
+            on { print }
+          ' CHANGELOG.md > release-body.md
+          PREV=$(git ls-remote --tags origin "v*" | sed "s|.*refs/tags/||" | grep -v "\^{}$" | grep -v "^v$VER$" | sort -V | tail -1)
+          if [ -n "$PREV" ]; then
+            echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/$PREV...v$VER" >> release-body.md
+          fi
+
       - name: Attach the artifacts to the release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
@@ -77,7 +90,13 @@ jobs:
             target/release/satori-desktop
             target/debian/*.deb
             target/generate-rpm/*.rpm
-          generate_release_notes: true
+          # The notes come from CHANGELOG.md (the declared source of
+          # truth), not GitHub's PR-list generator: a release notes
+          # body built here OVERWRITES on re-runs, where
+          # generate_release: true PREPENDS a new block on every
+          # attaching job (v0.10.0's page stacked eight "What's
+          # Changed" blocks: two tag pushes x four attach jobs).
+          body_path: release-body.md
 
   flatpak:
     strategy:
@@ -147,7 +166,6 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: bundles/*.flatpak
-          generate_release_notes: true
 
       - name: Save the staged tree for the publish job
         # orchard-publish packs the app tree (files/, export/,
@@ -200,7 +218,6 @@ jobs:
           files: |
             packaging/apk/out/*.apk
             packaging/apk/out/*.pub
-          generate_release_notes: true
 
   orchard:
     needs: flatpak

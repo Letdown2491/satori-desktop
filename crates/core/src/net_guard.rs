@@ -837,8 +837,17 @@ mod tests {
 
     // --- the user-relay exemption ------------------------------------------
 
+    /// The direct-hosts exemption set is a PROCESS global (a OnceLock),
+    /// not part of the EnvGuard's data-dir isolation: a test's allow
+    /// window leaks into any parallel test's screens. These tests take
+    /// this lock so their mutations stay private (the v0.10.0 CI run
+    /// interleaved the consent-ledger test's 127.0.0.1 exemption into
+    /// the refusing test's screens; locally the timing never hit).
+    static LEDGER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn user_relay_exemption_roundtrip() {
+        let _g = LEDGER_LOCK.lock().unwrap();
         let _env = crate::test_env::EnvGuard::new("netguard");
         let url = "wss://umbrel.local:7777";
         assert!(!user_chosen_relay(url));
@@ -856,6 +865,7 @@ mod tests {
     /// strips the port (and the brackets) on the way in.
     #[test]
     fn exemption_normalization_strips_ports_and_brackets() {
+        let _g = LEDGER_LOCK.lock().unwrap();
         let _env = crate::test_env::EnvGuard::new("netguard-port");
         allow_direct_relay("umbrel.local:7777");
         assert!(
@@ -882,6 +892,7 @@ mod tests {
 
     #[test]
     fn uri_relay_screen_refuses_private_dial_targets() {
+        let _g = LEDGER_LOCK.lock().unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -917,6 +928,7 @@ mod tests {
 
     #[test]
     fn uri_relay_screen_honors_the_consent_ledger() {
+        let _g = LEDGER_LOCK.lock().unwrap();
         let _env = crate::test_env::EnvGuard::new("netguard");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
