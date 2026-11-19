@@ -2165,7 +2165,7 @@ impl Shell {
             .when(self.outbox_pending > 0, |d| {
                 let n = self.outbox_pending;
                 d.child(states::offline_pill(&format!(
-                    "{n} note{} queued for delivery, the relays will answer",
+                    "{n} note{} queued for delivery",
                     if n == 1 { "" } else { "s" }
                 )))
             })
@@ -2411,7 +2411,7 @@ impl Shell {
             .when(self.outbox_pending > 0, |d| {
                 let n = self.outbox_pending;
                 d.child(states::offline_pill(&format!(
-                    "{n} note{} queued for delivery, the relays will answer",
+                    "{n} note{} queued for delivery",
                     if n == 1 { "" } else { "s" }
                 )))
             })
