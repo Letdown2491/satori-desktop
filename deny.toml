@@ -14,6 +14,7 @@ ignore = [
     "RUSTSEC-2026-0371", # zbus_names (zbus, the Linux portal client)
     "RUSTSEC-2026-0370", # zvariant (zbus, the Linux portal client)
     "RUSTSEC-2026-0372", # zvariant_derive (zbus, the Linux portal client)
+    "RUSTSEC-2026-0543", # chrono (gpui-pre's clock, frozen; baselined Nov 19 2026)
 ]
 
 [licenses]
