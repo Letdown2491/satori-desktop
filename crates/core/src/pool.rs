@@ -419,11 +419,17 @@ impl Pool {
         }
         for url in urls {
             self.reads.lock().unwrap().insert(url.clone());
-            // Read-scoped capability; bad relay = skip.
+            // Read-scoped capability; bad relay = skip. and_connect: the
+            // live relay-change path (manager.rs's set_reads caller) has
+            // no client.connect() behind it — a relay added without it
+            // joined the pool DISCONNECTED (add_relay defaults
+            // connect: false) and every read to it failed fast (D85).
+            // Idempotent for an already-connected relay.
             let _ = self
                 .client
                 .add_relay(url.clone())
                 .capabilities(RelayCapabilities::READ)
+                .and_connect()
                 .await;
         }
     }
@@ -434,6 +440,12 @@ impl Pool {
             .client
             .add_relay(url)
             .capabilities(RelayCapabilities::READ)
+            // and_connect: add_relay defaults to NOT connecting — a cold
+            // routed relay answered every REQ with not_ready, poisoning
+            // its latency profile toward read-dead (D85, verified
+            // empirically against the mock relay). connect() is a no-op
+            // for a relay whose connection task already runs.
+            .and_connect()
             .await;
         self.routed
             .lock()

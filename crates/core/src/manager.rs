@@ -1042,13 +1042,18 @@ impl Core {
     }
 
     /// Suspend watchdog (DESIGN.md §3.4): after sleep/hibernate every relay
-    /// socket is dead. The SDK's 55s ping notices, but its adaptive backoff
-    /// (10s doubling) can take minutes to reconnect — until then every read
-    /// burns its whole budget against dead relays. A wall-clock jump far
-    /// larger than the monotonic one means the machine slept: poke every
-    /// relay (`connect()` is idempotent) so reads recover in seconds, not
-    /// minutes. One probe per 30s for the process lifetime; skipped while
-    /// logged out. Call once, from main, on the Arc'd core.
+    /// socket is dead. A wall-clock jump far larger than the monotonic one
+    /// means the machine slept: force-retry every non-connected relay so
+    /// reads recover in seconds, not on the SDK's timer (≤55s ping + up to
+    /// 60s backoff). The old poke called client().connect() — a NO-OP for
+    /// Disconnected relays, which is exactly what every relay is after
+    /// sleep (the SDK's can_connect() accepts only Initialized /
+    /// Terminated / Sleeping; D85 audit, verified in nostr-relay-pool's
+    /// source). disconnect() lands Terminated — waking the SDK's sleeping
+    /// retry loop — and connect() dials immediately; healthy relays are
+    /// untouched, so a spurious fire (manual clock jump) costs nothing.
+    /// One probe per 30s for the process lifetime; skipped while logged
+    /// out. Call once, from main, on the Arc'd core.
     pub fn spawn_suspend_watchdog(self: &Arc<Self>) {
         let this = Arc::clone(self);
         self.rt.spawn(async move {
@@ -1063,7 +1068,10 @@ impl Core {
                 last_wall = wall;
                 last_mono = mono;
                 // CLOCK_MONOTONIC freezes in sleep; the wall clock doesn't.
-                if wall_d.saturating_sub(mono_d) <= std::time::Duration::from_secs(90) {
+                // 25s, not 90s (D85): the diff is per-probe-window, so a
+                // 60s lid-close used to slip every window entirely — and
+                // with the force-retry below, a spurious fire is free.
+                if wall_d.saturating_sub(mono_d) <= std::time::Duration::from_secs(25) {
                     continue;
                 }
                 // The pool() getter would BUILD a pool while logged out —
@@ -1075,7 +1083,14 @@ impl Core {
                     "watchdog: wall jumped {:?} vs monotonic {:?}, machine slept; reconnecting relays",
                     wall_d, mono_d
                 );
-                pool.client().connect().await;
+                for (_url, relay) in pool.client().relays().all().await {
+                    if !relay.status().is_connected() {
+                        relay.disconnect();
+                        relay.connect();
+                    }
+                }
+                // (The NWC wallet needs no poke: its socket rides its own
+                // nostr-sdk client with the same auto-reconnect, D85.)
             }
         });
     }
@@ -6739,11 +6754,12 @@ impl Core {
             let filter = Filter::new()
                 .kinds([Kind::TextNote, Kind::Custom(30023)])
                 .since(Timestamp::now());
-            let Ok(output) = pool
+            let Ok(mut output) = pool
                 .client()
                 .subscribe(nostr_sdk::client::ReqTarget::manual(vec![(
                     url.as_str(),
-                    vec![filter],
+                    // Kept alive for the CLOSED re-arm below (D85).
+                    vec![filter.clone()],
                 )]))
                 .await
             else {
@@ -6754,12 +6770,45 @@ impl Core {
                 return;
             };
             let mut notifications = pool.client().notifications();
+            // CLOSED re-arm state (D85): debounce + scheduled retry (a
+            // CLOSED skipped for the cooldown, or a failed re-arm, must
+            // retry on a timer — the removed sub can never CLOSE again).
+            let mut last_rearm: Option<std::time::Instant> = None;
+            let mut pending_rearm: Option<tokio::time::Instant> = None;
             // The idle sweep: teardown needs no event to arrive — the
             // receiver count is the truth about whether anyone watches.
             let mut idle = tokio::time::interval(std::time::Duration::from_secs(10));
             idle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 let n = tokio::select! {
+                    _ = async {
+                        match pending_rearm {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        pending_rearm = None;
+                        match pool
+                            .client()
+                            .subscribe(nostr_sdk::client::ReqTarget::manual(vec![(
+                                url.as_str(),
+                                vec![filter.clone()],
+                            )]))
+                            .await
+                        {
+                            Ok(o) => {
+                                let _ = pool.client().unsubscribe(output.id()).await;
+                                output = o;
+                            }
+                            Err(e) => {
+                                eprintln!("[core] wire: re-arm failed ({e})");
+                                pending_rearm = Some(
+                                    tokio::time::Instant::now() + Self::REARM_COOLDOWN,
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     _ = idle.tick() => {
                         if tx.receiver_count() == 0 {
                             eprintln!(
@@ -6778,6 +6827,49 @@ impl Core {
                         event,
                         ..
                     }) if output.id() == &subscription_id => *event,
+                    Some(nostr_sdk::client::ClientNotification::Message { message, .. })
+                        if matches!(
+                            &*message,
+                            nostr::message::RelayMessage::Closed { subscription_id, .. }
+                                if output.id() == subscription_id.as_ref()
+                        ) =>
+                    {
+                        // A CLOSED for the wire sub (relay restart,
+                        // subscription pressure): the SDK has removed it
+                        // and no reconnect replays a removed id (D85 —
+                        // the bell got this arm in 0.9.1, the wire never
+                        // did; one CLOSED froze the column for the
+                        // session). Re-issue on the same filter, debounced.
+                        if last_rearm.is_some_and(|t| t.elapsed() < Self::REARM_COOLDOWN) {
+                            pending_rearm =
+                                Some(tokio::time::Instant::now() + Self::REARM_COOLDOWN);
+                            continue;
+                        }
+                        last_rearm = Some(std::time::Instant::now());
+                        eprintln!(
+                            "[core] wire: closed by {}; re-arming",
+                            crate::pool::clean_reason(&url)
+                        );
+                        match pool
+                            .client()
+                            .subscribe(nostr_sdk::client::ReqTarget::manual(vec![(
+                                url.as_str(),
+                                vec![filter.clone()],
+                            )]))
+                            .await
+                        {
+                            Ok(o) => {
+                                let _ = pool.client().unsubscribe(output.id()).await;
+                                output = o;
+                            }
+                            Err(e) => {
+                                eprintln!("[core] wire: re-arm failed ({e})");
+                                pending_rearm =
+                                    Some(tokio::time::Instant::now() + Self::REARM_COOLDOWN);
+                            }
+                        }
+                        continue;
+                    }
                     Some(nostr_sdk::client::ClientNotification::Shutdown) => break,
                     Some(_) => continue,
                     None => break,
@@ -6839,8 +6931,67 @@ impl Core {
                 .map(|k| Kind::from_u16(*k))
                 .collect();
             let mut notifs = pool.client().notifications();
+            // CLOSED re-arm state (D85): the ids the live sub covers,
+            // a debounce, and the scheduled retry (a CLOSED skipped for
+            // the cooldown, or a failed re-arm, must retry on a timer —
+            // the removed sub can never CLOSE again).
+            let mut armed: Vec<EventId> = Vec::new();
+            let mut last_rearm: Option<std::time::Instant> = None;
+            let mut pending_rearm: Option<tokio::time::Instant> = None;
+            // The re-arm body, shared by the CLOSED handler and the
+            // timer: close before arming (D24: no churn pileup), re-issue
+            // the same id set (subscribe_for_ids re-chunks). False = the
+            // re-arm failed; the caller schedules the retry.
+            async fn rearm_viewport(
+                pool: &Arc<Pool>,
+                kinds: &[Kind],
+                tracker: &mut crate::viewport::ViewportTracker,
+                armed: &mut Vec<EventId>,
+                current: &mut Option<Output<SubscriptionId>>,
+            ) -> bool {
+                if let Some(o) = current.take() {
+                    let _ = pool.client().unsubscribe(o.id()).await;
+                }
+                let ids = std::mem::take(armed);
+                if ids.is_empty() {
+                    return true;
+                }
+                match pool
+                    .subscribe_for_ids(kinds.to_vec(), &ids, Some(Timestamp::now()))
+                    .await
+                {
+                    Ok(o) => {
+                        tracker.commit(ids.clone());
+                        *armed = ids;
+                        *current = Some(o);
+                        true
+                    }
+                    Err(e) => {
+                        eprintln!("[core] viewport: re-arm failed ({e})");
+                        // Bookkeeping matches the relay's view so the
+                        // next change re-arms.
+                        tracker.commit(Vec::new());
+                        false
+                    }
+                }
+            }
             loop {
                 tokio::select! {
+                    _ = async {
+                        match pending_rearm {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        pending_rearm = None;
+                        if !rearm_viewport(&pool, &kinds, &mut tracker, &mut armed, &mut current)
+                            .await
+                        {
+                            pending_rearm = Some(
+                                tokio::time::Instant::now() + Self::REARM_COOLDOWN,
+                            );
+                        }
+                    }
                     res = rx_ids.changed() => {
                         if res.is_err() {
                             // All senders gone (process teardown).
@@ -6863,17 +7014,19 @@ impl Core {
                                 if let Some(o) = current.take() {
                                     let _ = pool.client().unsubscribe(o.id()).await;
                                 }
+                                let flat: Vec<EventId> =
+                                    shards.iter().flatten().copied().collect();
                                 match pool
                                     .subscribe_for_ids(
                                         kinds.clone(),
-                                        &shards.iter().flatten().copied().collect::<Vec<_>>(),
+                                        &flat,
                                         Some(Timestamp::now()),
                                     )
                                     .await
                                 {
                                     Ok(o) => {
-                                        tracker
-                                            .commit(shards.iter().flatten().copied().collect());
+                                        tracker.commit(flat.clone());
+                                        armed = flat;
                                         current = Some(o);
                                     }
                                     Err(e) => {
@@ -6947,6 +7100,41 @@ impl Core {
                                     }
                                 }
                                 let _ = this.live.send(Live::Engagement);
+                            }
+                            nostr_sdk::client::ClientNotification::Message { message, .. }
+                                if matches!(
+                                    &*message,
+                            nostr::message::RelayMessage::Closed { subscription_id, .. }
+                                if o.id() == subscription_id.as_ref()
+                                ) =>
+                            {
+                                // CLOSED for the viewport sub (D85): the
+                                // SDK removed it and no reconnect replays
+                                // a removed id — the counts would sit
+                                // frozen until the next scroll changed the
+                                // id set. Re-issue the same ids, debounced.
+                                if last_rearm.is_some_and(|t| {
+                                    t.elapsed() < Self::REARM_COOLDOWN
+                                }) {
+                                    pending_rearm = Some(
+                                        tokio::time::Instant::now() + Self::REARM_COOLDOWN,
+                                    );
+                                    continue;
+                                }
+                                last_rearm = Some(std::time::Instant::now());
+                                if !rearm_viewport(
+                                    &pool,
+                                    &kinds,
+                                    &mut tracker,
+                                    &mut armed,
+                                    &mut current,
+                                )
+                                .await
+                                {
+                                    pending_rearm = Some(
+                                        tokio::time::Instant::now() + Self::REARM_COOLDOWN,
+                                    );
+                                }
                             }
                             _ => {}
                         }
@@ -7104,7 +7292,81 @@ impl Core {
         // Consecutive re-arms without an intervening delivery: drives
         // the escalating cooldown. Reset on every delivered bell event.
         let mut rearm_backoff: u32 = 0;
-        while let Some(n) = notifications.next().await {
+        // The scheduled re-arm (D85 audit): a CLOSED that lands inside a
+        // cooldown, or a failed re-arm subscribe, is retried on this
+        // timer. The SDK has ALREADY removed a closed sub, so no later
+        // CLOSED can ever re-trigger — without the timer those paths
+        // strand the bell until re-login. `pending()` parks forever when
+        // nothing is scheduled.
+        let mut pending_rearm: Option<tokio::time::Instant> = None;
+        // The re-arm body, shared by the CLOSED handler and the timer
+        // (they were hand-copied; the timer's failure path is exactly
+        // the case the old `break` stranded the bell on). Arms the main
+        // sub on a fresh window, then the routed fan-out; false = the
+        // main subscribe failed (old ids are unsubscribed; schedule a
+        // retry). Order is close-before-arm (D24: no churn pileup).
+        async fn rearm_live(
+            pool: &Arc<Pool>,
+            filters: &mut Vec<Filter>,
+            output: &mut Output<SubscriptionId>,
+            routed: &mut Option<Output<SubscriptionId>>,
+            bell_filters: &(dyn Fn(Timestamp) -> Vec<Filter> + Send + Sync),
+            kinds: &[Kind],
+            follows: &[PublicKey],
+        ) -> bool {
+            let _ = pool.client().unsubscribe(output.id()).await;
+            if let Some(r) = routed {
+                let _ = pool.client().unsubscribe(r.id()).await;
+            }
+            *filters = bell_filters(Timestamp::now());
+            match pool.client().subscribe(filters.clone()).await {
+                Ok(o) => *output = o,
+                Err(e) => {
+                    eprintln!("[core] live: re-arm subscribe failed ({e})");
+                    return false;
+                }
+            }
+            if !follows.is_empty() {
+                *routed = match pool
+                    .subscribe_routed(kinds.to_vec(), follows, Some(Timestamp::now()))
+                    .await
+                {
+                    Ok(o) => Some(o),
+                    Err(e) => {
+                        eprintln!("[core] live: re-arm fan-out failed ({e}); indexers only");
+                        None
+                    }
+                };
+            }
+            true
+        }
+        'live: loop {
+            tokio::select! {
+                _ = async {
+                    match pending_rearm {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    pending_rearm = None;
+                    rearm_backoff += 1;
+                    if !rearm_live(
+                        &pool,
+                        &mut filters,
+                        &mut output,
+                        &mut routed,
+                        &bell_filters,
+                        &kinds,
+                        &follows,
+                    )
+                    .await
+                    {
+                        pending_rearm =
+                            Some(tokio::time::Instant::now() + Self::REARM_COOLDOWN);
+                    }
+                }
+                n = notifications.next() => {
+                let Some(n) = n else { break 'live };
             // Session changed (sign-out, or a different account): drop
             // the stale identity's subscription. The check runs before
             // anything touches the store or the bell. live_on is left
@@ -7219,36 +7481,30 @@ impl Core {
                         .unwrap_or(Self::REARM_COOLDOWN_MAX)
                         .min(Self::REARM_COOLDOWN_MAX);
                     if last_rearm.is_some_and(|t| t.elapsed() < cooldown) {
+                        // D85: do NOT drop this CLOSED — the sub is
+                        // already gone and no later CLOSED can arrive.
+                        // Schedule the retry for the cooldown's expiry.
+                        pending_rearm = Some(tokio::time::Instant::now() + cooldown);
                         continue;
                     }
                     last_rearm = Some(std::time::Instant::now());
                     rearm_backoff += 1;
                     eprintln!("[core] live: a relay closed a live sub; re-arming");
-                    let _ = pool.client().unsubscribe(output.id()).await;
-                    if let Some(r) = &routed {
-                        let _ = pool.client().unsubscribe(r.id()).await;
-                    }
-                    filters = bell_filters(Timestamp::now());
-                    match pool.client().subscribe(filters.clone()).await {
-                        Ok(o) => output = o,
-                        Err(e) => {
-                            eprintln!("[core] live: re-arm subscribe failed ({e})");
-                            break;
-                        }
-                    }
-                    if !follows.is_empty() {
-                        routed = match pool
-                            .subscribe_routed(kinds.clone(), &follows, Some(Timestamp::now()))
-                            .await
-                        {
-                            Ok(o) => Some(o),
-                            Err(e) => {
-                                eprintln!(
-                                    "[core] live: re-arm fan-out failed ({e}); indexers only"
-                                );
-                                None
-                            }
-                        };
+                    if !rearm_live(
+                        &pool,
+                        &mut filters,
+                        &mut output,
+                        &mut routed,
+                        &bell_filters,
+                        &kinds,
+                        &follows,
+                    )
+                    .await
+                    {
+                        // The re-arm's own subscribe failed: retry on
+                        // the timer (the old `break` left the bell dead
+                        // for the session — D85).
+                        pending_rearm = Some(tokio::time::Instant::now() + cooldown);
                     }
                     continue;
                 }
@@ -7301,6 +7557,8 @@ impl Core {
             };
             if let Some(sig) = sig {
                 let _ = live.send(sig);
+            }
+                }
             }
         }
         // The stream ended without a Shutdown (client teardown): the

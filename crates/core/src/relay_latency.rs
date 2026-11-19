@@ -39,6 +39,11 @@ const RICH_EV: f64 = 20.0; // ...and only if it delivers this many events/query
 /// merely QUIET relay EOSEs empty fast and is NOT dead — it stays on the
 /// EMPTY_Q deprioritization.
 const DENIAL_TTL_SECS: u64 = 12 * 3600;
+/// The blaster shape's TTL (D85): the shape's counters are lifetime, so
+/// the dead_at stamp is what expires it — the relay becomes eligible
+/// again after this long, and a delivering sample clears the stamp
+/// outright.
+const BLASTER_TTL_SECS: u64 = 6 * 3600;
 const DEAD_N: u32 = 8;
 const DEAD_TRUNC: f64 = 0.9;
 /// Write-dead classification (D36): WRITE_DEAD_N consecutive publish
@@ -81,6 +86,12 @@ struct RelayStat {
     /// success leaves it untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ok_at: Option<u64>,
+    /// When the write-only-blaster shape first held (epoch secs). The
+    /// shape's counters are lifetime, so this stamp is what expires it:
+    /// eligibility returns after BLASTER_TTL_SECS, and any delivering
+    /// sample clears the stamp (D85).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dead_at: Option<u64>,
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -207,14 +218,19 @@ pub fn record(relay: &str, ms: u64, truncated: bool, events: usize) {
         Some(p) => (p.ms as f64 * (1.0 - ALPHA) + ms as f64 * ALPHA) as u64,
         None => ms,
     };
+    let n = prev.as_ref().map(|p| p.n + 1).unwrap_or(1);
+    let trunc = prev
+        .as_ref()
+        .map(|p| p.trunc + u32::from(truncated))
+        .unwrap_or(u32::from(truncated));
+    // The blaster shape on the NEW sample's counters — an empty,
+    // truncating sample past the thresholds is what (re-)stamps.
+    let blaster = n >= DEAD_N && ev < EV_EMPTY && trunc as f64 / n as f64 >= DEAD_TRUNC;
     let stat = RelayStat {
         ms: ms2,
         ev,
-        n: prev.as_ref().map(|p| p.n + 1).unwrap_or(1),
-        trunc: prev
-            .as_ref()
-            .map(|p| p.trunc + u32::from(truncated))
-            .unwrap_or(u32::from(truncated)),
+        n,
+        trunc,
         at: now_secs(),
         denied_at: prev.as_ref().and_then(|p| p.denied_at),
         write_fails: prev.as_ref().map(|p| p.write_fails).unwrap_or(0),
@@ -222,6 +238,17 @@ pub fn record(relay: &str, ms: u64, truncated: bool, events: usize) {
             Some(now_secs())
         } else {
             prev.as_ref().and_then(|p| p.ok_at)
+        },
+        // The blaster stamp: a delivering sample clears it (the relay is
+        // demonstrably reading for us again); an empty truncating sample
+        // that holds the shape re-stamps it. Anything else carries the
+        // old stamp.
+        dead_at: if events > 0 {
+            None
+        } else if blaster {
+            Some(now_secs())
+        } else {
+            prev.as_ref().and_then(|p| p.dead_at)
         },
     };
     held.map.insert(url.clone(), stat);
@@ -306,7 +333,19 @@ fn stat_read_dead(s: &RelayStat) -> bool {
     {
         return true;
     }
-    s.n >= DEAD_N && s.ev < EV_EMPTY && s.trunc as f64 / s.n as f64 >= DEAD_TRUNC
+    // The blaster shape, RECENTLY held: the counters behind it (n, trunc)
+    // are lifetime and never shrink, so dead_at is what makes the shape
+    // expire — eligibility returns after BLASTER_TTL_SECS, and a
+    // delivering sample (record events > 0) or mark_delivery clears the
+    // stamp outright. The old test consulted the bare lifetime ratio
+    // with no stamp: once ~8 brownout samples landed, the relay was
+    // read-dead FOREVER — every consumer skips read-dead relays, so no
+    // revival sample could ever be recorded (D85).
+    s.n >= DEAD_N
+        && s.ev < EV_EMPTY
+        && s.trunc as f64 / s.n as f64 >= DEAD_TRUNC
+        && s.dead_at
+            .is_some_and(|at| now_secs().saturating_sub(at) < BLASTER_TTL_SECS)
 }
 
 /// True when reading from this relay is known-futile (relay-latency.ts
@@ -346,6 +385,12 @@ pub fn record_write_result(relay: &str, ok: bool) {
             } else {
                 prev.as_ref().and_then(|p| p.ok_at)
             },
+            // A publish ACK is proof of life too (D85).
+            dead_at: if ok {
+                None
+            } else {
+                prev.as_ref().and_then(|p| p.dead_at)
+            },
             ..prev.unwrap_or_default()
         },
     );
@@ -381,7 +426,12 @@ pub fn mark_delivery(relay: &str) {
     }
     let mut held = stats().lock().unwrap();
     match held.map.get_mut(&url) {
-        Some(s) => s.ok_at = Some(now_secs()),
+        Some(s) => {
+            s.ok_at = Some(now_secs());
+            // Proof of life: a relay delivering over its socket is not a
+            // read-blaster, whatever its history says (D85).
+            s.dead_at = None;
+        }
         // First contact on an unprofiled relay: a one-field seed. (No
         // `order` touch — the LRU discipline treats this as metadata, and
         // the next real query sample re-arrants it.)
@@ -587,6 +637,32 @@ mod tests {
             "blocked: limit too high: 1000 (max 500)"
         ));
         assert!(!is_limit_rejection("blocked: you are not welcome here"));
+    }
+
+    #[test]
+    fn blaster_read_dead_revives() {
+        // The D85 regression: the blaster shape must not be permanent.
+        // Its counters are lifetime, so the dead_at stamp is what expires
+        // it — and a delivering sample (or mark_delivery) clears the
+        // stamp outright. The old test consulted the bare ratio with no
+        // stamp: once the shape landed, EVERY query skipped the relay,
+        // so no revival sample could ever be recorded.
+        let _env = EnvGuard::new("lat-dead-revive");
+        for _ in 0..DEAD_N + 1 {
+            record("wss://stuck.example", 4000, true, 0);
+        }
+        assert!(is_read_dead("wss://stuck.example"));
+        // Proof of life over the socket clears the stamp.
+        mark_delivery("wss://stuck.example");
+        assert!(!is_read_dead("wss://stuck.example"));
+        // Re-stamped by another empty truncating sample...
+        for _ in 0..2 {
+            record("wss://stuck.example", 4000, true, 0);
+        }
+        assert!(is_read_dead("wss://stuck.example"));
+        // ...cleared again by a DELIVERING query sample (events > 0).
+        record("wss://stuck.example", 400, false, 10);
+        assert!(!is_read_dead("wss://stuck.example"));
     }
 
     #[test]

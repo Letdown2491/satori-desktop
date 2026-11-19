@@ -32,10 +32,29 @@ impl Signer {
 
     pub async fn sign_event(&self, unsigned: UnsignedEvent) -> Result<Event> {
         match self {
-            Self::Bunker(c) => c
-                .sign_event_async(unsigned)
-                .await
-                .map_err(|e| LoginError::Connect(e.to_string())),
+            Self::Bunker(c) => match c.sign_event_async(unsigned.clone()).await {
+                Ok(ev) => Ok(ev),
+                Err(e) => {
+                    // A sign round-trip spanning a suspend is LOST: the
+                    // signer's reply is an ephemeral NIP-46 event that is
+                    // never replayed, so the request eats the full timeout
+                    // before erroring (D85). And a request fired before the
+                    // transport finished reviving fails fast (the relay is
+                    // not ready yet). One retry after a short grace gives
+                    // the SDK's auto-reconnect (10-60s backoff cycle) a
+                    // chance; Local keys never take this path.
+                    let timed_out = e.kind() == nostr_connect::error::ErrorKind::Timeout
+                        || e.to_string().to_lowercase().contains("not ready");
+                    if !timed_out {
+                        return Err(LoginError::Connect(e.to_string()));
+                    }
+                    eprintln!("[core] bunker: sign timed out (transport reviving?); one retry");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    c.sign_event_async(unsigned)
+                        .await
+                        .map_err(|e| LoginError::Connect(e.to_string()))
+                }
+            },
             Self::Local(k) => k
                 .sign_event(unsigned)
                 .map_err(|e| LoginError::Connect(e.to_string())),

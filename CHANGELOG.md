@@ -39,6 +39,18 @@ future version verifies clean. From this release on:
 
 (If you were sideloading with `--allow-untrusted`, stop needing it.)
 
+Connections come back faster. A full audit of the relay connection
+lifecycle surfaced real gaps in how Satori recovers: the reconnect
+nudge after sleep was a no-op in exactly the case it existed for (every
+relay asleep-disconnected), so recovery rode the SDK's own timers, up
+to a minute or more. The nudge now force-retries each dead relay the
+moment the machine wakes, short lid-closes included; relays added for
+routed reads actually connect now (some followed-author reads could
+sit empty for a whole session); the live bell's re-arm no longer has
+terminal failure paths; the wire column and engagement counts survive
+a relay restarting under them; and a relay that answered brownout
+queries with nothing can earn its way back into the read rotation.
+
 ## 0.9.2 - 2026-11-16
 
 @mentions inside note bodies now show people's names everywhere, not just
