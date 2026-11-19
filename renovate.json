@@ -1,0 +1,31 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:best-practices"],
+  "schedule": ["before 5am on monday"],
+  "prConcurrentLimit": 3,
+  "labels": ["dependencies"],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 5am on the first day of the month"]
+  },
+  "packageRules": [
+    {
+      "description": "GitHub Actions bumps batch into one reviewed PR; the digest pins are the contract (release.yml/pr.yml).",
+      "groupName": "github actions",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin"]
+    },
+    {
+      "description": "Cargo non-major bumps batch: one lockfile PR per week, not a conflict machine (the #23 sequencing rule).",
+      "groupName": "rust crates (non-major)",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor", "patch"]
+    },
+    {
+      "description": "Major crate updates come one at a time, each its own review.",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["major"],
+      "groupName": null
+    }
+  ]
+}

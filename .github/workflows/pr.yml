@@ -2,11 +2,12 @@
 # same gates the maintainer's manual container run did — fmt, clippy
 # with warnings denied, the test suite, the advisory scan, and a lint
 # of these workflow files themselves. --locked everywhere: the lock
-# changes only via explicit review (Renovate/Dependabot is the follow-up).
+# changes only via explicit review (Renovate PRs are that review).
 #
 # No container images enter this workflow (the toolchains install from
-# the distro and crates.io), so there is nothing to digest-pin yet;
-# keep it that way, or pin by digest when one appears.
+# the distro and crates.io). Every action is pinned by digest, matching
+# release.yml's contract; Renovate (issue #14's automation half) keeps
+# the pins moving via reviewed PRs.
 #
 # audit.toml carries the advisory baseline: the six informational
 # unmaintained warnings are ignored BY ID, everything else fails.
@@ -27,10 +28,10 @@ jobs:
   check:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch head
         with:
           components: rustfmt, clippy
 
@@ -52,7 +53,7 @@ jobs:
             libgstreamer-plugins-base1.0-dev
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Formatting
         run: cargo fmt --check
@@ -64,7 +65,7 @@ jobs:
         run: cargo test --locked --workspace
 
       - name: Install cargo-audit and cargo-deny
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2 branch head
         with:
           tool: cargo-audit,cargo-deny
 
