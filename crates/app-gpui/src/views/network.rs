@@ -9,6 +9,7 @@
 
 use gpui::{
     AnyElement, Context, EventEmitter, Render, SharedString, Window, div, prelude::*, px, rgb,
+    uniform_list,
 };
 use nostr::prelude::*;
 use satori_core::manager::{Core, FeedEvent, FeedRx, Profile};
@@ -32,8 +33,8 @@ pub(crate) struct NetworkView {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
-    Followers,
     Following,
+    Followers,
     Muted,
 }
 
@@ -249,7 +250,6 @@ enum Action {
 
 impl Render for NetworkView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let media = media::Snapshot::new(cx);
         let viewer = cx.entity_id();
 
         // Membership as sets: the per-row Vec::contains scans were
@@ -278,61 +278,83 @@ impl Render for NetworkView {
             list.drain(..).map(|pk| (name_of(&pk), pk)).collect();
         keyed.sort_by(|a, b| b.0.cmp(&a.0));
 
-        // Repin the avatars this paint shows — the ACTIVE tab's rows
-        // only (D84 audit: the three-tab crawl fetched avatars for rows
-        // never painted). lists.rs's discipline: the pane idles open,
-        // only renders touch the eviction window.
-        let mut painted: Vec<String> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for (_, pk) in &keyed {
-            if let Some(p) = self.profiles.get(&pk.to_string()) {
-                media::fetch(&self.core, p.picture.clone(), viewer, cx);
-                if !p.picture.is_empty() && seen.insert(p.picture.clone()) {
-                    painted.push(p.picture.clone());
-                }
-            }
-        }
-        media::repin(viewer, painted, cx);
+        // Repin + LRU touch happen INSIDE the virtual list below: only
+        // rows actually painted touch the eviction window (D60's
+        // discipline; the D84 fix narrowed the crawl from three tabs to
+        // one — the virtual list narrows it to the visible window).
 
-        // Per-segment rows: Followers (Follow?+Mute), Following
-        // (Unfollow+Mute), Muted (Unmute).
-        let rows: Vec<AnyElement> = keyed
-            .iter()
-            .enumerate()
-            .map(|(i, (_, pk))| {
-                let mut actions = Vec::new();
-                match self.tab {
-                    Tab::Followers => {
-                        if !is_muted.contains(pk) {
-                            actions.push(("Mute", false, Action::Mute));
-                        }
-                        if is_follow.contains(pk) {
-                            actions.push(("Following", false, Action::Unfollow));
-                        } else {
-                            actions.push(("Follow", true, Action::Follow));
-                        }
-                    }
-                    Tab::Following => {
-                        if !is_muted.contains(pk) {
-                            actions.push(("Mute", false, Action::Mute));
-                        } else {
-                            actions.push(("Unmute", false, Action::Unmute));
-                        }
-                        actions.push(("Unfollow", false, Action::Unfollow));
-                    }
-                    Tab::Muted => {
-                        actions.push(("Unmute", false, Action::Unmute));
-                    }
-                }
-                self.person_row(i, &media, pk, actions, cx)
-            })
-            .collect();
-
-        let count = rows.len();
+        // Rows are VIRTUALIZED (uniform_list): every scroll tick used to
+        // rebuild + lay out every row of the segment (the "janky scroll"
+        // the 0.10.0 test round reported) — now only the visible window
+        // exists per frame. The sort above stays per-paint (it feeds the
+        // window offsets), but it's a borrow over pre-built keys.
+        let count = keyed.len();
         let note: &str = match self.tab {
             Tab::Followers if count > 0 => "seen through your relays' contact lists",
-            Tab::Followers => "",
             _ => "",
+        };
+        let tab = self.tab;
+        let list: AnyElement = if count == 0 {
+            placeholder(match tab {
+                Tab::Followers => "No followers seen yet.",
+                Tab::Following => "You aren't following anyone yet.",
+                Tab::Muted => "Your mute list is empty.",
+            })
+        } else {
+            let this = cx.entity();
+            uniform_list("net-list", count, move |range, _window, cx| {
+                this.update(cx, |this, cx| {
+                    let media = media::Snapshot::new(cx);
+                    let mut painted: Vec<String> = Vec::new();
+                    let mut seen = std::collections::HashSet::new();
+                    let mut rows: Vec<AnyElement> = Vec::new();
+                    for (i, (_, pk)) in keyed
+                        .iter()
+                        .enumerate()
+                        .skip(range.start)
+                        .take(range.end.saturating_sub(range.start))
+                    {
+                        if let Some(p) = this.profiles.get(&pk.to_string()) {
+                            media::fetch(&this.core, p.picture.clone(), viewer, cx);
+                            if !p.picture.is_empty() && seen.insert(p.picture.clone()) {
+                                painted.push(p.picture.clone());
+                            }
+                        }
+                        // Per-segment rows: Followers (Follow?+Mute),
+                        // Following (Unfollow+Mute), Muted (Unmute).
+                        let mut actions: Vec<(&'static str, bool, Action)> = Vec::new();
+                        match tab {
+                            Tab::Followers => {
+                                if !is_muted.contains(pk) {
+                                    actions.push(("Mute", false, Action::Mute));
+                                }
+                                if is_follow.contains(pk) {
+                                    actions.push(("Following", false, Action::Unfollow));
+                                } else {
+                                    actions.push(("Follow", true, Action::Follow));
+                                }
+                            }
+                            Tab::Following => {
+                                if !is_muted.contains(pk) {
+                                    actions.push(("Mute", false, Action::Mute));
+                                } else {
+                                    actions.push(("Unmute", false, Action::Unmute));
+                                }
+                                actions.push(("Unfollow", false, Action::Unfollow));
+                            }
+                            Tab::Muted => {
+                                actions.push(("Unmute", false, Action::Unmute));
+                            }
+                        }
+                        rows.push(this.person_row(i, &media, pk, actions, cx));
+                    }
+                    media::repin(viewer, painted, cx);
+                    rows
+                })
+            })
+            .w_full()
+            .h_full()
+            .into_any_element()
         };
 
         div()
@@ -354,13 +376,13 @@ impl Render for NetworkView {
                     .border_b_1()
                     .border_color(rgb(theme::hairline()))
                     .child(self.tab_btn(
-                        Tab::Followers,
-                        format!("Followers {}", self.followers.len()),
+                        Tab::Following,
+                        format!("Following {}", self.follows.len()),
                         cx,
                     ))
                     .child(self.tab_btn(
-                        Tab::Following,
-                        format!("Following {}", self.follows.len()),
+                        Tab::Followers,
+                        format!("Followers {}", self.followers.len()),
                         cx,
                     ))
                     .child(self.tab_btn(Tab::Muted, format!("Muted {}", self.mutes.len()), cx)),
@@ -375,24 +397,16 @@ impl Render for NetworkView {
                         .child(note),
                 )
             })
-            .child(if rows.is_empty() {
-                placeholder(match self.tab {
-                    Tab::Followers => "No followers seen yet.",
-                    Tab::Following => "You aren't following anyone yet.",
-                    Tab::Muted => "Your mute list is empty.",
-                })
-            } else {
+            .child(
                 div()
-                    .id("following-list")
                     .w_full()
-                    .h_full()
+                    .flex_1()
+                    .min_h_0()
                     .max_w(px(content::COL_W))
                     .flex()
                     .flex_col()
-                    .overflow_y_scroll()
-                    .children(rows)
-                    .into_any_element()
-            })
+                    .child(list),
+            )
     }
 }
 

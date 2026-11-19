@@ -1443,6 +1443,26 @@ impl Core {
             let out = async {
                 let active = this.active().await?;
                 let me = active.me();
+                // The relays answer the reverse lookup DIRECTLY (kinds=[3]
+                // #p=me is a relay-side index) — the local store alone
+                // only holds kind-3s that already arrived, which are
+                // essentially the lists of people WE follow: a follower
+                // we don't follow back had no list locally and never
+                // showed (the 0.10.0 test round's "1 follower" report).
+                // One client-level read, bounded (relays answer
+                // newest-first); the SDK saves what arrives, feeding the
+                // scan + verification below. Own list's privacy is
+                // irrelevant here — this reads OTHER authors' public
+                // lists. Relay misses degrade to the local scan.
+                let _ = active
+                    .pool
+                    .get(
+                        Filter::new()
+                            .kind(Kind::ContactList)
+                            .custom_tag(SingleLetterTag::LOWERCASE_P, me.to_string())
+                            .limit(1000),
+                    )
+                    .await;
                 // Candidates: cached kind-3s whose p index matches me.
                 let candidates = active
                     .pool
