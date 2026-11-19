@@ -75,6 +75,12 @@ else
 fi
 chown -R builder:builder /home/builder/.abuild 2>/dev/null || true
 cp /home/builder/.abuild/*.pub /etc/apk/keys/ 2>/dev/null || true
+# The copy inherits the 0600 the umask-077 creation gave the source
+# (cp derives the mode from the SOURCE masked by umask, not from the
+# destination's neighbors): apk index runs as the BUILDER, cannot read
+# a root-owned 0600 key, and reports every signature UNTRUSTED (the
+# v0.10.0 CI failure). Alpine's own keys are 0644; ours must be too.
+chmod 0644 /etc/apk/keys/*.pub 2>/dev/null || true
 # The canary: fail HERE, at setup, if the builder cannot read the key —
 # not forty lines later inside abuild's signing step.
 su builder -c "test -r /home/builder/.abuild/$KEYNAME.rsa.pub"
