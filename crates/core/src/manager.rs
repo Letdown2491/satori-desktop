@@ -1440,8 +1440,24 @@ impl Core {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         self.rt.spawn(async move {
-            let out = async {
-                let active = this.active().await?;
+            // Up to three passes (0s / 12s / 35s): the first can race the
+            // session's relay phase — a pool still connecting answers the
+            // seed query with almost nothing, and the pane opened early
+            // never re-asks. Each pass sends its verified list; the view
+            // takes the latest.
+            for attempt in 0u32..3 {
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(if attempt == 1 {
+                        12
+                    } else {
+                        23
+                    }))
+                    .await;
+                }
+                // The session may be gone (sign-out mid-lookup).
+                let Ok(active) = this.active().await else {
+                    return;
+                };
                 let me = active.me();
                 // The relays answer the reverse lookup DIRECTLY (kinds=[3]
                 // #p=me is a relay-side index) — the local store alone
@@ -1454,7 +1470,7 @@ impl Core {
                 // scan + verification below. Own list's privacy is
                 // irrelevant here — this reads OTHER authors' public
                 // lists. Relay misses degrade to the local scan.
-                let _ = active
+                let seeded = active
                     .pool
                     .get(
                         Filter::new()
@@ -1462,7 +1478,9 @@ impl Core {
                             .custom_tag(SingleLetterTag::LOWERCASE_P, me.to_string())
                             .limit(1000),
                     )
-                    .await;
+                    .await
+                    .map(|s| s.len())
+                    .unwrap_or(0);
                 // Candidates: cached kind-3s whose p index matches me.
                 let candidates = active
                     .pool
@@ -1482,30 +1500,35 @@ impl Core {
                 }
                 let mut verify: Vec<PublicKey> = newest.into_keys().collect();
                 verify.retain(|pk| *pk != me);
-                if verify.is_empty() {
-                    return Ok::<Vec<PublicKey>, LoginError>(verify);
-                }
                 // Verify against each author's NEWEST list (any p): the
                 // index also holds lists that named me before an
                 // un-follow, and only the newest one speaks for the
                 // author now.
-                let latest = active
-                    .pool
-                    .store
-                    .contact_lists(&verify)
-                    .await
-                    .unwrap_or_default();
-                let verified: Vec<PublicKey> = latest
-                    .into_iter()
-                    .filter(|ev| {
-                        let pks: Vec<PublicKey> = ev.tags.public_keys().collect();
-                        pks.contains(&me)
-                    })
-                    .map(|ev| ev.pubkey)
-                    .collect();
-                Ok(verified)
-            };
-            let _ = tx.send(out.await.unwrap_or_default());
+                let verified: Vec<PublicKey> = if verify.is_empty() {
+                    Vec::new()
+                } else {
+                    let latest = active
+                        .pool
+                        .store
+                        .contact_lists(&verify)
+                        .await
+                        .unwrap_or_default();
+                    latest
+                        .into_iter()
+                        .filter(|ev| {
+                            let pks: Vec<PublicKey> = ev.tags.public_keys().collect();
+                            pks.contains(&me)
+                        })
+                        .map(|ev| ev.pubkey)
+                        .collect()
+                };
+                eprintln!(
+                    "[core] followers: pass {attempt}: seed {seeded} event(s), {} candidate author(s), {} verified",
+                    verify.len(),
+                    verified.len()
+                );
+                let _ = tx.send(verified);
+            }
         });
         rx
     }
@@ -3163,27 +3186,56 @@ impl Core {
             .latest_by_kind(me, Kind::Custom(10000))
             .await
         {
+            eprintln!(
+                "[core] mutes: kind-10000 from {} ({} content byte(s), {} p tag(s))",
+                ev.created_at.as_secs(),
+                ev.content.len(),
+                ev.tags.clone().public_keys().count()
+            );
             let decrypted: Vec<String> = if ev.content.is_empty() {
                 Vec::new()
             } else {
-                active
+                match active
                     .signer
                     .nip44_decrypt_self(&me, ev.content.as_str())
                     .await
-                    .map(|plain| parse_list_event(&plain))
-                    .unwrap_or_default()
+                {
+                    Ok(plain) => {
+                        let parsed = parse_list_event(&plain);
+                        eprintln!(
+                            "[core] mutes: content decrypted, {} entr(y/ies) parsed",
+                            parsed.len()
+                        );
+                        parsed
+                    }
+                    Err(e) => {
+                        // The list was published by another client with a
+                        // different crypto/shape — say so instead of a
+                        // silent empty mirror (the blank-Muted report).
+                        eprintln!("[core] mutes: content DECRYPT FAILED: {e}");
+                        Vec::new()
+                    }
+                }
             };
             let mut m = self.muted.lock().unwrap();
             for pk in decrypted {
                 m.insert(pk);
             }
+            let mut tagged = 0usize;
             for pk in ev.tags.clone().public_keys() {
                 m.insert(pk.to_string());
+                tagged += 1;
             }
             drop(m);
+            eprintln!(
+                "[core] mutes: mirror now {} author(s) ({tagged} from public tags)",
+                self.muted.lock().unwrap().len()
+            );
             // The WoT graph consults mutes at qualification time
             // (dark-wisp filters muted/blocked out) — push the set.
             crate::wot::set_muted(self.muted.lock().unwrap().clone());
+        } else {
+            eprintln!("[core] mutes: NO kind-10000 in the store after the relay fetch");
         }
     }
 
