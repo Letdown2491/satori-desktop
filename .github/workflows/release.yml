@@ -71,13 +71,26 @@ jobs:
           rpm -q --info target/generate-rpm/*.rpm || rpm2cpio target/generate-rpm/*.rpm | cpio -it | head
 
       - name: Extract the release body from CHANGELOG.md
+        # CHANGELOG.md hard-wraps its paragraphs for reading the file;
+        # GitHub renders every newline in a release body as a line
+        # break, so each paragraph REJOINS onto one line here (the
+        # v0.10.0 page wrapped halfway across). The indented command
+        # block passes through untouched.
         run: |
           VER="${GITHUB_REF_NAME#v}"
           awk -v ver="$VER" '
             $0 ~ "^## " ver { on = 1; next }
             /^## / { on = 0 }
             on { print }
-          ' CHANGELOG.md > release-body.md
+          ' CHANGELOG.md | awk '
+            /^    / { if (buf != "") { print buf; buf = "" } print; incode = 1; next }
+            /^$/    { if (buf != "") { print buf; buf = "" } print ""; incode = 0; next }
+            {
+              if (incode) { if (buf != "") { print buf; buf = "" } incode = 0 }
+              buf = buf (buf == "" ? "" : " ") $0
+            }
+            END { if (buf != "") print buf }
+          ' > release-body.md
           PREV=$(git ls-remote --tags origin "v*" | sed "s|.*refs/tags/||" | grep -v "\^{}$" | grep -v "^v$VER$" | sort -V | tail -1)
           if [ -n "$PREV" ]; then
             echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/$PREV...v$VER" >> release-body.md
