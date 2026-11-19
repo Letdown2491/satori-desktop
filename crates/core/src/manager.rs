@@ -2991,6 +2991,23 @@ impl Core {
 
         // Private lists (NIP-51, content = nip44-encrypted tag JSON — the web
         // app's private-by-default semantics): bookmarks 10003, mutes 10000.
+        // FRESH FROM RELAYS first (the follows/nip65 pattern): the reads
+        // below are store-fed, and a list published by ANOTHER client
+        // never lands in the store unless something fetches it — mutes
+        // set elsewhere were invisible for the whole session (the 0.10.0
+        // test round: "i have mutes and they dont show"). One
+        // client-level read each, newest only; the SDK persists what it
+        // receives, so the store reads see it. Relay misses degrade to
+        // the cached copies.
+        let _ = futures_util::future::join(
+            active
+                .pool
+                .get(Filter::new().kind(Kind::Custom(10000)).author(me).limit(1)),
+            active
+                .pool
+                .get(Filter::new().kind(Kind::Custom(10003)).author(me).limit(1)),
+        )
+        .await;
         if let Ok(Some(ev)) = active
             .pool
             .store
