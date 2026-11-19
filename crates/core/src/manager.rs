@@ -6008,22 +6008,25 @@ impl Core {
                     // Private: the content array is the list (nip44); the
                     // stored event's other tags ride along (a plain e-tag
                     // the user's other client wrote must survive the RMW).
-                    let stored = active
-                        .pool
-                        .store
-                        .latest_by_kind(me, Kind::Custom(10003))
-                        .await
-                        .ok()
-                        .flatten();
-                    let mut ids: Vec<String> = core
-                        .own_bookmarked
-                        .lock()
-                        .unwrap()
-                        .clone()
-                        .into_iter()
-                        .collect();
-                    ids.push(target.id.to_string());
-                    let plain = list_json(&ids, "e");
+                    // The id set is the newest known event's DECRYPTED
+                    // list unioned with the mirror (D89): a bookmark made
+                    // elsewhere lands in the store through subscriptions
+                    // even when the mirror has not been refreshed.
+                    let stored =
+                        Self::latest_list_event(active, me, Kind::Custom(10003), None).await;
+                    let mut ids: std::collections::HashSet<String> =
+                        core.own_bookmarked.lock().unwrap().clone();
+                    if let Some(ev) = &stored
+                        && !ev.content.is_empty()
+                        && let Ok(plain) = active
+                            .signer
+                            .nip44_decrypt_self(&me, ev.content.as_str())
+                            .await
+                    {
+                        ids.extend(parse_list_event(&plain));
+                    }
+                    ids.insert(target.id.to_string());
+                    let plain = list_json(&ids.into_iter().collect::<Vec<_>>(), "e");
                     let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
                     let unsigned = UnsignedEvent::new(
                         me,
@@ -6040,14 +6043,11 @@ impl Core {
                     // Public: NIP-51 kind 30001 d="bookmarks" — the e-tags
                     // ARE the list (my event only — others' 30001s are
                     // different lists). The d and any other markers ride
-                    // along; the push dedupes.
-                    let stored = active
-                        .pool
-                        .store
-                        .latest_by_kind_d(me, Kind::Custom(30001), "bookmarks")
-                        .await
-                        .ok()
-                        .flatten();
+                    // along; the push dedupes. (D89: the cold-start wire
+                    // fetch guards a fresh install's first bookmark.)
+                    let stored =
+                        Self::latest_list_event(active, me, Kind::Custom(30001), Some("bookmarks"))
+                            .await;
                     let mut raw: Vec<Tag> = stored
                         .map(|ev| ev.tags.clone().to_vec())
                         .unwrap_or_default();
@@ -6482,8 +6482,71 @@ impl Core {
         crate::outbox_queue::len()
     }
 
+    /// The newest known list event, for read-modify-write (D89). The
+    /// store's copy is continuously fed by the pool's saves (the role
+    /// Amethyst's reactive LocalCache plays) and persists across
+    /// sessions (the role their AccountSettings backup plays), so it is
+    /// the base every list publish derives from. A store miss fires ONE
+    /// wire fetch — the cold-start guard: a toggle in the first seconds
+    /// of a fresh install must not replace the relay's list with a
+    /// single-entry one built from an unloaded mirror.
+    async fn latest_list_event(
+        active: &Active,
+        me: PublicKey,
+        kind: Kind,
+        d: Option<&str>,
+    ) -> Option<Event> {
+        let local = match d {
+            Some(d) => active
+                .pool
+                .store
+                .latest_by_kind_d(me, kind, d)
+                .await
+                .ok()
+                .flatten(),
+            None => active
+                .pool
+                .store
+                .latest_by_kind(me, kind)
+                .await
+                .ok()
+                .flatten(),
+        };
+        if local.is_some() {
+            return local;
+        }
+        let mut filter = Filter::new().kind(kind).author(me).limit(1);
+        if let Some(d) = d {
+            filter = filter.custom_tag(SingleLetterTag::LOWERCASE_D, d);
+        }
+        let _ = active.pool.get(filter).await;
+        match d {
+            Some(d) => active
+                .pool
+                .store
+                .latest_by_kind_d(me, kind, d)
+                .await
+                .ok()
+                .flatten(),
+            None => active
+                .pool
+                .store
+                .latest_by_kind(me, kind)
+                .await
+                .ok()
+                .flatten(),
+        }
+    }
+
     /// Publish the NIP-65 relay list (kind:10002 RMW) and swap it in live:
     /// new reads join the pool, removed writes stop receiving publishes.
+    ///
+    /// Deliberately NOT the D89 store-RMW shape: this is a whole-set
+    /// editor (the settings form's read/write boxes ARE the user's full
+    /// intent — unioning tags the form doesn't show would resurrect
+    /// relays the user just removed). Membership lists (follows, mutes,
+    /// bookmarks) are toggles, and they derive from the newest known
+    /// event below.
     pub fn set_relays(self: &Arc<Self>, read: Vec<String>, write: Vec<String>) -> PublishRx {
         let core = Arc::clone(self);
         self.publish_task(move |active, _tx| {
@@ -6524,28 +6587,47 @@ impl Core {
     }
 
     /// Follow / unfollow (NIP-02 kind:3 read-modify-write).
+    /// Follow / unfollow (NIP-02 kind:3, D89's store-RMW): the new
+    /// event derives from the newest known list event — its content
+    /// (the NIP-02 legacy relay map) and non-p tags (relay hints,
+    /// petnames) ride along untouched, and only the ONE p-tag the
+    /// toggle speaks for is added or removed. The mirror unions in on
+    /// every publish (a key anything knows about is never dropped), an
+    /// empty known list plus unfollow is a no-op (Amethyst's refusal
+    /// rule: never publish an empty replacement), and a follow with
+    /// nothing known anywhere starts a single-entry list (their
+    /// createFromScratch).
     pub fn set_following(self: &Arc<Self>, who: PublicKey, follow: bool) -> PublishRx {
         let core = Arc::clone(self);
         self.publish_task(move |active, tx| {
             Box::pin(async move {
                 let me = active.me();
-                let mut follows = active.follows.clone();
-                if follow {
-                    if !follows.contains(&who) {
-                        follows.push(who);
-                    }
-                } else {
-                    follows.retain(|f| f != &who);
-                }
-                let tags: Vec<Tag> = follows.iter().map(|pk| Tag::public_key(*pk)).collect();
+                let stored = Self::latest_list_event(active, me, Kind::ContactList, None).await;
+                let tags: Vec<Tag> = stored
+                    .as_ref()
+                    .map(|ev| ev.tags.clone().to_vec())
+                    .unwrap_or_default();
+                let content = stored
+                    .as_ref()
+                    .map(|ev| ev.content.clone())
+                    .unwrap_or_default();
+                let Some(tags) = contact_list_tags(tags, &active.follows, who, follow) else {
+                    return Ok(()); // the refusal rule: nothing to publish
+                };
                 let unsigned =
-                    UnsignedEvent::new(me, Timestamp::now(), Kind::ContactList, tags, "");
+                    UnsignedEvent::new(me, Timestamp::now(), Kind::ContactList, tags, content);
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(active, &signed, tx).await?;
                 {
                     let mut a = core.active.lock().unwrap();
                     if let Some(a) = a.as_mut() {
-                        a.follows = follows;
+                        if follow {
+                            if !a.follows.contains(&who) {
+                                a.follows.push(who);
+                            }
+                        } else {
+                            a.follows.retain(|f| f != &who);
+                        }
                     }
                 }
                 Ok(())
@@ -6553,23 +6635,58 @@ impl Core {
         })
     }
 
-    /// Mute / unmute (NIP-51 kind:10000, content encrypted to self).
+    /// Mute / unmute (NIP-51 kind:10000, content encrypted to self;
+    /// D89's store-RMW): the entry set is the newest known event's
+    /// union (decrypted content + its public p-tags) with the session
+    /// mirror, re-encrypted whole into the content. Public p-tags other
+    /// clients wrote stay public (they ride along untouched — a new
+    /// mute is never published as a public tag: announcing whom you
+    /// silenced is the one thing this list must not do). An empty known
+    /// set plus unmute is a no-op (the refusal rule).
     pub fn set_muted(self: &Arc<Self>, who: PublicKey, mute: bool) -> PublishRx {
         let core = Arc::clone(self);
         self.publish_task(move |active, tx| {
             Box::pin(async move {
                 let me = active.me();
-                let mut mutes = core.muted.lock().unwrap().clone();
                 let hex = who.to_string();
-                if mute {
-                    mutes.insert(hex.clone());
-                } else {
-                    mutes.remove(&hex);
+                let stored = Self::latest_list_event(active, me, Kind::Custom(10000), None).await;
+                let mut entries: HashSet<String> = core.muted.lock().unwrap().clone();
+                let mut tags: Vec<Tag> = stored
+                    .as_ref()
+                    .map(|ev| ev.tags.clone().to_vec())
+                    .unwrap_or_default();
+                if let Some(ev) = &stored {
+                    for pk in ev.tags.clone().public_keys() {
+                        entries.insert(pk.to_string());
+                    }
+                    if !ev.content.is_empty() {
+                        match active
+                            .signer
+                            .nip44_decrypt_self(&me, ev.content.as_str())
+                            .await
+                        {
+                            Ok(plain) => entries.extend(parse_list_event(&plain)),
+                            Err(e) => eprintln!(
+                                "[core] mute publish: stored content decrypt failed ({e}); publishing the union of what is known"
+                            ),
+                        }
+                    }
                 }
-                let plain = list_json(&mutes.into_iter().collect::<Vec<_>>(), "p");
+                if mute {
+                    entries.insert(hex.clone());
+                } else {
+                    if entries.is_empty() {
+                        // Nothing known anywhere to unmute from.
+                        return Ok(());
+                    }
+                    entries.remove(&hex);
+                    // A public mute of the toggled key goes quiet with it.
+                    tags.retain(|t| !(t.kind() == "p" && t.content() == Some(hex.as_str())));
+                }
+                let plain = list_json(&entries.into_iter().collect::<Vec<_>>(), "p");
                 let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
                 let unsigned =
-                    UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(10000), [], content);
+                    UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(10000), tags, content);
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(active, &signed, tx).await?;
                 // Keep the WoT qualification's mute screen in step.
@@ -7834,6 +7951,45 @@ fn parse_list_event(plain: &str) -> Vec<String> {
         .collect()
 }
 
+/// The kind-3 tag surgery (D89), pure so it can be tested: union the
+/// mirror's keys in (a key anything knows about is never dropped), then
+/// apply the toggle. `None` is Amethyst's refusal rule — an unfollow
+/// from a set that is empty after the union publishes nothing.
+fn contact_list_tags(
+    base: Vec<Tag>,
+    mirror: &[PublicKey],
+    who: PublicKey,
+    follow: bool,
+) -> Option<Vec<Tag>> {
+    let mut tags = base;
+    for pk in mirror.iter() {
+        let h = pk.to_string();
+        let present = tags
+            .iter()
+            .any(|t| t.kind() == "p" && t.content() == Some(h.as_str()));
+        if !present {
+            tags.push(Tag::public_key(*pk));
+        }
+    }
+    let hex = who.to_string();
+    if follow {
+        let present = tags
+            .iter()
+            .any(|t| t.kind() == "p" && t.content() == Some(hex.as_str()));
+        if !present {
+            tags.push(Tag::public_key(who));
+        }
+        return Some(tags);
+    }
+    // Unfollow: only a set that held the key publishes its removal.
+    let before = tags.len();
+    tags.retain(|t| !(t.kind() == "p" && t.content() == Some(hex.as_str())));
+    if tags.len() == before {
+        return None;
+    }
+    Some(tags)
+}
+
 /// Read-modify-write prefs.json (0600): overlay `pairs` onto the existing
 /// object, preserving app-owned keys. Core's single prefs write path —
 /// set_undo and the NIP-78 sync both land here.
@@ -8328,6 +8484,67 @@ impl Core {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// D89: the tag surgery never loses what the relay's list event
+    /// already carried. The store base's non-p tags (relay hints from
+    /// NIP-02's legacy days) and its other p-tags survive both toggles,
+    /// and the mirror unions in on top.
+    #[test]
+    fn contact_list_surgery_preserves_the_base_and_unions_the_mirror() {
+        let who = Keys::generate().public_key();
+        let other = Keys::generate().public_key();
+        let base = vec![
+            Tag::custom("relay", ["wss://old.example"]),
+            Tag::public_key(other),
+        ];
+        let mirror = vec![Keys::generate().public_key()];
+
+        // Follow: relay tag, both p-tags, mirror key all present.
+        let added = contact_list_tags(base.clone(), &mirror, who, true).unwrap();
+        assert!(added.iter().any(|t| t.kind() == "relay"));
+        assert!(
+            added
+                .iter()
+                .any(|t| t.kind() == "p" && t.content() == Some(other.to_string().as_str()))
+        );
+        assert!(
+            added
+                .iter()
+                .any(|t| t.kind() == "p" && t.content() == Some(who.to_string().as_str()))
+        );
+        assert!(
+            added
+                .iter()
+                .any(|t| t.kind() == "p" && t.content() == Some(mirror[0].to_string().as_str()))
+        );
+
+        // Unfollow: the toggled key goes, everything else stays.
+        let removed = contact_list_tags(base, &mirror, other, false).unwrap();
+        assert!(
+            !removed
+                .iter()
+                .any(|t| t.kind() == "p" && t.content() == Some(other.to_string().as_str()))
+        );
+        assert!(removed.iter().any(|t| t.kind() == "relay"));
+        assert!(
+            removed
+                .iter()
+                .any(|t| t.kind() == "p" && t.content() == Some(mirror[0].to_string().as_str()))
+        );
+    }
+
+    /// D89's refusal rule (Amethyst's): an unfollow when nothing anywhere
+    /// holds the key publishes nothing — the early-session empty-mirror
+    /// toggle must not replace the relay's list with a one-entry one.
+    /// A follow with nothing known still starts a list (from scratch).
+    #[test]
+    fn contact_list_unfollow_from_nothing_refuses_to_publish() {
+        let who = Keys::generate().public_key();
+        assert!(contact_list_tags(vec![], &[], who, false).is_none());
+        let started = contact_list_tags(vec![], &[], who, true).unwrap();
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].content(), Some(who.to_string().as_str()));
+    }
 
     /// The synced draft round-trip (D38 v1.4): attachment imetas survive
     /// the serde pass verbatim, and a legacy entry (no attachments key)

@@ -8,6 +8,18 @@ truth, not the other way around).
 
 ## 0.10.0 - 2026-11-19
 
+Editing your lists can no longer wipe them. Follow, mute, and bookmark
+lists were rebuilt from what the session had in memory when you toggled,
+so a change made in the first seconds after launch (before your lists
+finished loading), or one made from another client mid-session, could
+publish a shorter list over the relay's full one. Every list publish now
+starts from the newest copy of the list Satori knows (the local store,
+with one fallback fetch when it has none), keeps the parts of the old
+event a toggle does not touch (a follow list's relay hints, a mute
+list's public entries), and refuses to publish a removal when it has
+nothing to remove from. This is the same shape Amethyst ships, proven there by years of daily
+use.
+
 Your relationships live on one page now. Your profile picture at the top
 of the rail opens the me menu, and its new Network row opens a page with
 two segments: Following (people you follow) and Muted (people you have
