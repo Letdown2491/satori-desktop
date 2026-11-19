@@ -103,9 +103,27 @@ impl Store {
         if !pending {
             let _ = std::fs::remove_dir_all(config::events_dir().with_extension("vacuum"));
         }
+        // The prev delete is conditional (D89 audit): a half-finished
+        // swap leaves a just-created live dir beside prev, the only
+        // recoverable generation — deleting it unconditionally turns a
+        // failed open's fresh store into unrecoverable data loss.
+        let had_store = std::fs::metadata(config::events_dir().join("data.mdb"))
+            .map(|m| m.len())
+            .unwrap_or(0)
+            > 0;
+        if !had_store {
+            // Same half-swap, self-heal: restore the parked generation
+            // as live rather than boot onto a fresh dir beside it.
+            let prev = config::events_dir().with_extension("prev");
+            if prev.join("data.mdb").exists() {
+                let _ = std::fs::rename(&prev, config::events_dir());
+            }
+        }
         let db = NostrLmdb::open(config::events_dir()).await?;
-        // The rebuilt store opened: the previous generation is dead now.
-        let _ = std::fs::remove_dir_all(config::events_dir().with_extension("prev"));
+        if had_store {
+            // The rebuilt store opened: the previous generation is dead now.
+            let _ = std::fs::remove_dir_all(config::events_dir().with_extension("prev"));
+        }
         Ok(Self { db: Arc::new(db) })
     }
 
@@ -530,7 +548,7 @@ async fn vacuum_at(dir: &std::path::Path) -> Result<VacuumReport, String> {
     // nothing else in range; D84 audit). The empty-tail queries cost
     // microseconds against the created_at index — ~640 windows to the
     // epoch, capped by [lo == 0] below.
-    const WINDOW: u64 = 30 * 24 * 3600;
+    const WINDOW: u64 = VACUUM_WINDOW;
     let now = Timestamp::now().as_secs();
     let mut copied = 0usize;
     let mut hi = now;
@@ -648,8 +666,9 @@ fn swap_staged(dir: &std::path::Path, staging: &std::path::Path) -> Result<(), S
 // The state file (`events.vacuum.json`) is the handoff: the gate, the
 // walk, and `Store::open`'s debris policy all read it.
 
-/// The walk's created_at window (30 days, same as the blocking vacuum).
-const VACUUM_WINDOW: u64 = 30 * 24 * 3600;
+/// The walk's created_at window (30 days, shared with the blocking
+/// vacuum — one constant so they cannot silently diverge; D89 audit).
+pub(crate) const VACUUM_WINDOW: u64 = 30 * 24 * 3600;
 
 fn vacuum_state_path(dir: &std::path::Path) -> std::path::PathBuf {
     dir.with_extension("vacuum.json")
@@ -708,15 +727,15 @@ async fn adopt_staged(dir: &std::path::Path) -> Result<VacuumReport, String> {
     let source = NostrLmdb::open(dir).await.map_err(|e| e.to_string())?;
     let fresh = NostrLmdb::open(&staging).await.map_err(|e| e.to_string())?;
 
-    let delta = source
-        .query(Filter::new().since(Timestamp::from(cutoff)))
-        .await
-        .map_err(|e| e.to_string())?;
     let mut moved = 0usize;
-    for event in &delta {
-        fresh.save_event(event).await.map_err(|e| e.to_string())?;
-        moved += 1;
-    }
+    copy_range(
+        &source,
+        &fresh,
+        cutoff,
+        Timestamp::now().as_secs(),
+        &mut moved,
+    )
+    .await?;
 
     // The honesty check, stricter than the blocking vacuum's: staging
     // plus the delta must hold exactly what the live store holds.
@@ -781,26 +800,24 @@ async fn deferred_vacuum_walk(store: &Store) -> Result<(), String> {
         ),
         _ => return Ok(()), // stale spawn: nothing pending
     };
+    let mut start_over = false;
     if !staging.exists() {
         // The debris policy kept this only if the state file said
         // copying; a walk that outlived its staging starts the dir over
-        // (the cursor replays whole windows into the fresh env).
+        // — and recopies from the TOP (D89 audit): the cursor only
+        // covers windows already staged, so resuming there into a fresh
+        // env is a structurally short copy that always falls back to
+        // the blocking rebuild at adoption.
         std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+        start_over = true;
     }
     let fresh = NostrLmdb::open(&staging).await.map_err(|e| e.to_string())?;
 
     let now = Timestamp::now().as_secs();
-    let mut hi = cursor.min(now);
+    let mut hi = if start_over { now } else { cursor.min(now) };
     loop {
         let lo = hi.saturating_sub(VACUUM_WINDOW - 1);
-        let filter = Filter::new()
-            .since(Timestamp::from(lo))
-            .until(Timestamp::from(hi));
-        let events = store.query(filter).await.map_err(|e| e.to_string())?;
-        for event in &events {
-            fresh.save_event(event).await.map_err(|e| e.to_string())?;
-        }
-        copied += events.len();
+        copy_range(store.database().as_ref(), &fresh, lo, hi, &mut copied).await?;
         write_vacuum_state(&dir, "copying", cutoff, lo, copied);
         if lo == 0 {
             break;
@@ -810,14 +827,14 @@ async fn deferred_vacuum_walk(store: &Store) -> Result<(), String> {
 
     // The tail catch (future-dated events, same as the blocking
     // vacuum): idempotent on resume.
-    let tail = store
-        .query(Filter::new().since(Timestamp::from(now + 1)))
-        .await
-        .map_err(|e| e.to_string())?;
-    for event in &tail {
-        fresh.save_event(event).await.map_err(|e| e.to_string())?;
-    }
-    copied += tail.len();
+    copy_range(
+        store.database().as_ref(),
+        &fresh,
+        now + 1,
+        now + 10 * 365 * 24 * 3600,
+        &mut copied,
+    )
+    .await?;
 
     write_vacuum_state(&dir, "complete", cutoff, 0, copied);
     eprintln!(
@@ -838,6 +855,52 @@ async fn deferred_vacuum_walk(store: &Store) -> Result<(), String> {
 // finished staging copy (delta + count check + two renames). A failed
 // adoption falls back to the blocking rebuild; a crashed walk resumes
 // from its cursor.
+
+/// The walk's memory cap (D89 audit): a copy chunk materializes its
+/// events as decoded `Event` structs, and the decoded set is 1.5-2x its
+/// serialized size — the whole 30-day window on the 1.3 GB store that
+/// triggered D87 ran beside the live UI. Ranges are split until each
+/// query holds at most this many events.
+const COPY_PAGE: u64 = 20_000;
+/// Save batches: awaited one event at a time, nostr-lmdb's ingester
+/// commits (and fsyncs) per event; a concurrent batch drains as one
+/// transaction.
+const COPY_SAVE_BATCH: usize = 128;
+
+/// Copy every event in [lo, hi] into `fresh` (D89 audit): the range is
+/// split recursively until each materialized chunk is under COPY_PAGE,
+/// so the walk's RAM is bounded no matter how heavy one window is.
+/// Saves are idempotent by id, so overlap and resumes are free.
+async fn copy_range(
+    src: &NostrLmdb,
+    fresh: &NostrLmdb,
+    lo: u64,
+    hi: u64,
+    copied: &mut usize,
+) -> Result<(), String> {
+    let filter = Filter::new()
+        .since(Timestamp::from(lo))
+        .until(Timestamp::from(hi));
+    let n: usize = src.count(filter.clone()).await.map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Ok(());
+    }
+    if n as u64 > COPY_PAGE && lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        Box::pin(copy_range(src, fresh, mid + 1, hi, copied)).await?;
+        Box::pin(copy_range(src, fresh, lo, mid, copied)).await?;
+        return Ok(());
+    }
+    let events = src.query(filter).await.map_err(|e| e.to_string())?;
+    for batch in events.iter().collect::<Vec<_>>().chunks(COPY_SAVE_BATCH) {
+        let saves = batch.iter().map(|e| fresh.save_event(e));
+        for saved in futures_util::future::join_all(saves).await {
+            saved.map_err(|e| e.to_string())?;
+        }
+    }
+    *copied += events.len();
+    Ok(())
+}
 
 /// Relative growth (the extent is 1.5x the watermark's)...
 const GATE_RATIO: f64 = 1.5;
@@ -930,6 +993,21 @@ async fn boot_gate_at(dir: &std::path::Path, ratio: f64, floor: u64) -> Result<G
                     eprintln!(
                         "boot gate: staged adoption failed ({err}); running the full rebuild"
                     );
+                    // A failed adoption can be a FAILED SWAP: the live
+                    // dir was renamed to prev and staging's rename in
+                    // failed, so the restore below ran against a store
+                    // that then existed. Restore again before the
+                    // rebuild — rebuilding the empty dir and opening it
+                    // would delete prev, the only recoverable copy
+                    // (D89 audit).
+                    if std::fs::metadata(dir.join("data.mdb"))
+                        .map(|m| m.len())
+                        .unwrap_or(0)
+                        == 0
+                        && dir.with_extension("prev").join("data.mdb").exists()
+                    {
+                        let _ = std::fs::rename(dir.with_extension("prev"), dir);
+                    }
                     notify_rebuild("Optimizing the local store — this launch may take a moment.");
                     return vacuum_at(dir).await.map(GateAction::Swapped);
                 }
@@ -1144,7 +1222,7 @@ mod tests {
     /// gate needs exclusive access, like at boot). The caller holds the
     /// EnvGuard — taking it here too would self-deadlock on the
     /// non-reentrant env lock.
-    fn planted_store(tag: &str) -> (std::path::PathBuf, Vec<Event>) {
+    fn planted_store(_tag: &str) -> (std::path::PathBuf, Vec<Event>) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

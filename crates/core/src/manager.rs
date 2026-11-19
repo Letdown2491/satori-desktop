@@ -1405,9 +1405,8 @@ impl Core {
         crate::wot::shared_follows(who)
     }
 
-    // The contacts page's reads (Followers / Following / Muted). The own
-    // sets are process mirrors kept by set_following/set_muted; the
-    // followers reverse-lookup is a store scan.
+    // The contacts page's reads (Following / Muted). The own sets are
+    // process mirrors kept by set_following/set_muted.
 
     /// The own follow set (the cached contact list's p-keys). Empty
     /// signed-out.
@@ -3083,12 +3082,6 @@ impl Core {
             .latest_by_kind(me, Kind::Custom(10000))
             .await
         {
-            eprintln!(
-                "[core] mutes: kind-10000 from {} ({} content byte(s), {} p tag(s))",
-                ev.created_at.as_secs(),
-                ev.content.len(),
-                ev.tags.clone().public_keys().count()
-            );
             let decrypted: Vec<String> = if ev.content.is_empty() {
                 Vec::new()
             } else {
@@ -3097,14 +3090,7 @@ impl Core {
                     .nip44_decrypt_self(&me, ev.content.as_str())
                     .await
                 {
-                    Ok(plain) => {
-                        let parsed = parse_list_event(&plain);
-                        eprintln!(
-                            "[core] mutes: content decrypted, {} entr(y/ies) parsed",
-                            parsed.len()
-                        );
-                        parsed
-                    }
+                    Ok(plain) => parse_list_event(&plain),
                     Err(e) => {
                         // The list was published by another client with a
                         // different crypto/shape — say so instead of a
@@ -3118,21 +3104,13 @@ impl Core {
             for pk in decrypted {
                 m.insert(pk);
             }
-            let mut tagged = 0usize;
             for pk in ev.tags.clone().public_keys() {
                 m.insert(pk.to_string());
-                tagged += 1;
             }
             drop(m);
-            eprintln!(
-                "[core] mutes: mirror now {} author(s) ({tagged} from public tags)",
-                self.muted.lock().unwrap().len()
-            );
             // The WoT graph consults mutes at qualification time
             // (dark-wisp filters muted/blocked out) — push the set.
             crate::wot::set_muted(self.muted.lock().unwrap().clone());
-        } else {
-            eprintln!("[core] mutes: NO kind-10000 in the store after the relay fetch");
         }
     }
 
@@ -6082,14 +6060,10 @@ impl Core {
                 let me = active.me();
                 let hex = id.to_string();
                 // Private list: decrypt, drop the id, re-encrypt — only if
-                // it was there (content array OR a plain e-tag).
-                let stored = active
-                    .pool
-                    .store
-                    .latest_by_kind(me, Kind::Custom(10003))
-                    .await
-                    .ok()
-                    .flatten();
+                // it was there (content array OR a plain e-tag). (D89: the
+                // cold-start wire fetch guards a fresh install's first
+                // un-bookmark, same as bookmark's.)
+                let stored = Self::latest_list_event(active, me, Kind::Custom(10003), None).await;
                 if let Some(ev) = stored {
                     let ids: Vec<String> = if ev.content.is_empty() {
                         Vec::new()
@@ -6128,14 +6102,11 @@ impl Core {
                     }
                 }
                 // Public list: rebuild the stored tags without the id's
-                // e-tag (the d rides along) — only if it was there.
-                let stored = active
-                    .pool
-                    .store
-                    .latest_by_kind_d(me, Kind::Custom(30001), "bookmarks")
-                    .await
-                    .ok()
-                    .flatten();
+                // e-tag (the d rides along) — only if it was there. (D89:
+                // same cold-start guard.)
+                let stored =
+                    Self::latest_list_event(active, me, Kind::Custom(30001), Some("bookmarks"))
+                        .await;
                 if let Some(ev) = stored {
                     let mut raw: Vec<Tag> = ev.tags.clone().to_vec();
                     let before = raw.len();
@@ -6683,12 +6654,19 @@ impl Core {
                     // A public mute of the toggled key goes quiet with it.
                     tags.retain(|t| !(t.kind() == "p" && t.content() == Some(hex.as_str())));
                 }
-                let plain = list_json(&entries.into_iter().collect::<Vec<_>>(), "p");
+                let plain = list_json(
+                    &entries.iter().cloned().collect::<Vec<_>>(),
+                    "p",
+                );
                 let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
                 let unsigned =
                     UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(10000), tags, content);
                 let signed = active.signer.sign_event(unsigned).await?;
                 Self::commit(active, &signed, tx).await?;
+                // The mirror becomes the published set (D89 audit): it
+                // never shrank before, so an unmuted key survived it and
+                // the next unrelated toggle's union re-published it.
+                *core.muted.lock().unwrap() = entries;
                 // Keep the WoT qualification's mute screen in step.
                 crate::wot::set_muted(core.muted.lock().unwrap().clone());
                 Ok(())
