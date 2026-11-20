@@ -665,9 +665,21 @@ async fn probe(client: &NostrWalletConnect) -> Result<WalletInfo, String> {
 
 // --- zap request building -------------------------------------------------
 
+/// Who authors the kind-9734 zap request (D92's privacy dropdown).
+/// `Attributed` signs through the owner's signer (the D20 public zap);
+/// `Anonymous` signs with a fresh ephemeral key (NIP-57) — the wallet
+/// pays and the receipt lands as before, but the request carries no
+/// identity. Private zaps (NIP-44-encrypted requests) stay future work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZapPrivacy {
+    Attributed,
+    Anonymous,
+}
+
 /// Build the unsigned kind-9734 zap request (public zap — NIP-57): recipient
 /// p-tag, target e-tag, the amount, the lnurl, and the relays the wallet
 /// should publish the receipt to (ours — so the receipt-watch can see it).
+/// The message rides the content; empty is the old shape.
 pub fn zap_request(
     me: PublicKey,
     recipient: PublicKey,
@@ -675,19 +687,43 @@ pub fn zap_request(
     msat: u64,
     lnurl: &str,
     receipt_relays: Vec<String>,
+    message: &str,
 ) -> UnsignedEvent {
+    let data = zap_request_data(recipient, msat, lnurl, receipt_relays, message);
+    data.event_id(note_id)
+        .into_event_builder()
+        .finalize_unsigned(me)
+}
+
+/// The profile-zap variant (NIP-57): the SAME request minus the e-tag —
+/// the p-tag names the target, there is no event to reference.
+pub fn zap_request_profile(
+    me: PublicKey,
+    recipient: PublicKey,
+    msat: u64,
+    lnurl: &str,
+    receipt_relays: Vec<String>,
+    message: &str,
+) -> UnsignedEvent {
+    let data = zap_request_data(recipient, msat, lnurl, receipt_relays, message);
+    data.into_event_builder().finalize_unsigned(me)
+}
+
+fn zap_request_data(
+    recipient: PublicKey,
+    msat: u64,
+    lnurl: &str,
+    receipt_relays: Vec<String>,
+    message: &str,
+) -> ZapRequestData {
     let relays: Vec<RelayUrl> = receipt_relays
         .iter()
         .filter_map(|r| RelayUrl::parse(r).ok())
         .collect();
-    let data = ZapRequestData::new(recipient, relays)
-        .message(String::new())
+    ZapRequestData::new(recipient, relays)
+        .message(message.to_string())
         .amount(msat)
         .lnurl(lnurl_encode(lnurl))
-        .event_id(note_id);
-    // finalize_unsigned stamps the AUTHOR (the zapper) — the request is
-    // signed through the owner's signer downstream (bunker; D20).
-    data.into_event_builder().finalize_unsigned(me)
 }
 
 // --- NIP-57 zap splits (Appendix G) ---------------------------------------
@@ -931,6 +967,7 @@ mod tests {
             21_000,
             "zaps@example.com",
             vec!["wss://relay.example".into()],
+            "",
         );
         assert_eq!(u16::from(unsigned.kind), 9734);
         let tags = unsigned.tags.clone().to_vec();
@@ -943,6 +980,56 @@ mod tests {
         assert!(has("amount"), "msat tag");
         assert!(has("lnurl"), "bech32 lnurl tag");
         assert!(has("relays"), "receipt relays tag");
+        assert_eq!(unsigned.pubkey, me.public_key());
+    }
+
+    #[test]
+    fn zap_request_carries_the_message() {
+        let me = Keys::parse("e1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554")
+            .unwrap();
+        let recipient =
+            Keys::parse("a1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554")
+                .unwrap();
+        let note_id =
+            EventId::from_hex("0707070707070707070707070707070707070707070707070707070707070707")
+                .unwrap();
+        // The message IS the 9734 content (NIP-57).
+        let unsigned = zap_request(
+            me.public_key(),
+            recipient.public_key(),
+            note_id,
+            21_000,
+            "zaps@example.com",
+            vec!["wss://relay.example".into()],
+            "great post",
+        );
+        assert_eq!(unsigned.content, "great post");
+    }
+
+    #[test]
+    fn profile_request_has_no_e_tag() {
+        let me = Keys::parse("e1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554")
+            .unwrap();
+        let recipient =
+            Keys::parse("a1d4a5b33a9d2f0c8b7e6f5a4d3c2b1a0918273645f4e3d2c1b0a99887766554")
+                .unwrap();
+        let unsigned = zap_request_profile(
+            me.public_key(),
+            recipient.public_key(),
+            21_000,
+            "zaps@example.com",
+            vec!["wss://relay.example".into()],
+            "",
+        );
+        assert_eq!(u16::from(unsigned.kind), 9734);
+        let tags = unsigned.tags.clone().to_vec();
+        let has = |name: &str| {
+            tags.iter()
+                .any(|t| t.as_slice().first() == Some(&name.to_string()))
+        };
+        assert!(has("p"), "recipient tag");
+        assert!(!has("e"), "a profile zap names no event");
+        assert!(has("amount"), "msat tag");
         assert_eq!(unsigned.pubkey, me.public_key());
     }
 

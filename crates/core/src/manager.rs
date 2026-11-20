@@ -75,6 +75,49 @@ pub type WalletResultRx = mpsc::UnboundedReceiver<WalletEvent>;
 /// message, not a crash).
 type ZapFlow = std::result::Result<(), WalletEvent>;
 
+/// Who signs the kind-9734 (D92's privacy dropdown). `Owner` rides the
+/// active signer (the bunker); `Anonymous` signs locally with a fresh
+/// ephemeral key (NIP-57) — the wallet pays and the receipt lands as
+/// before, but no identity rides the request. One key per zap: a
+/// split's requests all share it.
+enum ZapSigner {
+    Owner,
+    Anonymous(Keys),
+}
+
+impl ZapSigner {
+    fn new(privacy: wallet::ZapPrivacy) -> Self {
+        match privacy {
+            wallet::ZapPrivacy::Attributed => Self::Owner,
+            wallet::ZapPrivacy::Anonymous => Self::Anonymous(Keys::generate()),
+        }
+    }
+
+    /// The pubkey stamped into the request: the owner's (finalized
+    /// unsigned here, signed through the bunker) or the ephemeral one.
+    fn author(&self, me: PublicKey) -> PublicKey {
+        match self {
+            Self::Owner => me,
+            Self::Anonymous(k) => k.public_key(),
+        }
+    }
+
+    async fn sign(
+        &self,
+        active: &Active,
+        unsigned: UnsignedEvent,
+    ) -> std::result::Result<Event, String> {
+        match self {
+            Self::Owner => active
+                .signer
+                .sign_event(unsigned)
+                .await
+                .map_err(|e| e.to_string()),
+            Self::Anonymous(k) => k.sign_event(unsigned).map_err(|e| e.to_string()),
+        }
+    }
+}
+
 /// Stream of feed/write results for the UI.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -1645,17 +1688,52 @@ impl Core {
         self.own_zapped.lock().unwrap().clone()
     }
 
-    /// Zap a note: a PUBLIC NIP-57 zap through the connected NWC wallet
-    /// (the tap = 21 sats default). Events stream on the returned channel
-    /// AND on subscribe_wallet — see [`WalletResultRx`].
-    pub fn zap(self: &Arc<Self>, note: Event, msat: u64) -> WalletResultRx {
+    /// Zap a note: a NIP-57 zap through the connected NWC wallet (the
+    /// tap = 21 sats default). `message` rides the 9734 content;
+    /// `privacy` picks the request's author (D92). Events stream on the
+    /// returned channel AND on subscribe_wallet — see [`WalletResultRx`].
+    pub fn zap(
+        self: &Arc<Self>,
+        note: Event,
+        msat: u64,
+        message: String,
+        privacy: wallet::ZapPrivacy,
+    ) -> WalletResultRx {
         let (tx, rx) = mpsc::unbounded_channel();
         let this = Arc::clone(self);
         let w = Arc::clone(&self.wallet);
         self.rt.spawn(async move {
-            if let Err(e) = this.zap_inner(&note, msat, &tx).await {
+            if let Err(e) = this.zap_inner(&note, msat, &message, privacy, &tx).await {
                 // Early failures never reach pay_stored's own emit — the
                 // feed's whisper still needs to hear them.
+                w.emit(e.clone());
+                let _ = tx.send(e);
+            }
+        });
+        rx
+    }
+
+    /// Zap a PROFILE (NIP-57's no-e-tag variant): the p-tag names the
+    /// target, the lightning pointer comes from the target's kind-0
+    /// (`meta`). The ledger keys the record by the recipient's pubkey
+    /// hex — a profile zap has no event id to correlate, so the
+    /// receipt-watch matches the request's author instead (the UI's
+    /// zapped mirror reads the same string).
+    pub fn zap_profile(
+        self: &Arc<Self>,
+        meta: Event,
+        msat: u64,
+        message: String,
+        privacy: wallet::ZapPrivacy,
+    ) -> WalletResultRx {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let this = Arc::clone(self);
+        let w = Arc::clone(&self.wallet);
+        self.rt.spawn(async move {
+            if let Err(e) = this
+                .zap_profile_inner(&meta, msat, &message, privacy, &tx)
+                .await
+            {
                 w.emit(e.clone());
                 let _ = tx.send(e);
             }
@@ -1733,6 +1811,8 @@ impl Core {
         self: &Arc<Self>,
         note: &Event,
         msat: u64,
+        message: &str,
+        privacy: wallet::ZapPrivacy,
         tx: &mpsc::UnboundedSender<WalletEvent>,
     ) -> ZapFlow {
         let note_hex = note.id.to_string();
@@ -1758,6 +1838,10 @@ impl Core {
         })?;
         let me = active.me();
         let recipient = note.pubkey;
+        // One ephemeral key per zap — a split's requests all share it
+        // (attributed zaps ignore it).
+        let signer = ZapSigner::new(privacy);
+        let author = signer.author(me);
 
         // NIP-57 Appendix G: `zap` tags on the target event name the split
         // receivers (the author is not implicitly among them); no tags →
@@ -1810,25 +1894,26 @@ impl Core {
                 reason: e,
             })?;
 
-            // Sign FIRST (through the owner's signer — the bunker), STORE
-            // the signed request, then pay. A crash between sign and pay
-            // leaves a Pending record a retry can finish — same event id.
+            // Sign FIRST (the author key matches the privacy choice),
+            // STORE the signed request, then pay. A crash between sign
+            // and pay leaves a Pending record a retry can finish — same
+            // event id.
             let unsigned = wallet::zap_request(
-                me,
+                author,
                 share_pk,
                 note.id,
                 share_msat,
                 &lnurl,
                 active.write_relays.clone(),
+                message,
             );
             let signed =
-                active
-                    .signer
-                    .sign_event(unsigned)
+                signer
+                    .sign(&active, unsigned)
                     .await
-                    .map_err(|e| WalletEvent::ZapFailed {
+                    .map_err(|reason| WalletEvent::ZapFailed {
                         note: note_hex.clone(),
-                        reason: e.to_string(),
+                        reason,
                     })?;
             let record = wallet::ZapRecord {
                 req: signed.id.to_string(),
@@ -1846,6 +1931,119 @@ impl Core {
             let _ = self.pay_stored(&record, &signed, tx).await;
         }
         Ok(())
+    }
+
+    async fn zap_profile_inner(
+        self: &Arc<Self>,
+        meta: &Event,
+        msat: u64,
+        message: &str,
+        privacy: wallet::ZapPrivacy,
+        tx: &mpsc::UnboundedSender<WalletEvent>,
+    ) -> ZapFlow {
+        // The ledger key is the recipient's pubkey hex (see zap_profile).
+        let note_hex = meta.pubkey.to_string();
+        // One in-flight payment per target — the same Feather rule.
+        if !self.wallet.claim_flight(&note_hex) {
+            return Err(WalletEvent::ZapFailed {
+                note: note_hex,
+                reason: "a zap on this profile is already in flight".into(),
+            });
+        }
+        let _guard = FlightGuard(&self.wallet, &note_hex);
+
+        if !self.wallet.is_ready() {
+            return Err(WalletEvent::ZapFailed {
+                note: note_hex.clone(),
+                reason: "no wallet connected".into(),
+            });
+        }
+        let active = self.active().await.map_err(|e| WalletEvent::ZapFailed {
+            note: note_hex.clone(),
+            reason: e.to_string(),
+        })?;
+        let me = active.me();
+        let signer = ZapSigner::new(privacy);
+        let author = signer.author(me);
+
+        let lud = lightning_field(&meta.content).ok_or_else(|| WalletEvent::ZapFailed {
+            note: note_hex.clone(),
+            reason: "no lightning address on the profile".into(),
+        })?;
+        let lnurl = wallet::lnurlp_url(&lud).map_err(|e| WalletEvent::ZapFailed {
+            note: note_hex.clone(),
+            reason: e,
+        })?;
+
+        // Sign FIRST, STORE, pay — the same discipline as note zaps.
+        let unsigned = wallet::zap_request_profile(
+            author,
+            meta.pubkey,
+            msat,
+            &lnurl,
+            active.write_relays.clone(),
+            message,
+        );
+        let signed =
+            signer
+                .sign(&active, unsigned)
+                .await
+                .map_err(|reason| WalletEvent::ZapFailed {
+                    note: note_hex.clone(),
+                    reason,
+                })?;
+        let record = wallet::ZapRecord {
+            req: signed.id.to_string(),
+            note: note_hex.clone(),
+            recipient: meta.pubkey.to_string(),
+            msat,
+            state: wallet::ZapState::Pending,
+            created_at: now_secs(),
+            event: serde_json::to_string(&signed).unwrap_or_default(),
+        };
+        wallet::ledger_update(record.clone());
+        let _ = self.pay_stored(&record, &signed, tx).await;
+        Ok(())
+    }
+
+    /// The author's NIP-A3 payment targets (kind 10133): store-first,
+    /// one cold wire fetch when absent (D89's `latest_list_event`
+    /// shape), parsed through `crate::nip::payto`. Empty = none known (never
+    /// an error — the chips just don't render).
+    pub async fn payment_targets(
+        &self,
+        author: PublicKey,
+    ) -> Vec<crate::nip::payto::PaymentTarget> {
+        let kind = Kind::Custom(crate::nip::payto::KIND);
+        if let Some(ev) = self.store_latest(author, kind).await {
+            return crate::nip::payto::parse(&ev);
+        }
+        // Cold store: one targeted fetch (the SDK persists what arrives),
+        // then read back.
+        let Ok(active) = self.active().await else {
+            return Vec::new();
+        };
+        let filter = Filter::new().kind(kind).author(author).limit(1);
+        let _ = active.pool.get(filter).await;
+        match self.store_latest(author, kind).await {
+            Some(ev) => crate::nip::payto::parse(&ev),
+            None => Vec::new(),
+        }
+    }
+
+    /// Store-first read (the D89 shape): the latest kind-10133 by one
+    /// author, or None when the store hasn't met one.
+    async fn store_latest(&self, author: PublicKey, kind: Kind) -> Option<Event> {
+        let Ok(active) = self.active().await else {
+            return None;
+        };
+        active
+            .pool
+            .store
+            .latest_by_kind(author, kind)
+            .await
+            .ok()
+            .flatten()
     }
 
     /// The shared pay path for a STORED, signed request (fresh or retry):
@@ -1906,7 +2104,14 @@ impl Core {
                 };
                 self.wallet.emit(ev.clone());
                 let _ = tx.send(ev);
-                self.watch_receipt(&note, &req, tx);
+                // The watch keys off the request's own geometry: the e
+                // tag when the ledger entry is an event id (note zaps),
+                // the p tag always, and the sender match against the
+                // request's author (me, or the anonymous ephemeral key).
+                let e_tag = EventId::from_hex(&note).ok();
+                if let Ok(recipient) = PublicKey::from_str(&record.recipient) {
+                    self.watch_receipt(&note, e_tag, recipient, signed.pubkey, &req, tx);
+                }
                 Ok(())
             }
             Err(wallet::PayError::Uncertain) => {
@@ -1941,41 +2146,48 @@ impl Core {
     /// stronger proof and recovers nothing else.
     fn watch_receipt(
         self: &Arc<Self>,
-        note_hex: &str,
+        note_key: &str,
+        e_tag: Option<EventId>,
+        recipient: PublicKey,
+        sender: PublicKey,
         req: &str,
         tx: &mpsc::UnboundedSender<WalletEvent>,
     ) {
         let this = Arc::clone(self);
-        let note = note_hex.to_string();
+        let note_hex = note_key.to_string();
         let req = req.to_string();
         let tx = tx.clone(); // the spawned task outlives the borrow
         self.rt.spawn(async move {
-            let Ok(active) = this.active().await else {
-                return;
-            };
-            let me = active.me();
-            let Ok(note_id) = EventId::from_hex(&note) else {
-                return;
-            };
+            // The watch keys off the request's own geometry: the e tag
+            // when there is one (note zaps), the p tag always (profile
+            // zaps have no event to reference), and the sender match
+            // against the request's author (me, or the anonymous
+            // ephemeral key — the reconciliation).
+            let mut filter = Filter::new()
+                .kind(Kind::Custom(9735))
+                .custom_tag(SingleLetterTag::LOWERCASE_P, recipient);
+            if let Some(note_id) = e_tag {
+                filter = filter.event(note_id);
+            }
             for _ in 0..6 {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                let events = match active
-                    .pool
-                    .get(Filter::new().kind(Kind::Custom(9735)).event(note_id))
-                    .await
-                {
+                let Ok(active) = this.active().await else {
+                    return;
+                };
+                let events = match active.pool.get(filter.clone()).await {
                     Ok(set) => set,
                     Err(_) => continue, // relay budget blown — look again
                 };
                 // parse_zap_receipt verifies the embedded 9734 (signature +
-                // p/e/a tags); the sender being ME is the reconciliation.
+                // p/e/a tags); the sender being the request's author is the
+                // reconciliation.
                 if events
                     .iter()
-                    .any(|ev| crate::notifications::parse_zap_receipt(ev).sender == Some(me))
+                    .any(|ev| crate::notifications::parse_zap_receipt(ev).sender == Some(sender))
                 {
                     wallet::ledger_set_state(&req, wallet::ZapState::Confirmed);
                     let ev = WalletEvent::ZapReceipt {
-                        note: note.clone(),
+                        note: note_hex.clone(),
                         req: req.clone(),
                     };
                     this.wallet.emit(ev.clone());

@@ -119,7 +119,12 @@ impl ZapSheet {
             return;
         }
         let note = self.note.clone();
-        self.core.zap(note, msat);
+        self.core.zap(
+            note,
+            msat,
+            String::new(),
+            satori_core::wallet::ZapPrivacy::Attributed,
+        );
         cx.emit(Nav::Pop);
     }
 
