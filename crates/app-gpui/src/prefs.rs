@@ -83,14 +83,23 @@ pub fn columns_layout() -> ColumnsPref {
 /// Merge-save the columns layout (the Prefs::save pattern: the file
 /// holds keys this struct doesn't — clobbering them is the exact bug
 /// the GTK save had).
-pub fn save_columns_layout(layout: &ColumnsPref) {
+/// The merge-save idiom every overlay key shares (the file holds keys
+/// this process's struct doesn't): read the whole JSON, insert ONE key's
+/// serialized overlay, write back pretty. One home (D94's audit) — the
+/// write path's shape (fsync discipline, future atomic rename) changes
+/// here, not in each saver.
+fn save_overlay(key: &str, overlay: &impl serde::Serialize) {
     let mut value = read_value(config::files::PREFS);
-    if let (Some(obj), Ok(overlay)) = (value.as_object_mut(), serde_json::to_value(layout)) {
-        obj.insert("columns".into(), overlay);
+    if let (Some(obj), Ok(overlay)) = (value.as_object_mut(), serde_json::to_value(overlay)) {
+        obj.insert(key.into(), overlay);
     }
     if let Ok(body) = serde_json::to_string_pretty(&value) {
         write_state(config::files::PREFS, &body);
     }
+}
+
+pub fn save_columns_layout(layout: &ColumnsPref) {
+    save_overlay("columns", layout)
 }
 
 /// Catalog kinds hidden from the feed (`content_hidden` in prefs.json).
@@ -238,28 +247,26 @@ pub fn default_zap_presets() -> Vec<ZapPreset> {
         .collect()
 }
 
-/// The stored strip; missing/corrupt key = the built-ins.
+/// The stored strip; missing/corrupt key = the built-ins. Capped at
+/// READ too: the write paths enforce 8, but a hand-edited prefs.json
+/// must not render unbounded rows per frame (D94's memory lens).
 pub fn zap_presets() -> Vec<ZapPreset> {
-    read_value(config::files::PREFS)
+    let mut presets = read_value(config::files::PREFS)
         .get("zap_presets")
-        .and_then(|p| serde_json::from_value(p.clone()).ok())
-        .filter(|p: &Vec<ZapPreset>| !p.is_empty())
-        .unwrap_or_else(default_zap_presets)
+        .and_then(|p| serde_json::from_value::<Vec<ZapPreset>>(p.clone()).ok())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(default_zap_presets);
+    presets.truncate(8);
+    presets
 }
 
 /// Merge-save the strip (the columns-layout pattern: the file holds keys
 /// this struct doesn't). Hard cap 8 — the strip is a row, not a list.
 pub fn save_zap_presets(presets: &[ZapPreset]) {
-    let mut value = read_value(config::files::PREFS);
-    if let Some(obj) = value.as_object_mut() {
-        let capped: Vec<ZapPreset> = presets.iter().take(8).cloned().collect();
-        if let Ok(overlay) = serde_json::to_value(&capped) {
-            obj.insert("zap_presets".into(), overlay);
-        }
-    }
-    if let Ok(body) = serde_json::to_string_pretty(&value) {
-        write_state(config::files::PREFS, &body);
-    }
+    // The cap lives at the write, and the READ is capped too (zap_presets)
+    // — the invariant holds whichever path a prefs.json came in from.
+    let capped: Vec<ZapPreset> = presets.iter().take(8).cloned().collect();
+    save_overlay("zap_presets", &capped)
 }
 
 /// Does a short bolt tap send the quick amount directly (true, the D20

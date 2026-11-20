@@ -277,6 +277,24 @@ pub fn ledger_history() -> Vec<ZapRecord> {
     zaps
 }
 
+/// The most recent distinct zap amounts (sats), newest first — the zap
+/// sheet's seed bed (D92). Reads the ledger once without materializing
+/// the full reversed history (the sheet keeps 3 numbers).
+pub fn ledger_recent_amounts(n: usize) -> Vec<u64> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for z in load_ledger().zaps.iter().rev() {
+        let sats = z.msat / 1000;
+        if sats > 0 && seen.insert(sats) {
+            out.push(sats);
+            if out.len() >= n {
+                break;
+            }
+        }
+    }
+    out
+}
+
 // --- wallet.json (secret-free connection record) --------------------------
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -716,15 +734,26 @@ fn zap_request_data(
     receipt_relays: Vec<String>,
     message: &str,
 ) -> ZapRequestData {
+    // The message rides the LNURL callback URL (percent-encoded) and the
+    // relay-published receipt — an uncapped one fails the payment
+    // mysteriously (URL length caps, oversized receipts dropped).
+    // 256 chars, the LNURL `commentAllowed` practice (D94's audit).
+    let mut capped = message.trim().to_string();
+    if capped.chars().count() > MESSAGE_CAP {
+        capped = capped.chars().take(MESSAGE_CAP).collect();
+    }
     let relays: Vec<RelayUrl> = receipt_relays
         .iter()
         .filter_map(|r| RelayUrl::parse(r).ok())
         .collect();
     ZapRequestData::new(recipient, relays)
-        .message(message.to_string())
+        .message(capped)
         .amount(msat)
         .lnurl(lnurl_encode(lnurl))
 }
+
+/// The most characters a zap message may carry (see zap_request_data).
+pub const MESSAGE_CAP: usize = 256;
 
 // --- NIP-57 zap splits (Appendix G) ---------------------------------------
 

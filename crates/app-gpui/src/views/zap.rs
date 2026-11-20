@@ -100,13 +100,7 @@ impl ZapSheet {
             .detach();
         // The ledger is the seed bed: recent amounts, newest first,
         // deduped (the picker grows around the user's habits).
-        let mut seen = std::collections::HashSet::new();
-        let recent = satori_core::wallet::ledger_history()
-            .into_iter()
-            .map(|z| z.msat / 1000)
-            .filter(|sats| *sats > 0 && seen.insert(*sats))
-            .take(RECENT_SEEDS)
-            .collect();
+        let recent = satori_core::wallet::ledger_recent_amounts(RECENT_SEEDS);
         // The hero seeds with the instant amount (the tap pref — the
         // Wallet tab's field owns it), selected — the first keystroke
         // replaces it.
@@ -142,16 +136,10 @@ impl ZapSheet {
     /// The author's NIP-A3 payment targets (one cold fetch at open;
     /// empty = none known — the chips just don't render).
     fn want_targets(&self, who: PublicKey, cx: &mut Context<Self>) {
-        let core = Arc::clone(&self.core);
-        let this = cx.entity().downgrade();
-        cx.spawn(async move |_, cx| {
-            let targets = core.payment_targets(who).await;
-            let _ = this.update(cx, |sheet, cx| {
-                sheet.targets = targets;
-                cx.notify();
-            });
-        })
-        .detach();
+        super::payto::want_targets(&self.core, who, cx, |sheet, targets, cx| {
+            sheet.targets = targets;
+            cx.notify();
+        });
     }
 
     /// The recipient's display name (best effort — the short npub stands
@@ -186,58 +174,76 @@ impl ZapSheet {
         cx.notify();
     }
 
+    /// The quiet status whisper (settings' set_status shape): one door,
+    /// so the err flag and the notify never split.
+    fn set_status(&mut self, msg: &str, err: bool, cx: &mut Context<Self>) {
+        self.status = msg.to_string();
+        self.status_err = err;
+        cx.notify();
+    }
+
     /// Save the current hero + message as a preset (same sats replaces).
     fn save_preset(&mut self, cx: &mut Context<Self>) {
         let Some(sats) = self.chosen_msat(cx).map(|m| m / 1000) else {
-            self.status = "how many sats?".into();
-            self.status_err = true;
-            cx.notify();
+            self.set_status("how many sats?", true, cx);
             return;
         };
         let message = self.message.read(cx).content.trim().to_string();
+        if message.chars().count() > satori_core::wallet::MESSAGE_CAP {
+            self.set_status(
+                &format!(
+                    "message is {} characters max",
+                    satori_core::wallet::MESSAGE_CAP
+                ),
+                true,
+                cx,
+            );
+            return;
+        }
         self.presets.retain(|p| p.sats != sats);
         self.presets.insert(0, prefs::ZapPreset { sats, message });
         self.presets.truncate(PRESET_CAP);
         prefs::save_zap_presets(&self.presets);
-        self.status = "preset saved".into();
-        self.status_err = false;
-        cx.notify();
+        self.set_status("preset saved", false, cx);
     }
 
     fn delete_preset(&mut self, sats: u64, cx: &mut Context<Self>) {
         self.presets.retain(|p| p.sats != sats);
         prefs::save_zap_presets(&self.presets);
-        self.status = "preset removed".into();
-        self.status_err = false;
-        cx.notify();
+        self.set_status("preset removed", false, cx);
     }
 
     /// Start the zap with the hero's amount and pop. Outcome flows on
     /// the wallet broadcast (the feed's bolt + status whisper own it).
     fn zap(&mut self, cx: &mut Context<Self>) {
         let Some(msat) = self.chosen_msat(cx) else {
-            self.status = "how many sats?".into();
-            self.status_err = true;
-            cx.notify();
+            self.set_status("how many sats?", true, cx);
             return;
         };
-        if !self.core.wallet().is_ready() {
-            // No dead end (D93): the targets row below IS the answer.
-            self.status = "no wallet connected".into();
-            self.status_err = true;
-            cx.notify();
+        let message = self.message.read(cx).content.trim().to_string();
+        if message.chars().count() > satori_core::wallet::MESSAGE_CAP {
+            self.set_status(
+                &format!(
+                    "message is {} characters max",
+                    satori_core::wallet::MESSAGE_CAP
+                ),
+                true,
+                cx,
+            );
             return;
         }
-        let message = self.message.read(cx).content.trim().to_string();
+        if !self.core.wallet().is_ready() {
+            // No dead end (D93): the targets row below IS the answer.
+            self.set_status("no wallet connected", true, cx);
+            return;
+        }
         match &self.target {
             ZapTarget::Note(note) => {
                 self.core.zap(note.clone(), msat, message, self.privacy);
             }
             ZapTarget::Profile { who, lud } => {
                 let Some(lud) = lud.clone() else {
-                    self.status = "no lightning address on the profile".into();
-                    self.status_err = true;
-                    cx.notify();
+                    self.set_status("no lightning address on the profile", true, cx);
                     return;
                 };
                 self.core
@@ -251,18 +257,6 @@ impl ZapSheet {
 /// A preset pill's label.
 fn format_sats(sats: u64) -> String {
     format!("{sats} sats")
-}
-
-/// Chip label for a payment target's rail type ("venmo" → "Venmo").
-fn target_label(t: &satori_core::nip::payto::PaymentTarget) -> String {
-    let mut chars = t.target_type.chars();
-    match chars.next() {
-        Some(first) => {
-            let rest: String = chars.collect();
-            first.to_uppercase().collect::<String>() + &rest
-        }
-        None => t.target_type.clone(),
-    }
 }
 
 impl Render for ZapSheet {
@@ -338,32 +332,13 @@ impl Render for ZapSheet {
                             }),
                     )
                     .child(
-                        div().flex().flex_wrap().gap_2().children(
-                            targets.iter().map(|t| {
-                                let label = target_label(t);
-                                let uri = satori_core::nip::payto::uri_for(t);
-                                Self::pill(format!("payto-{}", t.target_type), label)
-                                    .on_click({
-                                        let uri = uri.clone();
-                                        move |_, _, cx| {
-                                            cx.open_url(&uri);
-                                        }
-                                    })
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Right,
-                                        {
-                                            let uri = uri.clone();
-                                            move |_, _, cx| {
-                                                cx.write_to_clipboard(
-                                                    gpui::ClipboardItem::new_string(
-                                                        uri.clone(),
-                                                    ),
-                                                );
-                                            }
-                                        },
-                                    )
-                            }),
-                        ),
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .children(
+                                targets.iter().map(|t| super::payto::chip(t, theme::T_UI)),
+                            ),
                     )
                     .child(
                         div()

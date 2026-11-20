@@ -185,17 +185,10 @@ impl ProfileView {
     /// The header's NIP-A3 chips (D93): one cold fetch at open; empty
     /// = none known, the row just doesn't render.
     fn want_pay_targets(&self, cx: &mut Context<Self>) {
-        let core = Arc::clone(&self.core);
-        let who = self.who;
-        let this = cx.entity().downgrade();
-        cx.spawn(async move |_, cx| {
-            let targets = core.payment_targets(who).await;
-            let _ = this.update(cx, |this, cx| {
-                this.pay_targets = targets;
-                cx.notify();
-            });
-        })
-        .detach();
+        super::payto::want_targets(&self.core, self.who, cx, |this, targets, cx| {
+            this.pay_targets = targets;
+            cx.notify();
+        });
     }
 
     fn pin_window(&mut self, cx: &mut Context<Self>) {
@@ -1061,43 +1054,12 @@ impl Render for ProfileView {
                             // hand-off chips — the rails the lightning
                             // pointer doesn't cover. Click opens, right-
                             // click copies; no amount is ever attached.
+                            // The chip is the sheet's chip (views::payto).
                             .when(!self.pay_targets.is_empty(), |d| {
-                                let chips = self.pay_targets.iter().map(|t| {
-                                    let mut chars = t.target_type.chars();
-                                    let label = match chars.next() {
-                                        Some(first) => {
-                                            let rest: String = chars.collect();
-                                            first.to_uppercase().collect::<String>() + &rest
-                                        }
-                                        None => t.target_type.clone(),
-                                    };
-                                    let uri = satori_core::nip::payto::uri_for(t);
-                                    div()
-                                        .id(SharedString::from(format!("payto-{}", t.target_type)))
-                                        .cursor_pointer()
-                                        .px_2()
-                                        .py_0p5()
-                                        .rounded(px(theme::R_EMBED))
-                                        .border_1()
-                                        .border_color(rgb(theme::hairline()))
-                                        .text_size(px(theme::T_SMALL))
-                                        .text_color(rgb(theme::muted()))
-                                        .on_click({
-                                            let uri = uri.clone();
-                                            move |_, _, cx| {
-                                                cx.open_url(&uri);
-                                            }
-                                        })
-                                        .on_mouse_down(gpui::MouseButton::Right, {
-                                            let uri = uri.clone();
-                                            move |_, _, cx| {
-                                                cx.write_to_clipboard(
-                                                    gpui::ClipboardItem::new_string(uri.clone()),
-                                                );
-                                            }
-                                        })
-                                        .child(label)
-                                });
+                                let chips = self
+                                    .pay_targets
+                                    .iter()
+                                    .map(|t| super::payto::chip(t, theme::T_SMALL));
                                 d.child(
                                     div()
                                         .flex()

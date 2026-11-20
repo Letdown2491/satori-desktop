@@ -11,6 +11,7 @@ pub mod login;
 pub mod nav;
 pub mod network;
 pub mod notifications;
+pub mod payto;
 pub mod profile;
 pub mod quotes;
 pub mod reader;

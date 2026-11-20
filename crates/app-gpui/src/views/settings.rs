@@ -58,10 +58,11 @@ pub struct SettingsView {
     // the manage pane owns the detail).
     wallet: Status,
     // Zap prefs (D92): the instant amount (the cached value is what
-    // Enter applies) and the add-preset fields. The stored strip is
-    // read per render (prefs is the truth; rows remove through it).
+    // Enter applies), the strip as a snapshot field (refreshed by every
+    // mutation — the audit's per-render re-read), and the add fields.
     zap_instant_sats_val: u64,
     zap_instant_sats: Entity<Input>,
+    zap_presets: Vec<prefs::ZapPreset>,
     zap_add_sats: Entity<Input>,
     zap_add_msg: Entity<Input>,
     // Set when the sign-out row is clicked: the pane freezes on "Signing
@@ -166,6 +167,7 @@ impl SettingsView {
                 i.content = prefs::zap_instant_sats().to_string();
                 i.placeholder("")
             }),
+            zap_presets: prefs::zap_presets(),
             zap_add_sats: cx.new(|cx| Input::single_line("sats", cx)),
             zap_add_msg: cx.new(|cx| Input::single_line("message (optional)", cx)),
             machine_hidden: satori_core::store::machine_notes_hidden(),
@@ -1452,6 +1454,7 @@ impl SettingsView {
         let zap_instant_sats = self.zap_instant_sats.clone();
         let zap_add_sats = self.zap_add_sats.clone();
         let zap_add_msg = self.zap_add_msg.clone();
+        let zap_presets_snapshot = self.zap_presets.clone();
         div()
             .flex()
             .flex_col()
@@ -1526,7 +1529,7 @@ impl SettingsView {
                 )
                 .child({
                     let mut col = div().w_full().flex().flex_col();
-                    for p in prefs::zap_presets() {
+                    for p in zap_presets_snapshot.iter() {
                         let sats = p.sats;
                         col = col.child(
                             div()

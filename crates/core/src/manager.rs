@@ -118,6 +118,40 @@ impl ZapSigner {
     }
 }
 
+/// Where an ANONYMOUS zap's receipt is asked to publish (the 9734's
+/// relays tag, visible to anyone reading the receipt): a fixed neutral
+/// public set, never the owner's write relays — a personal relay set
+/// is itself a fingerprint (D94's audit finding). The trade-off is
+/// honest: our own receipt watch may miss the confirmation (it polls
+/// our read relays), and Paid stays the truth of record.
+const ANON_ZAP_RELAYS: [&str; 3] = [
+    "wss://nostr.wine/",
+    "wss://relay.damus.io/",
+    "wss://nos.lol/",
+];
+
+/// The signed request's own e tag as an EventId — the receipt-watch's
+/// geometry read from the REQUEST, not guessed from the ledger key (a
+/// pubkey-hex key parses as an EventId; the audit's phantom-e-tag bug).
+/// Profile zaps have none, and their receipts must not be filtered on one.
+fn request_e_tag(signed: &Event) -> Option<EventId> {
+    signed
+        .tags
+        .iter()
+        .find(|t| t.as_slice().first().map(String::as_str) == Some("e"))
+        .and_then(|t| t.as_slice().get(1))
+        .and_then(|hex| EventId::from_hex(hex).ok())
+}
+
+/// The receipt-relay choice per privacy (see ANON_ZAP_RELAYS): ours for
+/// attributed (we want the confirmation), the neutral set for anonymous.
+fn zap_receipt_relays(privacy: wallet::ZapPrivacy, write_relays: &[String]) -> Vec<String> {
+    match privacy {
+        wallet::ZapPrivacy::Attributed => write_relays.to_vec(),
+        wallet::ZapPrivacy::Anonymous => ANON_ZAP_RELAYS.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
 /// Stream of feed/write results for the UI.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -864,6 +898,13 @@ pub struct Core {
     /// Own zaps: note id (hex) → zapped. The ledger (zaps.json) is the
     /// durable authority; this mirrors it for render, like own_liked.
     own_zapped: Mutex<HashSet<String>>,
+    /// Session negative cache for NIP-A3 payment-target cold misses
+    /// (D94's audit): authors we already wire-asked and got nothing
+    /// from. "Absent" is the permanent answer for most authors — without
+    /// this, every profile visit and sheet open re-fires the fan-out.
+    /// Cleared never (session-scoped by design; a freshly published
+    /// target list lands when the store next checks it).
+    payto_asked: Mutex<HashSet<String>>,
     /// Tombstone hydration: the one-time store scan that seeds the
     /// deletions module with kind:5s that predate it (drop_deleted's
     /// doc). The module persists past this point; the flag just keeps
@@ -956,6 +997,7 @@ impl Core {
             own_drafts: Mutex::new(Vec::new()),
             muted: Mutex::new(HashSet::new()),
             own_zapped: Mutex::new(HashSet::new()),
+            payto_asked: Mutex::new(HashSet::new()),
             tombstones_hydrated: std::sync::atomic::AtomicBool::new(false),
             wallet: Arc::new(Wallet::new()),
             profiles_mem: Mutex::new(ProfileMem::new()),
@@ -1898,38 +1940,25 @@ impl Core {
             // Sign FIRST (the author key matches the privacy choice),
             // STORE the signed request, then pay. A crash between sign
             // and pay leaves a Pending record a retry can finish — same
-            // event id.
+            // event id. The relays choice (see zap_profile_inner):
+            // attributed rides our write relays, anonymous the neutral
+            // public set.
+            let relays = zap_receipt_relays(privacy, &active.write_relays);
             let unsigned = wallet::zap_request(
-                author,
-                share_pk,
-                note.id,
-                share_msat,
-                &lnurl,
-                active.write_relays.clone(),
-                message,
+                author, share_pk, note.id, share_msat, &lnurl, relays, message,
             );
-            let signed =
-                signer
-                    .sign(&active, unsigned)
-                    .await
-                    .map_err(|reason| WalletEvent::ZapFailed {
-                        note: note_hex.clone(),
-                        reason,
-                    })?;
-            let record = wallet::ZapRecord {
-                req: signed.id.to_string(),
-                note: note_hex.clone(),
-                recipient: share_pk.to_string(),
-                msat: share_msat,
-                state: wallet::ZapState::Pending,
-                created_at: now_secs(),
-                event: serde_json::to_string(&signed).unwrap_or_default(),
-            };
-            wallet::ledger_update(record.clone());
-
-            // A definite failure here has already erased the record and
-            // reported itself; the remaining receivers still get paid.
-            let _ = self.pay_stored(&record, &signed, tx).await;
+            // A definite failure inside has already erased the record
+            // and reported itself; the remaining receivers still get paid.
+            self.store_and_pay(
+                &active,
+                &signer,
+                unsigned,
+                &note_hex,
+                &share_pk.to_string(),
+                share_msat,
+                tx,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -1967,36 +1996,62 @@ impl Core {
         let me = active.me();
         let signer = ZapSigner::new(privacy);
         let author = signer.author(me);
-
-        // The pointer arrives validated by the caller (the sheet only
-        // offers the zap when a lud exists); lnurlp_url still refuses
-        // junk honestly.
+        // The receipt publishes where the 9734's relays tag says. An
+        // attributed zap uses OUR write relays (we want the confirmation);
+        // an anonymous one uses a NEUTRAL public set — the owner's relay
+        // list is itself a fingerprint, and the audit pulled it out of
+        // the anonymity promise (D91/D94).
+        let relays = zap_receipt_relays(privacy, &active.write_relays);
         let lnurl = wallet::lnurlp_url(lud).map_err(|e| WalletEvent::ZapFailed {
             note: note_hex.clone(),
             reason: e,
         })?;
 
-        // Sign FIRST, STORE, pay — the same discipline as note zaps.
-        let unsigned = wallet::zap_request_profile(
-            author,
-            *who,
+        // Sign FIRST (the author key matches the privacy choice),
+        // STORE the signed request, then pay. A crash between sign
+        // and pay leaves a Pending record a retry can finish — same
+        // event id.
+        let unsigned = wallet::zap_request_profile(author, *who, msat, &lnurl, relays, message);
+        self.store_and_pay(
+            &active,
+            &signer,
+            unsigned,
+            &note_hex,
+            &who.to_string(),
             msat,
-            &lnurl,
-            active.write_relays.clone(),
-            message,
-        );
+            tx,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)] // the request geometry, spelled out
+    /// The crash-safety invariant in ONE place (D94's duplication lens):
+    /// sign the request, store the record Pending, then pay. A crash
+    /// between sign and pay leaves a Pending record a retry can finish —
+    /// same event id. Both zap shapes (note/profile) and the split loop
+    /// come through here.
+    async fn store_and_pay(
+        self: &Arc<Self>,
+        active: &Active,
+        signer: &ZapSigner,
+        unsigned: UnsignedEvent,
+        note_key: &str,
+        recipient: &str,
+        msat: u64,
+        tx: &mpsc::UnboundedSender<WalletEvent>,
+    ) -> ZapFlow {
         let signed =
             signer
-                .sign(&active, unsigned)
+                .sign(active, unsigned)
                 .await
                 .map_err(|reason| WalletEvent::ZapFailed {
-                    note: note_hex.clone(),
+                    note: note_key.to_string(),
                     reason,
                 })?;
         let record = wallet::ZapRecord {
             req: signed.id.to_string(),
-            note: note_hex.clone(),
-            recipient: who.to_string(),
+            note: note_key.to_string(),
+            recipient: recipient.to_string(),
             msat,
             state: wallet::ZapState::Pending,
             created_at: now_secs(),
@@ -2019,8 +2074,13 @@ impl Core {
         if let Some(ev) = self.store_latest(author, kind).await {
             return crate::nip::payto::parse(&ev);
         }
-        // Cold store: one targeted fetch (the SDK persists what arrives),
-        // then read back.
+        // Cold store: the session negative cache first (most authors
+        // never publish one — see payto_asked), then one targeted fetch
+        // (the SDK persists what arrives), then read back.
+        let asked_key = author.to_string();
+        if self.payto_asked.lock().unwrap().contains(&asked_key) {
+            return Vec::new();
+        }
         let Ok(active) = self.active().await else {
             return Vec::new();
         };
@@ -2028,7 +2088,10 @@ impl Core {
         let _ = active.pool.get(filter).await;
         match self.store_latest(author, kind).await {
             Some(ev) => crate::nip::payto::parse(&ev),
-            None => Vec::new(),
+            None => {
+                self.payto_asked.lock().unwrap().insert(asked_key);
+                Vec::new()
+            }
         }
     }
 
@@ -2106,12 +2169,24 @@ impl Core {
                 self.wallet.emit(ev.clone());
                 let _ = tx.send(ev);
                 // The watch keys off the request's own geometry: the e
-                // tag when the ledger entry is an event id (note zaps),
+                // tag read off the SIGNED REQUEST (note zaps carry one;
+                // profile zaps don't — a pubkey-hex ledger key parses as
+                // an EventId, so the note field cannot discriminate this
+                // and never gets to: the audit's phantom-e-tag bug),
                 // the p tag always, and the sender match against the
                 // request's author (me, or the anonymous ephemeral key).
-                let e_tag = EventId::from_hex(&note).ok();
+                let e_tag = request_e_tag(signed);
                 if let Ok(recipient) = PublicKey::from_str(&record.recipient) {
-                    self.watch_receipt(&note, e_tag, recipient, signed.pubkey, &req, tx);
+                    self.watch_receipt(
+                        &note,
+                        e_tag,
+                        recipient,
+                        signed.pubkey,
+                        &req,
+                        record.msat,
+                        record.created_at,
+                        tx,
+                    );
                 }
                 Ok(())
             }
@@ -2145,6 +2220,7 @@ impl Core {
     /// Confirmed when OUR verified zap lands. Best-effort: Paid is already
     /// truthful (the wallet returned a preimage); the receipt is the
     /// stronger proof and recovers nothing else.
+    #[allow(clippy::too_many_arguments)] // the watch geometry, spelled out
     fn watch_receipt(
         self: &Arc<Self>,
         note_key: &str,
@@ -2152,6 +2228,8 @@ impl Core {
         recipient: PublicKey,
         sender: PublicKey,
         req: &str,
+        msat: u64,
+        created_at: u64,
         tx: &mpsc::UnboundedSender<WalletEvent>,
     ) {
         let this = Arc::clone(self);
@@ -2163,12 +2241,20 @@ impl Core {
             // when there is one (note zaps), the p tag always (profile
             // zaps have no event to reference), and the sender match
             // against the request's author (me, or the anonymous
-            // ephemeral key — the reconciliation).
+            // ephemeral key — the reconciliation). The no-e-tag shape
+            // is bounded twice over: a small limit (the poll repeats,
+            // a prolific recipient's full receipt history is not the
+            // question) and since the request's creation (an OLDER
+            // receipt of ours to the same recipient must not confirm
+            // this zap — the amount match below finishes the job).
             let mut filter = Filter::new()
                 .kind(Kind::Custom(9735))
-                .custom_tag(SingleLetterTag::LOWERCASE_P, recipient);
+                .custom_tag(SingleLetterTag::LOWERCASE_P, recipient)
+                .limit(10);
             if let Some(note_id) = e_tag {
                 filter = filter.event(note_id);
+            } else {
+                filter = filter.since(Timestamp::from(created_at));
             }
             for _ in 0..6 {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -2180,12 +2266,16 @@ impl Core {
                     Err(_) => continue, // relay budget blown — look again
                 };
                 // parse_zap_receipt verifies the embedded 9734 (signature +
-                // p/e/a tags); the sender being the request's author is the
-                // reconciliation.
-                if events
-                    .iter()
-                    .any(|ev| crate::notifications::parse_zap_receipt(ev).sender == Some(sender))
-                {
+                // p/e/a tags); the sender being the request's author AND
+                // the bolt11 amount matching the record is the
+                // reconciliation (a stale receipt from an earlier zap can
+                // carry the right sender — attributed — but not the amount
+                // of THIS one; anonymous sends have a fresh key and can't
+                // collide at all).
+                if events.iter().any(|ev| {
+                    let info = crate::notifications::parse_zap_receipt(ev);
+                    info.sender == Some(sender) && info.sats == msat / 1000
+                }) {
                     wallet::ledger_set_state(&req, wallet::ZapState::Confirmed);
                     let ev = WalletEvent::ZapReceipt {
                         note: note_hex.clone(),
@@ -8675,6 +8765,69 @@ impl Core {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// D94 (the audit's phantom-e-tag bug): the watch's e tag comes from
+    /// the REQUEST's own tag, never parsed out of the ledger key — a
+    /// pubkey-hex key IS 64 hex chars and parses as an EventId, which
+    /// used to filter profile-zap watches on a tag no receipt carries.
+    #[test]
+    fn watch_e_tag_reads_the_request_not_the_ledger_key() {
+        let me = Keys::generate();
+        let recipient = Keys::generate().public_key();
+        let note_id =
+            EventId::from_hex("0707070707070707070707070707070707070707070707070707070707070707")
+                .unwrap();
+        let relays = vec!["wss://relay.example".to_string()];
+        let note_req = wallet::zap_request(
+            me.public_key(),
+            recipient,
+            note_id,
+            21_000,
+            "zaps@example.com",
+            relays.clone(),
+            "",
+        );
+        let signed_note = me.sign_event(note_req).unwrap();
+        assert_eq!(request_e_tag(&signed_note), Some(note_id));
+
+        let profile_req = wallet::zap_request_profile(
+            me.public_key(),
+            recipient,
+            21_000,
+            "zaps@example.com",
+            relays,
+            "",
+        );
+        let signed_profile = me.sign_event(profile_req).unwrap();
+        // The regression: from_hex(who.to_string()) used to be Some here.
+        assert_eq!(
+            request_e_tag(&signed_profile),
+            None,
+            "a profile zap's watch must not filter on an e tag"
+        );
+        // And the trap itself: the ledger key WOULD have parsed.
+        assert!(EventId::from_hex(&recipient.to_string()).is_ok());
+    }
+
+    /// D94: an anonymous request's relays tag is the NEUTRAL public set,
+    /// never the owner's write relays (the relay list is a fingerprint).
+    #[test]
+    fn anonymous_requests_carry_neutral_relays() {
+        let mine = vec!["wss://my-personal-relay.example".to_string()];
+        assert_eq!(
+            zap_receipt_relays(wallet::ZapPrivacy::Anonymous, &mine),
+            ANON_ZAP_RELAYS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+            "the owner's relays must not ride an anonymous 9734"
+        );
+        assert_eq!(
+            zap_receipt_relays(wallet::ZapPrivacy::Attributed, &mine),
+            mine,
+            "attributed zaps keep the confirmation path"
+        );
+    }
 
     /// D89: the tag surgery never loses what the relay's list event
     /// already carried. The store base's non-p tags (relay hints from

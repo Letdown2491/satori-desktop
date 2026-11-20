@@ -309,6 +309,10 @@ pub fn zap_tap<H: Host>(host: &mut H, ev: &Event, cx: &mut Context<H>) {
         cx.emit(Nav::OpenZapSheet(ev.clone()));
         return;
     }
+    // wallet_ready is GLYPH render-state (a broadcast-refreshed mirror);
+    // action gating convention (D94's audit): the sheet checks
+    // core.wallet().is_ready() live. The tap routes to the wallet pane,
+    // so a stale mirror costs one wrong hop at worst.
     if !host.engagement().wallet_ready {
         cx.emit(Nav::OpenWallet);
         return;

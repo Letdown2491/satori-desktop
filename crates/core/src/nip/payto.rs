@@ -101,6 +101,12 @@ pub fn parse(ev: &Event) -> Vec<PaymentTarget> {
         return Vec::new();
     }
     let mut out: Vec<PaymentTarget> = Vec::new();
+    // Dedupe is a set alongside the vec (linear, not the O(tags²)
+    // contains-scan — attacker-writable tags), and the list is capped:
+    // an event padded with thousands of valid tags renders thousands of
+    // chips (D94's memory lens); a payment row with 12 rails is already
+    // unusable.
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     for t in ev.tags.iter() {
         let tag = t.as_slice();
         if tag.first().map(String::as_str) != Some(TAG_NAME) || tag.len() < 3 {
@@ -118,12 +124,19 @@ pub fn parse(ev: &Event) -> Vec<PaymentTarget> {
             target_type,
             authority: authority.to_string(),
         };
-        if !out.contains(&candidate) {
+        if seen.insert((candidate.target_type.clone(), candidate.authority.clone())) {
             out.push(candidate);
+            if out.len() >= MAX_TARGETS {
+                break;
+            }
         }
     }
     out
 }
+
+/// The most targets one event may offer (the render-side cap too — a
+/// longer list is unreadable, and the tags are attacker-writable).
+pub const MAX_TARGETS: usize = 12;
 
 /// A `lightning`-family target must be a reusable address: a bolt11
 /// invoice or lnurl payload expires, and a target list is an address,

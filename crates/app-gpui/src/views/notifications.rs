@@ -136,6 +136,11 @@ fn chip_label(t: NotifType) -> &'static str {
 /// frame, a millisecond of cryptography on the UI thread for a page of
 /// zap receipts). Bounded, oldest-dropped at 4096 events. The verb for
 /// everything else is a constant.
+/// The most characters of a receipt's message the notification card
+/// renders (the display-side bound; core's MESSAGE_CAP governs what WE
+/// send, not what we're sent).
+const ZAP_MSG_DISPLAY_CAP: usize = 280;
+
 fn action_parts(t: NotifType, ev: &Event) -> (&'static str, Option<String>) {
     const CAP: usize = 4096;
     struct PartsMemo {
@@ -162,7 +167,7 @@ fn action_parts(t: NotifType, ev: &Event) -> (&'static str, Option<String>) {
         NotifType::Quote => ("quoted your note", None),
         NotifType::PollVote => ("voted in your poll", None),
         NotifType::Zap => {
-            let info = parse_zap_receipt(ev);
+            let info = zap_info(ev);
             if info.sats == 0 {
                 ("zapped", None)
             } else {
@@ -177,14 +182,16 @@ fn action_parts(t: NotifType, ev: &Event) -> (&'static str, Option<String>) {
     parts
 }
 
-/// The zap's message (the 9734's content, D92) — memoized for the same
-/// reason action_parts is: parse_zap_receipt verifies a signature, and
-/// the message rides the same verified request. Empty = no message (the
-/// row renders no body, as before).
-fn zap_message(ev: &Event) -> String {
+/// The zap's parsed receipt (sender + sats + the 9734's message, D92)
+/// — memoized for the same reason action_parts is: parse_zap_receipt
+/// verifies a signature. ONE memo, not one per derived value: the
+/// header's sats and the body's message share the single verify (the
+/// audit's doubled-cold-cost finding). Empty message = no body on the
+/// row, as before.
+fn zap_info(ev: &Event) -> satori_core::notifications::ZapInfo {
     const CAP: usize = 4096;
     struct Memo {
-        map: HashMap<String, String>,
+        map: HashMap<String, satori_core::notifications::ZapInfo>,
         order: std::collections::VecDeque<String>,
     }
     static MEMO: std::sync::OnceLock<std::sync::Mutex<Memo>> = std::sync::OnceLock::new();
@@ -196,15 +203,15 @@ fn zap_message(ev: &Event) -> String {
     });
     let key = ev.id.to_string();
     let mut memo = memo.lock().unwrap();
-    if let Some(msg) = memo.map.get(&key) {
-        return msg.clone();
+    if let Some(info) = memo.map.get(&key) {
+        return info.clone();
     }
-    let msg = parse_zap_receipt(ev).message;
+    let info = parse_zap_receipt(ev);
     let m = &mut *memo;
     fifo_trim(&mut m.map, &mut m.order, CAP);
     m.order.push_back(key.clone());
-    m.map.insert(key, msg.clone());
-    msg
+    m.map.insert(key, info.clone());
+    info
 }
 
 /// One list row: a section label (New / Earlier) or a notification card.
@@ -1023,7 +1030,17 @@ fn notif_card(
     // content — the receipt's own content field is empty by construction,
     // D92); everything else wears its body.
     let zap_msg = if t == NotifType::Zap {
-        zap_message(ev)
+        // Display-capped: the core already refuses > MESSAGE_CAP on the
+        // way OUT, but a RECEIPT's content is attacker-chosen input.
+        let msg = zap_info(ev).message;
+        if msg.chars().count() > ZAP_MSG_DISPLAY_CAP {
+            format!(
+                "{}…",
+                msg.chars().take(ZAP_MSG_DISPLAY_CAP).collect::<String>()
+            )
+        } else {
+            msg
+        }
     } else {
         String::new()
     };
