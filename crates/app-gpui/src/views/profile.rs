@@ -883,33 +883,6 @@ impl Render for ProfileView {
                                                 .flex()
                                                 .items_center()
                                                 .gap_2()
-                                                // Zap rides FIRST — the
-                                                // no-e-tag profile zap (D92),
-                                                // the sheet's profile target.
-                                                .child(
-                                                    div()
-                                                        .id("profile-zap")
-                                                        .cursor_pointer()
-                                                        .px_2()
-                                                        .py_1()
-                                                        .rounded(px(theme::R_EMBED))
-                                                        .border_1()
-                                                        .border_color(rgb(theme::hairline()))
-                                                        .hover(|s| {
-                                                            s.border_color(rgb(theme::vermilion()))
-                                                        })
-                                                        .text_size(px(theme::T_SMALL))
-                                                        .text_color(rgb(theme::vermilion()))
-                                                        .on_click(move |_, _, cx| {
-                                                            let h = zap_handle.clone();
-                                                            h.update(cx, |view, cx| {
-                                                                cx.emit(Nav::OpenProfileZap(
-                                                                    view.who,
-                                                                ));
-                                                            });
-                                                        })
-                                                        .child("Zap"),
-                                                )
                                                 .child(
                                                     div()
                                                         .id("follow")
@@ -951,6 +924,34 @@ impl Render for ProfileView {
                                                             d.text_color(rgb(theme::vermilion()))
                                                                 .child("Follow")
                                                         }),
+                                                )
+                                                // Zap rides BETWEEN follow and
+                                                // mute — the no-e-tag profile
+                                                // zap (D92), the sheet's
+                                                // profile target.
+                                                .child(
+                                                    div()
+                                                        .id("profile-zap")
+                                                        .cursor_pointer()
+                                                        .px_2()
+                                                        .py_1()
+                                                        .rounded(px(theme::R_EMBED))
+                                                        .border_1()
+                                                        .border_color(rgb(theme::hairline()))
+                                                        .hover(|s| {
+                                                            s.border_color(rgb(theme::vermilion()))
+                                                        })
+                                                        .text_size(px(theme::T_SMALL))
+                                                        .text_color(rgb(theme::vermilion()))
+                                                        .on_click(move |_, _, cx| {
+                                                            let h = zap_handle.clone();
+                                                            h.update(cx, |view, cx| {
+                                                                cx.emit(Nav::OpenProfileZap(
+                                                                    view.who,
+                                                                ));
+                                                            });
+                                                        })
+                                                        .child("Zap"),
                                                 )
                                                 // Mute rides next to Follow — an
                                                 // optimistic flip, publish events
