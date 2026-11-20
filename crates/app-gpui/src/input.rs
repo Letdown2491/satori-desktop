@@ -255,6 +255,15 @@ impl Input {
         cx.notify();
     }
 
+    /// Replace the buffer AND select all of it: the zap sheet's hero
+    /// (D92, the dark-wisp ZapDialog pattern) — the first keystroke
+    /// replaces the seed instead of appending to it.
+    pub fn seed(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.set_text(text, cx);
+        self.selected_range = 0..self.content.len();
+        cx.notify();
+    }
+
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         self.goal_x = None;
         if self.selected_range.is_empty() {

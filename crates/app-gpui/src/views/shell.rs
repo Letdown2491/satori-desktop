@@ -457,6 +457,7 @@ impl Shell {
             Nav::OpenLightbox(urls, idx) => this.open_lightbox(urls.clone(), *idx, cx),
             Nav::OpenVideo(url, mime) => this.open_video(url.clone(), mime.clone(), cx),
             Nav::OpenZapSheet(ev) => this.open_zap_sheet(ev.clone(), cx),
+            Nav::OpenProfileZap(who) => this.open_profile_zap(*who, cx),
             Nav::OpenWallet => this.open_wallet(cx),
             Nav::PaneDeep => cx.notify(), // whisper re-reads the pane at render
             Nav::Pop => this.back(cx),
@@ -602,6 +603,15 @@ impl Shell {
     /// zapping keeps you where you were.
     fn open_zap_sheet(&mut self, ev: Event, cx: &mut Context<Self>) {
         let view = cx.new(|cx| ZapSheet::new(self.core.clone(), ev, cx));
+        self.subscribe_nav(&view, cx);
+        self.zap_overlay = Some(view);
+        cx.notify();
+    }
+
+    /// The profile zap sheet (the header's Zap button): the same overlay,
+    /// the no-e-tag target (D92).
+    fn open_profile_zap(&mut self, who: PublicKey, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| ZapSheet::new_profile(self.core.clone(), who, cx));
         self.subscribe_nav(&view, cx);
         self.zap_overlay = Some(view);
         cx.notify();

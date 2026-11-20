@@ -99,6 +99,9 @@ pub struct ProfileView {
     /// notes) tag parsing on the UI thread to slice ~9 tiles.
     photo_cache: Vec<String>,
     video_cache: Vec<VidTile>,
+    /// The author's NIP-A3 payment targets (D93): one cold fetch at
+    /// open, chips under the lightning pointer.
+    pay_targets: Vec<satori_core::nip::payto::PaymentTarget>,
 }
 
 impl EventEmitter<Nav> for ProfileView {}
@@ -142,8 +145,11 @@ impl ProfileView {
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             photo_cache: vec![],
             video_cache: vec![],
+            pay_targets: Vec::new(),
             core,
         };
+        // The header's NIP-A3 chips (D93): one cold fetch at open.
+        view.want_pay_targets(cx);
         // Endless scroll for the strips (the feed's pattern): the list's
         // scroll stream orders the next older page near the end cap, and
         // floats the back-to-top whisper a few rows down. The handler runs
@@ -176,6 +182,22 @@ impl ProfileView {
     /// the feed's window discipline). Called at render (landings) and from
     /// the scroll stream — the two moments the on-screen set changes. The
     /// Notes tab is the child Feed's list: it pins its own window.
+    /// The header's NIP-A3 chips (D93): one cold fetch at open; empty
+    /// = none known, the row just doesn't render.
+    fn want_pay_targets(&self, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        let who = self.who;
+        let this = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let targets = core.payment_targets(who).await;
+            let _ = this.update(cx, |this, cx| {
+                this.pay_targets = targets;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn pin_window(&mut self, cx: &mut Context<Self>) {
         let viewer = cx.entity_id();
         let mut painted: Vec<String> = Vec::new();
@@ -657,6 +679,7 @@ impl Render for ProfileView {
         let follow_handle = handle.clone();
         let edit_handle = handle.clone();
         let mute_handle = handle.clone();
+        let zap_handle = handle.clone();
         // The profile trust badge (WS3): one quiet pill under the name,
         // the shared verdict vocabulary's answer for this author. Unknown
         // renders NOTHING — the graph declining to answer is not a
@@ -867,6 +890,33 @@ impl Render for ProfileView {
                                                 .flex()
                                                 .items_center()
                                                 .gap_2()
+                                                // Zap rides FIRST — the
+                                                // no-e-tag profile zap (D92),
+                                                // the sheet's profile target.
+                                                .child(
+                                                    div()
+                                                        .id("profile-zap")
+                                                        .cursor_pointer()
+                                                        .px_2()
+                                                        .py_1()
+                                                        .rounded(px(theme::R_EMBED))
+                                                        .border_1()
+                                                        .border_color(rgb(theme::hairline()))
+                                                        .hover(|s| {
+                                                            s.border_color(rgb(theme::vermilion()))
+                                                        })
+                                                        .text_size(px(theme::T_SMALL))
+                                                        .text_color(rgb(theme::vermilion()))
+                                                        .on_click(move |_, _, cx| {
+                                                            let h = zap_handle.clone();
+                                                            h.update(cx, |view, cx| {
+                                                                cx.emit(Nav::OpenProfileZap(
+                                                                    view.who,
+                                                                ));
+                                                            });
+                                                        })
+                                                        .child("Zap"),
+                                                )
                                                 .child(
                                                     div()
                                                         .id("follow")
@@ -1005,6 +1055,62 @@ impl Render for ProfileView {
                                         } else {
                                             format!("{label} · click to copy")
                                         }),
+                                )
+                            })
+                            // Other ways to pay (D93): amount-less
+                            // hand-off chips — the rails the lightning
+                            // pointer doesn't cover. Click opens, right-
+                            // click copies; no amount is ever attached.
+                            .when(!self.pay_targets.is_empty(), |d| {
+                                let chips = self.pay_targets.iter().map(|t| {
+                                    let mut chars = t.target_type.chars();
+                                    let label = match chars.next() {
+                                        Some(first) => {
+                                            let rest: String = chars.collect();
+                                            first.to_uppercase().collect::<String>() + &rest
+                                        }
+                                        None => t.target_type.clone(),
+                                    };
+                                    let uri = satori_core::nip::payto::uri_for(t);
+                                    div()
+                                        .id(SharedString::from(format!("payto-{}", t.target_type)))
+                                        .cursor_pointer()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded(px(theme::R_EMBED))
+                                        .border_1()
+                                        .border_color(rgb(theme::hairline()))
+                                        .text_size(px(theme::T_SMALL))
+                                        .text_color(rgb(theme::muted()))
+                                        .on_click({
+                                            let uri = uri.clone();
+                                            move |_, _, cx| {
+                                                cx.open_url(&uri);
+                                            }
+                                        })
+                                        .on_mouse_down(gpui::MouseButton::Right, {
+                                            let uri = uri.clone();
+                                            move |_, _, cx| {
+                                                cx.write_to_clipboard(
+                                                    gpui::ClipboardItem::new_string(uri.clone()),
+                                                );
+                                            }
+                                        })
+                                        .child(label)
+                                });
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_size(px(theme::T_SMALL))
+                                                .text_color(rgb(theme::muted()))
+                                                .child("Other ways to pay:"),
+                                        )
+                                        .children(chips),
                                 )
                             })
                             .when(!about.is_empty(), |d| {

@@ -48,6 +48,9 @@ pub enum Nav {
     OpenVideo(String, Option<String>),
     /// The zap amount sheet for a note (bolt long-press / right-click).
     OpenZapSheet(Event),
+    /// The zap sheet for a PROFILE (the header's Zap button) — the same
+    /// sheet, the no-e-tag variant (D92).
+    OpenProfileZap(PublicKey),
     /// The NWC wallet connect pane (D20).
     OpenWallet,
     /// A #tag tapped in a note body — the hashtag timeline (Phase 2 §4.2).

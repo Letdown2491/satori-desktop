@@ -1714,14 +1714,15 @@ impl Core {
     }
 
     /// Zap a PROFILE (NIP-57's no-e-tag variant): the p-tag names the
-    /// target, the lightning pointer comes from the target's kind-0
-    /// (`meta`). The ledger keys the record by the recipient's pubkey
-    /// hex — a profile zap has no event id to correlate, so the
-    /// receipt-watch matches the request's author instead (the UI's
-    /// zapped mirror reads the same string).
+    /// target, `lud` is the recipient's lightning pointer (read off
+    /// their kind-0 by the caller). The ledger keys the record by the
+    /// recipient's pubkey hex — a profile zap has no event id to
+    /// correlate, so the receipt-watch matches the request's author
+    /// instead (the UI's zapped mirror reads the same string).
     pub fn zap_profile(
         self: &Arc<Self>,
-        meta: Event,
+        who: PublicKey,
+        lud: String,
         msat: u64,
         message: String,
         privacy: wallet::ZapPrivacy,
@@ -1731,7 +1732,7 @@ impl Core {
         let w = Arc::clone(&self.wallet);
         self.rt.spawn(async move {
             if let Err(e) = this
-                .zap_profile_inner(&meta, msat, &message, privacy, &tx)
+                .zap_profile_inner(&who, &lud, msat, &message, privacy, &tx)
                 .await
             {
                 w.emit(e.clone());
@@ -1935,14 +1936,15 @@ impl Core {
 
     async fn zap_profile_inner(
         self: &Arc<Self>,
-        meta: &Event,
+        who: &PublicKey,
+        lud: &str,
         msat: u64,
         message: &str,
         privacy: wallet::ZapPrivacy,
         tx: &mpsc::UnboundedSender<WalletEvent>,
     ) -> ZapFlow {
         // The ledger key is the recipient's pubkey hex (see zap_profile).
-        let note_hex = meta.pubkey.to_string();
+        let note_hex = who.to_string();
         // One in-flight payment per target — the same Feather rule.
         if !self.wallet.claim_flight(&note_hex) {
             return Err(WalletEvent::ZapFailed {
@@ -1966,11 +1968,10 @@ impl Core {
         let signer = ZapSigner::new(privacy);
         let author = signer.author(me);
 
-        let lud = lightning_field(&meta.content).ok_or_else(|| WalletEvent::ZapFailed {
-            note: note_hex.clone(),
-            reason: "no lightning address on the profile".into(),
-        })?;
-        let lnurl = wallet::lnurlp_url(&lud).map_err(|e| WalletEvent::ZapFailed {
+        // The pointer arrives validated by the caller (the sheet only
+        // offers the zap when a lud exists); lnurlp_url still refuses
+        // junk honestly.
+        let lnurl = wallet::lnurlp_url(lud).map_err(|e| WalletEvent::ZapFailed {
             note: note_hex.clone(),
             reason: e,
         })?;
@@ -1978,7 +1979,7 @@ impl Core {
         // Sign FIRST, STORE, pay — the same discipline as note zaps.
         let unsigned = wallet::zap_request_profile(
             author,
-            meta.pubkey,
+            *who,
             msat,
             &lnurl,
             active.write_relays.clone(),
@@ -1995,7 +1996,7 @@ impl Core {
         let record = wallet::ZapRecord {
             req: signed.id.to_string(),
             note: note_hex.clone(),
-            recipient: meta.pubkey.to_string(),
+            recipient: who.to_string(),
             msat,
             state: wallet::ZapState::Pending,
             created_at: now_secs(),

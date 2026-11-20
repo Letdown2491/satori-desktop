@@ -215,6 +215,59 @@ pub fn set_string(key: &str, val: &str) {
     }
 }
 
+/// The zap picker's presets (D92): amount + optional default message,
+/// stored in prefs.json under `zap_presets`. Missing key = the built-in
+/// strip (the 0.10.0 picker's constants). The optional message only ever
+/// autofills an EMPTY message field — it never clobbers typing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ZapPreset {
+    pub sats: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub message: String,
+}
+
+/// The built-in strip (the hardcoded defaults, kept as the missing-key
+/// default).
+pub fn default_zap_presets() -> Vec<ZapPreset> {
+    [21, 100, 500, 1000, 2100, 5000]
+        .into_iter()
+        .map(|sats| ZapPreset {
+            sats,
+            message: String::new(),
+        })
+        .collect()
+}
+
+/// The stored strip; missing/corrupt key = the built-ins.
+pub fn zap_presets() -> Vec<ZapPreset> {
+    read_value(config::files::PREFS)
+        .get("zap_presets")
+        .and_then(|p| serde_json::from_value(p.clone()).ok())
+        .filter(|p: &Vec<ZapPreset>| !p.is_empty())
+        .unwrap_or_else(default_zap_presets)
+}
+
+/// Merge-save the strip (the columns-layout pattern: the file holds keys
+/// this struct doesn't). Hard cap 8 — the strip is a row, not a list.
+pub fn save_zap_presets(presets: &[ZapPreset]) {
+    let mut value = read_value(config::files::PREFS);
+    if let Some(obj) = value.as_object_mut() {
+        let capped: Vec<ZapPreset> = presets.iter().take(8).cloned().collect();
+        if let Ok(overlay) = serde_json::to_value(&capped) {
+            obj.insert("zap_presets".into(), overlay);
+        }
+    }
+    if let Ok(body) = serde_json::to_string_pretty(&value) {
+        write_state(config::files::PREFS, &body);
+    }
+}
+
+/// Does a short bolt tap send the quick amount directly (true, the D20
+/// sketch) or open the sheet? The sheet's toggle row owns this pref.
+pub fn zap_instant() -> bool {
+    get_bool_or("zap_instant", true)
+}
+
 fn read_value(file: &str) -> serde_json::Value {
     // Parsed once per file change (mtime + size key — the core config.rs
     // prefs() pattern): the feed projection reads prefs per visible card

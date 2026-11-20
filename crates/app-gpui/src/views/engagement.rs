@@ -18,6 +18,7 @@ use satori_core::manager::{Core, PublishEvent};
 use satori_core::wallet::{Status, WalletEvent};
 
 use super::nav::Nav;
+use crate::prefs;
 
 /// The five mirrors + wallet readiness — the glyphs' render state. Every
 /// host view holds one; `Engagement::new` seeds it from core's persisted
@@ -302,6 +303,12 @@ pub fn toggle_bookmark<H: Host>(host: &mut H, ev: &Event, cx: &mut Context<H>) {
 /// it? The dim glyph opens the wallet pane instead. Errors and settle flow
 /// back on the wallet broadcast (on_wallet).
 pub fn zap_tap<H: Host>(host: &mut H, ev: &Event, cx: &mut Context<H>) {
+    // The instant pref (D92): off means the tap opens the sheet instead
+    // (the sheet's toggle row owns it).
+    if !prefs::zap_instant() {
+        cx.emit(Nav::OpenZapSheet(ev.clone()));
+        return;
+    }
     if !host.engagement().wallet_ready {
         cx.emit(Nav::OpenWallet);
         return;
