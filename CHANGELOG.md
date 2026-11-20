@@ -6,6 +6,46 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
+## 0.11.0 - 2026-11-20
+
+Zaps grow up. The zap sheet is a real dialog now: the amount is a big
+typeable number (pick a preset pill to seed it, type over it), a message
+can ride the zap (256 characters, delivered with the payment), and the
+preset strip is yours to shape: save any amount plus message as a pill
+from the sheet, remove one with a right-click, or manage the whole strip
+in Settings under Wallet. Two new preferences live in the sheet itself:
+a zap can be sent anonymously (signed with a throwaway key, so the
+receipt carries no name; the receipt publishes through neutral public
+relays rather than your own, which would give the anonymity away), and
+the quick tap on a note's bolt can be turned off, so tapping opens the
+sheet instead of instantly sending. The tap amount is configurable too,
+in the same Settings pane.
+
+Profiles can be zapped. A profile's header carries a Zap button between
+follow and mute, and the zap lands as a profile-level payment with no
+note attached.
+
+Other ways to pay. Some people publish their payment addresses from
+other services (Venmo, Bitcoin, Monero and friends) as NIP-A3 payment
+targets. Where an author publishes them, Satori shows quiet chips on
+their profile and in the zap sheet: one click opens the address in the
+service's app or page, right-click copies it. Chips never attach an
+amount, and they appear even when no wallet is connected, so the
+payment affordance has no dead end.
+
+Zap messages also surface where the zaps do: a notification for a zap
+that carried a message shows the message.
+
+As with every release, a five-lens audit (performance, system usage,
+memory, security, duplication) ran over the batch before the tag. It
+caught two real bugs: profile zaps could never receive their final
+confirmation (the receipt check looked for a marker no receipt carries,
+so the bolt stayed amber forever after a successful payment), and
+anonymous zaps leaked the identifying relay list described above. Both
+are fixed, along with smaller finds: a stale receipt can no longer
+confirm a new zap, and oversized zap messages can no longer silently
+fail a payment.
+
 ## 0.10.0 - 2026-11-19
 
 Editing your lists can no longer wipe them. Follow, mute, and bookmark

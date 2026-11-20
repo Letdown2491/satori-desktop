@@ -31,12 +31,15 @@ is commit `a4b09e8`: `git show a4b09e8:src/<file>`). The build spec is
 
 ```
 podman build -t satori-dev -f Containerfile.dev
-podman run --rm -v satori-cargo:/usr/local/cargo -v "$PWD:/srv:Z" -w /srv satori-dev cargo check --workspace
-podman run --rm -v satori-cargo:/usr/local/cargo -v "$PWD:/srv:Z" -w /srv satori-dev cargo clippy --workspace
+podman run --rm -v satori-cargo:/usr/local/cargo:Z -v "$PWD:/srv:Z" -w /srv satori-dev cargo check --workspace
+podman run --rm -v satori-cargo:/usr/local/cargo:Z -v "$PWD:/srv:Z" -w /srv satori-dev cargo clippy --workspace
 ```
 
 (The cargo cache lives in the `satori-cargo` volume, so builds stay warm across
-container runs.)
+container runs. The volume mount needs `:Z` on both mounts: the ubuntu:24.04
+release build relabels the volume, and without the flag the next dev run dies
+on permission errors. If a release run ever leaves the volume root-owned:
+`podman run --rm --user 0:0 -v satori-cargo:/mnt:Z alpine chown -R 1000:1000 /mnt`.)
 
 Launching on the host: the bootc host lacks `libxkbcommon-x11` (GTK's Wayland
 backend never needed it). A copy lives at `~/.local/lib/libxkbcommon-x11.so.0`;
