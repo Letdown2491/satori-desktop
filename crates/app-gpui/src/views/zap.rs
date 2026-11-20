@@ -28,8 +28,6 @@ use super::content;
 use super::nav::Nav;
 use crate::{input::Input, prefs, theme};
 
-/// The one-tap default (sats) — the instant pref's amount.
-pub(crate) const TAP_SATS: u64 = 21;
 /// How many recent amounts the ledger seeds (deduped).
 const RECENT_SEEDS: usize = 3;
 /// The strip's cap (prefs::save_zap_presets enforces it too).
@@ -109,11 +107,13 @@ impl ZapSheet {
             .filter(|sats| *sats > 0 && seen.insert(*sats))
             .take(RECENT_SEEDS)
             .collect();
-        // The hero seeds with the tap default (Dark Wisp's instant
-        // amount), selected — the first keystroke replaces it.
+        // The hero seeds with the instant amount (the tap pref — the
+        // Wallet tab's field owns it), selected — the first keystroke
+        // replaces it.
+        let instant_sats = prefs::zap_instant_sats();
         let hero = cx.new(|cx| {
             let mut i = Input::single_line("custom, sats", cx);
-            i.seed(&TAP_SATS.to_string(), cx);
+            i.seed(&instant_sats.to_string(), cx);
             i
         });
         let message = cx.new(|cx| {
@@ -497,7 +497,10 @@ impl Render for ZapSheet {
             .child(toggle_row(
                 "zap-instant-toggle",
                 "Instant zap on tap",
-                &format!("{TAP_SATS} sats, no sheet — hold or right-click opens this"),
+                &format!(
+                    "{sats} sats, no sheet — hold or right-click opens this",
+                    sats = prefs::zap_instant_sats()
+                ),
                 instant,
                 cx.listener(move |this, _, _, cx| {
                     this.instant = !this.instant;

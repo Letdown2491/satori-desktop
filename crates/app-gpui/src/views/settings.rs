@@ -57,6 +57,13 @@ pub struct SettingsView {
     // Wallet (D20): mirrored status for the row (the broadcast is truth;
     // the manage pane owns the detail).
     wallet: Status,
+    // Zap prefs (D92): the instant amount (the cached value is what
+    // Enter applies) and the add-preset fields. The stored strip is
+    // read per render (prefs is the truth; rows remove through it).
+    zap_instant_sats_val: u64,
+    zap_instant_sats: Entity<Input>,
+    zap_add_sats: Entity<Input>,
+    zap_add_msg: Entity<Input>,
     // Set when the sign-out row is clicked: the pane freezes on "Signing
     // out…" while the shell tears the session down (the whole view is
     // replaced by the login doors a beat later).
@@ -152,6 +159,15 @@ impl SettingsView {
             undo_enabled: p.undo_enabled.unwrap_or(true),
             undo_secs_val,
             undo_secs,
+            zap_instant_sats_val: prefs::zap_instant_sats(),
+            zap_instant_sats: cx.new(|cx| {
+                let mut i = Input::new(cx);
+                i.multiline = false;
+                i.content = prefs::zap_instant_sats().to_string();
+                i.placeholder("")
+            }),
+            zap_add_sats: cx.new(|cx| Input::single_line("sats", cx)),
+            zap_add_msg: cx.new(|cx| Input::single_line("message (optional)", cx)),
             machine_hidden: satori_core::store::machine_notes_hidden(),
             hidden_kinds: prefs::content_hidden(),
             reaction_notifs: prefs::get_bool("reactionNotifs"),
@@ -482,6 +498,56 @@ impl SettingsView {
                 cx.notify();
             }
         }
+    }
+
+    /// The instant zap's amount (D92): Enter on the field applies (same
+    /// pattern as the undo window's seconds).
+    fn apply_zap_instant(&mut self, cx: &mut Context<Self>) {
+        let raw = self.zap_instant_sats.read(cx).content.trim().to_string();
+        match raw.parse::<u64>() {
+            Ok(sats) if (1..=100_000).contains(&sats) => {
+                self.zap_instant_sats_val = sats;
+                prefs::set_zap_instant_sats(sats);
+                self.set_status(format!("Bolt taps now send {sats} sats"), false);
+            }
+            _ => {
+                self.set_status("Instant zap is 1–100000 sats".into(), true);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Add a preset from the two fields (same sats replaces); the sheet's
+    /// "+ save preset" writes the same store.
+    fn add_zap_preset(&mut self, cx: &mut Context<Self>) {
+        let sats_raw = self.zap_add_sats.read(cx).content.trim().to_string();
+        let msg = self.zap_add_msg.read(cx).content.trim().to_string();
+        let Ok(sats) = sats_raw.parse::<u64>() else {
+            self.set_status("Preset amount is a number of sats".into(), true);
+            cx.notify();
+            return;
+        };
+        if sats == 0 {
+            self.set_status("Preset amount must be positive".into(), true);
+            cx.notify();
+            return;
+        }
+        let mut presets = prefs::zap_presets();
+        presets.retain(|p| p.sats != sats);
+        presets.insert(0, prefs::ZapPreset { sats, message: msg });
+        prefs::save_zap_presets(&presets);
+        self.zap_add_sats.update(cx, |i, cx| i.clear(cx));
+        self.zap_add_msg.update(cx, |i, cx| i.clear(cx));
+        self.set_status("Preset added".into(), false);
+        cx.notify();
+    }
+
+    fn remove_zap_preset(&mut self, sats: u64, cx: &mut Context<Self>) {
+        let mut presets = prefs::zap_presets();
+        presets.retain(|p| p.sats != sats);
+        prefs::save_zap_presets(&presets);
+        self.set_status("Preset removed".into(), false);
+        cx.notify();
     }
 
     fn toggle_machine_notes(&mut self, cx: &mut Context<Self>) {
@@ -1383,6 +1449,9 @@ impl SettingsView {
     }
 
     fn wallet_tab(&self, cx: &mut Context<Self>) -> Div {
+        let zap_instant_sats = self.zap_instant_sats.clone();
+        let zap_add_sats = self.zap_add_sats.clone();
+        let zap_add_msg = self.zap_add_msg.clone();
         div()
             .flex()
             .flex_col()
@@ -1430,6 +1499,82 @@ impl SettingsView {
                         .on_click(cx.listener(|_this, _, _, cx| {
                             cx.emit(Nav::OpenWallet);
                         })),
+                ),
+            )
+            // --- Zap presets (D92) ------------------------------------------
+            .child(
+                group(
+                    "Zap presets",
+                    "The zap sheet's pill strip. Add here or save from the sheet (right-click a pill removes it); a preset's message autofills only an empty message field.",
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child("Instant zap amount"),
+                        )
+                        .child(field(zap_instant_sats, "zap-instant-field"))
+                        .child(muted("sats (1–100000, Enter applies)")),
+                )
+                .child({
+                    let mut col = div().w_full().flex().flex_col();
+                    for p in prefs::zap_presets() {
+                        let sats = p.sats;
+                        col = col.child(
+                            div()
+                                .id(SharedString::from(format!("zap-preset-{sats}")))
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .py_1()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(px(theme::T_UI))
+                                        .text_color(rgb(theme::ink()))
+                                        .child(if p.message.is_empty() {
+                                            format!("{} sats", p.sats)
+                                        } else {
+                                            format!("{} sats · {}", p.sats, p.message)
+                                        }),
+                                )
+                                .child(
+                                    seal(
+                                        format!("zap-preset-remove-{sats}"),
+                                        "Remove",
+                                        theme::muted(),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.remove_zap_preset(sats, cx);
+                                    })),
+                                ),
+                        );
+                    }
+                    col
+                })
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(field(zap_add_sats, "zap-add-sats-field"))
+                        .child(field(zap_add_msg, "zap-add-msg-field"))
+                        .child(
+                            seal("zap-preset-add", "Add", theme::muted()).on_click(
+                                cx.listener(|this, _, _, cx| this.add_zap_preset(cx)),
+                            ),
+                        ),
                 ),
             )
     }
@@ -1871,6 +2016,25 @@ impl Render for SettingsView {
                         this.add_server(cx);
                     } else if this.undo_secs.read(cx).focus_handle(cx).is_focused(window) {
                         this.apply_undo_secs(cx);
+                    } else if this
+                        .zap_instant_sats
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window)
+                    {
+                        this.apply_zap_instant(cx);
+                    } else if this
+                        .zap_add_sats
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window)
+                        || this
+                            .zap_add_msg
+                            .read(cx)
+                            .focus_handle(cx)
+                            .is_focused(window)
+                    {
+                        this.add_zap_preset(cx);
                     }
                 }
             }))

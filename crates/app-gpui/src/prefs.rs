@@ -268,6 +268,20 @@ pub fn zap_instant() -> bool {
     get_bool_or("zap_instant", true)
 }
 
+/// The instant zap's amount (sats) — what a bolt tap sends when
+/// `zap_instant` is on. Default 21 (the D20 sketch's number). The
+/// Wallet tab's field owns it.
+pub fn zap_instant_sats() -> u64 {
+    get_string("zap_instant_sats")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|s| (1..=100_000).contains(s))
+        .unwrap_or(21)
+}
+
+pub fn set_zap_instant_sats(sats: u64) {
+    set_string("zap_instant_sats", &sats.to_string());
+}
+
 fn read_value(file: &str) -> serde_json::Value {
     // Parsed once per file change (mtime + size key — the core config.rs
     // prefs() pattern): the feed projection reads prefs per visible card

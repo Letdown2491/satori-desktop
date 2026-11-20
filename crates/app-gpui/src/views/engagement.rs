@@ -320,7 +320,7 @@ pub fn zap_tap<H: Host>(host: &mut H, ev: &Event, cx: &mut Context<H>) {
     host.touched();
     host.core().zap(
         ev.clone(),
-        super::zap::TAP_SATS * 1000,
+        prefs::zap_instant_sats() * 1000,
         String::new(),
         satori_core::wallet::ZapPrivacy::Attributed,
     );

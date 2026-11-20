@@ -177,6 +177,36 @@ fn action_parts(t: NotifType, ev: &Event) -> (&'static str, Option<String>) {
     parts
 }
 
+/// The zap's message (the 9734's content, D92) — memoized for the same
+/// reason action_parts is: parse_zap_receipt verifies a signature, and
+/// the message rides the same verified request. Empty = no message (the
+/// row renders no body, as before).
+fn zap_message(ev: &Event) -> String {
+    const CAP: usize = 4096;
+    struct Memo {
+        map: HashMap<String, String>,
+        order: std::collections::VecDeque<String>,
+    }
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<Memo>> = std::sync::OnceLock::new();
+    let memo = MEMO.get_or_init(|| {
+        std::sync::Mutex::new(Memo {
+            map: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        })
+    });
+    let key = ev.id.to_string();
+    let mut memo = memo.lock().unwrap();
+    if let Some(msg) = memo.map.get(&key) {
+        return msg.clone();
+    }
+    let msg = parse_zap_receipt(ev).message;
+    let m = &mut *memo;
+    fifo_trim(&mut m.map, &mut m.order, CAP);
+    m.order.push_back(key.clone());
+    m.map.insert(key, msg.clone());
+    msg
+}
+
 /// One list row: a section label (New / Earlier) or a notification card.
 #[derive(Clone)]
 enum Row {
@@ -989,16 +1019,36 @@ fn notif_card(
     }
     // The reaction's content is its glyph (a `+` rendered twice helps
     // nobody); a repost has no content of its own — the whisper below
-    // IS the boosted note. Everything else wears its body.
-    let has_body = !matches!(t, NotifType::Reaction | NotifType::Repost);
+    // IS the boosted note. A zap's body is its MESSAGE (the 9734's
+    // content — the receipt's own content field is empty by construction,
+    // D92); everything else wears its body.
+    let zap_msg = if t == NotifType::Zap {
+        zap_message(ev)
+    } else {
+        String::new()
+    };
+    let has_body = if t == NotifType::Zap {
+        !zap_msg.is_empty()
+    } else {
+        !matches!(t, NotifType::Reaction | NotifType::Repost)
+    };
     let handle_body = handle.clone();
     let handle_actions = handle.clone();
     if has_body {
         // The id is unconditional (the click only exists when there is
         // somewhere to go) — both arms stay one type.
+        let body_child = if t == NotifType::Zap {
+            div()
+                .text_size(px(theme::T_BODY))
+                .text_color(rgb(theme::ink()))
+                .child(zap_msg)
+                .into_any_element()
+        } else {
+            content::body(ev, &ctx, handle_body.clone()).into_any_element()
+        };
         let block = div()
             .id(SharedString::from(format!("notif-open-{idx}")))
-            .child(content::body(ev, &ctx, handle_body.clone()));
+            .child(body_child);
         let block = match open {
             Some(target) => block.cursor_pointer().on_click(move |_, _, cx| {
                 let target = target;

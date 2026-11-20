@@ -16,12 +16,14 @@
 use crate::nip::fields::tag_value;
 use nostr::prelude::*;
 
-/// Who zapped, and how much (sats). `sender: None` = anonymous — the
-/// receipt didn't carry a verifiable 9734.
+/// Who zapped, how much (sats), and what they said. `sender: None` =
+/// anonymous — the receipt didn't carry a verifiable 9734. `message` is
+/// the 9734's content (the zap sheet's message field); empty = none.
 #[derive(Debug, Clone, Default)]
 pub struct ZapInfo {
     pub sender: Option<PublicKey>,
     pub sats: u64,
+    pub message: String,
 }
 
 /// Millisats from a bolt11 invoice's human-readable part
@@ -88,6 +90,7 @@ pub fn parse_zap_receipt(ev: &Event) -> ZapInfo {
             info.sats = tag_value(&req, "amount")
                 .and_then(|a| a.parse::<u64>().ok())
                 .unwrap_or(0);
+            info.message = req.content.trim().to_string();
         }
     }
     if paid > 0 {
@@ -139,5 +142,51 @@ mod tests {
         let info = parse_zap_receipt(&receipt);
         assert!(info.sender.is_none());
         assert_eq!(info.sats, 0);
+    }
+
+    #[test]
+    fn message_rides_the_verified_request() {
+        // The 9734's content IS the zap message (D92): a valid embedded
+        // request's content surfaces; an unverifiable one's does not
+        // (a forged receipt can't be made to say things).
+        let signer = Keys::generate();
+        let recipient = Keys::generate().public_key();
+        let req = |content: &str| {
+            let unsigned = UnsignedEvent::new(
+                signer.public_key(),
+                Timestamp::now(),
+                Kind::Custom(9734),
+                [
+                    Tag::custom("p", [recipient.to_string()]),
+                    Tag::custom("amount", ["21000"]),
+                ],
+                content,
+            );
+            signer.sign_event(unsigned).unwrap()
+        };
+        let receipt_for = |req: &Event| {
+            let unsigned = UnsignedEvent::new(
+                signer.public_key(),
+                Timestamp::now(),
+                Kind::Custom(9735),
+                [
+                    Tag::custom("p", [recipient.to_string()]),
+                    Tag::custom("description", [serde_json::to_string(req).unwrap()]),
+                    Tag::custom("bolt11", ["lnbc210n1xyz"]),
+                ],
+                "",
+            );
+            signer.sign_event(unsigned).unwrap()
+        };
+        let info = parse_zap_receipt(&receipt_for(&req("great post")));
+        assert_eq!(info.message, "great post");
+        assert_eq!(info.sats, 21);
+        let info = parse_zap_receipt(&receipt_for(&req("  ")));
+        assert_eq!(info.message, "", "blank message stays empty");
+        // Forged: the message does not survive a failed verify.
+        let mut forged = req("great post");
+        forged.sig = Signature::from_hex(&"f".repeat(128)).unwrap();
+        let info = parse_zap_receipt(&receipt_for(&forged));
+        assert_eq!(info.message, "");
     }
 }
