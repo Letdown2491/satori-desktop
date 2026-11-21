@@ -57,6 +57,15 @@ pub fn want_preview(url: &str) {
     }
 }
 
+/// Retire the hover-preview want outright (cx-less): the tap outranks
+/// hover, and an in-flight PREVIEW build checks the want at landing —
+/// a cleared want drops it instead of parking a pipeline nobody paints.
+fn clear_want() {
+    if let Ok(mut g) = PREVIEW_WANT.write() {
+        *g = None;
+    }
+}
+
 /// The wanted preview's url, if any (cx-less).
 pub fn preview_want() -> Option<String> {
     PREVIEW_WANT.read().ok().and_then(|g| g.clone())
@@ -175,6 +184,44 @@ fn open_inner(url: String, mime: Option<String>, preview: bool, cx: &mut gpui::A
         eprintln!("[video] open promoted: the in-flight preview build lands as a player");
         promote(&url);
         cx.set_global(Signal);
+        return;
+    }
+    // A tap while a build window is open on ANOTHER url (field-test Nov
+    // 21 2026, round two): the window may hold some other tile's hover
+    // preview — in a feed full of gifs, ANY recent hover poisoned every
+    // tap for the length of a build. The tap OUTRANKS hover: retire the
+    // hover want (the in-flight preview build drops itself at landing
+    // instead of parking a pipeline nobody paints), then open this tile
+    // the moment the window clears. A window that never clears (a
+    // wedged build) degrades to the browser after a grace period — the
+    // tap was intent, silence is not an answer.
+    if !preview && !landed && !building && crate::media_guard::opening_busy() {
+        eprintln!(
+            "[video] open: a hover preview build is in flight; the tap outranks hover, opening when the build window clears"
+        );
+        clear_want();
+        cx.spawn(async move |cx| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            while crate::media_guard::opening_busy() {
+                if std::time::Instant::now() >= deadline {
+                    cx.update(|cx| {
+                        eprintln!(
+                            "[video] build window never cleared; the tap degrades to the browser"
+                        );
+                        if crate::views::content::web_url(&url) {
+                            cx.open_url(&url);
+                        }
+                        cx.set_global(Signal);
+                    });
+                    return;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+            }
+            cx.update(|cx| open_inner(url, mime, false, cx));
+        })
+        .detach();
         return;
     }
     // Already open or building — a second tap on the same tile is a no-op,
