@@ -109,13 +109,20 @@ pub fn gate(
         return Gate::Handled;
     };
     // Already open or building — a second tap on the same row is a
-    // no-op, not a second pipeline. And NO open (any url) starts while
-    // a build is in flight: the door's one-player law covers the build
-    // window too (five-lens audit Nov 2026 — a hover sweep used to
-    // construct one pipeline per tile crossed).
-    if already || opening_busy() {
-        if !already {
-            eprintln!("[video] open refused: a build is already in flight");
+    // no-op, not a second pipeline. The build WINDOW (five-lens audit
+    // Nov 2026 — a hover sweep used to construct one pipeline per tile
+    // crossed) refuses HOVER opens only (Degrade::Nothing — hover is
+    // not intent, it can queue). A TAP (Degrade::Browser — intent)
+    // PREEMPTS: it takes the slot, and the build in flight — a hover
+    // preview whose want the caller retired, or a prior tap's build the
+    // newer tap replaces — lands over or drops itself. The field test
+    // round-tripped "the tap degrades to the browser" because a WEDGED
+    // preview build (a stalled origin hangs Video::new past any grace
+    // period) held the window forever; taps never queue now. At most
+    // two pipelines coexist, and one of them is doomed.
+    if already || (opening_busy() && matches!(degrade, Degrade::Nothing)) {
+        if !already && matches!(degrade, Degrade::Nothing) {
+            eprintln!("[{tag}] preview refused: a build is already in flight");
         }
         return Gate::Handled;
     }
