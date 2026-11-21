@@ -359,8 +359,15 @@ impl Store {
     /// freed pages for new writes, so the file plateaus rather than
     /// shrinking; there is no compaction pass (the env handle stays
     /// inside nostr-lmdb).
+    ///
+    /// The window is the owner's lever (D99's Settings row; `retention_days`
+    /// in prefs.json): absent = the tested 90-day default; the string
+    /// "forever" turns the feed prune off entirely (the owner's archive
+    /// choice). Reference-list hygiene runs either way - it is dedup, not
+    /// retention. When note pins (kind 10001) gain a view, their targets
+    /// join the protect set - the same view-over-the-store contract as
+    /// bookmarks (the protect set is the BOOKMARKS' fix, v1.2).
     pub async fn prune(&self, protect: &std::collections::HashSet<EventId>) -> NostrResult<u32> {
-        const PRUNE_DAYS: u64 = 90;
         const PRUNE_BATCH: usize = 500;
         let mut deleted = 0u32;
         // Feed content: older than the retention window. Protected ids
@@ -374,25 +381,27 @@ impl Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let cutoff = Timestamp::from_secs(now.saturating_sub(PRUNE_DAYS * 86400));
-        for kind in FEED_KINDS.iter().chain(std::iter::once(&Kind::Reaction)) {
-            loop {
-                let filter = Filter::new().kind(*kind).until(cutoff).limit(PRUNE_BATCH);
-                let batch = self.query(filter).await?;
-                if batch.is_empty() {
-                    break;
-                }
-                let mut deleted_here = 0usize;
-                for ev in &batch {
-                    if protect.contains(&ev.id) {
-                        continue;
+        if let Some(days) = retention_days() {
+            let cutoff = Timestamp::from_secs(now.saturating_sub(days * 86400));
+            for kind in FEED_KINDS.iter().chain(std::iter::once(&Kind::Reaction)) {
+                loop {
+                    let filter = Filter::new().kind(*kind).until(cutoff).limit(PRUNE_BATCH);
+                    let batch = self.query(filter).await?;
+                    if batch.is_empty() {
+                        break;
                     }
-                    self.delete_event(ev.id).await?;
-                    deleted += 1;
-                    deleted_here += 1;
-                }
-                if deleted_here == 0 || batch.len() < PRUNE_BATCH {
-                    break;
+                    let mut deleted_here = 0usize;
+                    for ev in &batch {
+                        if protect.contains(&ev.id) {
+                            continue;
+                        }
+                        self.delete_event(ev.id).await?;
+                        deleted += 1;
+                        deleted_here += 1;
+                    }
+                    if deleted_here == 0 || batch.len() < PRUNE_BATCH {
+                        break;
+                    }
                 }
             }
         }
@@ -449,6 +458,12 @@ impl Store {
     /// Local tombstone (own deletions — NIP-09).
     pub async fn delete_event(&self, id: EventId) -> NostrResult<()> {
         self.db.delete(Filter::new().id(id)).await
+    }
+
+    /// The store's event count (D99's Settings readout). One index walk
+    /// over ids, no materialized events — the H-2 lesson's shape.
+    pub async fn event_count(&self) -> NostrResult<u64> {
+        self.db.count(Filter::new()).await.map(|c| c as u64)
     }
 
     async fn query(&self, filter: Filter) -> NostrResult<BTreeSet<Event>> {
@@ -694,6 +709,49 @@ fn write_vacuum_state(dir: &std::path::Path, state: &str, cutoff: u64, cursor: u
     if let Ok(json) = serde_json::to_string(&json) {
         let _ = std::fs::write(vacuum_state_path(dir), json);
     }
+}
+
+/// The retention window (D99's Settings lever; `retention_days` in
+/// prefs.json). Absent = the tested 90-day default. The string "forever"
+/// is None: the feed prune is off (the owner's archive choice). The clamp
+/// keeps a hand-edited prefs.json from setting a 0-day churn or a
+/// u64-overflow day count.
+fn retention_days() -> Option<u64> {
+    match std::fs::read_to_string(config::state_file(config::files::PREFS))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get("retention_days").cloned())
+    {
+        Some(serde_json::Value::String(s)) if s == "forever" => None,
+        Some(v) => Some(v.as_u64().map(|d| d.clamp(7, 3650)).unwrap_or(90)),
+        None => Some(90),
+    }
+}
+
+/// Schedule the verified store rebuild for the NEXT launch (D99's
+/// Settings action; the explicit vacuum cannot run while the app holds
+/// the env open). Writes the vacuum handoff state file: the walk spawns
+/// beside the app at Pool::open (a missing staging dir starts the copy
+/// from the top), the next boot's gate adopts it. Idempotent: a pending
+/// or completed staging already counts as scheduled, and the yes-answer
+/// is honest either way — the machinery owns the rest.
+pub fn schedule_rebuild() -> Result<(), String> {
+    let dir = config::events_dir();
+    if !dir.join("data.mdb").exists() {
+        return Err("no store yet".into());
+    }
+    if read_vacuum_state(&dir)
+        .and_then(|v| v.get("state").and_then(|s| s.as_str()).map(str::to_string))
+        .is_some_and(|state| state == "copying" || state == "complete")
+    {
+        return Ok(());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    write_vacuum_state(&dir, "copying", now, now, 0);
+    Ok(())
 }
 
 /// The gate's verdict. `Idle` is every ordinary boot; `Deferred` opens

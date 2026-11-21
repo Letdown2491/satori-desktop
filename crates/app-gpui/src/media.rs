@@ -488,6 +488,36 @@ pub(crate) fn thumb_key(url: &str) -> String {
     format!("{url}\u{0}thumb")
 }
 
+/// The media disk cache's footprint for D99's Settings readout: a walk
+/// of `media-cache/` (few hundred small files at the caps; a stat pass,
+/// done lazily from the settings pane only).
+pub fn cache_bytes() -> u64 {
+    fn walk(dir: &std::path::Path) -> u64 {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|e| {
+                        if e.file_type().ok().is_some_and(|t| t.is_dir()) {
+                            walk(&e.path())
+                        } else {
+                            e.metadata().map(|m| m.len()).unwrap_or(0)
+                        }
+                    })
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+    walk(&satori_core::config::media_cache_dir())
+}
+
+/// Clear the media disk cache (D99's Settings action): every image is
+/// refetched (from the network or the source CDN) on demand. The fetch
+/// paths mkdir-on-write, so the dir needs no re-creation here.
+pub fn cache_clear() {
+    let _ = std::fs::remove_dir_all(satori_core::config::media_cache_dir());
+}
+
 /// Core re-encodes thumbs at thumbnail(128, 128) — the byte math uses the
 /// ceiling; nothing reads a thumb entry's aspect.
 const THUMB_DIMS: (u32, u32) = (128, 128);

@@ -1015,6 +1015,24 @@ impl Core {
 
     /// Store retention (audit memory H-2): every event ever seen was kept
     /// forever - several MB/day, GB-class over a month of live saves. One
+    /// The store's footprint for D99's Settings readout: (bytes on disk,
+    /// event count). Bytes is the LMDB file's extent (the plateau shape:
+    /// freed pages wait for the rebuild); count is one index walk, no
+    /// materialized events.
+    pub async fn store_stats(&self) -> std::result::Result<(u64, u64), String> {
+        let active = self.active().await.map_err(|e| e.to_string())?;
+        let count = active
+            .pool
+            .store
+            .event_count()
+            .await
+            .map_err(|e| e.to_string())?;
+        let bytes = std::fs::metadata(crate::config::events_dir().join("data.mdb"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        Ok((bytes, count))
+    }
+
     /// prune pass shortly after launch (bootstraps settle first), then
     /// daily. The store is a cache; the relays are the archive. Call once,
     /// from main, on the Arc'd core.

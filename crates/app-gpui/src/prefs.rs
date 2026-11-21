@@ -214,6 +214,36 @@ pub fn get_string(key: &str) -> Option<String> {
     config::prefs().and_then(|v| v.get(key).and_then(|s| s.as_str()).map(String::from))
 }
 
+/// The feed-history retention window (D99's Settings lever; core's prune
+/// reads the same key). `None` = forever (the prune is off); absent =
+/// the 90-day default, so the pref file only carries an explicit choice.
+pub fn retention_days() -> Option<u64> {
+    match read_value(config::files::PREFS).get("retention_days") {
+        Some(serde_json::Value::String(s)) if s == "forever" => None,
+        Some(v) => Some(v.as_u64().unwrap_or(90)),
+        None => Some(90),
+    }
+}
+
+/// Set the retention window (settings.rs Storage group). `None` writes
+/// the "forever" string; Some days writes the number (7..=3650 clamped —
+/// the same sane range core's reader applies to hand edits).
+pub fn set_retention_days(days: Option<u64>) {
+    let value: serde_json::Value = match days {
+        None => serde_json::Value::String("forever".into()),
+        Some(d) => serde_json::Value::from(d.clamp(7, 3650)),
+    };
+    let mut raw = read_value(config::files::PREFS);
+    if let Some(obj) = raw.as_object_mut() {
+        obj.insert("retention_days".into(), value);
+    }
+    if let Ok(body) = serde_json::to_string_pretty(&raw) {
+        write_state(config::files::PREFS, &body);
+    }
+}
+
+/// Set a top-level string pref (same shape as set_bool; the media
+/// servers pane's local edits).
 pub fn set_string(key: &str, val: &str) {
     let mut value = read_value(config::files::PREFS);
     if let Some(obj) = value.as_object_mut() {

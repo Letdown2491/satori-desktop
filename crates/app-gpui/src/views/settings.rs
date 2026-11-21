@@ -79,6 +79,15 @@ pub struct SettingsView {
     // collapsed by default — flagged rows render inline, the full table hides.
     show_all_relays: bool,
     show_spam: bool,
+    // Storage (D99): the store's (bytes, event count) and the media
+    // cache's bytes, fetched once at open (the pane is not a live meter);
+    // the rebuild scheduling is sticky for the pane's life.
+    storage: Option<(u64, u64)>,
+    media_bytes: Option<u64>,
+    rebuild_scheduled: bool,
+    // The retention lever's snapshot (None = forever): the pills write
+    // the pref AND this field, so no render re-reads the file.
+    retention: Option<u64>,
     // Toast equivalent (the pane has no header seal to hang one on).
     status: String,
     status_err: bool,
@@ -182,11 +191,28 @@ impl SettingsView {
             status_err: false,
             show_all_relays: false,
             show_spam: false,
+            storage: None,
+            media_bytes: None,
+            rebuild_scheduled: false,
+            retention: prefs::retention_days(),
             tab: SettingsTab::General,
         };
         view.pump_feed(core.fetch_media_servers(), cx);
         view.pump_me(cx);
         view.pump_wallet(cx);
+        // The storage readout (D99): fetched once at open — the pane is
+        // not a live meter, and a stale number on a long-open pane is
+        // honest enough for a size.
+        let stats_core = core.clone();
+        let _ = cx.spawn(async move |this, cx| {
+            let stats = stats_core.store_stats().await.ok();
+            let media = crate::media::cache_bytes();
+            let _ = this.update(cx, |this, cx| {
+                this.storage = stats;
+                this.media_bytes = Some(media);
+                cx.notify();
+            });
+        });
         // Relay health (D33/D36) refreshes on a slow poll: the latency
         // profiles update as queries run, and this pane is the only reader.
         cx.spawn(async move |this, cx| {
@@ -1022,6 +1048,155 @@ impl SettingsView {
                         .child(
                             seal("import-backup", "Choose file…", theme::muted())
                                 .on_click(cx.listener(|this, _, _, cx| this.import_backup(cx))),
+                        ),
+                ),
+            )
+            // --- Storage (D99): the retention lever + the footprint --------
+            .child(
+                group(
+                    "Storage",
+                    "The store is a cache; the relays are the archive. Feed content older than the window is removed locally and returns from your relays when you scroll. Your zaps, messages and lists are never touched.",
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(160.0))
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child("Keep feed history"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .children(RETENTION_CHOICES.iter().map(|(label, days)| {
+                                    let on = self.retention == *days;
+                                    div()
+                                        .id(SharedString::from(format!("retention-{label}")))
+                                        .cursor_pointer()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded(px(theme::R_EMBED))
+                                        .border_1()
+                                        .border_color(rgb(if on {
+                                            theme::ink()
+                                        } else {
+                                            theme::hairline()
+                                        }))
+                                        .text_size(px(theme::T_SMALL))
+                                        .text_color(rgb(if on {
+                                            theme::ink()
+                                        } else {
+                                            theme::muted()
+                                        }))
+                                        .when(on, |d| {
+                                            d.font_weight(gpui::FontWeight::SEMIBOLD)
+                                        })
+                                        .child(*label)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.retention = *days;
+                                            prefs::set_retention_days(*days);
+                                            cx.notify();
+                                        }))
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child("Store"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::muted()))
+                                .child(match self.storage {
+                                    Some((bytes, count)) => format!(
+                                        "{} · {} events",
+                                        format_bytes(bytes),
+                                        format_count(count)
+                                    ),
+                                    None => "…".to_string(),
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child("Media cache"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::muted()))
+                                .child(self
+                                    .media_bytes
+                                    .map(format_bytes)
+                                    .unwrap_or_else(|| "…".into())),
+                        )
+                        .child(
+                            seal("media-cache-clear", "Clear", theme::muted())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    crate::media::cache_clear();
+                                    this.media_bytes = Some(0);
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child("Rebuild"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::T_SMALL))
+                                .text_color(rgb(theme::muted()))
+                                .child("compacts the store's file"),
+                        )
+                        .child(
+                            seal("store-rebuild", "Next launch", theme::muted())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.rebuild_scheduled =
+                                        satori_core::store::schedule_rebuild().is_ok();
+                                    cx.notify();
+                                }))
+                                .when(self.rebuild_scheduled, |d| d.child("Scheduled")),
                         ),
                 ),
             )
@@ -1867,6 +2042,39 @@ fn toggle(id: impl Into<SharedString>, on: bool) -> Stateful<Div> {
         } else {
             theme::muted()
         })))
+}
+
+/// The retention lever's choices (D99): the label and the window in
+/// days (None = forever, the prune is off). The order is the pill row's.
+const RETENTION_CHOICES: [(&str, Option<u64>); 5] = [
+    ("2 weeks", Some(14)),
+    ("1 month", Some(30)),
+    ("3 months", Some(90)),
+    ("1 year", Some(365)),
+    ("forever", None),
+];
+
+/// Bytes as the readout shows them: MB below a thousand, GB past it.
+fn format_bytes(bytes: u64) -> String {
+    let mb = bytes as f64 / 1048576.0;
+    if mb >= 1024.0 {
+        format!("{:.1} GB", mb / 1024.0)
+    } else {
+        format!("{} MB", mb.round() as u64)
+    }
+}
+
+/// Thousands-separated count (the readout's "38,210 events").
+fn format_count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// A settings group: title + description + rows chained as children.
