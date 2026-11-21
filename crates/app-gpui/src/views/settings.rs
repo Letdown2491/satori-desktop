@@ -65,16 +65,6 @@ pub struct SettingsView {
     zap_presets: Vec<prefs::ZapPreset>,
     zap_add_sats: Entity<Input>,
     zap_add_msg: Entity<Input>,
-    // Set when the sign-out row is clicked: the pane freezes on "Signing
-    // out…" while the shell tears the session down (the whole view is
-    // replaced by the login doors a beat later).
-    signing_out: bool,
-    // The signed-in identity, resolved name for the Session row (the short
-    // npub stands in until the profile lands).
-    me_name: Option<String>,
-    // The short npub, computed once — it used to re-read session.json from
-    // disk and re-bech32 the key on EVERY render of the pane.
-    me_npub: String,
     // Relay-health pane (session-scoped): the "show all N relays" expand,
     // collapsed by default — flagged rows render inline, the full table hides.
     show_all_relays: bool,
@@ -184,9 +174,6 @@ impl SettingsView {
             reaction_notifs: prefs::get_bool("reactionNotifs"),
             bookmark_public: prefs::get_bool("bookmarkPublic"),
             wallet: core.wallet().status(),
-            signing_out: false,
-            me_name: None,
-            me_npub: Self::me_npub_short(),
             status: String::new(),
             status_err: false,
             show_all_relays: false,
@@ -198,7 +185,6 @@ impl SettingsView {
             tab: SettingsTab::General,
         };
         view.pump_feed(core.fetch_media_servers(), cx);
-        view.pump_me(cx);
         view.pump_wallet(cx);
         // The storage readout (D99): fetched once at open — the pane is
         // not a live meter, and a stale number on a long-open pane is
@@ -283,40 +269,6 @@ impl SettingsView {
         .detach();
     }
 
-    /// The signed-in profile's name for the Session row. The profiles
-    /// service resolves a miss once, so retry like the rail avatar does —
-    /// though this pane opens long after connect, so it usually lands
-    /// first try.
-    fn pump_me(&self, cx: &mut Context<Self>) {
-        let Some(me) =
-            satori_core::session::load().and_then(|s| PublicKey::from_str(&s.pubkey).ok())
-        else {
-            return;
-        };
-        let me_hex = me.to_string();
-        cx.spawn(async move |this, cx| {
-            for _ in 0..5 {
-                let mut rx = this
-                    .update(cx, |this, _| this.core.clone().ensure_profiles(vec![me]))
-                    .expect("settings alive");
-                // One event per ask (the debouncer resolves once); any
-                // miss waits out the 2s and retries — never a busy loop.
-                if let Some(FeedEvent::Profiles(ps)) = rx.recv().await
-                    && let Some(p) = ps.into_iter().find(|p| p.pubkey == me_hex)
-                {
-                    let _ = this.update(cx, |this, cx| {
-                        let name = p.display();
-                        this.me_name = (!name.is_empty() && name != me_hex).then_some(name);
-                        cx.notify();
-                    });
-                    return;
-                }
-                cx.background_executor().timer(Duration::from_secs(2)).await;
-            }
-        })
-        .detach();
-    }
-
     fn pump_feed(&self, mut rx: satori_core::manager::FeedRx, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.recv().await {
@@ -372,15 +324,6 @@ impl SettingsView {
         })
         .detach();
         cx.notify();
-    }
-
-    /// The signed-in identity, short npub form for the Session row. Called
-    /// ONCE (at construction): it reads session.json from disk and bech32s
-    /// the key — not per-render work.
-    fn me_npub_short() -> String {
-        satori_core::session::load()
-            .and_then(|s| bech32_short(&s.pubkey))
-            .unwrap_or_else(|| "unknown key".to_string())
     }
 
     fn set_status(&mut self, msg: String, err: bool) {
@@ -918,6 +861,8 @@ impl SettingsView {
 
     fn general_tab(&self, cx: &mut Context<Self>) -> Div {
         let dark = self.dark.unwrap_or(true); // None = night (today's default)
+        let machine_hidden = self.machine_hidden;
+        let hidden_kinds = self.hidden_kinds.clone();
         div()
             .flex()
             .flex_col()
@@ -965,14 +910,44 @@ impl SettingsView {
                         ),
                 ),
             )
-            // --- Session (identity + sign out) ------------------------------
-            .child(
+            // --- Feed content (the feed catalog) -----------------------------
+                        .child(
                 group(
-                    "Session",
-                    "The key stays in this device's secret store until you sign out.",
+                    "Feed content",
+                    "What kinds your feed carries. Applies on the next home refresh.",
                 )
                 .child(
                     div()
+                        .id("machine-notes-row")
+                        .w_full()
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(theme::T_UI))
+                                        .text_color(rgb(theme::ink()))
+                                        .child("Hide machine notes"),
+                                )
+                                .child(muted(
+                                    "Kind-1 events whose entire content is JSON, app data \
+                                     transports, not speech",
+                                )),
+                        )
+                        .child(toggle("machine-notes", machine_hidden))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_machine_notes(cx))),
+                )
+                .children(satori_core::store::CATALOG.iter().map(|(label, kinds)| {
+                    let kinds: Vec<u16> = kinds.to_vec();
+                    let on = !kinds.iter().any(|k| hidden_kinds.contains(k));
+                    div()
+                        .id(SharedString::from(format!("kind-row-{label}")))
                         .w_full()
                         .flex()
                         .items_center()
@@ -983,29 +958,13 @@ impl SettingsView {
                                 .flex_1()
                                 .text_size(px(theme::T_UI))
                                 .text_color(rgb(theme::ink()))
-                                .child(match &self.me_name {
-                                    Some(name) => format!("Signed in as {name}"),
-                                    None => format!("Signed in as {}", self.me_npub),
-                                }),
+                                .child(label.to_string()),
                         )
-                        .child(
-                            div()
-                                .id("sign-out")
-                                .cursor_pointer()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::vermilion()))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    cx.emit(Nav::SignOut);
-                                    this.signing_out = true;
-                                    cx.notify();
-                                }))
-                                .when(
-                                    self.signing_out,
-                                    |d| d.text_color(rgb(theme::muted())).child("Signing out…"),
-                                )
-                                .when(!self.signing_out, |d| d.child("Sign out")),
-                        ),
-                ),
+                        .child(toggle(format!("kind-{label}"), on))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_kind(&kinds, cx);
+                        }))
+                })),
             )
             // --- List backup: the signed list events ------------------------
             .child(
@@ -1323,6 +1282,35 @@ impl SettingsView {
                         ),
                 ),
             )
+            // --- Bookmarks (D38) ---------------------------------------------
+            .child(
+                group(
+                    "Bookmarks",
+                    "Private bookmarks are nip44-encrypted (kind 10003). Public ones \
+                     are a plain NIP-51 list (kind 30001) anyone can read; both show \
+                     in the Bookmarks page.",
+                )
+                .child(
+                    div()
+                        .id("bookmark-public-row")
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child("Stars write public bookmarks"),
+                        )
+                        .child(toggle("bookmark-public", self.bookmark_public))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toggle_bookmark_public(cx);
+                        })),
+                ),
+            )
     }
 
     fn relays_tab(&self, cx: &mut Context<Self>) -> Div {
@@ -1507,8 +1495,6 @@ impl SettingsView {
     }
 
     fn notifications_tab(&self, cx: &mut Context<Self>) -> Div {
-        let machine_hidden = self.machine_hidden;
-        let hidden_kinds = self.hidden_kinds.clone();
         div()
             .flex()
             .flex_col()
@@ -1536,91 +1522,6 @@ impl SettingsView {
                         .child(toggle("reaction-notifs", self.reaction_notifs))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.toggle_reaction_notifs(cx);
-                        })),
-                ),
-            )
-            // --- Feed content (the feed catalog) -----------------------------
-            .child(
-                group(
-                    "Feed content",
-                    "What kinds your feed carries. Applies on the next home refresh.",
-                )
-                .child(
-                    div()
-                        .id("machine-notes-row")
-                        .w_full()
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .py_1()
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(theme::T_UI))
-                                        .text_color(rgb(theme::ink()))
-                                        .child("Hide machine notes"),
-                                )
-                                .child(muted(
-                                    "Kind-1 events whose entire content is JSON, app data \
-                                     transports, not speech",
-                                )),
-                        )
-                        .child(toggle("machine-notes", machine_hidden))
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_machine_notes(cx))),
-                )
-                .children(satori_core::store::CATALOG.iter().map(|(label, kinds)| {
-                    let kinds: Vec<u16> = kinds.to_vec();
-                    let on = !kinds.iter().any(|k| hidden_kinds.contains(k));
-                    div()
-                        .id(SharedString::from(format!("kind-row-{label}")))
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .py_1()
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::ink()))
-                                .child(label.to_string()),
-                        )
-                        .child(toggle(format!("kind-{label}"), on))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_kind(&kinds, cx);
-                        }))
-                })),
-            )
-            // --- Bookmarks (D38) ---------------------------------------------
-            .child(
-                group(
-                    "Bookmarks",
-                    "Private bookmarks are nip44-encrypted (kind 10003). Public ones \
-                     are a plain NIP-51 list (kind 30001) anyone can read; both show \
-                     in the Bookmarks page.",
-                )
-                .child(
-                    div()
-                        .id("bookmark-public-row")
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .py_1()
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::ink()))
-                                .child("Stars write public bookmarks"),
-                        )
-                        .child(toggle("bookmark-public", self.bookmark_public))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.toggle_bookmark_public(cx);
                         })),
                 ),
             )
@@ -2165,9 +2066,9 @@ fn ago(secs: u64) -> String {
 }
 
 /// The shared bech32-prefix shape: an npub's first 12 chars + ellipsis.
-/// Both the Session row (me_npub_short) and the blocked/spam author rows
-/// (short_author) render it — one spelling, or the two drift. `None`
-/// when the hex doesn't parse; each caller owns its miss tail.
+/// The blocked/spam author rows (short_author) render it — one spelling,
+/// or the callers drift. `None` when the hex doesn't parse; each caller
+/// owns its miss tail.
 fn bech32_short(hex: &str) -> Option<String> {
     PublicKey::from_str(hex)
         .ok()

@@ -315,8 +315,12 @@ pub struct Shell {
     /// The add-column menu's open flag (the workspace's + affordance).
     add_menu: bool,
     /// The me menu's open flag (D78): the avatar's click opens the user's
-    /// own surfaces — profile, bookmarks, drafts, lists.
+    /// own surfaces — profile, bookmarks, drafts, lists. Sign-out lives
+    /// here too (D101): the row is two-step armed — first click asks,
+    /// second signs out, any close disarms (a fat-finger next to
+    /// Network must not cost a re-login).
     me_menu: bool,
+    me_signout_armed: bool,
     /// The column a drag is over right now (phase 2 reorder cue): its
     /// header lights vermilion; cleared on drop.
     reorder_over: Option<usize>,
@@ -362,6 +366,7 @@ impl Shell {
             focused_col: 0,
             add_menu: false,
             me_menu: false,
+            me_signout_armed: false,
             reorder_over: None,
             row_scroll: ScrollHandle::new(),
             tag_input: cx.new(|cx| Input::single_line("#", cx)),
@@ -462,7 +467,6 @@ impl Shell {
             Nav::PaneDeep => cx.notify(), // whisper re-reads the pane at render
             Nav::Pop => this.back(cx),
             Nav::SetTheme(dark) => this.set_theme(*dark, cx),
-            Nav::SignOut => this.sign_out(cx),
         })
         .detach();
     }
@@ -651,6 +655,14 @@ impl Shell {
         cx.emit(ShellEvent::SignedOut);
     }
 
+    /// Close the me menu and disarm its sign-out row (D101): every
+    /// close path goes through here, so a menu reopened after a
+    /// near-miss never presents an armed "Really sign out?".
+    fn close_me_menu(&mut self) {
+        self.me_menu = false;
+        self.me_signout_armed = false;
+    }
+
     /// The notifications pane. Opening marks seen (the view constructor does
     /// the read-state advance); the dot goes quiet at once and the next poll
     /// confirms.
@@ -758,7 +770,7 @@ impl Shell {
         self.columns_on = false;
         self.save_layout();
         self.add_menu = false;
-        self.me_menu = false;
+        self.close_me_menu();
         for col in self.columns.drain(..) {
             col.pane.release_media(cx);
         }
@@ -1406,7 +1418,7 @@ impl Shell {
         // The me menu owns Esc while it's up (the catcher owns clicks) —
         // in either view mode, before anything pops.
         if self.me_menu {
-            self.me_menu = false;
+            self.close_me_menu();
             cx.notify();
             return;
         }
@@ -1699,6 +1711,7 @@ impl Shell {
                     // Re-click with the menu open closes it: the catcher
                     // occludes, so the toggle never double-fires.
                     shell.me_menu = !shell.me_menu;
+                    shell.me_signout_armed = false;
                     cx.notify();
                 }),
             ))
@@ -2552,7 +2565,7 @@ impl Shell {
         // click.
         layer = layer.child(div().id("me-menu-catcher").size_full().occlude().on_click(
             cx.listener(|shell, _, _, cx| {
-                shell.me_menu = false;
+                shell.close_me_menu();
                 cx.notify();
             }),
         ));
@@ -2575,8 +2588,10 @@ impl Shell {
         card = card.child(Self::me_row(
             "View profile",
             "me-view-profile",
+            theme::ink(),
             cx.listener(move |shell, _, _, cx| {
                 shell.me_menu = false;
+                shell.me_signout_armed = false;
                 if let Some(me) = shell.me {
                     shell.open_profile(me, cx);
                 }
@@ -2587,33 +2602,72 @@ impl Shell {
         card = card.child(Self::me_row(
             "Bookmarks",
             "me-bookmarks",
+            theme::ink(),
             cx.listener(move |shell, _, _, cx| {
                 shell.me_menu = false;
+                shell.me_signout_armed = false;
                 shell.open_bookmarks(cx);
             }),
         ));
         card = card.child(Self::me_row(
             "Drafts",
             "me-drafts",
+            theme::ink(),
             cx.listener(move |shell, _, _, cx| {
                 shell.me_menu = false;
+                shell.me_signout_armed = false;
                 shell.open_drafts(cx);
             }),
         ));
         card = card.child(Self::me_row(
             "Lists",
             "me-lists",
+            theme::ink(),
             cx.listener(move |shell, _, _, cx| {
                 shell.me_menu = false;
+                shell.me_signout_armed = false;
                 shell.open_lists(cx);
             }),
         ));
         card = card.child(Self::me_row(
             "Network",
             "me-network",
+            theme::ink(),
             cx.listener(move |shell, _, _, cx| {
                 shell.me_menu = false;
+                shell.me_signout_armed = false;
                 shell.open_network(cx);
+            }),
+        ));
+        // Sign out (D101): the account verb, moved out of Settings'
+        // Session group. Two-step armed — the first click asks ("Really
+        // sign out?"), the second signs; the freeze the old Settings
+        // row had is unnecessary here, the SignedOut swap removes the
+        // menu with the whole shell.
+        card = card.child(
+            div()
+                .mt(px(4.0))
+                .pt(px(4.0))
+                .border_t_1()
+                .border_color(rgb(theme::hairline())),
+        );
+        card = card.child(Self::me_row(
+            if self.me_signout_armed {
+                "Really sign out?"
+            } else {
+                "Sign out"
+            },
+            "me-signout",
+            theme::vermilion(),
+            cx.listener(move |shell, _, _, cx| {
+                if shell.me_signout_armed {
+                    shell.me_menu = false;
+                    shell.me_signout_armed = false;
+                    shell.sign_out(cx);
+                } else {
+                    shell.me_signout_armed = true;
+                    cx.notify();
+                }
             }),
         ));
         layer = layer.child(card);
@@ -2625,6 +2679,7 @@ impl Shell {
     fn me_row(
         label: &'static str,
         id: &'static str,
+        color: u32,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> AnyElement {
         div()
@@ -2633,7 +2688,7 @@ impl Shell {
             .px(px(12.0))
             .py(px(8.0))
             .text_size(px(theme::T_UI))
-            .text_color(rgb(theme::ink()))
+            .text_color(rgb(color))
             .hover(|s| s.bg(rgb(theme::hairline())))
             .on_click(on_click)
             .child(label)
