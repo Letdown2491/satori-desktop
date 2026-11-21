@@ -2,7 +2,8 @@
 //!
 //! TODO(port): crates/app/src/media_cache.rs + cards.rs media_picture — P2/P3.
 //! core's `fetch_image` (SSRF-guarded, sha256-keyed disk cache) hands back
-//! the original bytes (plus a ≤128px disc thumb) which we hand to gpui's
+//! the display bytes (a bounded rendition for huge originals, the original
+//! otherwise — plus a ≤128px disc thumb) which we hand to gpui's
 //! image pipeline. A global cache shares results across views (cards,
 //! lightbox, avatars all key on the same URL):
 //!   - Ready — painted.
@@ -449,13 +450,15 @@ impl Cache {
     }
 }
 
-/// Build the cached entry from core's handoff. The ORIGINAL encoded bytes
-/// go to gpui's pipeline as-is: gpui decodes on its own asset thread and
-/// caches the texture by content hash. (The old path re-encoded everything
-/// to PNG on the main thread — a 12MP photo spent hundreds of ms in deflate
-/// there, ×40 per top-up page: the endless-scroll hang.) `size` stays the
-/// original dimensions — the frame's aspect is the picture's, and eviction
-/// budgets decoded pixels, not file bytes. The disc thumb rides beside it.
+/// Build the cached entry from core's handoff. The encoded bytes (for big
+/// pictures, the bounded display rendition — see core's `decode`) go to
+/// gpui's pipeline as-is: gpui decodes on its own asset thread and caches
+/// the texture by content hash. (The old path re-encoded everything to PNG
+/// on the main thread — a 12MP photo spent hundreds of ms in deflate there,
+/// ×40 per top-up page: the endless-scroll hang.) `size` describes the bytes
+/// shipped — the rendition's dims when resized, same aspect as the original
+/// either way — so the frame's aspect is the picture's, and eviction budgets
+/// what gpui actually decodes. The disc thumb rides beside it.
 pub fn cached_from_decoded(d: DecodedImage) -> Option<CachedImage> {
     let format = match d.format {
         image::ImageFormat::Png => ImageFormat::Png,

@@ -1636,11 +1636,28 @@ impl Shell {
         // LRU touch freezes and the grace expires — photo pressure then
         // flashed the avatar to the ink initial and refetched, repeating.
         // Pinned, eviction skips it for the session.
+        //
+        // The open lightbox's pictures ride the same owner set: it paints
+        // over everything, so an eviction under it (the very pressure a
+        // full-screen photo invites) would flash it dark mid-read. Fetch
+        // sweeps too — a picture evicted before the lightbox opened comes
+        // back from the disk cache on the next render.
+        let mut shell_pins = Vec::new();
         if !me_pic.is_empty() {
             media::fetch(&self.core, me_pic.clone(), cx.entity_id(), cx);
-            // repin, not pin: the rail's owner set is exactly THIS avatar
-            // (a profile-picture change must release the old one).
-            media::repin(cx.entity_id(), vec![me_pic.clone()], cx);
+            shell_pins.push(me_pic.clone());
+        }
+        if let Some((urls, idx)) = &self.lightbox
+            && let Some(url) = urls.get(*idx)
+        {
+            media::fetch(&self.core, url.clone(), cx.entity_id(), cx);
+            shell_pins.push(url.clone());
+        }
+        if !shell_pins.is_empty() {
+            // repin, not pin: the shell's owner set is exactly this list
+            // (a profile-picture change or a lightbox close must release
+            // the old members).
+            media::repin(cx.entity_id(), shell_pins, cx);
         }
         let me_avatar = media::avatar(rail_snap.as_ref(), &me_pic, &me_name, 26.0);
 

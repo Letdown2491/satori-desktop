@@ -6,6 +6,19 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
+## 0.11.1 - 2026-11-20
+
+Reading and pictures settle down. Note text now keeps the spacing its
+author typed: single line breaks stay tight, and a blank line between
+paragraphs actually shows one, instead of everything reading as one
+evenly-spaced run. Profiles' about text picks up the same rhythm, and
+keeps its paragraph breaks where they used to be dropped. Big pictures
+arrive pre-sized for the screen: oversized originals are re-encoded once
+on fetch, so a couple of huge photos can no longer push the picture
+cache over its memory budget and flash everything on screen blank while
+it refetches, in single column, in multicolumn, and worst on the
+articles page.
+
 ## 0.11.0 - 2026-11-20
 
 Zaps grow up. The zap sheet is a real dialog now: the amount is a big

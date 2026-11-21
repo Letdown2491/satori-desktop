@@ -29,6 +29,11 @@
   <launchable type="desktop-id">io.github.Letdown2491.satori.desktop</launchable>
   <url type="homepage">https://github.com/Letdown2491/satori-desktop</url>
   <releases>
+    <release version="0.11.1" date="2026-11-20">
+      <description>
+        <p>Reading and pictures settle down. Note text now keeps the spacing its author typed: single line breaks stay tight, and a blank line between paragraphs actually shows one, instead of everything reading as one evenly-spaced run. Profiles' about text picks up the same rhythm, and keeps its paragraph breaks where they used to be dropped. Big pictures arrive pre-sized for the screen: oversized originals are re-encoded once on fetch, so a couple of huge photos can no longer push the picture cache over its memory budget and flash everything on screen blank while it refetches, in single column, in multicolumn, and worst on the articles page.</p>
+      </description>
+    </release>
     <release version="0.11.0" date="2026-11-20">
       <description>
         <p>Zaps grow up. The zap sheet is a real dialog now: the amount is a big typeable number (pick a preset pill to seed it, type over it), a message can ride the zap (256 characters, delivered with the payment), and the preset strip is yours to shape: save any amount plus message as a pill from the sheet, remove one with a right-click, or manage the whole strip in Settings under Wallet. Two new preferences live in the sheet itself: a zap can be sent anonymously (signed with a throwaway key, so the receipt carries no name; the receipt publishes through neutral public relays rather than your own, which would give the anonymity away), and the quick tap on a note's bolt can be turned off, so tapping opens the sheet instead of instantly sending. The tap amount is configurable too, in the same Settings pane.</p>

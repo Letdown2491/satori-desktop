@@ -61,8 +61,12 @@ pub const JSON_BUDGET: Duration = Duration::from_secs(20);
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
-    /// The ORIGINAL encoded bytes (jpeg/png/webp/gif) — the UI hands them to
-    /// gpui's image pipeline, which decodes on its own asset thread.
+    /// The DISPLAY RENDITION's encoded bytes (jpeg/png/webp/gif) — the UI
+    /// hands them to gpui's image pipeline, which decodes on its own asset
+    /// thread. Sources longer than RENDITION_MAX_EDGE travel as a bounded
+    /// re-encode (0.11.1's flicker fix), so the UI's cache and gpui's texture
+    /// hold the rendition, not a 24MP original; the disk cache keeps the
+    /// original file either way. `width`/`height` describe these bytes.
     pub bytes: Vec<u8>,
     /// Format of `bytes` (gpui maps it onto its own enum).
     pub format: image::ImageFormat,
@@ -106,6 +110,13 @@ const MAX_JSON_BYTES: usize = 2 * 1024 * 1024;
 /// allocation — see decode): 40MP ≈ a full-frame camera photo ≈ 160MB of
 /// RGBA at the absolute peak. Compressed bombs die here instead.
 const MAX_PIXELS: u64 = 40_000_000;
+
+/// The display rendition's long-edge bound (0.11.1's flicker fix): enough
+/// for the reading column at 2× hidpi AND the full-screen lightbox on a
+/// 1080p-class display without a visible upscale; anything longer decodes
+/// to tens of MB of RGBA and eats the UI cache's photo budget two pictures
+/// at a time. See the rendition block in `decode`.
+const RENDITION_MAX_EDGE: u32 = 2048;
 
 /// Bounded retry cadence for transient failures: three attempts, 0.6s →
 /// 1.2s apart — enough to absorb a CDN hiccup, short enough that the UI's
@@ -893,14 +904,16 @@ fn decode(bytes: &[u8]) -> Result<DecodedImage, MediaError> {
     // touches these pixels — it re-decodes from `bytes` on its own thread.
     let img = image::load_from_memory(bytes).map_err(|_| MediaError::NotMedia)?;
     let rgba = img.to_rgba8();
-    let (width, height) = rgba.dimensions();
+    let (mut width, mut height) = rgba.dimensions();
     let mut format = image::guess_format(bytes).map_err(|_| MediaError::NotMedia)?;
     let mut out = bytes.to_vec();
     // gpui's image pipeline maps png/jpeg/webp/gif only — AVIF bytes would
     // die at the UI layer and read as not-media. The pixels are validated
     // here, so a one-time re-encode (on the fetch thread, disk-cached after)
-    // is all the format needs to travel the rest of the pipe.
-    if format == image::ImageFormat::Avif {
+    // is all the format needs to travel the rest of the pipe. (A huge AVIF
+    // skips this: the rendition re-encode below handles it, and a full-size
+    // PNG intermediate would be its own multi-tens-of-MB blowup.)
+    if format == image::ImageFormat::Avif && width.max(height) <= RENDITION_MAX_EDGE {
         let mut png = Vec::new();
         if img
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
@@ -922,6 +935,46 @@ fn decode(bytes: &[u8]) -> Result<DecodedImage, MediaError> {
     } else {
         None
     };
+    // The display rendition (0.11.1's flicker fix): a picture bigger than the
+    // rendition edge decodes to tens of MB of RGBA — two 24MP photos ate the
+    // UI cache's whole photo budget, and every landing's eviction then dropped
+    // gpui's decoded texture for something ON SCREEN (the flash-then-refetch
+    // flicker; in multicolumn it reached the desperate valve's pinned victims,
+    // so live columns flashed on every burst). So the UI caches a bounded
+    // re-encode instead of the original: long edge ≤ RENDITION_MAX_EDGE, a
+    // triangle-filter resize, JPEG q80 for opaque pixels (PNG when there is
+    // alpha to preserve — the checkerboard must survive). The dims travel as
+    // the rendition's: the UI's eviction budget counts what gpui actually
+    // holds. Animated GIFs keep the original (a re-encode would freeze them);
+    // the original bytes stay on disk either way — the rendition is rebuilt
+    // per fetch, once, off the runtime.
+    if width.max(height) > RENDITION_MAX_EDGE && format != image::ImageFormat::Gif {
+        let scaled = img.resize(
+            RENDITION_MAX_EDGE,
+            RENDITION_MAX_EDGE,
+            image::imageops::FilterType::Triangle,
+        );
+        let (rw, rh) = (scaled.width(), scaled.height());
+        let has_alpha = scaled.color().has_alpha();
+        let mut enc = Vec::new();
+        let encoded = if has_alpha {
+            scaled
+                .write_to(&mut std::io::Cursor::new(&mut enc), image::ImageFormat::Png)
+                .map(|_| image::ImageFormat::Png)
+        } else {
+            scaled
+                .write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(
+                    &mut enc, 80,
+                ))
+                .map(|_| image::ImageFormat::Jpeg)
+        };
+        if let Ok(fmt) = encoded {
+            out = enc;
+            format = fmt;
+            width = rw;
+            height = rh;
+        }
+    }
     Ok(DecodedImage {
         width,
         height,
@@ -1211,6 +1264,67 @@ mod tests {
             decode_async(png_header(15000, 15000)).await,
             Err(MediaError::NotMedia)
         ));
+    }
+
+    fn real_jpeg(w: u32, h: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::DynamicImage::new_rgb8(w, h)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        bytes
+    }
+
+    /// The display rendition (0.11.1): a decode longer than RENDITION_MAX_EDGE
+    /// travels as a bounded re-encode — long edge bounded, aspect kept, dims
+    /// describing the bytes actually shipped (the UI's eviction budget counts
+    /// what gpui decodes). Opaque pixels take the JPEG path.
+    #[test]
+    fn rendition_bounds_huge_decodes() {
+        let d = decode(&real_jpeg(3000, 2000)).unwrap();
+        assert_eq!(d.width.max(d.height), RENDITION_MAX_EDGE);
+        let ratio = d.width as f64 / d.height as f64;
+        assert!((ratio - 1.5).abs() < 0.01, "aspect kept, got {ratio}");
+        assert_eq!(d.format, image::ImageFormat::Jpeg);
+        // The bytes are the rendition: they decode back to the rendition's
+        // own dims, not the original's.
+        let re = image::load_from_memory(&d.bytes).unwrap();
+        assert_eq!((re.width(), re.height()), (d.width, d.height));
+        assert!(d.thumb.is_some(), "the disc thumb still rides");
+    }
+
+    #[test]
+    fn rendition_preserves_alpha_and_small_originals() {
+        // Small originals ride unchanged: no re-encode, no dim rewrite.
+        let d = decode(&real_png(300, 200)).unwrap();
+        assert_eq!((d.width, d.height), (300, 200));
+        assert_eq!(d.format, image::ImageFormat::Png);
+
+        // Alpha must survive the rendition (a transparent sticker, say): the
+        // PNG path keeps pixels pixel-exact.
+        let d = decode(&real_png(2400, 1200)).unwrap();
+        assert_eq!(d.width.max(d.height), RENDITION_MAX_EDGE);
+        assert_eq!(d.format, image::ImageFormat::Png);
+        let re = image::load_from_memory(&d.bytes).unwrap().to_rgba8();
+        assert_eq!(re.get_pixel(0, 0).0[3], 0, "transparent stays so");
+    }
+
+    #[test]
+    fn rendition_skips_gifs() {
+        // A re-encode would freeze an animation; the original rides.
+        let mut bytes = Vec::new();
+        image::DynamicImage::new_rgb8(2000, 1000)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Gif,
+            )
+            .unwrap();
+        let d = decode(&bytes).unwrap();
+        assert_eq!((d.width, d.height), (2000, 1000));
+        assert_eq!(d.format, image::ImageFormat::Gif);
+        assert_eq!(d.bytes, bytes, "gif bytes pass through untouched");
     }
 }
 
