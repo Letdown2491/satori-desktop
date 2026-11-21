@@ -29,6 +29,16 @@
   <launchable type="desktop-id">io.github.Letdown2491.satori.desktop</launchable>
   <url type="homepage">https://github.com/Letdown2491/satori-desktop</url>
   <releases>
+    <release version="0.12.0" date="2026-11-21">
+      <description>
+        <p>Gifs, done properly. The composer has a gif button: type to search, hover to preview, click to pick. The pick publishes as a real attachment, an imeta-tagged gif that every client renders, not just this one. In the feed, gif posts animate when you hover and play with controls when you click, and a click always plays: even if you crossed three gifs on the way there, none of them can hold your tap hostage.</p>
+        <p>Storage you control. Settings gains retention levers: keep notes, pictures and the rest for a span you choose (a week to ten years), and the store vacuums what aged out on its own schedule.</p>
+        <p>Under the hood, the store learned versioning. The on-disk format now carries a schema stamp and a migration runner, so a future format change converts the store in place at boot instead of asking for a fresh login, and a downgrade is refused with a quiet screen before anything opens.</p>
+        <p>Bunker honesty. When a NIP-46 signer stops answering, an amber pill reads "Signer unreachable, reads still work" where the outbox pill lives: no dismiss, no button, gone the moment the signer returns.</p>
+        <p>Around the house: Settings gains a Content tab for the feed's kind catalog, sign out moved into the avatar menu, and a fresh start opens three columns. A relay that failed three writes in a row used to sit out of the publish fan-out forever; it now comes back on its own within ten minutes, and when the fan-out does skip a relay, the log says so.</p>
+        <p>As with every release, a five-lens audit (performance, system usage, memory, security, duplication) ran over the batch before the tag. Its densest vein was the gif picker's hover machinery: hover is not intent, so a preview never opens a browser tab, a sweep across the grid builds nothing, and a build nobody wants any more is dropped rather than parked looping. It also caught a store stamp that could desync from the generation it describes, a self-heal path one rename away from stranding a recovery, and smaller finds, all fixed.</p>
+      </description>
+    </release>
     <release version="0.11.1" date="2026-11-20">
       <description>
         <p>Reading and pictures settle down. Note text now keeps the spacing its author typed: single line breaks stay tight, and a blank line between paragraphs actually shows one, instead of everything reading as one evenly-spaced run. Profiles' about text picks up the same rhythm, and keeps its paragraph breaks where they used to be dropped. Big pictures arrive pre-sized for the screen: oversized originals are re-encoded once on fetch, so a couple of huge photos can no longer push the picture cache over its memory budget and flash everything on screen blank while it refetches, in single column, in multicolumn, and worst on the articles page.</p>

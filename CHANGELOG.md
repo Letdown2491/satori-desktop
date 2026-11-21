@@ -6,6 +6,43 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
+## 0.12.0 - 2026-11-21
+
+Gifs, done properly. The composer has a gif button: type to search, hover
+to preview, click to pick. The pick publishes as a real attachment, an
+imeta-tagged gif that every client renders, not just this one. In the
+feed, gif posts animate when you hover and play with controls when you
+click, and a click always plays: even if you crossed three gifs on the
+way there, none of them can hold your tap hostage.
+
+Storage you control. Settings gains retention levers: keep notes,
+pictures and the rest for a span you choose (a week to ten years), and
+the store vacuums what aged out on its own schedule.
+
+Under the hood, the store learned versioning. The on-disk format now
+carries a schema stamp and a migration runner, so a future format change
+converts the store in place at boot instead of asking for a fresh login,
+and a downgrade is refused with a quiet screen before anything opens.
+
+Bunker honesty. When a NIP-46 signer stops answering, an amber pill reads
+"Signer unreachable, reads still work" where the outbox pill lives: no
+dismiss, no button, gone the moment the signer returns.
+
+Around the house: Settings gains a Content tab for the feed's kind
+catalog, sign out moved into the avatar menu, and a fresh start opens
+three columns. A relay that failed three writes in a row used to sit out
+of the publish fan-out forever; it now comes back on its own within ten
+minutes, and when the fan-out does skip a relay, the log says so.
+
+As with every release, a five-lens audit (performance, system usage,
+memory, security, duplication) ran over the batch before the tag. Its
+densest vein was the gif picker's hover machinery: hover is not intent,
+so a preview never opens a browser tab, a sweep across the grid builds
+nothing, and a build nobody wants any more is dropped rather than parked
+looping. It also caught a store stamp that could desync from the
+generation it describes, a self-heal path one rename away from stranding
+a recovery, and smaller finds, all fixed.
+
 ## 0.11.1 - 2026-11-20
 
 Reading and pictures settle down. Note text now keeps the spacing its
