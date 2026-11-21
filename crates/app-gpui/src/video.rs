@@ -69,6 +69,34 @@ pub fn opening(url: &str) -> bool {
     crate::media_guard::opening(url)
 }
 
+/// The tap's promotion (field-test Nov 21 2026): a CLICK on a tile whose
+/// hover-PREVIEW build is still in flight is intent — the old flow
+/// refused it ("a build is already in flight") and the build then landed
+/// as a preview that only played while the cursor stayed. The promoted
+/// build lands as a FULL player (no auto-retire, browser fallback on
+/// failure). One mark: the one-build window means at most one build can
+/// be in flight to promote.
+static PROMOTED: RwLock<Option<String>> = RwLock::new(None);
+
+/// Mark the in-flight build for `url` as promoted to a full player.
+fn promote(url: &str) {
+    if let Ok(mut g) = PROMOTED.write() {
+        *g = Some(url.to_string());
+    }
+}
+
+/// Consume the promotion mark for `url` (true when it was set). The
+/// landing path consults it to flip the preview flag — before the
+/// want check, so a promoted build lands even if the cursor moved on.
+fn take_promoted(url: &str) -> bool {
+    if let Ok(mut g) = PROMOTED.write()
+        && g.as_deref() == Some(url)
+    {
+        return g.take().is_some();
+    }
+    false
+}
+
 /// The wake-up global (theme.rs ThemeSignal pattern): set when the player
 /// opens/toggles/closes — every video-bearing view observes it and
 /// repaints poster ↔ player.
@@ -136,9 +164,22 @@ fn open_inner(url: String, mime: Option<String>, preview: bool, cx: &mut gpui::A
         satori_core::pool::clean_reason(&url)
     );
     let openable = crate::views::content::web_url(&url);
+    let landed = active(&url).is_some();
+    let building = crate::media_guard::opening(&url);
+    // A tap on a tile whose hover-PREVIEW build is still in flight is
+    // INTENT (field-test Nov 21 2026): the old flow refused it — "a
+    // build is already in flight" — and the build then landed as a
+    // preview that played only while the cursor stayed. Promote
+    // instead: the in-flight build lands as a full player.
+    if !preview && !landed && building {
+        eprintln!("[video] open promoted: the in-flight preview build lands as a player");
+        promote(&url);
+        cx.set_global(Signal);
+        return;
+    }
     // Already open or building — a second tap on the same tile is a no-op,
     // not a second pipeline.
-    let already = active(&url).is_some() || crate::media_guard::opening(&url);
+    let already = landed || building;
     let degrade = if preview {
         crate::media_guard::Degrade::Nothing
     } else {
@@ -194,6 +235,10 @@ fn open_inner(url: String, mime: Option<String>, preview: bool, cx: &mut gpui::A
             .await;
         cx.update(|cx| match res {
             Ok(video) => {
+                // A tap mid-build promoted this build to a full player:
+                // flip the flag BEFORE the want check — a promoted build
+                // lands even if the cursor moved on (the tap is intent).
+                let preview = preview && !take_promoted(&url);
                 // The build outlived its welcome: the cursor moved on
                 // (or the picker closed) while it ran — landing it here
                 // would loop a pipeline nobody paints. Drop it instead.
@@ -228,7 +273,10 @@ fn open_inner(url: String, mime: Option<String>, preview: bool, cx: &mut gpui::A
                     satori_core::pool::clean_reason(&url)
                 );
                 crate::media_guard::clear(&url);
-                if !preview && crate::views::content::web_url(&url) {
+                // A promoted build failed: the TAP was intent, so the
+                // browser fallback the tap earns still applies (a plain
+                // preview never degrades to the browser).
+                if (!preview || take_promoted(&url)) && crate::views::content::web_url(&url) {
                     cx.open_url(&url);
                 }
             }
