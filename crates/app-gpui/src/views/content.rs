@@ -1164,6 +1164,18 @@ pub(crate) fn repost_inner_cached(ev: &Event) -> Option<std::sync::Arc<Event>> {
     inner
 }
 
+/// Flush the pending line run as one paragraph block: a single line rides
+/// directly, several collect into a tight column (line breaks without a
+/// paragraph gap — the pre-wrap semantics). Shared by the note body and the
+/// profile's about flow.
+pub(crate) fn push_block(body: Div, run: &mut Vec<AnyElement>) -> Div {
+    match run.len() {
+        0 => body,
+        1 => body.child(run.remove(0)),
+        _ => body.child(div().w_full().flex().flex_col().children(run.drain(..))),
+    }
+}
+
 /// Render a note body: word-flow paragraphs, media gallery section, quote
 /// embeds. Media fetches ride the shared cache (`media::Snapshot`); the view
 /// queues them via `content::media_urls` + `media::fetch`.
@@ -1181,7 +1193,7 @@ pub fn body_with<V: EventEmitter<Nav> + 'static>(
     handle: Entity<V>,
     skip_title_line: bool,
 ) -> Div {
-    let mut body = div().w_full().flex().flex_col().gap_2();
+    let mut body = div().w_full().flex().flex_col().gap_4();
 
     let parsed = body_parse_cached(ev);
     let dims = &parsed.dims;
@@ -1206,15 +1218,11 @@ pub fn body_with<V: EventEmitter<Nav> + 'static>(
     // Paragraph rhythm follows the TS renderer's pre-wrap semantics
     // (TODO(port): src/render/content.ts — `.content` is pre-wrap): a single
     // newline breaks the line tight (no paragraph gap); only blank lines
-    // separate paragraphs. Consecutive lines collect into one block.
+    // separate paragraphs, at a full blank line's worth of space (gap_4 —
+    // the old gap_2 sat inside the 1.2 line pitch, so paragraphs read as one
+    // run: "single spaced everywhere"). Consecutive lines collect into one
+    // block.
     let mut run: Vec<AnyElement> = Vec::new();
-    fn push_block(body: Div, run: &mut Vec<AnyElement>) -> Div {
-        match run.len() {
-            0 => body,
-            1 => body.child(run.remove(0)),
-            _ => body.child(div().w_full().flex().flex_col().children(run.drain(..))),
-        }
-    }
     for para in text.split('\n') {
         let trimmed = para.trim();
         if trimmed.is_empty() {

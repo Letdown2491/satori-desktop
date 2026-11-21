@@ -1327,9 +1327,19 @@ fn thumb_tile(
 /// (newlines in the raw about split paragraphs), so links, mentions and
 /// hashtags click through exactly as they do in note bodies.
 fn about_flow(text: &str, ctx: &content::Body, handle: &Entity<ProfileView>) -> Div {
-    let mut flow = div().w_full().flex().flex_col().gap_1();
-    for para in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        flow = flow.child(content::word_flow(para, &[], ctx, handle));
+    // The note body's paragraph rhythm (content::push_block): a single
+    // newline breaks the line tight; a blank line starts a new paragraph at
+    // the full gap. (The old flow filtered blank lines out, so an author's
+    // paragraphs collapsed into one run.)
+    let mut flow = div().w_full().flex().flex_col().gap_4();
+    let mut run: Vec<AnyElement> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            flow = content::push_block(flow, &mut run);
+            continue;
+        }
+        run.push(content::word_flow(line, &[], ctx, handle).into_any_element());
     }
-    flow
+    content::push_block(flow, &mut run)
 }
