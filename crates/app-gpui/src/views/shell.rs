@@ -735,7 +735,12 @@ impl Shell {
                 }
             }
             if self.columns.is_empty() {
+                // The first-run default (D98): the three daily surfaces —
+                // Notes, Articles, Notifications, reading order. Only before
+                // any saved layout exists; the user's own arrangement (any
+                // column set, any order) persists and wins from then on.
                 self.pin_column(ColumnKind::Feed, cx);
+                self.pin_column(ColumnKind::Articles, cx);
                 self.pin_column(ColumnKind::Notifications, cx);
             }
         }
