@@ -290,6 +290,15 @@ pub struct Composer {
     /// its query is still the newest (the guide's §5: don't abort
     /// in-flight requests, ignore late answers instead).
     gifs_seq: u64,
+    /// The last query the debounced search actually saw. The observe on
+    /// the field fires on EVERY notify — and a focused field notifies
+    /// every caret blink (input.rs's blink loop) — so the observe
+    /// compares content: without this, each blink re-armed the debounce
+    /// and bumped the generation, and every in-flight answer arrived
+    /// stale and was dropped. The grid froze on the starter search the
+    /// moment you clicked into the field to type. (flatpak field-test,
+    /// Nov 21 2026)
+    gifs_seen: String,
     /// The open alt-text editor: which attachment id it edits + the one
     /// shared single-line field (research §4.2 — AltTextEditorDialog).
     alt_edit: Option<u64>,
@@ -476,9 +485,22 @@ impl Composer {
             i.placeholder("search gifs")
         });
         // The GIF picker's search (D104): the field is watched the same
-        // way — every change re-arms the debounced query.
-        cx.observe(&gifs_query, |this, _input, cx| this.gifs_query_changed(cx))
-            .detach();
+        // way — every CONTENT change re-arms the debounced query. The
+        // raw observe would also fire on every caret blink while the
+        // field is focused (the blink loop's own cx.notify), and each
+        // of those bumped the generation: every answer arrived stale
+        // and was dropped, the grid frozen on the starter search the
+        // moment you clicked in to type. So the observe filters by
+        // content (gifs_seen's note).
+        cx.observe(&gifs_query, |this, input, cx| {
+            let q = input.read(cx).content.trim().to_string();
+            if q == this.gifs_seen {
+                return;
+            }
+            this.gifs_seen = q;
+            this.gifs_query_changed(cx);
+        })
+        .detach();
         // Restored attachments get real ids too (the upload chain only
         // ever targets fresh picks, but the invariant stays simple: ids
         // are unique within a composer).
@@ -514,6 +536,7 @@ impl Composer {
             gifs_err: None,
             gifs_loading: false,
             gifs_seq: 0,
+            gifs_seen: String::new(),
             alt_edit: None,
             alt_input,
             sched_on: false,
@@ -694,6 +717,10 @@ impl Composer {
         self.gifs_open = !self.gifs_open;
         if self.gifs_open {
             if self.gifs.is_empty() {
+                // Re-seed: the seen-value clears first or the observe
+                // would ignore a starter identical to the last query
+                // (an errored grid would stay empty forever).
+                self.gifs_seen.clear();
                 let starter = satori_core::gifs::STARTERS[0];
                 self.gifs_query.update(cx, |i, cx| i.set_text(starter, cx));
             }
