@@ -1305,6 +1305,19 @@ impl Core {
         // The profile mirror is display state for the logged-in session's
         // reading; a next login re-hydrates it from its own feed pages.
         self.profiles_mem.lock().unwrap().clear();
+        // The amber bar (D103) is per-session truth: a session that died
+        // with the signer unreachable leaves the watch false, and a
+        // re-login onto a still-dead bunker would write false->false —
+        // no tick, and the bar would never light for that whole session
+        // (five-lens audit Nov 2026). A new session starts healthy.
+        self.signer_health.send_if_modified(|v| {
+            if *v {
+                false
+            } else {
+                *v = true;
+                true
+            }
+        });
     }
 
     /// Sign out: run the full session teardown (transports, pool identity,
@@ -1718,6 +1731,17 @@ impl Core {
         self.task_once(move || {
             Box::pin(async move { crate::media::fetch_poster(url, cap, sniff, sniff_uri).await })
         })
+    }
+
+    /// The GIF service search (D104), on this runtime — same seam as
+    /// fetch_poster: reqwest needs the tokio IO driver, and polled from
+    /// gpui's executor it panics thread 'main (the D32 crash class).
+    pub fn gifs_search(
+        self: &Arc<Self>,
+        q: String,
+    ) -> mpsc::UnboundedReceiver<std::result::Result<crate::gifs::GifPage, crate::gifs::GifError>>
+    {
+        self.task_once(move || Box::pin(async move { crate::gifs::search(&q, 24, 0).await }))
     }
 
     // --- wallet / zaps (D20) ---------------------------------------------------

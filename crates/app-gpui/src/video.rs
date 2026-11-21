@@ -30,12 +30,37 @@ use crate::views::content;
 struct Player {
     url: String,
     video: Video,
+    /// The GIF picker's hover preview (D104): a preview player is
+    /// retired by the picker's own lifecycle (pick, close, un-hover),
+    /// never by url sniffing — a legit overlay video must be
+    /// distinguishable from a preview even if the service ever serves
+    /// look-alike urls.
+    preview: bool,
     /// Held for its Drop (aborts the proxy listener when the player dies);
     /// never read, hence the underscore.
     _proxy: Option<satori_core::video_proxy::RangeProxy>,
 }
 
 static ACTIVE: RwLock<Option<Player>> = RwLock::new(None);
+
+/// The hover-preview intent (D104): which tile's preview the cursor
+/// WANTS, if any. Set on hover-in (before the dwell), cleared on
+/// hover-out / pick / picker close. The landing path consults it: a
+/// build that finishes after the cursor moved on — or the picker
+/// closed — is dropped, not parked looping with nobody painting it.
+static PREVIEW_WANT: RwLock<Option<String>> = RwLock::new(None);
+
+/// Record the cursor's preview intent for `url` (cx-less; hover-in).
+pub fn want_preview(url: &str) {
+    if let Ok(mut g) = PREVIEW_WANT.write() {
+        *g = Some(url.to_string());
+    }
+}
+
+/// The wanted preview's url, if any (cx-less).
+pub fn preview_want() -> Option<String> {
+    PREVIEW_WANT.read().ok().and_then(|g| g.clone())
+}
 
 /// Is a player for `url` still being built? (The tile's breathing state.)
 /// The slot itself lives in the shared door (media_guard::OPENING — the
@@ -92,16 +117,35 @@ pub fn inline_able(url: &str, mime: Option<&str>) -> bool {
 /// guards are the shared media door (media_guard.rs) — audio is this
 /// function's sibling, not its copy.
 pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
+    open_inner(url, mime, false, cx);
+}
+
+/// The GIF picker's hover preview (D104): the tap's machinery WITHOUT
+/// the browser. A refused preview (strict Tor, proxy failure, build
+/// failure) is a NO-OP — the tile stays a still; hover is not intent,
+/// and a sweep must never open browser tabs. The caller dwells first
+/// (composer.rs): a sweep never even starts a pipeline.
+pub fn open_preview(url: String, cx: &mut gpui::App) {
+    open_inner(url, Some("video/mp4".into()), true, cx);
+}
+
+fn open_inner(url: String, mime: Option<String>, preview: bool, cx: &mut gpui::App) {
     let openable = crate::views::content::web_url(&url);
     // Already open or building — a second tap on the same tile is a no-op,
     // not a second pipeline.
     let already = active(&url).is_some() || crate::media_guard::opening(&url);
+    let degrade = if preview {
+        crate::media_guard::Degrade::Nothing
+    } else {
+        crate::media_guard::Degrade::Browser
+    };
     let Gate::Door(door) = crate::media_guard::gate(
         &url,
         openable && inline_able(&url, mime.as_deref()),
         already,
         "[video]",
         cx,
+        degrade,
     ) else {
         return;
     };
@@ -114,7 +158,10 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
         if !crate::media_guard::screened(parsed.host_str().map(str::to_string), "[video]").await {
             cx.update(|cx| {
                 crate::media_guard::clear(&url);
-                cx.open_url(&url);
+                // A preview's degrade is a no-op — never the browser.
+                if !preview {
+                    cx.open_url(&url);
+                }
                 cx.set_global(Signal);
             });
             return;
@@ -123,7 +170,7 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
         // background executor, never the UI thread. A GIF-service mp4
         // (the /mp4/orig/ namespace, D104) LOOPS — it is a GIF's
         // animation, and a GIF that stops dead is a broken GIF.
-        let looping = url.contains("/mp4/orig/");
+        let looping = url.starts_with("https://gifs.nostr.build/mp4/orig/");
         let res = cx
             .background_executor()
             .spawn(async move {
@@ -142,6 +189,15 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
             .await;
         cx.update(|cx| match res {
             Ok(video) => {
+                // The build outlived its welcome: the cursor moved on
+                // (or the picker closed) while it ran — landing it here
+                // would loop a pipeline nobody paints. Drop it instead.
+                if preview && preview_want().as_deref() != Some(url.as_str()) {
+                    std::thread::spawn(move || drop(video));
+                    crate::media_guard::clear(&url);
+                    cx.set_global(Signal);
+                    return;
+                }
                 // One player per process: a replaced player's Drop joins
                 // its worker — defer that off the UI thread.
                 crate::media_guard::land(
@@ -150,6 +206,7 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
                     Player {
                         url: url.clone(),
                         video,
+                        preview,
                         _proxy: Some(proxy),
                     },
                 );
@@ -157,14 +214,16 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
             // The pipeline failed (missing plugins, dead URL): the honest
             // fallback is the browser — the pre-Phase-3 behavior. The
             // url is event-borne: sanitized before the log (a \n could
-            // forge lines, an ESC inject terminal escapes).
+            // forge lines, an ESC inject terminal escapes). A PREVIEW
+            // never degrades to the browser (hover is not intent): the
+            // tile just stays a still.
             Err(e) => {
                 eprintln!(
                     "[video] pipeline failed for {}: {e:?}; degrading to browser",
                     satori_core::pool::clean_reason(&url)
                 );
                 crate::media_guard::clear(&url);
-                if crate::views::content::web_url(&url) {
+                if !preview && crate::views::content::web_url(&url) {
                     cx.open_url(&url);
                 }
             }
@@ -200,18 +259,55 @@ pub fn close(cx: &mut gpui::App) {
     }
 }
 
-/// Close the player only if it's a GIF preview (the picker's hover
-/// player, D104): the composer's picker closing must not murder a
-/// video the overlay is legitimately playing — but a preview left
-/// running without its tile is a pipeline nobody paints.
+/// Close the player only if it's a preview (the picker's hover player,
+/// D104): the composer's picker closing must not murder a video the
+/// overlay is legitimately playing — but a preview left running without
+/// its tile is a pipeline nobody paints. The flag, not the url, decides
+/// (a look-alike url from the service must not immune-ize a preview,
+/// nor doom an overlay video). The pending want retires with it: a
+/// build still in flight will not land.
 pub fn close_gif_preview(cx: &mut gpui::App) {
-    let is_gif = ACTIVE
+    if let Ok(mut g) = PREVIEW_WANT.write() {
+        *g = None;
+    }
+    let is_preview = ACTIVE
         .read()
         .ok()
-        .and_then(|g| g.as_ref().map(|p| p.url.contains("/mp4/orig/")))
+        .and_then(|g| g.as_ref().map(|p| p.preview))
         .unwrap_or(false);
-    if is_gif {
+    if is_preview {
         close(cx);
+    }
+}
+
+/// The cursor left the tile: retire its want, and stop this tile's
+/// preview if it already landed.
+pub fn unwant_preview(url: &str, cx: &mut gpui::App) {
+    if let Ok(mut g) = PREVIEW_WANT.write()
+        && g.as_deref() == Some(url)
+    {
+        *g = None;
+    }
+    if active(url).is_some() {
+        close_gif_preview(cx);
+    }
+}
+
+/// Drop ALL preview state, cx-less (the composer's Drop): the want and
+/// any landed preview player. No wake fires — the only painter was the
+/// composer that is dying.
+pub fn abandon_previews() {
+    if let Ok(mut g) = PREVIEW_WANT.write() {
+        *g = None;
+    }
+    let preview = ACTIVE
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().map(|p| p.preview))
+        .unwrap_or(false);
+    if preview && let Ok(mut a) = ACTIVE.write() {
+        let old = a.take();
+        std::thread::spawn(move || drop(old));
     }
 }
 

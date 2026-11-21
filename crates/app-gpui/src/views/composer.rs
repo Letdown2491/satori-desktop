@@ -685,18 +685,19 @@ impl Composer {
     // --- GIF picker (D104) --------------------------------------------------
 
     /// The GIF button: open or close the picker. Opening with an empty
-    /// state runs the first starter (the guide's §8: no trending
-    /// endpoint; the picker opens on everyday searches). Closing takes
-    /// the preview player down with it — a hover preview without its
-    /// tile is a pipeline nobody paints.
+    /// grid (first open, or a previous failure) seeds the starter term —
+    /// the observe on the field runs the debounced search (one request,
+    /// never two: the direct call double-fired it, five-lens audit Nov
+    /// 2026). Closing takes the preview player down with it — a preview
+    /// without its tile is a pipeline nobody paints.
     fn toggle_gifs(&mut self, cx: &mut Context<Self>) {
         self.gifs_open = !self.gifs_open;
-        if self.gifs_open && self.gifs.is_empty() && self.gifs_err.is_none() {
-            let starter = satori_core::gifs::STARTERS[0];
-            self.gifs_query.update(cx, |i, cx| i.set_text(starter, cx));
-            self.gifs_seq += 1;
-            self.gifs_search(starter, cx);
-        } else if !self.gifs_open {
+        if self.gifs_open {
+            if self.gifs.is_empty() {
+                let starter = satori_core::gifs::STARTERS[0];
+                self.gifs_query.update(cx, |i, cx| i.set_text(starter, cx));
+            }
+        } else {
             crate::video::close_gif_preview(cx);
         }
         cx.notify();
@@ -735,7 +736,11 @@ impl Composer {
     }
 
     /// The search itself: one request per query, the answer applied
-    /// only when its generation is still newest.
+    /// only when its generation is still newest. The request runs on
+    /// core's runtime — reqwest needs the tokio IO driver, and polled
+    /// from gpui's executor it panicked thread 'main' (the crash the
+    /// day D32 shipped, media.rs's note); the channel is the fetch
+    /// seam. The grid changed either way: any open preview retires.
     fn gifs_search(&mut self, q: &str, cx: &mut Context<Self>) {
         if q.is_empty() {
             self.gifs.clear();
@@ -747,10 +752,15 @@ impl Composer {
         let seq = self.gifs_seq;
         self.gifs_loading = true;
         cx.notify();
+        let mut rx = self.core.gifs_search(q.to_string());
         let q = q.to_string();
         cx.spawn(async move |this, cx| {
-            let res = satori_core::gifs::search(&q.clone(), 24, 0).await;
+            let res = rx
+                .recv()
+                .await
+                .unwrap_or(Err(satori_core::gifs::GifError::Unavailable));
             let _ = this.update(cx, |this, cx| {
+                crate::video::close_gif_preview(cx);
                 if this.gifs_seq != seq {
                     return; // a newer query owns the grid
                 }
@@ -775,11 +785,10 @@ impl Composer {
         .detach();
     }
 
-    /// A starter chip: set the field, run the search now.
+    /// A starter chip: set the field — the observe on the field runs
+    /// the debounced search (a direct call double-fired the request).
     fn gifs_chip(&mut self, term: &str, cx: &mut Context<Self>) {
         self.gifs_query.update(cx, |i, cx| i.set_text(term, cx));
-        self.gifs_seq += 1; // retire any in-flight typing's task
-        self.gifs_search(term, cx);
     }
 
     /// A pick: the imeta is born finished — no upload, no bytes (the
@@ -833,14 +842,30 @@ impl Composer {
                     .bg(rgb(theme::panel()))
                     .overflow_hidden()
                     // Hover previews the animation: the pick must show
-                    // the GIF moving before it lands in the note.
+                    // the GIF moving before it lands in the note. A
+                    // DWELL gates the open (300ms): a sweep across the
+                    // grid retires its want at every leave and never
+                    // builds a pipeline per tile crossed (five-lens
+                    // audit Nov 2026). The preview path never opens a
+                    // browser tab — a refused preview is a still.
                     .on_hover(cx.listener(move |_this, hovered: &bool, _, cx| {
                         if *hovered {
-                            crate::video::open(mp4_hover.clone(), Some("video/mp4".into()), cx);
-                        } else if crate::video::active(&mp4_hover).is_some() {
-                            // The mouse left this tile: its preview has
-                            // no watcher — a pipeline nobody paints.
-                            crate::video::close_gif_preview(cx);
+                            crate::video::want_preview(&mp4_hover);
+                            let mp4 = mp4_hover.clone();
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(300))
+                                    .await;
+                                if crate::video::preview_want().as_deref() != Some(mp4.as_str()) {
+                                    return; // the cursor moved on during the dwell
+                                }
+                                let _ = this.update(cx, |_, cx| {
+                                    crate::video::open_preview(mp4.clone(), cx)
+                                });
+                            })
+                            .detach();
+                        } else {
+                            crate::video::unwant_preview(&mp4_hover, cx);
                         }
                     }))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -2018,6 +2043,17 @@ impl Focusable for Composer {
             Tab::Photo | Tab::Video => self.photo_title.read(cx).focus_handle(cx),
             Tab::Note => self.focus.clone(),
         }
+    }
+}
+
+/// The composer dies: retire any preview state (the want and a landed
+/// preview player). Without this, a picker closed by a keyboard pop —
+/// no hover-out, no Esc into the composer's own handler — leaves a
+/// build that lands afterward looping forever (five-lens audit,
+/// memory lens).
+impl Drop for Composer {
+    fn drop(&mut self) {
+        crate::video::abandon_previews();
     }
 }
 

@@ -220,6 +220,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      - name: Write the GIF API key (repo secret; git-ignored file)
+        env:
+          GIFS_API_KEY: ${{ secrets.GIFS_API_KEY }}
+        run: echo -n "$GIFS_API_KEY" > crates/core/gifs_key.txt
+
       - name: Build the apk (alpine 3.22, musl)
         # Digest-pinned (issue #14): the tag alpine:3.22 at the time of
         # pinning; Renovate proposes digest bumps via reviewed PRs.

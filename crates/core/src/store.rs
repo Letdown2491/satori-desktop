@@ -113,9 +113,15 @@ impl Store {
             > 0;
         if !had_store {
             // Same half-swap, self-heal: restore the parked generation
-            // as live rather than boot onto a fresh dir beside it.
+            // as live rather than boot onto a fresh dir beside it. The
+            // live dir is storeLESS (no data.mdb) but may not be EMPTY —
+            // a schema stamp, a half-made staging shell (the audit's
+            // double-vacuum trace) — and rename onto a non-empty dir
+            // fails with ENOTEMPTY, silently stranding the recovery.
+            // Whatever is there without a store is junk: clear it first.
             let prev = config::events_dir().with_extension("prev");
             if prev.join("data.mdb").exists() {
+                let _ = std::fs::remove_dir_all(config::events_dir());
                 let _ = std::fs::rename(&prev, config::events_dir());
             }
         }
@@ -123,15 +129,28 @@ impl Store {
         // app and refuses a downgrade there; this repeat check guards
         // every other open path (tests, a future embedder) with the
         // same rule — never open a newer store than this binary speaks.
-        if let SchemaCheck::TooNew(version) = check_schema(&config::events_dir()) {
-            return Err(DbError::other(format!(
-                "store schema v{version} is newer than this Satori (v{CODE_SCHEMA}); update Satori, or sign in fresh"
-            )));
+        // Outdated refuses TOO (five-lens audit Nov 2026): a failed
+        // boot-gate migration falls back to Store::open, which must not
+        // quietly open the unmigrated store the gate just refused.
+        match check_schema(&config::events_dir()) {
+            SchemaCheck::Current | SchemaCheck::Fresh => {}
+            SchemaCheck::TooNew(version) => {
+                return Err(DbError::other(format!(
+                    "store schema v{version} is newer than this Satori (v{CODE_SCHEMA}); update Satori, or sign in fresh"
+                )));
+            }
+            SchemaCheck::Outdated(version) => {
+                return Err(DbError::other(format!(
+                    "store schema v{version} needs a migration; start Satori once (the boot gate migrates), or remove the store to sign in fresh"
+                )));
+            }
         }
         let db = NostrLmdb::open(config::events_dir()).await?;
         if had_store {
             // The rebuilt store opened: the previous generation is dead now.
-            let _ = std::fs::remove_dir_all(config::events_dir().with_extension("prev"));
+            if let Err(e) = std::fs::remove_dir_all(config::events_dir().with_extension("prev")) {
+                eprintln!("[DEBUG prev remove failed] {e}");
+            }
         }
         Ok(Self { db: Arc::new(db) })
     }
@@ -518,11 +537,26 @@ pub struct VacuumReport {
 }
 
 pub async fn vacuum() -> Result<VacuumReport, String> {
-    // The CLI caller (--vacuum) prints the report and exits — it never
-    // opens the store in this process, so the swapped-in handle is
-    // dropped here. (A caller that keeps RUNNING must use the returned
-    // store: see the heed path-cache note on migrate_with.)
-    vacuum_at(&config::events_dir()).await.map(|(r, _)| r)
+    // The schema gate (five-lens audit Nov 2026): the CLI door reads,
+    // copies, and swaps — it must never swap an Outdated store's
+    // pre-migration copy live (the older binary that follows would
+    // retroactively stamp it and open it: the silent downgrade D100
+    // refuses everywhere else), nor touch a TooNew one.
+    match check_schema(&config::events_dir()) {
+        SchemaCheck::Outdated(from) => Err(format!(
+            "store schema v{from} needs a migration this tool cannot run: start Satori once (the boot gate migrates), then vacuum"
+        )),
+        SchemaCheck::TooNew(version) => Err(format!(
+            "store schema v{version} is newer than this Satori (v{CODE_SCHEMA}); update Satori"
+        )),
+        _ => {
+            // The CLI caller (--vacuum) prints the report and exits — it never
+            // opens the store in this process, so the swapped-in handle is
+            // dropped here. (A caller that keeps RUNNING must use the returned
+            // store: see the heed path-cache note on migrate_with.)
+            vacuum_at(&config::events_dir()).await.map(|(r, _)| r)
+        }
+    }
 }
 
 /// The rebuild itself, against explicit paths: `dir` is the live store
@@ -544,7 +578,7 @@ pub async fn vacuum() -> Result<VacuumReport, String> {
 async fn walk_copy_all(
     source: &NostrLmdb,
     fresh: &NostrLmdb,
-    transform: &dyn Fn(Event) -> Option<Event>,
+    transform: &(dyn Fn(Event) -> Option<Event> + Send + Sync),
 ) -> Result<usize, String> {
     const WINDOW: u64 = VACUUM_WINDOW;
     let now = Timestamp::now().as_secs();
@@ -552,16 +586,12 @@ async fn walk_copy_all(
     let mut hi = now;
     loop {
         let lo = hi.saturating_sub(WINDOW - 1);
-        let filter = Filter::new()
-            .since(Timestamp::from(lo))
-            .until(Timestamp::from(hi));
-        let events = source.query(filter).await.map_err(|e| e.to_string())?;
-        for event in events {
-            if let Some(event) = transform(event) {
-                fresh.save_event(&event).await.map_err(|e| e.to_string())?;
-                copied += 1;
-            }
-        }
+        // copy_range IS the D89 discipline (five-lens audit Nov 2026):
+        // the window pages down to COPY_PAGE chunks before any query
+        // materializes, and saves drain in COPY_SAVE_BATCH transactions
+        // — the whole window decoded at once, fsynced per event, was
+        // the pre-D89 shape on a 1.3 GB store.
+        copy_range(source, fresh, lo, hi, transform, &mut copied).await?;
         if lo == 0 {
             break;
         }
@@ -573,16 +603,15 @@ async fn walk_copy_all(
     // counted by the total above but covered by no window, and the verify
     // below would refuse the swap over it - the 0.5.0 vacuum aborted on
     // exactly this, one future-dated event among 25,544. Catch the tail.
-    let tail = source
-        .query(Filter::new().since(Timestamp::from(now + 1)))
-        .await
-        .map_err(|e| e.to_string())?;
-    for event in tail {
-        if let Some(event) = transform(event) {
-            fresh.save_event(&event).await.map_err(|e| e.to_string())?;
-            copied += 1;
-        }
-    }
+    copy_range(
+        source,
+        fresh,
+        now + 1,
+        now + 10 * 365 * 24 * 3600,
+        transform,
+        &mut copied,
+    )
+    .await?;
     Ok(copied)
 }
 
@@ -668,6 +697,9 @@ async fn vacuum_at(dir: &std::path::Path) -> Result<(VacuumReport, Store), Strin
     }
     swap_staged(dir, &staging)?;
 
+    // The stamp rides the swap (see adopt_staged): the live dir never
+    // sits unstamped after a generation change.
+    write_schema_version(dir, CODE_SCHEMA);
     // The gate measures growth FROM the last rebuild, manual or automatic.
     record_watermark(dir, bytes_of(dir));
 
@@ -1016,6 +1048,7 @@ async fn adopt_staged(dir: &std::path::Path) -> Result<(VacuumReport, Store), St
         &fresh,
         cutoff,
         Timestamp::now().as_secs(),
+        &|event| Some(event),
         &mut moved,
     )
     .await?;
@@ -1042,6 +1075,11 @@ async fn adopt_staged(dir: &std::path::Path) -> Result<(VacuumReport, Store), St
             .map_err(|e| e.to_string())?;
     }
     swap_staged(dir, &staging)?;
+    // The stamp rides the swap (five-lens audit Nov 2026): the live dir
+    // must never sit unstamped — a pre-CODE_SCHEMA binary reading it
+    // bare would retroactively stamp it as its own and open it (the
+    // silent downgrade this machinery refuses everywhere else).
+    write_schema_version(dir, CODE_SCHEMA);
     // The adoption is the handoff's end: the state file goes with the
     // staging dir it described.
     let _ = std::fs::remove_file(vacuum_state_path(dir));
@@ -1108,7 +1146,15 @@ async fn deferred_vacuum_walk(store: &Store) -> Result<(), String> {
     let mut hi = if start_over { now } else { cursor.min(now) };
     loop {
         let lo = hi.saturating_sub(VACUUM_WINDOW - 1);
-        copy_range(store.database().as_ref(), &fresh, lo, hi, &mut copied).await?;
+        copy_range(
+            store.database().as_ref(),
+            &fresh,
+            lo,
+            hi,
+            &|event| Some(event),
+            &mut copied,
+        )
+        .await?;
         write_vacuum_state(&dir, "copying", cutoff, lo, copied);
         if lo == 0 {
             break;
@@ -1123,6 +1169,7 @@ async fn deferred_vacuum_walk(store: &Store) -> Result<(), String> {
         &fresh,
         now + 1,
         now + 10 * 365 * 24 * 3600,
+        &|event| Some(event),
         &mut copied,
     )
     .await?;
@@ -1161,12 +1208,17 @@ const COPY_SAVE_BATCH: usize = 128;
 /// Copy every event in [lo, hi] into `fresh` (D89 audit): the range is
 /// split recursively until each materialized chunk is under COPY_PAGE,
 /// so the walk's RAM is bounded no matter how heavy one window is.
-/// Saves are idempotent by id, so overlap and resumes are free.
+/// Saves are idempotent by id, so overlap and resumes are free. The
+/// transform hooks the per-event re-encode (the migration); the
+/// vacuum's and adoption's walks pass identity. `copied` counts SAVED
+/// events — drops by the transform are excluded (walk_copy_all's
+/// honesty check compares against the staging count).
 async fn copy_range(
     src: &NostrLmdb,
     fresh: &NostrLmdb,
     lo: u64,
     hi: u64,
+    transform: &(dyn Fn(Event) -> Option<Event> + Send + Sync),
     copied: &mut usize,
 ) -> Result<(), String> {
     let filter = Filter::new()
@@ -1178,18 +1230,25 @@ async fn copy_range(
     }
     if n as u64 > COPY_PAGE && lo < hi {
         let mid = lo + (hi - lo) / 2;
-        Box::pin(copy_range(src, fresh, mid + 1, hi, copied)).await?;
-        Box::pin(copy_range(src, fresh, lo, mid, copied)).await?;
+        Box::pin(copy_range(src, fresh, mid + 1, hi, transform, copied)).await?;
+        Box::pin(copy_range(src, fresh, lo, mid, transform, copied)).await?;
         return Ok(());
     }
     let events = src.query(filter).await.map_err(|e| e.to_string())?;
-    for batch in events.iter().collect::<Vec<_>>().chunks(COPY_SAVE_BATCH) {
-        let saves = batch.iter().map(|e| fresh.save_event(e));
-        for saved in futures_util::future::join_all(saves).await {
-            saved.map_err(|e| e.to_string())?;
+    let mut saved = 0usize;
+    for batch in events
+        .into_iter()
+        .collect::<Vec<_>>()
+        .chunks(COPY_SAVE_BATCH)
+    {
+        let transformed: Vec<Event> = batch.iter().filter_map(|e| transform(e.clone())).collect();
+        let saves = transformed.iter().map(|e| fresh.save_event(e));
+        for result in futures_util::future::join_all(saves).await {
+            result.map_err(|e| e.to_string())?;
         }
+        saved += transformed.len();
     }
-    *copied += events.len();
+    *copied += saved;
     Ok(())
 }
 
@@ -1263,6 +1322,14 @@ async fn boot_gate_at(dir: &std::path::Path, ratio: f64, floor: u64) -> Result<G
     match check_schema(dir) {
         SchemaCheck::TooNew(version) => return Ok(GateAction::Refused(version)),
         SchemaCheck::Outdated(_) => {
+            // A pending vacuum handoff describes a PRE-migration copy:
+            // adopting it after the migration would swap the old
+            // encoding back in, and the retroactive re-stamp would call
+            // the regressed store current (five-lens audit Nov 2026).
+            // The migration IS a rebuild — the handoff is void, staging
+            // dir and state file both (`copying` walks included).
+            let _ = std::fs::remove_file(vacuum_state_path(dir));
+            let _ = std::fs::remove_dir_all(dir.with_extension("vacuum"));
             let (report, store) = migrate(dir).await?;
             return Ok(GateAction::Migrated(report, store));
         }

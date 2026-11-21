@@ -43,6 +43,31 @@ pub enum Gate {
     Door(Box<Door>),
 }
 
+/// What a refused open degrades to. The TAP's semantics (Browser) hand
+/// the url to the system browser — an explicit tap is intent. The HOVER
+/// PREVIEW's semantics (Nothing, D104) are a no-op: the tile stays a
+/// still. Hover is not intent — a cursor sweep across a grid must never
+/// open a browser tab per tile crossed (five-lens audit Nov 2026).
+#[derive(Clone, Copy)]
+pub enum Degrade {
+    Browser,
+    Nothing,
+}
+
+fn fall_back(url: &str, degrade: Degrade, cx: &mut gpui::App) {
+    if let Degrade::Browser = degrade {
+        cx.open_url(url);
+    }
+}
+
+/// Is ANY pipeline building right now? (cx-less.) The build window is
+/// process-wide — one player per process, so the two never build
+/// concurrently; a second open inside a build window is a no-op, not a
+/// second concurrent pipeline+proxy+download.
+pub fn opening_busy() -> bool {
+    OPENING.read().ok().is_some()
+}
+
 /// `Gate::Door`'s payload, boxed (clippy: the variant dwarfed Handled).
 pub struct Door {
     /// The ORIGIN url, parsed (the screen's host comes from here).
@@ -60,25 +85,35 @@ pub struct Door {
 /// mark, and the M5 proxy door (no door, no dial: degrade to the
 /// browser, fail closed). Every degrade arm wakes the views so a
 /// breathing build mark never sticks.
-pub fn gate(url: &str, inline: bool, already: bool, tag: &str, cx: &mut gpui::App) -> Gate {
+pub fn gate(
+    url: &str,
+    inline: bool,
+    already: bool,
+    tag: &str,
+    cx: &mut gpui::App,
+    degrade: Degrade,
+) -> Gate {
     // The browser allow-list (audit security M2). The AUDIO player's tap
     // used to open_url here unguarded (audit security: an attacker imeta
     // URL of any scheme rode the row straight to a desktop handler).
     let openable = crate::views::content::web_url(url);
     if !openable || !inline {
         if openable {
-            cx.open_url(url);
+            fall_back(url, degrade, cx);
         }
         return Gate::Handled;
     }
     let Ok(parsed) = url::Url::parse(url) else {
         // Not a real URL at all — the browser can sort it out or not.
-        cx.open_url(url);
+        fall_back(url, degrade, cx);
         return Gate::Handled;
     };
     // Already open or building — a second tap on the same row is a
-    // no-op, not a second pipeline.
-    if already {
+    // no-op, not a second pipeline. And NO open (any url) starts while
+    // a build is in flight: the door's one-player law covers the build
+    // window too (five-lens audit Nov 2026 — a hover sweep used to
+    // construct one pipeline per tile crossed).
+    if already || opening_busy() {
         return Gate::Handled;
     }
     if let Ok(mut g) = OPENING.write() {
@@ -92,7 +127,7 @@ pub fn gate(url: &str, inline: bool, already: bool, tag: &str, cx: &mut gpui::Ap
         Err(e) => {
             eprintln!("[{tag}] proxy spawn failed ({e}); degrading to browser");
             clear(url);
-            cx.open_url(url);
+            fall_back(url, degrade, cx);
             cx.set_global(crate::video::Signal);
             return Gate::Handled;
         }
@@ -102,7 +137,7 @@ pub fn gate(url: &str, inline: bool, already: bool, tag: &str, cx: &mut gpui::Ap
         Err(e) => {
             eprintln!("[{tag}] proxy uri unparseable ({e}); degrading to browser");
             clear(url);
-            cx.open_url(url);
+            fall_back(url, degrade, cx);
             cx.set_global(crate::video::Signal);
             return Gate::Handled;
         }

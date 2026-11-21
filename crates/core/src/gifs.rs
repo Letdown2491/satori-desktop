@@ -284,8 +284,25 @@ pub fn imeta_for(gif: &Gif) -> Vec<String> {
     if let Some(bytes) = gif.bytes {
         tag.push(format!("size {bytes}"));
     }
-    if !gif.title.is_empty() {
-        tag.push(format!("alt {}", gif.title));
+    // The title is uploader-influenced service metadata flowing into the
+    // user's published note: control chars stripped, whitespace
+    // collapsed — the single-line shape the composer's own alt editor
+    // enforces (a newline in an entry corrupts line-parsing imeta
+    // readers in OTHER clients; Satori's own parser is element-based
+    // and safe either way). (five-lens audit Nov 2026)
+    let alt: String = gif
+        .title
+        .chars()
+        // Control chars OUT, but whitespace stays: \n and \t are
+        // controls too, and they are the very separators the collapse
+        // below needs (filter first, THEN collapse).
+        .filter(|c| c.is_whitespace() || !c.is_control())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !alt.is_empty() {
+        tag.push(format!("alt {alt}"));
     }
     tag
 }
@@ -372,5 +389,16 @@ mod tests {
         let imeta = imeta_for(&gif);
         assert_eq!(imeta[1], "m image/webp");
         assert_eq!(imeta.len(), 3, "no size (null bytes), no alt (empty title)");
+    }
+
+    #[test]
+    fn the_alt_entry_stays_one_line() {
+        // Service titles flow into the published note: control chars
+        // out, whitespace collapsed — the imeta entry's single-line
+        // shape (other clients parse entries as key=value lines).
+        let mut gif: Gif = serde_json::from_str(SAMPLE).unwrap();
+        gif.title = "wave\n  curling\t\u{7}wild".into();
+        let imeta = imeta_for(&gif);
+        assert_eq!(imeta[4], "alt wave curling wild");
     }
 }

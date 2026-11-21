@@ -220,7 +220,10 @@ pub fn get_string(key: &str) -> Option<String> {
 pub fn retention_days() -> Option<u64> {
     match read_value(config::files::PREFS).get("retention_days") {
         Some(serde_json::Value::String(s)) if s == "forever" => None,
-        Some(v) => Some(v.as_u64().unwrap_or(90)),
+        // The same 7..=3650 clamp core's reader applies (five-lens audit
+        // Nov 2026): a hand-edited pref can't show "0 days" while the
+        // prune actually runs at 7 — display and destruction agree.
+        Some(v) => Some(v.as_u64().unwrap_or(90).clamp(7, 3650)),
         None => Some(90),
     }
 }

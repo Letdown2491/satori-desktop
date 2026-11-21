@@ -422,6 +422,16 @@ impl Shell {
     fn pump_signer(&self, cx: &mut Context<Self>) {
         let mut rx = self.core.signer_health();
         cx.spawn(async move |this, cx| {
+            // The value at subscribe time counts as SEEN (tokio watch):
+            // without this first read, a session that starts with the
+            // bar already warranted (the watch left false by the
+            // previous session, five-lens audit Nov 2026) would paint
+            // nothing until the next tick.
+            let down = !*rx.borrow_and_update();
+            let _ = this.update(cx, |this, cx| {
+                this.signer_down = down;
+                cx.notify();
+            });
             while rx.changed().await.is_ok() {
                 let down = !*rx.borrow();
                 let _ = this.update(cx, |this, cx| {

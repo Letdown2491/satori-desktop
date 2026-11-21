@@ -79,6 +79,7 @@ pub fn open(url: String, cx: &mut gpui::App) {
         crate::media_guard::opening(&url),
         "[audio]",
         cx,
+        crate::media_guard::Degrade::Browser,
     ) else {
         return;
     };
