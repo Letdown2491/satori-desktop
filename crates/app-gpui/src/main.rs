@@ -23,8 +23,8 @@ mod views;
 use std::sync::Arc;
 
 use gpui::{
-    App, Application, Bounds, Context, Entity, Render, WindowBounds, WindowOptions, div,
-    prelude::*, px, size,
+    App, Application, Bounds, Context, Entity, Render, Window, WindowBounds, WindowOptions, div,
+    prelude::*, px, rgb, size,
 };
 use satori_core::manager::{Core, FeedEvent};
 
@@ -259,24 +259,40 @@ fn main() {
     // startup"): the gate now STAGES a copy and defers the walk to the
     // background (spawned at Pool::open); a later boot adopts the
     // finished copy (delta + renames, bounded by one session's writes).
+    let mut preopen = None;
     match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("boot-gate runtime")
         .block_on(satori_core::store::boot_gate())
     {
-        Ok(satori_core::store::GateAction::Swapped(report)) => {
+        Ok(satori_core::store::GateAction::Swapped(report, store)) => {
             println!(
                 "boot gate: store rebuilt, {} events, data.mdb {:.1} MB -> {:.1} MB",
                 report.events,
                 report.bytes_before as f64 / 1048576.0,
                 report.bytes_after as f64 / 1048576.0
             );
+            preopen = Some(store);
+        }
+        Ok(satori_core::store::GateAction::Migrated(report, store)) => {
+            println!(
+                "boot gate: store migrated to schema v{}, {} events",
+                satori_core::store::CODE_SCHEMA,
+                report.events
+            );
+            preopen = Some(store);
         }
         Ok(satori_core::store::GateAction::Deferred) => {
             println!(
                 "boot gate: store rebuild deferred to the background; the slimmer store applies at a later launch"
             );
+        }
+        Ok(satori_core::store::GateAction::Refused(version)) => {
+            // The downgrade stop (D100): the store on disk was written
+            // by a newer Satori. Open nothing — show the quiet screen.
+            schema_refusal(version);
+            return;
         }
         Ok(satori_core::store::GateAction::Idle) => {}
         Err(err) => {
@@ -332,6 +348,11 @@ fn main() {
         }
         cx.set_global(desktop);
         let core = Arc::new(Core::new());
+        // The boot gate's hand-through (D100): a migrated or adopted
+        // store rides into the pool as the live env, never a reopen.
+        if let Some(store) = preopen.take() {
+            core.preopen_store(store);
+        }
         // The suspend watchdog (DESIGN.md §3.4): after sleep/hibernate,
         // reconnect the relays in seconds instead of the SDK's backoff.
         core.spawn_suspend_watchdog();
@@ -372,6 +393,63 @@ fn main() {
             },
         )
         .expect("failed to open Satori window");
+        cx.activate(true);
+    });
+}
+
+/// The downgrade refusal screen (D100): the store on disk was written
+/// by a NEWER Satori, and opening it would be the silent corruption the
+/// schema machinery exists to prevent. No core, no pool, no store — a
+/// quiet window with the one honest sentence and the two exits.
+struct SchemaRefusal {
+    version: u32,
+}
+
+impl Render for SchemaRefusal {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .bg(rgb(crate::theme::panel()))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(px(crate::theme::T_BODY))
+                    .text_color(rgb(crate::theme::ink()))
+                    .child("This store was written by a newer Satori"),
+            )
+            .child(
+                div()
+                    .text_size(px(crate::theme::T_UI))
+                    .text_color(rgb(crate::theme::muted()))
+                    .child(format!(
+                        "Your data is safe. Update Satori to keep this library, or sign in fresh to start a new one (store schema v{}, this Satori speaks v{}).",
+                        self.version,
+                        satori_core::store::CODE_SCHEMA
+                    )),
+            )
+    }
+}
+
+fn schema_refusal(version: u32) {
+    Application::with_platform(gpui_linux::current_platform(false)).run(move |cx: &mut App| {
+        let bounds = Bounds::centered(None, size(px(480.), px(180.)), cx);
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("Satori".into()),
+                    ..Default::default()
+                }),
+                app_id: Some(satori_core::config::APP_ID.into()),
+                ..Default::default()
+            },
+            |_window, cx| cx.new(|_cx| SchemaRefusal { version }),
+        )
+        .expect("failed to open the refusal window");
         cx.activate(true);
     });
 }

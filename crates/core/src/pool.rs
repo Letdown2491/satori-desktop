@@ -271,6 +271,14 @@ impl Pool {
     }
 
     pub async fn open() -> Result<Self, SdkError> {
+        Self::open_with(None).await
+    }
+
+    /// Open with a pre-opened store: the boot gate's swap hands its
+    /// migrated/adopted env through (the heed path-cache rule — a
+    /// reopen of a swapped path returns the renamed-away env). `None`
+    /// opens the ordinary way; `open()` is this with `None`.
+    pub async fn open_with(preopen: Option<Store>) -> Result<Self, SdkError> {
         // M5 WP2: the screening transport. Every relay NOT in the
         // user-chosen set dials through it — resolution pinned
         // fail-closed to public unicast. If loopback won't bind there
@@ -279,7 +287,10 @@ impl Pool {
             .await
             .map_err(|e| SdkError::other(format!("screening transport: {e}")))?;
         let socks_addr = screening.addr();
-        let store = Store::open().await?;
+        let store = match preopen {
+            Some(store) => store,
+            None => Store::open().await?,
+        };
         // D87: if the boot gate deferred the store rebuild, the walk
         // runs here — beside the app, reading through this very handle.
         // No-ops (cheap stat) unless the state file says a copy is due.

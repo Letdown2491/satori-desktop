@@ -79,7 +79,7 @@ pub const FEED_KINDS: [Kind; 17] = [
 /// The app's LMDB store (nostr-lmdb). `Clone` is a handle clone — the
 /// env is one `Arc`; the deferred-vacuum walk takes one so it can read
 /// through the live env instead of opening a second one on the file.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Store {
     db: Arc<NostrLmdb>,
 }
@@ -118,6 +118,15 @@ impl Store {
             if prev.join("data.mdb").exists() {
                 let _ = std::fs::rename(&prev, config::events_dir());
             }
+        }
+        // The schema backstop (D100): the boot gate runs first in the
+        // app and refuses a downgrade there; this repeat check guards
+        // every other open path (tests, a future embedder) with the
+        // same rule — never open a newer store than this binary speaks.
+        if let SchemaCheck::TooNew(version) = check_schema(&config::events_dir()) {
+            return Err(DbError::other(format!(
+                "store schema v{version} is newer than this Satori (v{CODE_SCHEMA}); update Satori, or sign in fresh"
+            )));
         }
         let db = NostrLmdb::open(config::events_dir()).await?;
         if had_store {
@@ -509,14 +518,75 @@ pub struct VacuumReport {
 }
 
 pub async fn vacuum() -> Result<VacuumReport, String> {
-    vacuum_at(&config::events_dir()).await
+    // The CLI caller (--vacuum) prints the report and exits — it never
+    // opens the store in this process, so the swapped-in handle is
+    // dropped here. (A caller that keeps RUNNING must use the returned
+    // store: see the heed path-cache note on migrate_with.)
+    vacuum_at(&config::events_dir()).await.map(|(r, _)| r)
 }
 
 /// The rebuild itself, against explicit paths: `dir` is the live store
 /// (`events/`), the staging copy goes to `events.vacuum` beside it, and
 /// on success `dir` becomes `events.prev` while the staging copy takes
 /// its name. Same-filesystem renames: atomic, no copy.
-async fn vacuum_at(dir: &std::path::Path) -> Result<VacuumReport, String> {
+/// The full copy walk, shared by the vacuum and the schema migration:
+/// every event, copied from the source env into the staging env in
+/// created_at windows walking BACKWARDS from now (the hot 90 days
+/// first, then bookmark-preserved elders). The walk runs to the epoch —
+/// an earlier draft stopped after eight consecutive empty windows
+/// (~8 months), which silently dropped anything older the prune had
+/// preserved (a bookmark past the stop vanished with nothing else in
+/// range; D84 audit). The empty-tail queries cost microseconds against
+/// the created_at index — ~640 windows to the epoch, capped by
+/// [lo == 0] below. The transform applies per event (the vacuum passes
+/// identity; the migration re-encodes). Returns events SAVED (drops
+/// by the transform are excluded).
+async fn walk_copy_all(
+    source: &NostrLmdb,
+    fresh: &NostrLmdb,
+    transform: &dyn Fn(Event) -> Option<Event>,
+) -> Result<usize, String> {
+    const WINDOW: u64 = VACUUM_WINDOW;
+    let now = Timestamp::now().as_secs();
+    let mut copied = 0usize;
+    let mut hi = now;
+    loop {
+        let lo = hi.saturating_sub(WINDOW - 1);
+        let filter = Filter::new()
+            .since(Timestamp::from(lo))
+            .until(Timestamp::from(hi));
+        let events = source.query(filter).await.map_err(|e| e.to_string())?;
+        for event in events {
+            if let Some(event) = transform(event) {
+                fresh.save_event(&event).await.map_err(|e| e.to_string())?;
+                copied += 1;
+            }
+        }
+        if lo == 0 {
+            break;
+        }
+        hi = lo - 1;
+    }
+
+    // The windows tile [0, now); an event with a created_at AHEAD of the
+    // local clock (one relay or client with a skewed time is enough) is
+    // counted by the total above but covered by no window, and the verify
+    // below would refuse the swap over it - the 0.5.0 vacuum aborted on
+    // exactly this, one future-dated event among 25,544. Catch the tail.
+    let tail = source
+        .query(Filter::new().since(Timestamp::from(now + 1)))
+        .await
+        .map_err(|e| e.to_string())?;
+    for event in tail {
+        if let Some(event) = transform(event) {
+            fresh.save_event(&event).await.map_err(|e| e.to_string())?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
+}
+
+async fn vacuum_at(dir: &std::path::Path) -> Result<(VacuumReport, Store), String> {
     let staging = dir.with_extension("vacuum"); // events/ -> events.vacuum/
     let prev = dir.with_extension("prev");
     let bytes_of = |d: &std::path::Path| {
@@ -555,47 +625,10 @@ async fn vacuum_at(dir: &std::path::Path) -> Result<VacuumReport, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    // Copy in created_at windows, walking BACKWARDS from now: the hot
-    // 90 days first, then bookmark-preserved elders. The walk runs to
-    // the epoch — an earlier draft stopped after eight consecutive
-    // empty windows (~8 months), which silently dropped anything older
-    // the prune had preserved (a bookmark past the stop vanished with
-    // nothing else in range; D84 audit). The empty-tail queries cost
-    // microseconds against the created_at index — ~640 windows to the
-    // epoch, capped by [lo == 0] below.
-    const WINDOW: u64 = VACUUM_WINDOW;
-    let now = Timestamp::now().as_secs();
-    let mut copied = 0usize;
-    let mut hi = now;
-    loop {
-        let lo = hi.saturating_sub(WINDOW - 1);
-        let filter = Filter::new()
-            .since(Timestamp::from(lo))
-            .until(Timestamp::from(hi));
-        let events = source.query(filter).await.map_err(|e| e.to_string())?;
-        for event in &events {
-            fresh.save_event(event).await.map_err(|e| e.to_string())?;
-        }
-        copied += events.len();
-        if lo == 0 {
-            break;
-        }
-        hi = lo - 1;
-    }
-
-    // The windows tile [0, now); an event with a created_at AHEAD of the
-    // local clock (one relay or client with a skewed time is enough) is
-    // counted by the total above but covered by no window, and the verify
-    // below would refuse the swap over it - the 0.5.0 vacuum aborted on
-    // exactly this, one future-dated event among 25,544. Catch the tail.
-    let tail = source
-        .query(Filter::new().since(Timestamp::from(now + 1)))
-        .await
-        .map_err(|e| e.to_string())?;
-    for event in &tail {
-        fresh.save_event(event).await.map_err(|e| e.to_string())?;
-    }
-    copied += tail.len();
+    // The full copy walk (identity transform): every event, hot window
+    // first, future-dated tail caught. The verify trio below is the
+    // honesty gate: nothing lost, nothing gained, nothing wrote mid-run.
+    let copied = walk_copy_all(&source, &fresh, &|event| Some(event)).await?;
 
     // The honesty checks: nothing lost, nothing gained - and if the
     // store moved under us, say so instead of crying copy error. Any
@@ -638,11 +671,17 @@ async fn vacuum_at(dir: &std::path::Path) -> Result<VacuumReport, String> {
     // The gate measures growth FROM the last rebuild, manual or automatic.
     record_watermark(dir, bytes_of(dir));
 
-    Ok(VacuumReport {
+    let report = VacuumReport {
         events: total,
         bytes_before,
         bytes_after: bytes_of(dir),
-    })
+    };
+    Ok((
+        report,
+        Store {
+            db: Arc::new(fresh),
+        },
+    ))
 }
 
 /// The swap half of every rebuild: the live store parks as
@@ -754,14 +793,200 @@ pub fn schedule_rebuild() -> Result<(), String> {
     Ok(())
 }
 
+// --- Schema versioning (D100) -------------------------------------------
+//
+// The store's biggest file carried no record of who wrote it or in what
+// format. This section is the fix: a version stamp inside the store dir,
+// checked at every boot, with a migration runner on the vacuum's rails.
+//
+// The invariant that orders everything: the schema check runs BEFORE the
+// vacuum gate at every boot, so an adoption (which re-encodes through the
+// SDK and would lose a beside-the-store stamp) only ever handles a
+// current-schema store.
+
+/// The store schema THIS binary writes and reads. v1 is retroactive:
+/// every store the app ever wrote before versioning existed is v1 —
+/// the first open under this machinery stamps such a store in place,
+/// and nothing about today's formats changes.
+pub const CODE_SCHEMA: u32 = 1;
+
+/// The stamp lives INSIDE the store dir (`events/schema.json`), not
+/// beside it: the vacuum's and the migration's swaps rename whole
+/// directories, and a beside-the-store stamp would desync from the
+/// generation it describes (a `prev` restore would read the new stamp
+/// over the old store).
+fn schema_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("schema.json")
+}
+
+fn read_schema_version(dir: &std::path::Path) -> Option<u32> {
+    std::fs::read_to_string(schema_path(dir))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get("version").and_then(|v| v.as_u64()))
+        .map(|v| v as u32)
+}
+
+fn write_schema_version(dir: &std::path::Path, version: u32) {
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(json) = serde_json::to_string(&serde_json::json!({ "version": version, "at": at })) {
+        let _ = std::fs::write(schema_path(dir), json);
+    }
+}
+
+/// The boot-time schema verdict. `Fresh`: no store yet (stamped on the
+/// way through). `Current`: the stamp matches this binary. `Outdated`:
+/// an older store this binary must migrate before opening. `TooNew`: a
+/// NEWER store this binary must refuse — opening it would be the silent
+/// corruption this exists to prevent.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SchemaCheck {
+    Fresh,
+    Current,
+    Outdated(u32),
+    TooNew(u32),
+}
+
+pub fn check_schema(dir: &std::path::Path) -> SchemaCheck {
+    match read_schema_version(dir) {
+        None => {
+            // Retroactive stamp: whatever is here (or nothing) is v1.
+            write_schema_version(dir, CODE_SCHEMA);
+            if dir.join("data.mdb").exists() {
+                SchemaCheck::Current
+            } else {
+                SchemaCheck::Fresh
+            }
+        }
+        Some(v) if v == CODE_SCHEMA => SchemaCheck::Current,
+        Some(v) if v < CODE_SCHEMA => SchemaCheck::Outdated(v),
+        Some(v) => SchemaCheck::TooNew(v),
+    }
+}
+
+/// One migration step: a per-event transform, applied while copying a
+/// store into staging. `None` drops the event. Pure and testable — the
+/// runner owns the copy, the counts, and the swap.
+type MigrationStep = fn(Event) -> Option<Event>;
+
+/// The real steps, in order: `MIGRATION_STEPS[i]` upgrades a v(i+1)
+/// store to v(i+2). Empty today — v1 is the only schema, so `Outdated`
+/// is unreachable until the first format change appends a step AND
+/// bumps CODE_SCHEMA in the same commit.
+static MIGRATION_STEPS: &[MigrationStep] = &[];
+
+/// Migrate a store at `dir` from its stamped version to CODE_SCHEMA:
+/// the vacuum's walk with the version's transform hooked in — full
+/// copy into staging, the count verified against the source, the same
+/// two-rename swap, the stamp advanced only after the swap lands. Any
+/// abort leaves the live store and its old stamp untouched.
+///
+/// Returns the OPEN STORE built on the migrated env — never a fresh
+/// `Store::open` at `dir`. heed caches envs by path in a process-global
+/// registry, and a cache entry only leaves via an env handle we do not
+/// hold (nostr-lmdb wraps it), so a reopen after the swap returns the
+/// STALE env mapped to the renamed-away inode: the migration would be
+/// invisible and the session's writes would land in the parked
+/// generation. The env that walked the copy IS the store, now living
+/// at `dir`.
+async fn migrate_with(
+    dir: &std::path::Path,
+    from: u32,
+    steps: &[MigrationStep],
+) -> Result<(VacuumReport, Store), String> {
+    if from + steps.len() as u32 != CODE_SCHEMA {
+        return Err(format!(
+            "no migration path from store schema v{from} to v{CODE_SCHEMA}"
+        ));
+    }
+    let staging = dir.with_extension("migrate");
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let source = NostrLmdb::open(dir).await.map_err(|e| e.to_string())?;
+    let fresh = NostrLmdb::open(&staging).await.map_err(|e| e.to_string())?;
+    let total = source
+        .count(Filter::new())
+        .await
+        .map_err(|e| e.to_string())?;
+    let copied = walk_copy_all(&source, &fresh, &|event| {
+        steps.iter().try_fold(event, |e, step| step(e))
+    })
+    .await?;
+    // Nothing lost: the staging count is checked against the walked
+    // count, and the source against ITS count at the start (the same
+    // mid-run-write refusal the vacuum has; the boot-gate window makes
+    // this a formality, but the check is free).
+    let fresh_count = fresh
+        .count(Filter::new())
+        .await
+        .map_err(|e| e.to_string())?;
+    if fresh_count != copied {
+        return Err(format!(
+            "migration aborted: staging holds {fresh_count} events but {copied} were copied"
+        ));
+    }
+    let source_now = source
+        .count(Filter::new())
+        .await
+        .map_err(|e| e.to_string())?;
+    if source_now != total {
+        return Err(format!(
+            "migration aborted: the store changed during the run ({total} events at the start, {source_now} now)"
+        ));
+    }
+    for d in [&staging, dir] {
+        std::fs::File::open(d)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())?;
+    }
+    swap_staged(dir, &staging)?;
+    write_schema_version(dir, CODE_SCHEMA);
+    let report = VacuumReport {
+        events: total,
+        bytes_before: std::fs::metadata(dir.join("data.mdb"))
+            .map(|m| m.len())
+            .unwrap_or(0),
+        bytes_after: std::fs::metadata(dir.join("data.mdb"))
+            .map(|m| m.len())
+            .unwrap_or(0),
+    };
+    Ok((
+        report,
+        Store {
+            db: Arc::new(fresh),
+        },
+    ))
+}
+
+/// The real migration entry (the boot gate's; tests drive
+/// `migrate_with` with fake steps).
+async fn migrate(dir: &std::path::Path) -> Result<(VacuumReport, Store), String> {
+    let from = read_schema_version(dir).unwrap_or(CODE_SCHEMA);
+    migrate_with(dir, from, MIGRATION_STEPS).await
+}
+
 /// The gate's verdict. `Idle` is every ordinary boot; `Deferred` opens
 /// the app immediately with the walk running beside it; `Swapped`
-/// reports an adopted (or fallback-rebuilt) store.
+/// reports an adopted (or fallback-rebuilt) store; `Migrated` reports a
+/// schema migration completed in this boot's exclusive window;
+/// `Refused` is the downgrade stop — the store on disk is newer than
+/// this binary, and the app must not open it. The swapped and migrated
+/// variants carry the OPEN STORE built on the swapped-in env: heed
+/// caches envs by path, so the process that swapped MUST adopt the
+/// handle instead of reopening the path (the reopen returns the stale,
+/// renamed-away env).
 #[derive(Debug, Clone)]
 pub enum GateAction {
     Idle,
     Deferred,
-    Swapped(VacuumReport),
+    Swapped(VacuumReport, Store),
+    Migrated(VacuumReport, Store),
+    Refused(u32),
 }
 
 /// Phase 3: adopt a completed staging copy. The delta (events saved
@@ -770,7 +995,7 @@ pub enum GateAction {
 /// before the swap: a shortfall means old-dated backfill landed in
 /// already-walked windows, and the caller falls back to the full
 /// blocking rebuild rather than swap a lossy store in.
-async fn adopt_staged(dir: &std::path::Path) -> Result<VacuumReport, String> {
+async fn adopt_staged(dir: &std::path::Path) -> Result<(VacuumReport, Store), String> {
     let staging = dir.with_extension("vacuum");
     let bytes_of = |d: &std::path::Path| {
         std::fs::metadata(d.join("data.mdb"))
@@ -822,11 +1047,19 @@ async fn adopt_staged(dir: &std::path::Path) -> Result<VacuumReport, String> {
     let _ = std::fs::remove_file(vacuum_state_path(dir));
 
     record_watermark(dir, bytes_of(dir));
-    Ok(VacuumReport {
+    let report = VacuumReport {
         events: fresh_count,
         bytes_before,
         bytes_after: bytes_of(dir),
-    })
+    };
+    // The swapped-in env IS the store (the heed path-cache rule — see
+    // migrate_with): this session runs on it instead of reopening dir.
+    Ok((
+        report,
+        Store {
+            db: Arc::new(fresh),
+        },
+    ))
 }
 
 /// Phase 2's spawn point: `Pool::open` calls this with the session's
@@ -1023,6 +1256,18 @@ async fn boot_gate_at(dir: &std::path::Path, ratio: f64, floor: u64) -> Result<G
                 .unwrap_or(0);
         }
     }
+    // The schema check (D100), BEFORE the vacuum gate: the adoption
+    // path re-encodes through the SDK, so it must only ever see a
+    // current-schema store. A downgrade is refused here, before any
+    // env opens.
+    match check_schema(dir) {
+        SchemaCheck::TooNew(version) => return Ok(GateAction::Refused(version)),
+        SchemaCheck::Outdated(_) => {
+            let (report, store) = migrate(dir).await?;
+            return Ok(GateAction::Migrated(report, store));
+        }
+        SchemaCheck::Fresh | SchemaCheck::Current => {}
+    }
     if now_bytes == 0 {
         // No store yet (fresh install): nothing to gate.
         return Ok(GateAction::Idle);
@@ -1038,14 +1283,14 @@ async fn boot_gate_at(dir: &std::path::Path, ratio: f64, floor: u64) -> Result<G
             // Phase 3: adopt. Any hard failure falls back to the full
             // blocking rebuild — a shortfall in staging never swaps.
             match adopt_staged(dir).await {
-                Ok(report) => {
+                Ok((report, store)) => {
                     println!(
                         "boot gate: staged store adopted, {} events, data.mdb {:.1} MB -> {:.1} MB",
                         report.events,
                         report.bytes_before as f64 / 1048576.0,
                         report.bytes_after as f64 / 1048576.0
                     );
-                    return Ok(GateAction::Swapped(report));
+                    return Ok(GateAction::Swapped(report, store));
                 }
                 Err(err) => {
                     eprintln!(
@@ -1067,7 +1312,9 @@ async fn boot_gate_at(dir: &std::path::Path, ratio: f64, floor: u64) -> Result<G
                         let _ = std::fs::rename(dir.with_extension("prev"), dir);
                     }
                     notify_rebuild("Optimizing the local store — this launch may take a moment.");
-                    return vacuum_at(dir).await.map(GateAction::Swapped);
+                    return vacuum_at(dir)
+                        .await
+                        .map(|(r, store)| GateAction::Swapped(r, store));
                 }
             }
         }
@@ -1373,25 +1620,17 @@ mod tests {
         // Boot 2: adoption. The delta is empty (nothing new was saved),
         // so the whole boot is the count check + two renames.
         let action = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
-        let GateAction::Swapped(report) = action else {
+        let GateAction::Swapped(report, store) = action else {
             panic!("a completed staging copy adopts at the next boot, got {action:?}")
         };
         assert_eq!(report.events, 2);
         assert!(!store_dir.with_extension("vacuum").exists());
         assert!(!store_dir.with_extension("vacuum.json").exists());
 
-        // Every event survived into the adopted store; the watermark
-        // moved to the rebuilt extent.
-        let reopened = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
-        assert_eq!(rt.block_on(reopened.count(Filter::new())).unwrap(), 2);
-        for event in &events {
-            assert!(
-                rt.block_on(reopened.event_by_id(&event.id))
-                    .unwrap()
-                    .is_some()
-            );
-        }
-        drop(reopened);
+        // Every event survived into the ADOPTED STORE — the handle the
+        // gate hands through (a reopen of the swapped path would read
+        // the stale heed-cached env; the hand-through is the contract).
+        assert_eq!(rt.block_on(store.event_count()).unwrap(), 2);
         let watermark =
             std::fs::read_to_string(store_dir.with_extension("watermark.json")).unwrap();
         let base: serde_json::Value = serde_json::from_str(&watermark).unwrap();
@@ -1399,6 +1638,8 @@ mod tests {
             base.get("bytes").unwrap().as_u64().unwrap(),
             std::fs::metadata(store_dir.join("data.mdb")).unwrap().len()
         );
+        drop(store);
+        let _ = &events;
         drop(env);
     }
 
@@ -1430,16 +1671,15 @@ mod tests {
         .unwrap();
 
         let action = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
-        let GateAction::Swapped(report) = action else {
+        let GateAction::Swapped(report, store) = action else {
             panic!("the fallback runs a full rebuild, got {action:?}")
         };
         // The fallback rebuilt from the LIVE store: both events, and
         // the state file is gone with its superseded staging.
         assert_eq!(report.events, 2);
         assert!(!store_dir.with_extension("vacuum.json").exists());
-        let reopened = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
-        assert_eq!(rt.block_on(reopened.count(Filter::new())).unwrap(), 2);
-        drop(reopened);
+        assert_eq!(rt.block_on(store.event_count()).unwrap(), 2);
+        drop(store);
         drop(env);
     }
 
@@ -1462,6 +1702,91 @@ mod tests {
 
         let action = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
         assert!(matches!(action, GateAction::Idle));
+        drop(env);
+    }
+
+    /// D100: the stamp round-trips; a pre-versioning store is stamped
+    /// v1 in place (retroactive, no disruption); a NEWER stamp refuses
+    /// at the gate before any env opens.
+    #[test]
+    fn schema_stamps_retroactively_and_refuses_downgrades() {
+        let env = EnvGuard::new("schema-stamp");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (store_dir, _) = planted_store("schema-stamp");
+
+        // No stamp: retroactive v1, and the verdict is Current (a store
+        // exists and speaks this binary's schema).
+        assert_eq!(check_schema(&store_dir), SchemaCheck::Current);
+        let stamp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(store_dir.join("schema.json")).unwrap())
+                .unwrap();
+        assert_eq!(stamp.get("version").unwrap().as_u64().unwrap(), 1);
+
+        // A fresh boot over NO store: Fresh, stamped on the way through.
+        let empty = env.dir().join("empty-events");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(check_schema(&empty), SchemaCheck::Fresh);
+
+        // A downgrade: newer stamp, refused before anything opens.
+        std::fs::write(store_dir.join("schema.json"), r#"{"version": 99, "at": 0}"#).unwrap();
+        assert_eq!(check_schema(&store_dir), SchemaCheck::TooNew(99));
+        let action = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
+        assert!(matches!(action, GateAction::Refused(99)));
+        // The store itself was not touched by the refusal.
+        let opened = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
+        assert_eq!(rt.block_on(opened.count(Filter::new())).unwrap(), 2);
+        drop(opened);
+        drop(env);
+    }
+
+    /// D100: a migration is the vacuum walk with a transform hooked in —
+    /// full copy, count verified, same two-rename swap, the stamp
+    /// advanced only after the swap lands. Driven with a fake step (a
+    /// real one does not exist yet: v1 is the only schema).
+    #[test]
+    fn migration_walks_transforms_and_swaps() {
+        fn drop_ones(event: Event) -> Option<Event> {
+            (!event.content.contains("one")).then_some(event)
+        }
+        let env = EnvGuard::new("schema-migrate");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (store_dir, _) = planted_store("schema-migrate");
+
+        // Plant a v0 store (one version below this binary's, one step
+        // away): the shape every future upgrade starts from.
+        std::fs::write(store_dir.join("schema.json"), r#"{"version": 0, "at": 0}"#).unwrap();
+
+        let (report, store) = rt
+            .block_on(migrate_with(&store_dir, 0, &[drop_ones]))
+            .unwrap();
+        assert_eq!(report.events, 2);
+
+        // The swap happened: no staging left, the stamp advanced, and
+        // the returned store — the env that walked the copy, never a
+        // reopen — holds exactly the transform's output.
+        assert!(!store_dir.with_extension("migrate").exists());
+        let stamp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(store_dir.join("schema.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            stamp.get("version").unwrap().as_u64().unwrap(),
+            u64::from(CODE_SCHEMA)
+        );
+        let kept = rt.block_on(store.query(Filter::new())).unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept.first().unwrap().content, "two");
+        drop(store);
+
+        // No path, no migration: a from/steps mismatch is an error, not
+        // a silent no-op.
+        let err = rt.block_on(migrate_with(&store_dir, 0, &[])).unwrap_err();
+        assert!(err.contains("no migration path"), "{err}");
         drop(env);
     }
 }

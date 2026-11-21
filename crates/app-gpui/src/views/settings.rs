@@ -204,7 +204,7 @@ impl SettingsView {
         // not a live meter, and a stale number on a long-open pane is
         // honest enough for a size.
         let stats_core = core.clone();
-        let _ = cx.spawn(async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             let stats = stats_core.store_stats().await.ok();
             let media = crate::media::cache_bytes();
             let _ = this.update(cx, |this, cx| {
@@ -212,7 +212,8 @@ impl SettingsView {
                 this.media_bytes = Some(media);
                 cx.notify();
             });
-        });
+        })
+        .detach();
         // Relay health (D33/D36) refreshes on a slow poll: the latency
         // profiles update as queries run, and this pane is the only reader.
         cx.spawn(async move |this, cx| {

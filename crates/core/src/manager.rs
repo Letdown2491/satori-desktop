@@ -883,6 +883,11 @@ pub struct Core {
     /// service's debouncer is session-scoped (Weak handle — it exits when
     /// the service drops), so each login builds its own.
     pool: Mutex<Option<Arc<Pool>>>,
+    /// The boot gate's hand-through (D100): when this boot migrated or
+    /// adopted the store (a directory swap), the swapped-in env is THE
+    /// store — the heed path-cache forbids reopening the path. pool()
+    /// takes this instead of Store::open, once.
+    preopen: Mutex<Option<crate::store::Store>>,
     /// Own reactions: target event id (hex) → engaged.
     own_liked: Mutex<HashSet<String>>,
     /// Own reposts (NIP-18 kind 6/16) — same shape as own_liked.
@@ -991,6 +996,7 @@ impl Core {
             scheduled_started: std::sync::atomic::AtomicBool::new(false),
             login_seq: AtomicU64::new(1),
             pool: Mutex::new(None),
+            preopen: Mutex::new(None),
             own_liked: Mutex::new(HashSet::new()),
             own_reposted: Mutex::new(HashSet::new()),
             own_bookmarked: Mutex::new(HashSet::new()),
@@ -2766,13 +2772,20 @@ impl Core {
         if let Some(p) = self.pool.lock().unwrap().as_ref() {
             return Ok(Arc::clone(p));
         }
+        let preopen = self.preopen.lock().unwrap().take();
         let p = Arc::new(
-            Pool::open()
+            Pool::open_with(preopen)
                 .await
                 .map_err(|e| LoginError::Resume(e.to_string()))?,
         );
         *self.pool.lock().unwrap() = Some(Arc::clone(&p));
         Ok(p)
+    }
+
+    /// Hand the boot gate's swapped-in store to the pool (D100). Call
+    /// once, from main, before init: the first pool() call consumes it.
+    pub fn preopen_store(&self, store: crate::store::Store) {
+        *self.preopen.lock().unwrap() = Some(store);
     }
 
     /// The handshake-completed bunker client, when the caller just finished
