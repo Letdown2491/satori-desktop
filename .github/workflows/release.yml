@@ -51,6 +51,11 @@ jobs:
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev
 
+      - name: Write the GIF API key (repo secret; git-ignored file)
+        env:
+          GIFS_API_KEY: ${{ secrets.GIFS_API_KEY }}
+        run: echo -n "$GIFS_API_KEY" > crates/core/gifs_key.txt
+
       - name: Build the release binary
         run: cargo build --release --locked -p satori-gpui
 
@@ -144,6 +149,11 @@ jobs:
         # that day — pin both arch legs to the same toolchain the x86_64
         # deb/rpm job builds with.
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch head
+
+      - name: Write the GIF API key (repo secret; git-ignored file)
+        env:
+          GIFS_API_KEY: ${{ secrets.GIFS_API_KEY }}
+        run: echo -n "$GIFS_API_KEY" > crates/core/gifs_key.txt
 
       - name: Build the release binary
         run: cargo build --release --locked -p satori-gpui

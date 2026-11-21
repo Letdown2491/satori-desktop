@@ -120,10 +120,25 @@ pub fn open(url: String, mime: Option<String>, cx: &mut gpui::App) {
             return;
         }
         // Video::new blocks up to ~5s (playbin state + caps) — the
-        // background executor, never the UI thread.
+        // background executor, never the UI thread. A GIF-service mp4
+        // (the /mp4/orig/ namespace, D104) LOOPS — it is a GIF's
+        // animation, and a GIF that stops dead is a broken GIF.
+        let looping = url.contains("/mp4/orig/");
         let res = cx
             .background_executor()
-            .spawn(async move { Video::new(&proxied) })
+            .spawn(async move {
+                if looping {
+                    Video::new_with_options(
+                        &proxied,
+                        gpui_video_player::VideoOptions {
+                            looping: Some(true),
+                            ..Default::default()
+                        },
+                    )
+                } else {
+                    Video::new(&proxied)
+                }
+            })
             .await;
         cx.update(|cx| match res {
             Ok(video) => {
@@ -182,6 +197,21 @@ pub fn close(cx: &mut gpui::App) {
         // Drop joins the GStreamer worker thread — off the UI thread.
         std::thread::spawn(move || drop(old));
         cx.set_global(Signal);
+    }
+}
+
+/// Close the player only if it's a GIF preview (the picker's hover
+/// player, D104): the composer's picker closing must not murder a
+/// video the overlay is legitimately playing — but a preview left
+/// running without its tile is a pipeline nobody paints.
+pub fn close_gif_preview(cx: &mut gpui::App) {
+    let is_gif = ACTIVE
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().map(|p| p.url.contains("/mp4/orig/")))
+        .unwrap_or(false);
+    if is_gif {
+        close(cx);
     }
 }
 

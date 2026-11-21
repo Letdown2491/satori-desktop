@@ -240,8 +240,15 @@ fn media_assets_with(parsed: Option<&article::ArticleData>, ev: &Event) -> Vec<M
         if m.url.is_empty() {
             continue;
         }
-        let video =
-            m.mime.as_deref().is_some_and(|m| m.starts_with("video/")) || is_video_url(&m.url);
+        // A gifs.nostr.build GIF plays its mp4 twin (D104): a GIF tile
+        // that sits still isn't the GIF. The poster is the ORIGINAL's
+        // url (the cache decodes its first frame); the player loops
+        // (video.rs's /mp4/orig/ rule). Other hosts' GIFs stay stills.
+        let gif_grid = m.mime.as_deref() == Some("image/gif")
+            && satori_core::gifs::mp4_from_original(&m.url).is_some();
+        let video = gif_grid
+            || m.mime.as_deref().is_some_and(|m| m.starts_with("video/"))
+            || is_video_url(&m.url);
         let audio = voice
             || m.mime.as_deref().is_some_and(|m| m.starts_with("audio/"))
             || is_audio_url(&m.url);
@@ -252,11 +259,23 @@ fn media_assets_with(parsed: Option<&article::ArticleData>, ev: &Event) -> Vec<M
                 waveform: m.waveform,
             }
         } else if video {
-            MediaAsset::Video {
-                url: m.url,
-                poster: m.poster,
-                blurhash: m.blurhash,
-                mime: m.mime.clone(),
+            if gif_grid {
+                // The gif twin rides the imeta arm: the mp4 url plays,
+                // the original url is the poster.
+                MediaAsset::Video {
+                    url: satori_core::gifs::mp4_from_original(&m.url)
+                        .unwrap_or_else(|| m.url.clone()),
+                    poster: Some(m.url),
+                    blurhash: m.blurhash,
+                    mime: None,
+                }
+            } else {
+                MediaAsset::Video {
+                    url: m.url,
+                    poster: m.poster,
+                    blurhash: m.blurhash,
+                    mime: m.mime.clone(),
+                }
             }
         } else {
             MediaAsset::Picture { url: m.url }
@@ -281,6 +300,15 @@ fn media_assets_with(parsed: Option<&article::ArticleData>, ev: &Event) -> Vec<M
                 MediaAsset::Video {
                     url: url.clone(),
                     poster: Some(thumb),
+                    blurhash: None,
+                    mime: None,
+                }
+            } else if let Some(gif_mp4) = satori_core::gifs::mp4_from_original(&url) {
+                // A bare gifs.nostr.build original link (D104): it plays
+                // as the looping mp4, postered by the original.
+                MediaAsset::Video {
+                    url: gif_mp4,
+                    poster: Some(url.clone()),
                     blurhash: None,
                     mime: None,
                 }

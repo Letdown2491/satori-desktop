@@ -278,6 +278,18 @@ pub struct Composer {
     /// Attachment id supply (monotonic; upload completions find their
     /// tile by this).
     next_att: u64,
+    // --- GIF picker (D104): gifs.nostr.build over the composer floor ---
+    // Stills grid, hover plays the mp4 through the ONE player, a click
+    // inserts a no-upload attachment (the imeta is born finished).
+    gifs_open: bool,
+    gifs_query: Entity<Input>,
+    gifs: Vec<satori_core::gifs::Gif>,
+    gifs_err: Option<String>,
+    gifs_loading: bool,
+    /// The typing generation: a late search answer applies only when
+    /// its query is still the newest (the guide's §5: don't abort
+    /// in-flight requests, ignore late answers instead).
+    gifs_seq: u64,
     /// The open alt-text editor: which attachment id it edits + the one
     /// shared single-line field (research §4.2 — AltTextEditorDialog).
     alt_edit: Option<u64>,
@@ -457,6 +469,16 @@ impl Composer {
             i.tripwire = true;
             i.placeholder("describe the image, for readers who can't see it")
         });
+        // The GIF picker's search field (D104): single line, harmless.
+        let gifs_query = cx.new(|cx| {
+            let mut i = Input::new(cx);
+            i.multiline = false;
+            i.placeholder("search gifs")
+        });
+        // The GIF picker's search (D104): the field is watched the same
+        // way — every change re-arms the debounced query.
+        cx.observe(&gifs_query, |this, _input, cx| this.gifs_query_changed(cx))
+            .detach();
         // Restored attachments get real ids too (the upload chain only
         // ever targets fresh picks, but the invariant stays simple: ids
         // are unique within a composer).
@@ -486,6 +508,12 @@ impl Composer {
             quote,
             next_att: attachments.len() as u64,
             attachments,
+            gifs_open: false,
+            gifs_query,
+            gifs: vec![],
+            gifs_err: None,
+            gifs_loading: false,
+            gifs_seq: 0,
             alt_edit: None,
             alt_input,
             sched_on: false,
@@ -652,6 +680,271 @@ impl Composer {
             }
         })
         .detach();
+    }
+
+    // --- GIF picker (D104) --------------------------------------------------
+
+    /// The GIF button: open or close the picker. Opening with an empty
+    /// state runs the first starter (the guide's §8: no trending
+    /// endpoint; the picker opens on everyday searches). Closing takes
+    /// the preview player down with it — a hover preview without its
+    /// tile is a pipeline nobody paints.
+    fn toggle_gifs(&mut self, cx: &mut Context<Self>) {
+        self.gifs_open = !self.gifs_open;
+        if self.gifs_open && self.gifs.is_empty() && self.gifs_err.is_none() {
+            let starter = satori_core::gifs::STARTERS[0];
+            self.gifs_query.update(cx, |i, cx| i.set_text(starter, cx));
+            self.gifs_seq += 1;
+            self.gifs_search(starter, cx);
+        } else if !self.gifs_open {
+            crate::video::close_gif_preview(cx);
+        }
+        cx.notify();
+    }
+
+    fn gifs_query_changed(&mut self, cx: &mut Context<Self>) {
+        // Debounce (the guide's §5, ~250ms): the newest generation's
+        // task runs the search; its elders die on wake.
+        self.gifs_seq += 1;
+        let seq = self.gifs_seq;
+        self.gifs_loading = !self.gifs_query.read(cx).content.trim().is_empty();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.gifs_seq != seq {
+                    return; // a newer generation owns the grid
+                }
+                let q = this.gifs_query.read(cx).content.trim().to_string();
+                // Skip one-letter Latin queries (noise, and the guide
+                // says the budget is real); one emoji or any two
+                // characters run.
+                if q.chars().count() == 1
+                    && q.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                {
+                    this.gifs_loading = false;
+                    cx.notify();
+                    return;
+                }
+                this.gifs_search(&q, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The search itself: one request per query, the answer applied
+    /// only when its generation is still newest.
+    fn gifs_search(&mut self, q: &str, cx: &mut Context<Self>) {
+        if q.is_empty() {
+            self.gifs.clear();
+            self.gifs_loading = false;
+            self.gifs_err = None;
+            cx.notify();
+            return;
+        }
+        let seq = self.gifs_seq;
+        self.gifs_loading = true;
+        cx.notify();
+        let q = q.to_string();
+        cx.spawn(async move |this, cx| {
+            let res = satori_core::gifs::search(&q.clone(), 24, 0).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.gifs_seq != seq {
+                    return; // a newer query owns the grid
+                }
+                this.gifs_loading = false;
+                match res {
+                    Ok(page) => {
+                        this.gifs = page.items;
+                        this.gifs_err = if this.gifs.is_empty() {
+                            Some(format!("No GIFs for \u{201c}{q}\u{201d}"))
+                        } else {
+                            None
+                        };
+                    }
+                    Err(e) => {
+                        this.gifs.clear();
+                        this.gifs_err = Some(e.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// A starter chip: set the field, run the search now.
+    fn gifs_chip(&mut self, term: &str, cx: &mut Context<Self>) {
+        self.gifs_query.update(cx, |i, cx| i.set_text(term, cx));
+        self.gifs_seq += 1; // retire any in-flight typing's task
+        self.gifs_search(term, cx);
+    }
+
+    /// A pick: the imeta is born finished — no upload, no bytes (the
+    /// guide's §9: never re-host, never a preview URL). The attachment
+    /// rides whatever tab is open; publish, synced draft and the render
+    /// side all read the one tag verbatim.
+    fn pick_gif(&mut self, gif: satori_core::gifs::Gif, cx: &mut Context<Self>) {
+        let mut a = Attachment::from_imeta(satori_core::gifs::imeta_for(&gif))
+            .expect("imeta_for always builds a url entry");
+        a.id = self.next_att;
+        self.next_att += 1;
+        self.attachments.push(a);
+        self.gifs_open = false;
+        crate::video::close_gif_preview(cx);
+        self.status.clear();
+        cx.notify();
+    }
+
+    /// The picker card (D104): search field + starter chips + the grid.
+    /// Tiles are the service's STILL previews (a PNG first frame through
+    /// the media cache — the grid never re-hosts and never fetches the
+    /// multi-MB originals); HOVER plays that tile's mp4 through the one
+    /// player (video.rs loops the /mp4/orig/ namespace); a click inserts.
+    /// The attribution line is a condition of use (the guide's §2) — it
+    /// stays, visible, at the header.
+    fn gif_picker(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let snap = media::Snapshot::new(cx);
+        let core = self.core.clone();
+        let query = self.gifs_query.clone();
+        let err = self.gifs_err.clone();
+        let loading = self.gifs_loading;
+
+        let mut grid = div().flex().flex_wrap().gap_2().w_full();
+        for gif in &self.gifs {
+            let tile_w = 180.0_f32;
+            let tile_h = (tile_w * gif.height as f32 / gif.width as f32).clamp(90.0, 240.0);
+            let mp4 = satori_core::gifs::mp4_for_grid(gif);
+            let still = gif.previews.medium.still.clone();
+            let picked = gif.clone();
+            let mp4_hover = mp4.clone();
+            media::fetch(&core, still.clone(), cx.entity_id(), cx);
+            grid = grid.child(
+                div()
+                    .id(SharedString::from(format!("gif-{}", gif.id)))
+                    .cursor_pointer()
+                    .w(px(tile_w))
+                    .h(px(tile_h))
+                    .rounded(px(theme::R_EMBED))
+                    .border_1()
+                    .border_color(rgb(theme::hairline()))
+                    .bg(rgb(theme::panel()))
+                    .overflow_hidden()
+                    // Hover previews the animation: the pick must show
+                    // the GIF moving before it lands in the note.
+                    .on_hover(cx.listener(move |_this, hovered: &bool, _, cx| {
+                        if *hovered {
+                            crate::video::open(mp4_hover.clone(), Some("video/mp4".into()), cx);
+                        } else if crate::video::active(&mp4_hover).is_some() {
+                            // The mouse left this tile: its preview has
+                            // no watcher — a pipeline nobody paints.
+                            crate::video::close_gif_preview(cx);
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.pick_gif(picked.clone(), cx);
+                    }))
+                    .child(match crate::video::active(&mp4) {
+                        Some(video) => {
+                            crate::video::element(&video, tile_w, tile_h).into_any_element()
+                        }
+                        None => match snap.png(&still) {
+                            Some(png) => img(png).size_full().into_any_element(),
+                            None => div().size_full().into_any_element(),
+                        },
+                    }),
+            );
+        }
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded(px(theme::R_EMBED))
+            .border_1()
+            .border_color(rgb(theme::hairline()))
+            .bg(rgb(theme::panel()))
+            .p_2()
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .rounded(px(theme::R_EMBED))
+                            .border_1()
+                            .border_color(rgb(theme::hairline()))
+                            .bg(rgb(theme::washi()))
+                            .p_1()
+                            .child(query),
+                    )
+                    // Attribution (the guide's §2): visible, a real link,
+                    // wherever the GIFs appear.
+                    .child(
+                        div()
+                            .id("gif-attribution")
+                            .cursor_pointer()
+                            .text_size(px(theme::T_SMALL))
+                            .text_color(rgb(theme::muted()))
+                            .on_click(|_, _, cx| cx.open_url(satori_core::gifs::ATTRIBUTION_URL))
+                            .child(satori_core::gifs::ATTRIBUTION),
+                    ),
+            )
+            .child(div().w_full().flex().flex_wrap().gap_1().children(
+                satori_core::gifs::STARTERS.iter().map(|term| {
+                    let term = term.to_string();
+                    let label = term.clone();
+                    div()
+                        .id(SharedString::from(format!("gif-chip-{term}")))
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(rgb(theme::hairline()))
+                        .text_size(px(theme::T_SMALL))
+                        .text_color(rgb(theme::muted()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.gifs_chip(term.as_str(), cx);
+                        }))
+                        .child(label)
+                }),
+            ))
+            .child(
+                div()
+                    .id("gif-grid")
+                    .w_full()
+                    .max_h(px(420.0))
+                    .overflow_y_scroll()
+                    .when(loading, |d| {
+                        d.child(
+                            div()
+                                .w_full()
+                                .py_4()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::muted()))
+                                .child("searching…"),
+                        )
+                    })
+                    .when(!loading && err.is_some(), |d| {
+                        d.child(
+                            div()
+                                .w_full()
+                                .py_4()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::muted()))
+                                .child(err.clone().unwrap_or_default()),
+                        )
+                    })
+                    .when(!loading && err.is_none(), |d| d.child(grid)),
+            )
     }
 
     /// The @-token under the caret, if any: `@handle` with no whitespace
@@ -1822,6 +2115,7 @@ impl Render for Composer {
             media::fetch(&self.core, cover_url.clone(), cx.entity_id(), cx);
         }
         let previewing = self.previewing;
+        let gifs_open = self.gifs_open;
         // The article flip: fields AND body box give way to the preview.
         let art_previewing = previewing && tab == Tab::Article;
 
@@ -1855,6 +2149,15 @@ impl Render for Composer {
                 // save is never stale. An untouched form pops on the first
                 // Esc, as it always did. The SHEET's Esc falls through —
                 // the shell's back() closes the card.
+                // The GIF picker (D104) takes the first Esc: close it (and
+                // its preview player) before the page's two-step save.
+                if ev.keystroke.key == "escape" && this.gifs_open {
+                    this.gifs_open = false;
+                    crate::video::close_gif_preview(cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 if ev.keystroke.key == "escape" && !this.posting && this.emoji_suggest.is_empty() {
                     match this.surface {
                         Surface::Sheet => {}
@@ -2611,6 +2914,9 @@ impl Render for Composer {
             .when(previewing && tab != Tab::Article, |d| {
                 d.child(self.compose_preview(cx))
             })
+            // The GIF picker (D104): a card over the form's floor, the
+            // search + the grid + the attribution the service requires.
+            .when(gifs_open, |d| d.child(self.gif_picker(cx)))
             // The action bar (prototype variant C): every affordance in
             // one bounded band — the form's floor, not loose words.
             // Attach and schedule stand left as quiet toggles; the seal
@@ -2644,6 +2950,36 @@ impl Render for Composer {
                                 }))
                                 .child("+ attach media"),
                         )
+                        // The GIF button (D104), only where the service's
+                        // key was baked in (build.rs): an unconfigured
+                        // build hides the door instead of showing a
+                        // broken one.
+                        .when(satori_core::gifs::configured(), |d| {
+                            d.child(
+                                div()
+                                    .id("gif")
+                                    .cursor_pointer()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded(px(theme::R_EMBED))
+                                    .border_1()
+                                    .border_color(rgb(if gifs_open {
+                                        theme::vermilion()
+                                    } else {
+                                        theme::hairline()
+                                    }))
+                                    .text_size(px(theme::T_UI))
+                                    .text_color(rgb(if gifs_open {
+                                        theme::vermilion()
+                                    } else {
+                                        theme::muted()
+                                    }))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_gifs(cx);
+                                    }))
+                                    .child(if gifs_open { "GIF ✓" } else { "GIF" }),
+                            )
+                        })
                     })
                     .when(tab != Tab::Poll, |d| {
                         d.child(

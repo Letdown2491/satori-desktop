@@ -45,6 +45,7 @@ pub mod dedup;
 pub mod deletions;
 pub mod diag;
 pub mod error;
+pub mod gifs;
 pub mod hints;
 pub mod manager;
 pub mod net_guard;
