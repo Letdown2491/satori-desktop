@@ -1019,7 +1019,17 @@ impl Element for InputElement {
             None if self.input.read(cx).multiline => {
                 style.size.height = window.line_height().into();
             }
-            None => style.size.height = relative(1.).into(),
+            None => {
+                // Single-line: fill a definite-height parent (login's and
+                // wallet's 34px rows), but FLOOR at one line — relative(1.)
+                // against the GIF picker's auto-height search row resolved
+                // to ZERO: a sliver of wrapper padding with no hitbox, so
+                // clicks missed the field, no caret ever came, and every
+                // keystroke rode the note field instead. (flatpak
+                // field-test, Nov 21 2026)
+                style.size.height = relative(1.).into();
+                style.min_size.height = window.line_height().into();
+            }
         }
         (window.request_layout(style, [], cx), ())
     }

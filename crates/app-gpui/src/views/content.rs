@@ -244,7 +244,13 @@ fn media_assets_with(parsed: Option<&article::ArticleData>, ev: &Event) -> Vec<M
         // that sits still isn't the GIF. The poster is the ORIGINAL's
         // url (the cache decodes its first frame); the player loops
         // (video.rs's /mp4/orig/ rule). Other hosts' GIFs stay stills.
-        let gif_grid = m.mime.as_deref() == Some("image/gif")
+        // The gate is the URL SHAPE, not the mime: the service's
+        // originals are mostly WEBP (`m image/webp` in the imeta —
+        // the pick's own tag!), and a mime == image/gif gate excluded
+        // every one of Satori's own picks from the player — they fell
+        // to Picture, which cannot decode a webp, and the note's GIF
+        // vanished. (flatpak field-test, Nov 21 2026)
+        let gif_grid = m.mime.as_deref().is_some_and(|mm| mm.starts_with("image/"))
             && satori_core::gifs::mp4_from_original(&m.url).is_some();
         let video = gif_grid
             || m.mime.as_deref().is_some_and(|m| m.starts_with("video/"))

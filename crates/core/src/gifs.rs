@@ -271,9 +271,14 @@ pub fn mp4_from_original(url: &str) -> Option<String> {
 /// The NIP-92 imeta a pick publishes (§9): the original's url, the mime
 /// from `format`, the dim, the size when known, the alt when titled.
 /// The composer's Attachment carries this verbatim — publish, synced
-/// draft and the render side all read the one tag.
+/// draft and the render side all read the one tag. Element 0 is the
+/// literal "imeta": the tag shape upload.rs's arrays use, and the shape
+/// note_tags' gate requires — without it the composer's pick was
+/// silently dropped at publish and the note went out tagless (the GIF
+/// never showed in ANY client). (flatpak field-test, Nov 21 2026)
 pub fn imeta_for(gif: &Gif) -> Vec<String> {
     let mut tag = vec![
+        "imeta".to_string(),
         format!("url {}", gif.url),
         format!(
             "m image/{}",
@@ -342,11 +347,12 @@ mod tests {
         assert_eq!(gif.previews.small.height, 96);
 
         let imeta = imeta_for(&gif);
-        assert_eq!(imeta[0], "url https://gifs.nostr.build/20099e4e59051.gif");
-        assert_eq!(imeta[1], "m image/gif");
-        assert_eq!(imeta[2], "dim 224x126");
-        assert_eq!(imeta[3], "size 806309");
-        assert_eq!(imeta[4], "alt Giant wave curling with an eye");
+        assert_eq!(imeta[0], "imeta");
+        assert_eq!(imeta[1], "url https://gifs.nostr.build/20099e4e59051.gif");
+        assert_eq!(imeta[2], "m image/gif");
+        assert_eq!(imeta[3], "dim 224x126");
+        assert_eq!(imeta[4], "size 806309");
+        assert_eq!(imeta[5], "alt Giant wave curling with an eye");
 
         // The grid/preview mp4 gets the .mp4 suffix the video gate
         // needs; the POSTED url is the original, untouched.
@@ -354,7 +360,7 @@ mod tests {
             mp4_for_grid(&gif),
             "https://gifs.nostr.build/mp4/orig/20099e4e59051.gif.mp4"
         );
-        assert!(imeta[0].ends_with(".gif"));
+        assert!(imeta[1].ends_with(".gif"));
     }
 
     #[test]
@@ -387,8 +393,8 @@ mod tests {
         gif.bytes = None;
         gif.title = String::new();
         let imeta = imeta_for(&gif);
-        assert_eq!(imeta[1], "m image/webp");
-        assert_eq!(imeta.len(), 3, "no size (null bytes), no alt (empty title)");
+        assert_eq!(imeta[2], "m image/webp");
+        assert_eq!(imeta.len(), 4, "head, url, mime, dim; no size, no alt");
     }
 
     #[test]
@@ -399,6 +405,6 @@ mod tests {
         let mut gif: Gif = serde_json::from_str(SAMPLE).unwrap();
         gif.title = "wave\n  curling\t\u{7}wild".into();
         let imeta = imeta_for(&gif);
-        assert_eq!(imeta[4], "alt wave curling wild");
+        assert_eq!(imeta[5], "alt wave curling wild");
     }
 }

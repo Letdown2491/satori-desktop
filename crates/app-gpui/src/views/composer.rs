@@ -713,7 +713,7 @@ impl Composer {
     /// never two: the direct call double-fired it, five-lens audit Nov
     /// 2026). Closing takes the preview player down with it — a preview
     /// without its tile is a pipeline nobody paints.
-    fn toggle_gifs(&mut self, cx: &mut Context<Self>) {
+    fn toggle_gifs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.gifs_open = !self.gifs_open;
         if self.gifs_open {
             if self.gifs.is_empty() {
@@ -724,6 +724,13 @@ impl Composer {
                 let starter = satori_core::gifs::STARTERS[0];
                 self.gifs_query.update(cx, |i, cx| i.set_text(starter, cx));
             }
+            // The picker takes the caret: the composer autofocuses the
+            // NOTE field on render, so an open that left focus alone
+            // sent every typed character into the note draft while the
+            // search field sat there unsearched. (flatpak field-test,
+            // Nov 21 2026)
+            let h = self.gifs_query.read(cx).focus_handle(cx);
+            window.focus(&h, cx);
         } else {
             crate::video::close_gif_preview(cx);
         }
@@ -3037,8 +3044,8 @@ impl Render for Composer {
                                     } else {
                                         theme::muted()
                                     }))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_gifs(cx);
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_gifs(window, cx);
                                     }))
                                     .child(if gifs_open { "GIF ✓" } else { "GIF" }),
                             )

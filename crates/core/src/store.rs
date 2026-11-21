@@ -148,9 +148,7 @@ impl Store {
         let db = NostrLmdb::open(config::events_dir()).await?;
         if had_store {
             // The rebuilt store opened: the previous generation is dead now.
-            if let Err(e) = std::fs::remove_dir_all(config::events_dir().with_extension("prev")) {
-                eprintln!("[DEBUG prev remove failed] {e}");
-            }
+            let _ = std::fs::remove_dir_all(config::events_dir().with_extension("prev"));
         }
         Ok(Self { db: Arc::new(db) })
     }

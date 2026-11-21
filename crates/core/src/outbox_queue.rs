@@ -372,7 +372,22 @@ pub(crate) fn targets(write_relays: &[String]) -> Vec<String> {
         .filter(|r| !crate::relay_latency::is_write_dead(r))
         .cloned()
         .collect();
-    if live.is_empty() { norm } else { live }
+    if live.is_empty() {
+        norm
+    } else {
+        // Visibility (flatpak field-test, Nov 21 2026): a trimmed fan-out
+        // looked like a one-relay publish — "we only published WHERE?"
+        // The dead relays failed their last three writes (D36); they
+        // rejoin the fan-out on their next success, or when every relay
+        // is dead and the fallback tries them all.
+        if live.len() < norm.len() {
+            eprintln!(
+                "[core] publish fan-out: {} relay(s) skipped write-dead (consecutive write timeouts; they rejoin on a success)",
+                norm.len() - live.len()
+            );
+        }
+        live
+    }
 }
 
 #[cfg(test)]
