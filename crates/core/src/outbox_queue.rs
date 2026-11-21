@@ -377,12 +377,12 @@ pub(crate) fn targets(write_relays: &[String]) -> Vec<String> {
     } else {
         // Visibility (flatpak field-test, Nov 21 2026): a trimmed fan-out
         // looked like a one-relay publish — "we only published WHERE?"
-        // The dead relays failed their last three writes (D36); they
-        // rejoin the fan-out on their next success, or when every relay
-        // is dead and the fallback tries them all.
+        // The dead relays failed their last three writes (D36); they sit
+        // out a 10-minute cooldown and rejoin the fan-out by themselves
+        // (their next real attempt re-decides).
         if live.len() < norm.len() {
             eprintln!(
-                "[core] publish fan-out: {} relay(s) skipped write-dead (consecutive write timeouts; they rejoin on a success)",
+                "[core] publish fan-out: {} relay(s) skipped write-dead (3 consecutive write failures; back within 10 minutes)",
                 norm.len() - live.len()
             );
         }
@@ -576,5 +576,13 @@ mod tests {
         // A success clears the learned deadness.
         crate::relay_latency::record_write_result(a, true);
         assert!(!crate::relay_latency::is_write_dead(a));
+        // The deadness COOLS OFF (field-test Nov 21 2026): the fan-out
+        // must not need the all-dead fallback to retry a benched relay —
+        // one healthy sibling used to bench it for life. Simulate a
+        // stale attempt by rewriting the stat's write_at into the past.
+        crate::relay_latency::record_write_result(b, false);
+        assert!(crate::relay_latency::is_write_dead(b));
+        crate::relay_latency::age_write_at(b, 601);
+        assert!(!crate::relay_latency::is_write_dead(b));
     }
 }

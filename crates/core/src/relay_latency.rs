@@ -92,6 +92,12 @@ struct RelayStat {
     /// sample clears the stamp (D85).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dead_at: Option<u64>,
+    /// Last write ATTEMPT (epoch secs, ok or fail — record_write_result).
+    /// The write-dead cooldown's clock (flatpak field-test Nov 21 2026):
+    /// without it a benched relay could only revive through the
+    /// all-dead fallback, so one bad afternoon benched it for life.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    write_at: Option<u64>,
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -234,6 +240,9 @@ pub fn record(relay: &str, ms: u64, truncated: bool, events: usize) {
         at: now_secs(),
         denied_at: prev.as_ref().and_then(|p| p.denied_at),
         write_fails: prev.as_ref().map(|p| p.write_fails).unwrap_or(0),
+        // A read sample touches no write clock: the cooldown runs on
+        // record_write_result's stamp alone.
+        write_at: prev.as_ref().and_then(|p| p.write_at),
         ok_at: if events > 0 {
             Some(now_secs())
         } else {
@@ -380,6 +389,8 @@ pub fn record_write_result(relay: &str, ok: bool) {
         RelayStat {
             write_fails: fails,
             at: now,
+            // The attempt itself, win or lose — the cooldown's clock.
+            write_at: Some(now),
             ok_at: if ok {
                 Some(now)
             } else {
@@ -406,13 +417,33 @@ pub fn record_write_result(relay: &str, ok: bool) {
 }
 
 /// True when publishing to this relay failed WRITE_DEAD_N times in a row
-/// (D36): it leaves the write fan-out (outbox_queue::targets) until a
-/// success — which only the all-dead fallback can produce — resets it.
+/// (D36): it leaves the write fan-out (outbox_queue::targets) — but only
+/// for WRITE_DEAD_COOLDOWN_SECS (flatpak field-test Nov 21 2026): the/// original design revives a benched relay ONLY through the all-dead
+/// fallback, so while one healthy relay carries the fan-out the benched
+/// ones never get attempted, never earn the resetting success — three
+/// failures during one outage was a life sentence (the owner's nos.lol
+/// sat at seven consecutive "fails" while perfectly alive). After the
+/// cooldown the relay rejoins the fan-out; its next real attempt (ok
+/// resets, fail re-benches) is what decides.
+/// Test hook: backdate a relay's write_at (the cooldown's clock) so a
+/// test can walk past the cooldown without sleeping. cfg(test) — no
+/// production caller.
+#[cfg(test)]
+pub fn age_write_at(relay: &str, secs: u64) {
+    let mut held = stats().lock().unwrap();
+    if let Some(s) = held.map.get_mut(&key(relay)) {
+        s.write_at = s.write_at.map(|at| at.saturating_sub(secs));
+    }
+}
+
 pub fn is_write_dead(relay: &str) -> bool {
+    const WRITE_DEAD_COOLDOWN_SECS: u64 = 600;
     let held = stats().lock().unwrap();
-    held.map
-        .get(&key(relay))
-        .is_some_and(|s| s.write_fails >= WRITE_DEAD_N)
+    held.map.get(&key(relay)).is_some_and(|s| {
+        s.write_fails >= WRITE_DEAD_N
+            && s.write_at
+                .is_some_and(|at| now_secs().saturating_sub(at) < WRITE_DEAD_COOLDOWN_SECS)
+    })
 }
 
 /// Proof-of-life mark for the LIVE stream path (manager.rs's bell): an
