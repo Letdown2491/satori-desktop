@@ -299,6 +299,9 @@ pub struct Shell {
     /// signed and saved but not yet ACKed by any relay. A quiet pill, not
     /// an error (D26's split); the drainer owns the retries.
     outbox_pending: usize,
+    /// The signer bar (D103): the last sign failed on transport — the
+    /// bunker is unreachable. Amber, status-only; sign_report clears it.
+    signer_down: bool,
     /// The rail's live dot left (D56): the failure mode it covered is
     /// either self-healed (the suspend watchdog recycles the sockets) or
     /// discovered at the point of action (publish/zap whispers). The
@@ -360,6 +363,7 @@ impl Shell {
             hold: None,
             notif_unread: false,
             outbox_pending: 0,
+            signer_down: false,
             stack: vec![],
             columns_on: false,
             columns: Vec::new(),
@@ -403,8 +407,30 @@ impl Shell {
             .and_then(|hex| PublicKey::from_str(&hex).ok());
         shell.want_avatar(cx);
         shell.watch_notif(cx);
+        shell.pump_signer(cx);
         shell.outbox_pending = Core::outbox_pending();
         shell
+    }
+
+    /// The signer bar's pump (D103): a watch, not a feed — the state is
+    /// singular and idempotent. Every sign call reports through
+    /// Active::sign_report; a transport failure lights the bar, the
+    /// next success (or even a refusal — the signer answered) clears
+    /// it. No dismiss, no action: while it's up every write fails
+    /// anyway, and recovery is either the signer returning (self-
+    /// clears) or the avatar menu's Sign out (re-paste the URI).
+    fn pump_signer(&self, cx: &mut Context<Self>) {
+        let mut rx = self.core.signer_health();
+        cx.spawn(async move |this, cx| {
+            while rx.changed().await.is_ok() {
+                let down = !*rx.borrow();
+                let _ = this.update(cx, |this, cx| {
+                    this.signer_down = down;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// One ensure_profiles pump for the rail avatar. The profiles service
@@ -2216,8 +2242,7 @@ impl Shell {
             .when(depth > 1 || self.columns_on, |d| {
                 d.child(self.title_row(cx))
             })
-            // The reading column's top band is the pane's, but the
-            // outbox honesty pill (D26: a state, not an error; §4.4)
+            // The outbox honesty pill (D26: a state, not an error; §4.4)
             // floats over any pane — queued notes are the SHELL's
             // news, whatever you're reading.
             .when(self.outbox_pending > 0, |d| {
@@ -2226,6 +2251,12 @@ impl Shell {
                     "{n} note{} queued for delivery",
                     if n == 1 { "" } else { "s" }
                 )))
+            })
+            // The signer bar (D103): the bunker didn't answer a sign,
+            // twice. Status only — reads work, writes fail until the
+            // signer's back (self-clears) or the user re-pastes.
+            .when(self.signer_down, |d| {
+                d.child(states::offline_pill("Signer unreachable, reads still work"))
             })
             .child(Self::pane_element(pane))
             // The floating back-to-top whisper: the ACTIVE pane's own
@@ -2465,13 +2496,17 @@ impl Shell {
                 cx.notify();
             }))
             // The outbox honesty pill floats over the workspace too (it is
-            // the SHELL's news, D26).
+            // the SHELL's news, D26). The signer bar (D103) rides here as
+            // well — same shape, same rules.
             .when(self.outbox_pending > 0, |d| {
                 let n = self.outbox_pending;
                 d.child(states::offline_pill(&format!(
                     "{n} note{} queued for delivery",
                     if n == 1 { "" } else { "s" }
                 )))
+            })
+            .when(self.signer_down, |d| {
+                d.child(states::offline_pill("Signer unreachable, reads still work"))
             })
             .child(row)
             // The add-column menu: an absolute card over the + slot; Esc

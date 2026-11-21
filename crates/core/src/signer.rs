@@ -19,6 +19,17 @@ pub enum Signer {
     Local(Keys),
 }
 
+/// The verdict of a bunker sign round-trip (D103): a transport-class
+/// failure (the request ate the timeout, or fired before the transport
+/// revived — twice, so the SDK's auto-reconnect got its chance) means
+/// the signer is UNREACHABLE; any other error means the signer ANSWERED
+/// and refused (a denied request, a bad event) — it is reachable.
+/// Local keys can only ever be "answered": there is no transport.
+pub enum SignFailure {
+    Answered(LoginError),
+    Transport(LoginError),
+}
+
 impl Signer {
     pub async fn public_key(&self) -> Result<PublicKey> {
         match self {
@@ -31,6 +42,20 @@ impl Signer {
     }
 
     pub async fn sign_event(&self, unsigned: UnsignedEvent) -> Result<Event> {
+        match self.sign_event_classified(unsigned).await {
+            Ok(ev) => Ok(ev),
+            Err(SignFailure::Answered(e)) | Err(SignFailure::Transport(e)) => Err(e),
+        }
+    }
+
+    /// The classified sign: the one the shell's signer bar rides
+    /// (Active::sign_report). The D85 retry lives here — the grace
+    /// gives the SDK's auto-reconnect (10-60s backoff cycle) a chance
+    /// before a transport verdict is final.
+    pub async fn sign_event_classified(
+        &self,
+        unsigned: UnsignedEvent,
+    ) -> std::result::Result<Event, SignFailure> {
         match self {
             Self::Bunker(c) => match c.sign_event_async(unsigned.clone()).await {
                 Ok(ev) => Ok(ev),
@@ -40,25 +65,31 @@ impl Signer {
                     // never replayed, so the request eats the full timeout
                     // before erroring (D85). And a request fired before the
                     // transport finished reviving fails fast (the relay is
-                    // not ready yet). One retry after a short grace gives
-                    // the SDK's auto-reconnect (10-60s backoff cycle) a
-                    // chance; Local keys never take this path.
-                    let timed_out = e.kind() == nostr_connect::error::ErrorKind::Timeout
-                        || e.to_string().to_lowercase().contains("not ready");
-                    if !timed_out {
-                        return Err(LoginError::Connect(e.to_string()));
+                    // not ready yet).
+                    if !Self::transport_err(&e) {
+                        return Err(SignFailure::Answered(LoginError::Connect(e.to_string())));
                     }
                     eprintln!("[core] bunker: sign timed out (transport reviving?); one retry");
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     c.sign_event_async(unsigned)
                         .await
-                        .map_err(|e| LoginError::Connect(e.to_string()))
+                        .map_err(|e| match Self::transport_err(&e) {
+                            true => SignFailure::Transport(LoginError::Connect(e.to_string())),
+                            false => SignFailure::Answered(LoginError::Connect(e.to_string())),
+                        })
                 }
             },
             Self::Local(k) => k
                 .sign_event(unsigned)
-                .map_err(|e| LoginError::Connect(e.to_string())),
+                .map_err(|e| SignFailure::Answered(LoginError::Connect(e.to_string()))),
         }
+    }
+
+    /// Transport-class errors: the timeout kind, or the fail-fast
+    /// "not ready" of a request racing the transport's revival.
+    fn transport_err(e: &nostr_connect::error::Error) -> bool {
+        e.kind() == nostr_connect::error::ErrorKind::Timeout
+            || e.to_string().to_lowercase().contains("not ready")
     }
 
     /// NIP-44 encrypt to self (private lists — NIP-51).

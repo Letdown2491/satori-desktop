@@ -109,8 +109,7 @@ impl ZapSigner {
     ) -> std::result::Result<Event, String> {
         match self {
             Self::Owner => active
-                .signer
-                .sign_event(unsigned)
+                .sign_report(unsigned)
                 .await
                 .map_err(|e| e.to_string()),
             Self::Anonymous(k) => k.sign_event(unsigned).map_err(|e| e.to_string()),
@@ -541,6 +540,9 @@ pub enum ScheduleEvent {
 struct Active {
     session: Session,
     signer: Signer,
+    /// The signer bar's watch (D103), shared with the Core that built
+    /// this session: sign_report writes it, the shell pumps it.
+    signer_health: Arc<tokio::sync::watch::Sender<bool>>,
     pool: Arc<Pool>,
     profiles: Arc<crate::profiles::ProfileService>,
     undo: crate::undo::UndoWindow,
@@ -563,6 +565,42 @@ struct Active {
 }
 
 impl Active {
+    /// The one owner-sign doorway (D103): every sign call site goes
+    /// through here so the shell's amber bar rides the same truth. A
+    /// success clears the bar; a signer's ANSWER clears it too (a
+    /// refusal proves reachability); a transport-class failure lights
+    /// it. Local keys can never report a transport failure, so the bar
+    /// is a bunker-only signal by construction.
+    async fn sign_report(&self, unsigned: UnsignedEvent) -> Result<Event> {
+        match self.signer.sign_event_classified(unsigned).await {
+            Ok(ev) => {
+                self.set_signer_reach(true);
+                Ok(ev)
+            }
+            Err(crate::signer::SignFailure::Answered(e)) => {
+                self.set_signer_reach(true);
+                Err(e)
+            }
+            Err(crate::signer::SignFailure::Transport(e)) => {
+                self.set_signer_reach(false);
+                Err(e)
+            }
+        }
+    }
+
+    /// Write the watch only on change (a changed() tick per redundant
+    /// send would wake the shell for nothing).
+    fn set_signer_reach(&self, ok: bool) {
+        self.signer_health.send_if_modified(|v| {
+            if *v == ok {
+                false
+            } else {
+                *v = ok;
+                true
+            }
+        });
+    }
+
     /// Set the follow list and its hex mirror together — the pair must
     /// never drift (the mirror feeds the mention tiers).
     fn set_follows(&mut self, follows: Vec<PublicKey>) {
@@ -871,6 +909,10 @@ pub struct Core {
     /// it. subscribe_hold().
     hold_tx: tokio::sync::broadcast::Sender<PublishEvent>,
     active: Mutex<Option<Active>>,
+    /// The signer's reachability (D103): a watch the shell pumps into
+    /// the amber bar. sign_report writes it; a success or a signer's
+    /// ANSWER clears it, a double transport failure lights it.
+    signer_health: Arc<tokio::sync::watch::Sender<bool>>,
     pending: Mutex<Option<Arc<NostrConnect>>>,
     hold_seq: AtomicU64,
     /// Login epoch: bumped on every connect attempt and cancel; a
@@ -990,6 +1032,7 @@ impl Core {
             rt,
             blocktime,
             active: Mutex::new(None),
+            signer_health: Arc::new(tokio::sync::watch::Sender::new(true)),
             pending: Mutex::new(None),
             hold_seq: AtomicU64::new(1),
             outbox_started: std::sync::atomic::AtomicBool::new(false),
@@ -2767,6 +2810,13 @@ impl Core {
         }
     }
 
+    /// The signer bar's watch (D103): `true` = reachable, `false` = the
+    /// last sign failed on transport (after D85's retry). The shell
+    /// pumps this into the amber pill.
+    pub fn signer_health(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.signer_health.subscribe()
+    }
+
     /// The process pool (create-or-get).
     async fn pool(&self) -> Result<Arc<Pool>> {
         if let Some(p) = self.pool.lock().unwrap().as_ref() {
@@ -2848,6 +2898,7 @@ impl Core {
         Ok(Active {
             session: session.clone(),
             signer,
+            signer_health: Arc::clone(&self.signer_health),
             pool,
             profiles,
             undo,
@@ -2903,7 +2954,7 @@ impl Core {
                     [Tag::custom("d", [key.as_str()])],
                     content,
                 );
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 Self::commit(active, &signed, tx).await?;
                 Ok(())
             })
@@ -4376,7 +4427,7 @@ impl Core {
                         ev.tags.clone().to_vec(),
                         ev.content.clone(),
                     );
-                    let signed = active.signer.sign_event(unsigned).await?;
+                    let signed = active.sign_report(unsigned).await?;
                     Self::commit(&active, &signed, &tx).await?;
                     n += 1;
                 }
@@ -4469,7 +4520,7 @@ impl Core {
                     tags,
                     Self::content_with_media_urls(content, &imetas),
                 );
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 // Same undo window as notes (the reply toast is the note
                 // toast — one seam, hold_and_commit).
                 match active.undo.hold_duration() {
@@ -4575,7 +4626,7 @@ impl Core {
                 }
                 let unsigned =
                     UnsignedEvent::new(active.me(), Timestamp::now(), Kind::Custom(1018), tags, "");
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 Self::commit(active, &signed, tx).await?;
                 Ok(())
             })
@@ -4603,7 +4654,7 @@ impl Core {
                     ],
                     "",
                 );
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 Self::commit(active, &signed, tx).await?;
                 Ok(())
             })
@@ -4633,7 +4684,7 @@ impl Core {
                     tags,
                     format!("nostr:{}", target.id.to_bech32().unwrap_or_default()),
                 );
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 // Same undo window as every publish (hold_and_commit — the
                 // comment/poll_vote shape; the audit's duplication lens:
                 // this was the 15th site the #81 collapse missed).
@@ -5466,7 +5517,7 @@ impl Core {
         let me = active.me();
         let (content, tags) = Self::note_tags(content, reply_to, mentions, quote, &imetas, me);
         let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::TextNote, tags, content);
-        let signed = active.signer.sign_event(unsigned).await?;
+        let signed = active.sign_report(unsigned).await?;
 
         match active.undo.hold_duration() {
             Some(hold) => {
@@ -5537,7 +5588,7 @@ impl Core {
                     tags,
                     content,
                 );
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 crate::scheduled::hold(&me, signed, scheduled_at).ok_or_else(|| {
                     LoginError::Connect(format!(
                         "you have reached the maximum of {} scheduled posts; cancel some to schedule more",
@@ -5577,7 +5628,7 @@ impl Core {
                     draft.tags(scheduled_at),
                     draft.body.clone(),
                 );
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 crate::scheduled::hold(&me, signed, scheduled_at).ok_or_else(|| {
                     LoginError::Connect(format!(
                         "you have reached the maximum of {} scheduled posts; cancel some to schedule more",
@@ -5722,7 +5773,7 @@ impl Core {
                     tag_list,
                     question,
                 );
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 match active.undo.hold_duration() {
                     Some(hold) => {
                         let token = core.hold_seq.fetch_add(1, Ordering::SeqCst);
@@ -5834,7 +5885,7 @@ impl Core {
         let me = active.me();
         let tags = Self::video_tags(&title, &content, &imeta, content_warning.as_deref());
         let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(22), tags, content);
-        let signed = active.signer.sign_event(unsigned).await?;
+        let signed = active.sign_report(unsigned).await?;
 
         match active.undo.hold_duration() {
             Some(hold) => {
@@ -5926,7 +5977,7 @@ impl Core {
         // TODO(port): src/nostr/content.ts mention tokenization → p tags (the
         // note path carries the same deferral).
         let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(20), tags, content);
-        let signed = active.signer.sign_event(unsigned).await?;
+        let signed = active.sign_report(unsigned).await?;
 
         match active.undo.hold_duration() {
             Some(hold) => {
@@ -5968,7 +6019,7 @@ impl Core {
                     draft.tags(now),
                     draft.body.clone(),
                 );
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 // Same undo window as notes/pictures (hold_and_commit).
                 match active.undo.hold_duration() {
                     Some(hold) => {
@@ -6039,8 +6090,7 @@ impl Core {
                 let hash = crate::upload::sha256_hex(&bytes);
                 let unsigned = crate::upload::blossom_auth_template(me, &hash);
                 let signed = active
-                    .signer
-                    .sign_event(unsigned)
+                    .sign_report(unsigned)
                     .await
                     .map_err(|e| e.to_string())?;
                 let up = crate::upload::blossom_upload_all(
@@ -6105,7 +6155,7 @@ impl Core {
                     tags,
                     "",
                 );
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 Self::commit(active, &signed, tx).await?;
                 Ok(())
             })
@@ -6298,7 +6348,7 @@ impl Core {
                     ],
                     content,
                 );
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 Self::commit(active, &signed, tx).await?;
                 core.own_liked.lock().unwrap().insert(target.id.to_string());
                 Ok(())
@@ -6349,7 +6399,7 @@ impl Core {
                             .unwrap_or_default(),
                         content,
                     );
-                    let signed = active.signer.sign_event(unsigned).await?;
+                    let signed = active.sign_report(unsigned).await?;
                     Self::commit(active, &signed, tx).await?;
                 } else {
                     // Public: NIP-51 kind 30001 d="bookmarks" — the e-tags
@@ -6372,7 +6422,7 @@ impl Core {
                     }
                     let unsigned =
                         UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(30001), raw, "");
-                    let signed = active.signer.sign_event(unsigned).await?;
+                    let signed = active.sign_report(unsigned).await?;
                     Self::commit(active, &signed, tx).await?;
                 }
                 core.own_bookmarked
@@ -6431,7 +6481,7 @@ impl Core {
                             raw,
                             content,
                         );
-                        let signed = active.signer.sign_event(unsigned).await?;
+                        let signed = active.sign_report(unsigned).await?;
                         Self::commit(active, &signed, tx).await?;
                     }
                 }
@@ -6448,7 +6498,7 @@ impl Core {
                     if raw.len() < before {
                         let unsigned =
                             UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(30001), raw, "");
-                        let signed = active.signer.sign_event(unsigned).await?;
+                        let signed = active.sign_report(unsigned).await?;
                         Self::commit(active, &signed, tx).await?;
                     }
                 }
@@ -6596,7 +6646,7 @@ impl Core {
                     [Tag::custom("d", ["satori/drafts"])],
                     content,
                 );
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;
                 Ok(())
             }
@@ -6657,7 +6707,7 @@ impl Core {
                     [Tag::custom("d", ["satori/drafts"])],
                     content,
                 );
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 Self::commit(&active, &signed, &tx).await?;
                 // The wrap itself: NIP-37's delete — republish with empty
                 // content (relays keep the empty shell until NIP-40 expiry).
@@ -6674,7 +6724,7 @@ impl Core {
                         wrap.tags.clone().to_vec(),
                         "",
                     );
-                    let signed = active.signer.sign_event(unsigned).await?;
+                    let signed = active.sign_report(unsigned).await?;
                     Self::commit(&active, &signed, &tx).await?;
                 }
                 Ok(())
@@ -6873,7 +6923,7 @@ impl Core {
                     tags.push(relay_tag(url, Some("write")));
                 }
                 let unsigned = UnsignedEvent::new(me, Timestamp::now(), Kind::RelayList, tags, "");
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 Self::commit_broadcast(active, &signed).await?;
                 {
                     let mut a = core.active.lock().unwrap();
@@ -6921,7 +6971,7 @@ impl Core {
                 };
                 let unsigned =
                     UnsignedEvent::new(me, Timestamp::now(), Kind::ContactList, tags, content);
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 Self::commit(active, &signed, tx).await?;
                 {
                     let mut a = core.active.lock().unwrap();
@@ -6995,7 +7045,7 @@ impl Core {
                 let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
                 let unsigned =
                     UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(10000), tags, content);
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 Self::commit(active, &signed, tx).await?;
                 // The mirror becomes the published set (D89 audit): it
                 // never shrank before, so an unmuted key survived it and
@@ -7088,7 +7138,7 @@ impl Core {
                 );
                 let unsigned =
                     UnsignedEvent::new(me, Timestamp::now(), Kind::Metadata, [], content);
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 Self::commit_broadcast(active, &signed).await?;
                 Ok(())
             })
@@ -7107,7 +7157,7 @@ impl Core {
                     [seen::hint_tag(target.id, &target.pubkey)],
                     "",
                 );
-                let signed = active.signer.sign_event(unsigned).await?;
+                let signed = active.sign_report(unsigned).await?;
                 Self::commit(active, &signed, tx).await?;
                 // Own deletion accepted: PIN the tombstone (deletions.ts
                 // recordDeletion(ev, pin=true)) — immune to relay-fed
