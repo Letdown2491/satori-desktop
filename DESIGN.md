@@ -256,7 +256,7 @@ replaced in the P3 polish pass; see below.)*
 
 | Token | Light (`sumi-e`) | Dark (`sumi-e-dark`) |
 |---|---|---|
-| bg (washi) | `#e3dac4` | `#15140f` |
+| D102 | **The Content tab: the feed's kind catalog gets its own settings tab (0.12.0; Nov 21 2026).** D101 parked Feed content in General; the owner's follow-up (\"shouldn't it get its own tab?\") was right for a concrete reason: the catalog is the DENSEST group in the pane (machine notes + the whole kind catalog, ~17 rows), and it is the read side of a read-heavy client, buried mid-General between Appearance and List backup. **Content** now sits second in the tab row (General · Content · Composing · Relays · Trust · Notifications · Wallet): each tab names a domain, General becomes a tight housekeeping tab (Appearance · List backup · Storage), and the group is findable instead of scroll-hunting. Tabs are cheap chrome; findability is the user's time. | The owner proposed it; agreed on the density + read-side argument. Amends D101's placement, not its logic. |\n| bg (washi) | `#e3dac4` | `#15140f` |
 | panel | `#d9cfb5` | `#1e1c16` |
 | border (hairline) | `#c9bd9f` | `#322e25` |
 | text (ink) | `#191714` | `#e9e3d6` |

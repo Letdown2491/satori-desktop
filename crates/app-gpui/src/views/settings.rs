@@ -90,6 +90,7 @@ pub struct SettingsView {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SettingsTab {
     General,
+    Content,
     Composing,
     Relays,
     Trust,
@@ -98,10 +99,11 @@ enum SettingsTab {
 }
 
 impl SettingsTab {
-    /// Row order (issue #2): General, Composing, Relays, Trust,
-    /// Notifications, Wallet.
-    const ALL: [SettingsTab; 6] = [
+    /// Row order (issue #2's IA as amended by D102: the read side's
+    /// Content tab joins after General, the write side follows).
+    const ALL: [SettingsTab; 7] = [
         SettingsTab::General,
+        SettingsTab::Content,
         SettingsTab::Composing,
         SettingsTab::Relays,
         SettingsTab::Trust,
@@ -112,6 +114,7 @@ impl SettingsTab {
     fn label(self) -> &'static str {
         match self {
             SettingsTab::General => "General",
+            SettingsTab::Content => "Content",
             SettingsTab::Composing => "Composing",
             SettingsTab::Relays => "Relays",
             SettingsTab::Trust => "Trust",
@@ -851,6 +854,7 @@ impl SettingsView {
     fn current_tab(&self, cx: &mut Context<Self>) -> Div {
         match self.tab {
             SettingsTab::General => self.general_tab(cx),
+            SettingsTab::Content => self.content_tab(cx),
             SettingsTab::Composing => self.composing_tab(cx),
             SettingsTab::Relays => self.relays_tab(cx),
             SettingsTab::Trust => self.trust_tab(cx),
@@ -859,61 +863,19 @@ impl SettingsView {
         }
     }
 
-    fn general_tab(&self, cx: &mut Context<Self>) -> Div {
-        let dark = self.dark.unwrap_or(true); // None = night (today's default)
+    /// The read side (D102): what the feed carries. The kind catalog is
+    /// the densest group in the pane — a tab of its own, named for the
+    /// domain, instead of a bury-in-General.
+    fn content_tab(&self, cx: &mut Context<Self>) -> Div {
         let machine_hidden = self.machine_hidden;
         let hidden_kinds = self.hidden_kinds.clone();
         div()
             .flex()
             .flex_col()
-            // --- Appearance (light / dark) ----------------------------------
+            // --- Content (the feed catalog) ----------------------------------
             .child(
                 group(
-                    "Appearance",
-                    "Ink on paper, the day palette or the night one. Applies at once.",
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .py_1()
-                        .child(
-                            div()
-                                .id("theme-light")
-                                .cursor_pointer()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(if !dark { theme::ink() } else { theme::muted() }))
-                                .when(!dark, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
-                                .on_click(cx.listener(|_this, _, _, cx| {
-                                    cx.emit(Nav::SetTheme(false));
-                                }))
-                                .child("Light"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(theme::hairline()))
-                                .child("·"),
-                        )
-                        .child(
-                            div()
-                                .id("theme-dark")
-                                .cursor_pointer()
-                                .text_size(px(theme::T_UI))
-                                .text_color(rgb(if dark { theme::ink() } else { theme::muted() }))
-                                .when(dark, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
-                                .on_click(cx.listener(|_this, _, _, cx| {
-                                    cx.emit(Nav::SetTheme(true));
-                                }))
-                                .child("Dark"),
-                        ),
-                ),
-            )
-            // --- Feed content (the feed catalog) -----------------------------
-                        .child(
-                group(
-                    "Feed content",
+                    "Content",
                     "What kinds your feed carries. Applies on the next home refresh.",
                 )
                 .child(
@@ -965,6 +927,57 @@ impl SettingsView {
                             this.toggle_kind(&kinds, cx);
                         }))
                 })),
+            )
+    }
+
+    fn general_tab(&self, cx: &mut Context<Self>) -> Div {
+        let dark = self.dark.unwrap_or(true); // None = night (today's default)
+        div()
+            .flex()
+            .flex_col()
+            // --- Appearance (light / dark) ----------------------------------
+            .child(
+                group(
+                    "Appearance",
+                    "Ink on paper, the day palette or the night one. Applies at once.",
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .py_1()
+                        .child(
+                            div()
+                                .id("theme-light")
+                                .cursor_pointer()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(if !dark { theme::ink() } else { theme::muted() }))
+                                .when(!dark, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
+                                .on_click(cx.listener(|_this, _, _, cx| {
+                                    cx.emit(Nav::SetTheme(false));
+                                }))
+                                .child("Light"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::hairline()))
+                                .child("·"),
+                        )
+                        .child(
+                            div()
+                                .id("theme-dark")
+                                .cursor_pointer()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(if dark { theme::ink() } else { theme::muted() }))
+                                .when(dark, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
+                                .on_click(cx.listener(|_this, _, _, cx| {
+                                    cx.emit(Nav::SetTheme(true));
+                                }))
+                                .child("Dark"),
+                        ),
+                ),
             )
             // --- List backup: the signed list events ------------------------
             .child(
@@ -2194,10 +2207,12 @@ mod tests {
 
     #[test]
     fn tab_order_is_the_approved_ia() {
-        // Issue #2's IA: six tabs, General first and Wallet last.
-        assert_eq!(SettingsTab::ALL.len(), 6);
+        // Issue #2's IA as amended by D102: seven tabs, General first,
+        // the read side's Content second, Wallet last.
+        assert_eq!(SettingsTab::ALL.len(), 7);
         assert_eq!(SettingsTab::ALL[0], SettingsTab::General);
-        assert_eq!(SettingsTab::ALL[5], SettingsTab::Wallet);
+        assert_eq!(SettingsTab::ALL[1], SettingsTab::Content);
+        assert_eq!(SettingsTab::ALL[6], SettingsTab::Wallet);
         for tab in SettingsTab::ALL {
             assert!(!tab.label().is_empty());
         }
