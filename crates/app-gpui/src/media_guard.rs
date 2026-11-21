@@ -114,6 +114,9 @@ pub fn gate(
     // window too (five-lens audit Nov 2026 — a hover sweep used to
     // construct one pipeline per tile crossed).
     if already || opening_busy() {
+        if !already {
+            eprintln!("[video] open refused: a build is already in flight");
+        }
         return Gate::Handled;
     }
     if let Ok(mut g) = OPENING.write() {

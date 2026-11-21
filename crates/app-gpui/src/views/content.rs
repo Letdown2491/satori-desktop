@@ -336,7 +336,17 @@ fn media_assets_with(parsed: Option<&article::ArticleData>, ev: &Event) -> Vec<M
             } else {
                 continue;
             };
-            if !out.iter().any(|a| a.url() == url) {
+            // The dedup covers the POSTER too: the gif twin's asset url
+            // is the transformed mp4 (only the poster is the original),
+            // so a content link naming the original used to slip past
+            // the url check and the gallery showed the gif twice —
+            // Satori renders imeta AND the content shim, other clients
+            // dedup by the original. (flatpak field-test, Nov 21 2026)
+            if !out.iter().any(|a| a.url() == url)
+                && !out.iter().any(
+                    |a| matches!(a, MediaAsset::Video { poster: Some(p), .. } if p.as_str() == url),
+                )
+            {
                 out.push(asset);
             }
         }
@@ -1633,6 +1643,17 @@ fn video_tile(
     let panel_w = w.unwrap_or(COL_W - 32.0);
     let panel_h = panel_w * 9.0 / 16.0;
 
+    // A gifs.nostr.build tile (D104's "the feed animates too"): the
+    // poster is the original and THIS url is its mp4 twin. It animates
+    // on HOVER — the same dwell mechanic as the picker's grid — because
+    // the one-player law (video.rs) caps the process at one pipeline:
+    // every visible gif autoplaying is N pipelines, and the law is
+    // load-bearing (proxy ports, decoder memory, CPU). Reduced motion
+    // keeps the still (the play mark's tap-to-play is the affordance).
+    let gif_twin = poster
+        .and_then(satori_core::gifs::mp4_from_original)
+        .is_some_and(|mp4| mp4 == url)
+        && !crate::desktop::reduced_motion();
     let frame = div()
         .id(seg_id("video-tile", url))
         .cursor_pointer()
@@ -1647,6 +1668,28 @@ fn video_tile(
             None => d.w_full(),
         })
         .h(px(panel_h))
+        .when(gif_twin, |d| {
+            let mp4 = url.to_string();
+            d.on_hover(move |hovered: &bool, _, cx| {
+                if *hovered {
+                    crate::video::want_preview(&mp4);
+                    let mp4_dwell = mp4.clone();
+                    cx.spawn(async move |cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(300))
+                            .await;
+                        // The cursor moved on during the dwell.
+                        if crate::video::preview_want().as_deref() != Some(mp4_dwell.as_str()) {
+                            return;
+                        }
+                        cx.update(|app| crate::video::open_preview(mp4_dwell.clone(), app));
+                    })
+                    .detach();
+                } else {
+                    crate::video::unwant_preview(&mp4, cx);
+                }
+            })
+        })
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             crate::video::open(url_for_open.clone(), mime_for_open.clone(), cx);

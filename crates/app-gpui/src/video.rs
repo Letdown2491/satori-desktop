@@ -130,6 +130,11 @@ pub fn open_preview(url: String, cx: &mut gpui::App) {
 }
 
 fn open_inner(url: String, mime: Option<String>, preview: bool, cx: &mut gpui::App) {
+    eprintln!(
+        "[video] open{}: {}",
+        if preview { " preview" } else { "" },
+        satori_core::pool::clean_reason(&url)
+    );
     let openable = crate::views::content::web_url(&url);
     // Already open or building — a second tap on the same tile is a no-op,
     // not a second pipeline.
