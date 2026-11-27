@@ -6,7 +6,7 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
-## Unreleased
+## 0.13.0 - 2026-11-27
 
 Gifs animate on hover again: since 0.12.0 every hover preview was being
 refused, so the gif tiles stayed still. Two quick taps on different videos
@@ -23,9 +23,11 @@ the note actions, the sidebar, the composer and the sign-in doors.
 
 Threads open faster: the replies you already have show at once, and
 the rest arrive in two quick rounds instead of four slow ones, without
-jumping you back to the top. Clicking a reply now opens that reply, with
-the conversation it answers just above it ("3 earlier posts", tap to
-expand) and a link to the full thread.
+jumping you back to the top. Replies are also asked for where they are
+most likely to be, the original author's own inbox relays. Clicking a
+reply now opens that reply, with the posts it answers shown above it as
+readable posts, and a link to the full thread. Reply previews and quoted
+notes in the timeline read in full-strength text instead of faded grey.
 
 Pictures and videos display whole again. Some pictures had their bottom
 cut off in the timeline (tall photos especially, and any post whose size

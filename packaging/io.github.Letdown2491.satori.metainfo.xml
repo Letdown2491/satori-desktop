@@ -29,6 +29,18 @@
   <launchable type="desktop-id">io.github.Letdown2491.satori.desktop</launchable>
   <url type="homepage">https://github.com/Letdown2491/satori-desktop</url>
   <releases>
+    <release version="0.13.0" date="2026-11-27">
+      <description>
+        <p>Gifs animate on hover again: since 0.12.0 every hover preview was being refused, so the gif tiles stayed still. Two quick taps on different videos now always play the one you tapped last.</p>
+        <p>Sturdier on disk. Your session, preferences, zap history and wallet connection are written atomically, so a crash or power loss mid-save can no longer sign you out or reset your settings. Older stores are recognized correctly for future format upgrades.</p>
+        <p>The window appears immediately at launch, even while your keyring is still unlocking. Screen readers can now see and press the main controls: the note actions, the sidebar, the composer and the sign-in doors.</p>
+        <p>Threads open faster: the replies you already have show at once, and the rest arrive in two quick rounds instead of four slow ones, without jumping you back to the top. Replies are also asked for where they are most likely to be, the original author's own inbox relays. Clicking a reply now opens that reply, with the posts it answers shown above it as readable posts, and a link to the full thread. Reply previews and quoted notes in the timeline read in full-strength text instead of faded grey.</p>
+        <p>Pictures and videos display whole again. Some pictures had their bottom cut off in the timeline (tall photos especially, and any post whose size tag didn't match the picture), and videos with unusual widths played sheared diagonally with green edges.</p>
+        <p>Your mute and bookmark lists are safe with other clients. Muting or bookmarking in Satori used to rewrite entries it didn't understand: muted words and hashtags from another client came back as broken key entries, bookmarked articles and links were mangled, and a list carrying relay hints could be read as empty and overwritten. Every entry now survives untouched, and a list Satori can't decrypt is never overwritten.</p>
+        <p>Safer QR sign-in: the nostrconnect library (0.45.3) now rejects a signer that answers without the connection secret, which could have let a stranger on the relay pose as your signer.</p>
+        <p>Under the hood: the renderer moves to gpui-pre 0.3.14 (wgpu 30), the file picker to rfd 0.18, a crash in one background task can no longer cascade into the whole app, and profile and engagement lookups no longer build a text key for every visible note on every frame.</p>
+      </description>
+    </release>
     <release version="0.12.0" date="2026-11-21">
       <description>
         <p>Gifs, done properly. The composer has a gif button: type to search, hover to preview, click to pick. The pick publishes as a real attachment, an imeta-tagged gif that every client renders, not just this one. In the feed, gif posts animate when you hover and play with controls when you click, and a click always plays: even if you crossed three gifs on the way there, none of them can hold your tap hostage.</p>

@@ -5268,7 +5268,7 @@ dependencies = [
 
 [[package]]
 name = "satori-core"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "base64 0.22.1",
  "bech32",
@@ -5296,7 +5296,7 @@ dependencies = [
 
 [[package]]
 name = "satori-gpui"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "blurhash",
  "chrono",
