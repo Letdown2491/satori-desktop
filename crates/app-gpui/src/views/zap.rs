@@ -145,8 +145,7 @@ impl ZapSheet {
     /// The recipient's display name (best effort — the short npub stands
     /// in until the profile is cached).
     fn who(&self) -> String {
-        let hex = self.who.to_string();
-        content::display_name(self.core.profile_of(&self.who).as_ref(), &hex)
+        content::display_name(self.core.profile_of(&self.who).as_ref(), &self.who)
     }
 
     /// The hero's amount in msats. None = the field didn't parse.

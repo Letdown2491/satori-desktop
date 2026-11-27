@@ -10,6 +10,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::a11y::A11y;
 use gpui::{
     Context, Div, Entity, EventEmitter, FontWeight, ListAlignment, ListOffset, ListScrollEvent,
     ListState, Render, SharedString, Window, div, list, prelude::*, px, relative, rgb,
@@ -73,7 +74,7 @@ pub struct Feed {
     mode: FeedMode,
     core: Arc<Core>,
     notes: Vec<Event>,
-    profiles: HashMap<String, Profile>,
+    profiles: HashMap<PublicKey, Profile>,
     /// Reply parents (nip10) resolved for the context whisper: parent id →
     /// author + snippet. `parents_asked` keeps misses from re-requesting.
     /// Both are eviction-capped (#31 latent): a long session's maps used
@@ -90,9 +91,9 @@ pub struct Feed {
     /// asked-set that keeps a paging feed from re-asking per page. Capped
     /// on the same insertion-order discipline as the parents maps —
     /// `counts_asked` grew per unique note for the session otherwise.
-    counts: HashMap<String, usize>,
-    counts_asked: HashSet<String>,
-    counts_order: VecDeque<String>,
+    counts: HashMap<EventId, usize>,
+    counts_asked: HashSet<EventId>,
+    counts_order: VecDeque<EventId>,
     /// Push signals since the last load (the live subscription): the
     /// new-notes pill's count. Nothing moves until the reader clicks.
     /// The new-notes pill's count (Live::Post bumps), zeroed by a click.
@@ -141,7 +142,11 @@ pub struct Feed {
     /// arrival, poll tally and publish event. The snapshot rebuilds only
     /// when the data changed (or the media cache's epoch moved).
     snap: Option<FeedSnap>,
-    snap_dirty: bool,
+    /// Which snapshot parts must rebuild. Per part, not one flag (review
+    /// Nov 27 2026): profile, count and parent trickles land many times a
+    /// second during a bootstrap, and each used to deep-copy the whole
+    /// notes window on the next frame although only one map moved.
+    snap_dirty: SnapDirty,
     /// Mirror of `notes` ids — dedupe was an O(n) scan per incoming note
     /// (O(n·m) per bootstrap batch); now a hash lookup.
     note_ids: HashSet<EventId>,
@@ -162,15 +167,40 @@ pub struct Feed {
     list: ListState,
 }
 
+/// Which parts of the render snapshot are stale (`rest`: engagement,
+/// quotes and the rich-card state).
+#[derive(Default, Clone, Copy)]
+struct SnapDirty {
+    notes: bool,
+    profiles: bool,
+    parents: bool,
+    counts: bool,
+    rest: bool,
+}
+
+impl SnapDirty {
+    const ALL: Self = Self {
+        notes: true,
+        profiles: true,
+        parents: true,
+        counts: true,
+        rest: true,
+    };
+
+    fn any(self) -> bool {
+        self.notes || self.profiles || self.parents || self.counts || self.rest
+    }
+}
+
 /// Everything the render's item closure reads, rebuilt (one deep copy) only
 /// when the data changed instead of every frame; the Arcs make the per-frame
 /// clone a refcount bump.
 struct FeedSnap {
     notes: std::sync::Arc<Vec<Event>>,
-    profiles: std::sync::Arc<HashMap<String, Profile>>,
+    profiles: std::sync::Arc<HashMap<PublicKey, Profile>>,
     parents: std::sync::Arc<HashMap<String, ParentNote>>,
     /// Note id → comment count (the bubbles).
-    counts: std::sync::Arc<HashMap<String, usize>>,
+    counts: std::sync::Arc<HashMap<EventId, usize>>,
     engagement: std::sync::Arc<engagement::Engagement>,
     quotes: std::sync::Arc<content::Quotes>,
     cards: std::sync::Arc<cards::CardState>,
@@ -248,7 +278,7 @@ impl Feed {
             last_dry: None,
             oldest_ts: None,
             snap: None,
-            snap_dirty: true,
+            snap_dirty: SnapDirty::ALL,
             mode,
             note_ids: HashSet::new(),
             last_visible_end: 0,
@@ -519,7 +549,7 @@ impl Feed {
     /// Any state mutation goes through here so the render snapshot knows to
     /// rebuild. (on_event covers the event-driven arms wholesale.)
     fn touch(&mut self) {
-        self.snap_dirty = true;
+        self.snap_dirty = SnapDirty::ALL;
     }
 
     /// NIP-36: reveal a warned row (veil_card's Show seal). Stays for the
@@ -544,7 +574,14 @@ impl Feed {
     }
 
     fn on_event(&mut self, ev: FeedEvent, cx: &mut Context<Self>) {
-        self.touch();
+        // The hot trickles move one map each; everything else may touch
+        // anything (the conservative default).
+        match &ev {
+            FeedEvent::Profiles(_) => self.snap_dirty.profiles = true,
+            FeedEvent::CommentCounts(_) => self.snap_dirty.counts = true,
+            FeedEvent::Parents(_) => self.snap_dirty.parents = true,
+            _ => self.touch(),
+        }
         enum Reflow {
             Reset,
             Append(usize),
@@ -608,10 +645,9 @@ impl Feed {
                 // cap eviction refreshes recency, mirroring the parents
                 // landing).
                 for (id, n) in counts {
-                    let key = id.to_string();
-                    self.counts_order.retain(|o| o != &key);
-                    self.counts_order.push_back(key.clone());
-                    self.counts.insert(key, n as usize);
+                    self.counts_order.retain(|o| o != &id);
+                    self.counts_order.push_back(id);
+                    self.counts.insert(id, n as usize);
                 }
                 self.trim_counts();
                 cx.notify();
@@ -626,9 +662,8 @@ impl Feed {
                 let mut seen = HashSet::new();
                 let missing: Vec<PublicKey> = p
                     .values()
-                    .map(|pn| pn.author.clone())
-                    .filter(|a| !self.profiles.contains_key(a) && seen.insert(a.clone()))
-                    .filter_map(|a| PublicKey::from_hex(&a).ok())
+                    .map(|pn| pn.author)
+                    .filter(|a| !self.profiles.contains_key(a) && seen.insert(*a))
                     .collect();
                 for (k, v) in p {
                     self.parents.insert(k.clone(), v);
@@ -742,9 +777,7 @@ impl Feed {
             let mut seen = HashSet::new();
             mention_candidates
                 .into_iter()
-                .filter(|pk| {
-                    !self.profiles.contains_key(&pk.to_string()) && seen.insert(pk.to_string())
-                })
+                .filter(|pk| !self.profiles.contains_key(pk) && seen.insert(*pk))
                 .collect()
         };
         if !missing.is_empty() {
@@ -780,11 +813,11 @@ impl Feed {
     fn want_counts(&mut self, cx: &mut Context<Self>) {
         let mut targets: Vec<(EventId, satori_core::nip::comment::CommentTarget)> = Vec::new();
         for note in &self.notes {
-            let id = note.id.to_string();
+            let id = note.id;
             if self.counts_asked.contains(&id) {
                 continue;
             }
-            self.counts_asked.insert(id.clone());
+            self.counts_asked.insert(id);
             self.counts_order.push_back(id);
             // Mixed targets (#52): a parameterized picture/video hangs its
             // comment thread off the a-tag ADDRESS, a note off its id —
@@ -862,7 +895,7 @@ impl Feed {
     fn absorb_profiles(&mut self, profiles: Vec<Profile>, cx: &mut Context<Self>) {
         for p in profiles {
             self.want_avatar(&p, cx);
-            self.profiles.insert(p.pubkey.clone(), p);
+            self.profiles.insert(p.pubkey, p);
         }
         // A landing can change a visible row's avatar URL (the picture
         // arrived after the note): re-pin so the new URL rides the
@@ -1128,7 +1161,7 @@ impl quotes::Host for Feed {
     fn core(&self) -> &Arc<Core> {
         &self.core
     }
-    fn profiles(&self) -> &HashMap<String, Profile> {
+    fn profiles(&self) -> &HashMap<PublicKey, Profile> {
         &self.profiles
     }
 }
@@ -1137,7 +1170,7 @@ impl actions::ActionHost for Feed {
     fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>) {
         engagement::toggle_like(self, ev, cx)
     }
-    fn toggle_reaction_picker(&mut self, id: &str, cx: &mut Context<Self>) {
+    fn toggle_reaction_picker(&mut self, id: EventId, cx: &mut Context<Self>) {
         engagement::toggle_reaction_picker(self, id, cx)
     }
     fn react_with(&mut self, ev: &Event, content: &str, cx: &mut Context<Self>) {
@@ -1188,10 +1221,10 @@ fn thread_nav(ev: &Event) -> Nav {
     {
         return Nav::OpenThreadAddr(kind, author, d);
     }
-    let root = satori_core::nip::nip10::reply_root(ev)
-        .and_then(|(id, _)| EventId::from_hex(&id).ok())
-        .unwrap_or(ev.id);
-    Nav::OpenThread(root)
+    // Thread option B (Nov 27 2026): a reply opens FOCUSED on itself,
+    // its parent chain above it (the thread pane walks it), not at a
+    // root guessed from tags that clients often leave out.
+    Nav::OpenThread(ev.id)
 }
 
 // The card takes the full render-time snapshot — one struct would hide the
@@ -1200,7 +1233,7 @@ fn thread_nav(ev: &Event) -> Nav {
 fn note_card(
     idx: usize,
     ev: &Event,
-    profiles: &HashMap<String, Profile>,
+    profiles: &HashMap<PublicKey, Profile>,
     parents: &HashMap<String, ParentNote>,
     eng: &engagement::Engagement,
     reduced_motion: bool,
@@ -1221,8 +1254,8 @@ fn note_card(
     // of every visible row, every frame — Arc bumps now. (The list hands
     // out &Event; the single clone here is the row's only deep copy.)
     let ev = std::sync::Arc::new(ev.clone());
-    let id = ev.id.to_string();
-    let key = ev.pubkey.to_string();
+    let id = ev.id;
+    let key = ev.pubkey;
     let profile = profiles.get(&key);
     let name = content::display_name(profile, &key);
     let picture = profile.map(|p| p.picture.clone()).unwrap_or_default();
@@ -1291,7 +1324,7 @@ fn note_card(
                 )),
         )
         .child(actions::action_row(
-            &id,
+            &id.to_hex(),
             &ev,
             actions::ActionState {
                 liked: engaged,
@@ -1300,7 +1333,7 @@ fn note_card(
                 zapped,
                 zapping,
                 wallet_ready: eng.wallet_ready,
-                picker_open: eng.reaction_picker.as_deref() == Some(&id),
+                picker_open: eng.reaction_picker == Some(id),
                 replies,
                 reduced_motion,
             },
@@ -1320,24 +1353,44 @@ impl Render for Feed {
         // The pending bolt's breathing honors the desktop's motion pref
         // (desktop.rs: the portal's prefers-reduced-motion).
         let reduced_motion = crate::desktop::Desktop::get(cx).reduced_motion;
-        if self.snap_dirty || self.snap.is_none() {
+        if self.snap.is_none() {
+            self.snap_dirty = SnapDirty::ALL;
+        }
+        let d = std::mem::take(&mut self.snap_dirty);
+        if d.any() {
+            use std::sync::Arc;
+            let prev = self.snap.take();
+            let keep = |dirty: bool| if dirty { None } else { prev.as_ref() };
             self.snap = Some(FeedSnap {
-                notes: std::sync::Arc::new(self.notes.clone()),
-                profiles: std::sync::Arc::new(self.profiles.clone()),
-                parents: std::sync::Arc::new(self.parents.clone()),
-                counts: std::sync::Arc::new(self.counts.clone()),
-                engagement: std::sync::Arc::new(self.engagement.clone()),
-                quotes: std::sync::Arc::new(self.quotes.clone()),
-                cards: std::sync::Arc::new(cards::CardState {
-                    poll_tallies: self.poll_tallies.clone(),
-                    poll_sel: self.poll_sel.clone(),
-                    voted: self.voted.clone(),
-                    rsvped: self.rsvped.clone(),
-                    revealed: self.revealed.clone(),
-                    goal_msat: self.goal_msat.clone(),
+                notes: keep(d.notes)
+                    .map(|p| p.notes.clone())
+                    .unwrap_or_else(|| Arc::new(self.notes.clone())),
+                profiles: keep(d.profiles)
+                    .map(|p| p.profiles.clone())
+                    .unwrap_or_else(|| Arc::new(self.profiles.clone())),
+                parents: keep(d.parents)
+                    .map(|p| p.parents.clone())
+                    .unwrap_or_else(|| Arc::new(self.parents.clone())),
+                counts: keep(d.counts)
+                    .map(|p| p.counts.clone())
+                    .unwrap_or_else(|| Arc::new(self.counts.clone())),
+                engagement: keep(d.rest)
+                    .map(|p| p.engagement.clone())
+                    .unwrap_or_else(|| Arc::new(self.engagement.clone())),
+                quotes: keep(d.rest)
+                    .map(|p| p.quotes.clone())
+                    .unwrap_or_else(|| Arc::new(self.quotes.clone())),
+                cards: keep(d.rest).map(|p| p.cards.clone()).unwrap_or_else(|| {
+                    Arc::new(cards::CardState {
+                        poll_tallies: self.poll_tallies.clone(),
+                        poll_sel: self.poll_sel.clone(),
+                        voted: self.voted.clone(),
+                        rsvped: self.rsvped.clone(),
+                        revealed: self.revealed.clone(),
+                        goal_msat: self.goal_msat.clone(),
+                    })
                 }),
             });
-            self.snap_dirty = false;
         }
         let media = media::Snapshot::new(cx);
         let snap = self.snap.as_ref().unwrap();
@@ -1402,6 +1455,11 @@ impl Render for Feed {
                     div().w_full().flex().justify_center().child(
                         div()
                             .id("new-posts-pill")
+                            .a11y_button(if self.loading_new {
+                                "Loading new notes".to_string()
+                            } else {
+                                new_notes_label(n)
+                            })
                             .cursor_pointer()
                             .flex_none()
                             .mb_1()
@@ -1514,8 +1572,7 @@ impl Render for Feed {
                                     let time = crate::timefmt::stamp(secs, cx);
                                     crate::timefmt::ensure(secs, cx);
                                     let eng = eng.clone();
-                                    let replies =
-                                        counts.get(&ev.id.to_string()).copied().unwrap_or(0);
+                                    let replies = counts.get(&ev.id).copied().unwrap_or(0);
                                     note_card(
                                         idx,
                                         ev,
@@ -1551,9 +1608,9 @@ impl Render for Feed {
 /// card (which paints ITS author too). The lazy list renders only the
 /// visible window, so this doubles as the visible re-request set —
 /// evicted entries come back exactly when their card is seen.
-fn card_media_urls(ev: &Event, profiles: &HashMap<String, Profile>) -> Vec<String> {
-    fn one(note: &Event, profiles: &HashMap<String, Profile>, urls: &mut Vec<String>) {
-        if let Some(p) = profiles.get(&note.pubkey.to_string()) {
+fn card_media_urls(ev: &Event, profiles: &HashMap<PublicKey, Profile>) -> Vec<String> {
+    fn one(note: &Event, profiles: &HashMap<PublicKey, Profile>, urls: &mut Vec<String>) {
+        if let Some(p) = profiles.get(&note.pubkey) {
             urls.push(p.picture.clone());
         }
         urls.extend(content::media_urls_cached(note).iter().cloned());
@@ -1582,9 +1639,9 @@ fn card_media_urls(ev: &Event, profiles: &HashMap<String, Profile>) -> Vec<Strin
 #[allow(clippy::too_many_arguments)]
 fn repost_card(
     ev: &Event,
-    profiles: &HashMap<String, Profile>,
+    profiles: &HashMap<PublicKey, Profile>,
     eng: &engagement::Engagement,
-    counts: &HashMap<String, usize>,
+    counts: &HashMap<EventId, usize>,
     reduced_motion: bool,
     media: &media::Snapshot,
     quotes: &content::Quotes,
@@ -1592,7 +1649,7 @@ fn repost_card(
     time: String,
     handle: Entity<Feed>,
 ) -> impl IntoElement {
-    let key = ev.pubkey.to_string();
+    let key = ev.pubkey;
     let name = content::display_name(profiles.get(&key), &key);
     let picture = profiles
         .get(&key)
@@ -1618,7 +1675,7 @@ fn repost_card(
             // and counts keyed by its id, the same keys the toggles write.
             // Arc bump — the deep-clone discipline note_card keeps.
             let inner_ev = note.clone();
-            let inner_id = inner_ev.id.to_string();
+            let inner_id = inner_ev.id;
             let engaged = eng.liked.contains(&inner_id);
             let saved = eng.bookmarked.contains(&inner_id);
             let shared = eng.reposted.contains(&inner_id);
@@ -1677,7 +1734,7 @@ fn repost_card(
                         )),
                 )
                 .child(actions::action_row(
-                    &inner_id,
+                    &inner_id.to_hex(),
                     &inner_ev,
                     actions::ActionState {
                         liked: engaged,
@@ -1686,7 +1743,7 @@ fn repost_card(
                         zapped,
                         zapping,
                         wallet_ready: eng.wallet_ready,
-                        picker_open: eng.reaction_picker.as_deref() == Some(&inner_id),
+                        picker_open: eng.reaction_picker == Some(inner_id),
                         replies,
                         reduced_motion,
                     },
@@ -1703,7 +1760,7 @@ fn reply_whisper(
     idx: usize,
     ev: &Event,
     parents: &HashMap<String, ParentNote>,
-    profiles: &HashMap<String, Profile>,
+    profiles: &HashMap<PublicKey, Profile>,
     handle: &Entity<Feed>,
 ) -> Option<gpui::AnyElement> {
     // Replies are a kind-1 concern; articles/highlights carry their own
@@ -1769,11 +1826,14 @@ fn reply_whisper(
                     // Even before the name lands, the parent's own words
                     // are worth their line.
                     rows.push(
+                        // Ink, not muted (owner, Nov 27 2026: the quoted
+                        // words were hard to read); the serif italic
+                        // still sets the quoted voice apart.
                         div()
                             .font_family(theme::SERIF)
                             .italic()
                             .text_size(px(theme::T_UI))
-                            .text_color(rgb(theme::muted()))
+                            .text_color(rgb(theme::ink()))
                             .child(snippet.clone())
                             .into_any_element(),
                     );

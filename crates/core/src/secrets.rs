@@ -7,11 +7,11 @@
 //! D17 removed the nsec login door; the `NSEC` slot survives only so the
 //! test fixture's local mode can read old session files.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use crate::config;
 use crate::error::{LoginError, Result};
@@ -189,14 +189,14 @@ fn tickets() -> &'static Mutex<HashMap<&'static str, u64>> {
 }
 
 fn take_ticket(name: &'static str) -> u64 {
-    let mut map = tickets().lock().unwrap();
+    let mut map = tickets().lock();
     let slot = map.entry(name).or_insert(0);
     *slot += 1;
     *slot
 }
 
 fn ticket_live(name: &'static str, ticket: u64) -> bool {
-    tickets().lock().unwrap().get(name).copied() == Some(ticket)
+    tickets().lock().get(name).copied() == Some(ticket)
 }
 
 fn file_store(name: &str, secret: &str) -> Result<()> {

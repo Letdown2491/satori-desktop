@@ -59,7 +59,7 @@ pub struct ProfileView {
     /// header's Mute button flips it optimistically.
     muted: bool,
     /// Known profiles — mention names in note bodies (word_flow).
-    profiles: HashMap<String, Profile>,
+    profiles: HashMap<PublicKey, Profile>,
     /// The Notes tab: an embedded Feed (FeedMode::Profile) — the timeline's
     /// exact rows (avatar, media, the reaction row) scoped to this author.
     /// The profile owns the header + strips; the list itself is the child's.
@@ -290,9 +290,7 @@ impl ProfileView {
         let missing: Vec<PublicKey> = notes
             .iter()
             .flat_map(content::mention_pks_cached)
-            .filter(|pk| {
-                !self.profiles.contains_key(&pk.to_string()) && seen.insert(pk.to_string())
-            })
+            .filter(|pk| !self.profiles.contains_key(pk) && seen.insert(*pk))
             .collect();
         if !missing.is_empty() {
             self.pump(self.core.ensure_profiles(missing), cx);
@@ -303,7 +301,7 @@ impl ProfileView {
     /// copy (name/about/picture/banner re-derive at render; a changed
     /// NIP-05 re-fires its memo, a changed picture refetches by URL).
     pub(crate) fn refresh_profile(&mut self, p: Profile, cx: &mut Context<Self>) {
-        self.profiles.insert(p.pubkey.clone(), p.clone());
+        self.profiles.insert(p.pubkey, p.clone());
         self.profile = Some(p);
         cx.notify();
     }
@@ -312,13 +310,9 @@ impl ProfileView {
         match ev {
             FeedEvent::Loaded(page) => {
                 for p in &page.profiles {
-                    self.profiles.insert(p.pubkey.clone(), p.clone());
+                    self.profiles.insert(p.pubkey, p.clone());
                 }
-                self.profile = page
-                    .profiles
-                    .iter()
-                    .find(|p| p.pubkey == self.who.to_string())
-                    .cloned();
+                self.profile = page.profiles.iter().find(|p| p.pubkey == self.who).cloned();
                 if let Some(p) = self.profile.clone() {
                     self.want_avatar(&p, cx);
                     self.want_nip05(&p, cx);
@@ -347,7 +341,7 @@ impl ProfileView {
                 self.paging = false;
                 self.has_more = has_more;
                 for p in &page.profiles {
-                    self.profiles.insert(p.pubkey.clone(), p.clone());
+                    self.profiles.insert(p.pubkey, p.clone());
                 }
                 let fresh = self.notes.len();
                 for n in page.notes {
@@ -372,7 +366,7 @@ impl ProfileView {
                 // The mention pump's landings (want_names): merge; the
                 // trailing notify repaints the bodies.
                 for p in profiles {
-                    self.profiles.insert(p.pubkey.clone(), p);
+                    self.profiles.insert(p.pubkey, p);
                 }
             }
             _ => {}
@@ -566,7 +560,7 @@ impl ProfileView {
 impl Render for ProfileView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let who_hex = self.who.to_string();
-        let name = content::display_name(self.profile.as_ref(), &who_hex);
+        let name = content::display_name(self.profile.as_ref(), &self.who);
         let about = self
             .profile
             .as_ref()

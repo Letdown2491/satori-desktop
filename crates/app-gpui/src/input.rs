@@ -970,13 +970,7 @@ struct PrepaintState {
     cursor: Option<PaintQuad>,
 }
 
-impl IntoElement for InputElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
+// (IntoElement comes from gpui-pre 0.3.14's blanket impl over Element.)
 
 impl Element for InputElement {
     type RequestLayoutState = ();

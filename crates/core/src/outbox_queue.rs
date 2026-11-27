@@ -31,9 +31,10 @@
 //! removes/attempts ride the debounced flusher — a crash before those
 //! flush at worst re-publishes an event, which relays dedupe by id.
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 use nostr::prelude::*;
 
@@ -157,7 +158,7 @@ pub(crate) fn enqueue(event: &Event) -> bool {
     };
     let now = now_secs();
     {
-        let mut held = outbox().lock().unwrap();
+        let mut held = outbox().lock();
         // Replaceable coordinate: drop older pending versions so a
         // superseded relay list can't resurrect on retry.
         if (10000..20000).contains(&u16::from(event.kind))
@@ -216,7 +217,7 @@ pub(crate) fn remove(event: &Event) {
     let Some(key) = outbox_key(event) else {
         return;
     };
-    let mut held = outbox().lock().unwrap();
+    let mut held = outbox().lock();
     if held.map.remove(&key).is_some() {
         held.order.retain(|o| o != &key);
         DIRTY.store(true, Ordering::Relaxed);
@@ -229,7 +230,7 @@ pub(crate) fn mark_attempt(event: &Event) {
         return;
     };
     let now = now_secs();
-    let mut held = outbox().lock().unwrap();
+    let mut held = outbox().lock();
     if let Some(p) = held.map.get_mut(&key) {
         p.attempts += 1;
         p.next_try_at = now + backoff(p.attempts);
@@ -243,7 +244,7 @@ pub(crate) fn reschedule(event: &Event, at: u64) {
     let Some(key) = outbox_key(event) else {
         return;
     };
-    let mut held = outbox().lock().unwrap();
+    let mut held = outbox().lock();
     if let Some(p) = held.map.get_mut(&key)
         && p.next_try_at < at
     {
@@ -254,7 +255,7 @@ pub(crate) fn reschedule(event: &Event, at: u64) {
 
 /// The oldest due item, if any (the drainer processes one at a time).
 pub(crate) fn next_due(now: u64) -> Option<Pending> {
-    let held = outbox().lock().unwrap();
+    let held = outbox().lock();
     held.order
         .iter()
         .filter_map(|k| held.map.get(k))
@@ -265,13 +266,13 @@ pub(crate) fn next_due(now: u64) -> Option<Pending> {
 
 /// Queue depth (bootstrap log line).
 pub(crate) fn len() -> usize {
-    outbox().lock().unwrap().map.len()
+    outbox().lock().map.len()
 }
 
 #[cfg(test)]
 pub(crate) fn contains(event: &Event) -> bool {
     outbox_key(event)
-        .map(|k| outbox().lock().unwrap().map.contains_key(&k))
+        .map(|k| outbox().lock().map.contains_key(&k))
         .unwrap_or(false)
 }
 
@@ -280,19 +281,14 @@ pub(crate) fn contains(event: &Event) -> bool {
 #[cfg(test)]
 fn stored_event(event: &Event) -> Option<Event> {
     let key = outbox_key(event)?;
-    outbox()
-        .lock()
-        .unwrap()
-        .map
-        .get(&key)
-        .map(|p| p.event.clone())
+    outbox().lock().map.get(&key).map(|p| p.event.clone())
 }
 
 fn write_disk() {
     // Snapshot under the lock, serialize OUTSIDE it (audit perf: the
     // same mutex must never gate a JSON-format behind a render lookup).
     let snap: Vec<Pending> = {
-        let held = outbox().lock().unwrap();
+        let held = outbox().lock();
         held.order
             .iter()
             .filter_map(|k| held.map.get(k))
@@ -491,7 +487,7 @@ mod tests {
         // Freshly enqueued: due one backoff(1) out, not now.
         assert!(next_due(now_secs()).is_none_or(|p| p.event.id != ev.id));
         mark_attempt(&ev);
-        let held = outbox().lock().unwrap();
+        let held = outbox().lock();
         let key = outbox_key(&ev).unwrap();
         let p = held.map.get(&key).unwrap();
         assert_eq!(p.attempts, 1);

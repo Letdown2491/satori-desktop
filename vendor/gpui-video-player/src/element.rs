@@ -12,9 +12,9 @@ use core_video::pixel_buffer::{CVPixelBuffer, kCVPixelFormatType_420YpCbCr8BiPla
 use core_video::r#return::kCVReturnSuccess;
 #[cfg(all(target_os = "macos", feature = "gpui-pre"))]
 use core_video_pre as core_video;
-use gpui::{
-    Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Window,
-};
+#[cfg(not(feature = "gpui-pre"))]
+use gpui::IntoElement;
+use gpui::{Element, ElementId, GlobalElementId, InspectorElementId, LayoutId, Window};
 use std::sync::Arc;
 use yuv::{YuvBiPlanarImage, YuvConversionMode, YuvRange, YuvStandardMatrix, yuv_nv12_to_bgra};
 
@@ -283,7 +283,10 @@ impl VideoElement {
         let width_usize = width as usize;
         let height_usize = height as usize;
         let y_size = width_usize * height_usize;
-        let uv_size = (width_usize * height_usize) / 2;
+        // VENDORED PATCH (stride): odd sizes round the chroma plane UP
+        // (the repacked layout, video.rs `pack_nv12`).
+        let (uv_row, uv_rows) = crate::video::nv12_uv_dims(width_usize, height_usize);
+        let uv_size = uv_row * uv_rows;
 
         if yuv_data.len() < y_size + uv_size {
             // Not enough data, return black frame
@@ -299,7 +302,7 @@ impl VideoElement {
             y_plane,
             y_stride: width,
             uv_plane,
-            uv_stride: width, // NV12 UV stride is same as width
+            uv_stride: uv_row as u32,
             width,
             height,
         };
@@ -475,6 +478,10 @@ impl Element for VideoElement {
     }
 }
 
+// VENDOR PATCH (satori-desktop, gpui-pre 0.3.14): gpui-pre now ships a
+// blanket `IntoElement` for every `Element`, so this impl only exists for
+// the old-gpui feature.
+#[cfg(not(feature = "gpui-pre"))]
 impl IntoElement for VideoElement {
     type Element = Self;
 

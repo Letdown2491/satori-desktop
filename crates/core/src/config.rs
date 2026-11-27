@@ -90,27 +90,31 @@ pub fn state_file(name: &str) -> PathBuf {
 /// `Arc` (audit fix: the dedup chokepoint reads per event — a deep
 /// `Value` clone per read went with it).
 pub fn prefs() -> Option<std::sync::Arc<serde_json::Value>> {
-    static CACHE: std::sync::Mutex<
-        Option<(
-            std::time::SystemTime,
-            u64,
-            std::sync::Arc<serde_json::Value>,
-        )>,
-    > = std::sync::Mutex::new(None);
+    /// (mtime, (len, inode), parsed): the inode catches atomic renames.
+    type Slot = Option<(
+        std::time::SystemTime,
+        (u64, u64),
+        std::sync::Arc<serde_json::Value>,
+    )>;
+    static CACHE: parking_lot::Mutex<Slot> = parking_lot::Mutex::new(None);
     let path = state_file(files::PREFS);
     let meta = std::fs::metadata(&path).ok()?; // no file = no prefs
     let modified = meta.modified().ok()?;
-    let mut held = CACHE.lock().unwrap();
+    let mut held = CACHE.lock();
     if let Some((at, len, value)) = held.as_ref()
         && *at == modified
-        && *len == meta.len()
+        && *len == (meta.len(), std::os::unix::fs::MetadataExt::ino(&meta))
     {
         return Some(std::sync::Arc::clone(value));
     }
     let value =
         serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).ok()?).ok()?;
     let value = std::sync::Arc::new(value);
-    *held = Some((modified, meta.len(), std::sync::Arc::clone(&value)));
+    *held = Some((
+        modified,
+        (meta.len(), std::os::unix::fs::MetadataExt::ino(&meta)),
+        std::sync::Arc::clone(&value),
+    ));
     Some(value)
 }
 

@@ -6,10 +6,11 @@
 //! The reactive part lives in the UI: cards render with whatever is cached
 //! and PATCH themselves when `ensure_profiles` resolves late arrivals.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use nostr::prelude::*;
 use tokio::sync::mpsc;
@@ -40,7 +41,7 @@ struct Waiter {
 }
 
 pub struct ProfileService {
-    cache: Mutex<HashMap<String, Entry>>,
+    cache: Mutex<HashMap<PublicKey, Entry>>,
     calls: Mutex<Vec<Arc<Mutex<Vec<Waiter>>>>>,
     pool: Arc<Pool>,
     disk: PathBuf,
@@ -71,7 +72,7 @@ impl ProfileService {
         service
     }
 
-    fn load_disk(path: &PathBuf) -> HashMap<String, Entry> {
+    fn load_disk(path: &PathBuf) -> HashMap<PublicKey, Entry> {
         #[derive(serde::Deserialize)]
         struct Raw {
             pubkey: String,
@@ -96,12 +97,15 @@ impl ProfileService {
             .and_then(|s| serde_json::from_str::<Vec<Raw>>(&s).ok())
             .map(|raws| {
                 raws.into_iter()
-                    .map(|r| {
-                        (
-                            r.pubkey.clone(),
+                    .filter_map(|r| {
+                        // A malformed key (hand-edited or torn file) drops
+                        // that one entry, not the whole cache.
+                        let pk = PublicKey::from_hex(&r.pubkey).ok()?;
+                        Some((
+                            pk,
                             Entry {
                                 profile: Profile {
-                                    pubkey: r.pubkey,
+                                    pubkey: pk,
                                     name: r.name,
                                     handle: r.handle,
                                     picture: r.picture,
@@ -115,14 +119,14 @@ impl ProfileService {
                                 },
                                 at: r.at,
                             },
-                        )
+                        ))
                     })
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    fn save_disk(&self, cache: &HashMap<String, Entry>) {
+    fn save_disk(&self, cache: &HashMap<PublicKey, Entry>) {
         #[derive(serde::Serialize)]
         struct Raw {
             pubkey: String,
@@ -142,7 +146,7 @@ impl ProfileService {
             .iter()
             .take(CAP)
             .map(|e| Raw {
-                pubkey: e.profile.pubkey.clone(),
+                pubkey: e.profile.pubkey.to_hex(),
                 name: e.profile.name.clone(),
                 handle: e.profile.handle.clone(),
                 picture: e.profile.picture.clone(),
@@ -154,18 +158,10 @@ impl ProfileService {
             })
             .collect();
         if let Ok(body) = serde_json::to_string(&raws) {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
             if let Some(parent) = self.disk.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let _ = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&self.disk)
-                .and_then(|mut f| f.write_all(body.as_bytes()));
+            let _ = crate::sidecar::try_write_atomic(&self.disk, body.as_bytes());
         }
         self.dirty.store(false, Ordering::Relaxed);
     }
@@ -178,34 +174,26 @@ impl ProfileService {
     pub fn snapshot(&self) -> Vec<Profile> {
         self.cache
             .lock()
-            .unwrap()
             .values()
             .map(|e| e.profile.clone())
             .collect()
     }
 
     pub fn get(&self, pk: &PublicKey) -> Option<Profile> {
-        self.cache
-            .lock()
-            .unwrap()
-            .get(&pk.to_string())
-            .map(|e| e.profile.clone())
+        self.cache.lock().get(pk).map(|e| e.profile.clone())
     }
 
     /// Absorb a fetched profile into the cache (+ persist soon).
     pub fn absorb(&self, profile: Profile) {
-        let pk = profile.pubkey.clone();
-        let mut cache = self.cache.lock().unwrap();
+        let pk = profile.pubkey;
+        let mut cache = self.cache.lock();
         // The CAP (10k) used to bound only the disk write; the in-memory
         // map was insert-only and grew for the process lifetime. Evict the
         // oldest-by-`at` entry to make room — re-absorbing a trimmed
         // profile is one relay query away (and the disk copy still holds
         // it if it predates this run).
         if cache.len() >= CAP && !cache.contains_key(&pk) {
-            let oldest = cache
-                .iter()
-                .min_by_key(|(_, e)| e.at)
-                .map(|(k, _)| k.clone());
+            let oldest = cache.iter().min_by_key(|(_, e)| e.at).map(|(k, _)| *k);
             if let Some(old) = oldest {
                 cache.remove(&old);
             }
@@ -227,7 +215,6 @@ impl ProfileService {
         let (tx, rx) = mpsc::unbounded_channel();
         self.calls
             .lock()
-            .unwrap()
             .push(Arc::new(Mutex::new(vec![Waiter { wants: pks, tx }])));
         rx
     }
@@ -259,8 +246,7 @@ impl ProfileService {
             .filter(|pk| {
                 self.cache
                     .lock()
-                    .unwrap()
-                    .get(&pk.to_string())
+                    .get(pk)
                     .map(|e| now_secs() - e.at > TTL)
                     .unwrap_or(true)
             })
@@ -276,11 +262,11 @@ impl ProfileService {
             return;
         }
         let stale: Vec<PublicKey> = {
-            let cache = self.cache.lock().unwrap();
+            let cache = self.cache.lock();
             cache
                 .values()
                 .filter(|e| now_secs() - e.at > TTL)
-                .filter_map(|e| PublicKey::from_hex(&e.profile.pubkey).ok())
+                .map(|e| e.profile.pubkey)
                 .collect()
         };
         if stale.is_empty() {
@@ -303,9 +289,9 @@ impl ProfileService {
     /// Refresh the TTL clock without fetching — the miss side of
     /// revalidation.
     fn touch(&self, pks: &[PublicKey]) {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock();
         for pk in pks {
-            if let Some(e) = cache.get_mut(&pk.to_string()) {
+            if let Some(e) = cache.get_mut(pk) {
                 e.at = now_secs();
             }
         }
@@ -332,7 +318,7 @@ impl ProfileService {
                     && now.saturating_sub(service.last_flush.load(Ordering::Relaxed)) > FLUSH_EVERY
                 {
                     service.last_flush.store(now, Ordering::Relaxed);
-                    let cache = service.cache.lock().unwrap().clone();
+                    let cache = service.cache.lock().clone();
                     service.save_disk(&cache);
                 }
 
@@ -340,7 +326,7 @@ impl ProfileService {
 
                 // Take pending calls → union misses → one chunked fetch.
                 let calls: Vec<Arc<Mutex<Vec<Waiter>>>> = {
-                    let mut c = service.calls.lock().unwrap();
+                    let mut c = service.calls.lock();
                     std::mem::take(&mut *c)
                 };
                 if calls.is_empty() {
@@ -348,7 +334,7 @@ impl ProfileService {
                 }
                 let mut missing: Vec<PublicKey> = Vec::new();
                 for call in &calls {
-                    for w in call.lock().unwrap().iter() {
+                    for w in call.lock().iter() {
                         for pk in &w.wants {
                             if service.get(pk).is_none() && !missing.contains(pk) {
                                 missing.push(*pk);
@@ -363,7 +349,7 @@ impl ProfileService {
                 // as None).
                 for call in calls {
                     let waiters: Vec<Waiter> = {
-                        let mut w = call.lock().unwrap();
+                        let mut w = call.lock();
                         std::mem::take(&mut *w)
                     };
                     for w in waiters {

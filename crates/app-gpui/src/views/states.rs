@@ -4,6 +4,7 @@
 //! ellipsis is enough; the ensō is the only animation). No new color, no
 //! new motion — the strip is a state, it does not travel.
 
+use crate::a11y::A11y;
 use gpui::{AnyElement, ClickEvent, FontWeight, Window, div, prelude::*, px, rgb};
 
 use crate::theme;
@@ -113,6 +114,7 @@ pub fn error_strip(
                         .child(
                             div()
                                 .id("error-dismiss")
+                                .a11y_button("Dismiss")
                                 .cursor_pointer()
                                 .text_size(px(theme::T_SMALL))
                                 .text_color(rgb(theme::muted()))
@@ -131,6 +133,7 @@ pub fn error_strip(
                     d.child(
                         div()
                             .id("error-retry")
+                            .a11y_button("Retry")
                             .cursor_pointer()
                             .text_size(px(theme::T_SMALL))
                             .child(theme::pressable(div().child("Retry")))

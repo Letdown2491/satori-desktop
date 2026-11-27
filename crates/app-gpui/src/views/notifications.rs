@@ -147,15 +147,15 @@ fn action_parts(t: NotifType, ev: &Event) -> (&'static str, Option<String>) {
         map: HashMap<String, (&'static str, Option<String>)>,
         order: std::collections::VecDeque<String>,
     }
-    static MEMO: std::sync::OnceLock<std::sync::Mutex<PartsMemo>> = std::sync::OnceLock::new();
+    static MEMO: std::sync::OnceLock<parking_lot::Mutex<PartsMemo>> = std::sync::OnceLock::new();
     let memo = MEMO.get_or_init(|| {
-        std::sync::Mutex::new(PartsMemo {
+        parking_lot::Mutex::new(PartsMemo {
             map: HashMap::new(),
             order: std::collections::VecDeque::new(),
         })
     });
     let key = ev.id.to_string();
-    let mut memo = memo.lock().unwrap();
+    let mut memo = memo.lock();
     if let Some(parts) = memo.map.get(&key) {
         return parts.clone();
     }
@@ -194,15 +194,15 @@ fn zap_info(ev: &Event) -> satori_core::notifications::ZapInfo {
         map: HashMap<String, satori_core::notifications::ZapInfo>,
         order: std::collections::VecDeque<String>,
     }
-    static MEMO: std::sync::OnceLock<std::sync::Mutex<Memo>> = std::sync::OnceLock::new();
+    static MEMO: std::sync::OnceLock<parking_lot::Mutex<Memo>> = std::sync::OnceLock::new();
     let memo = MEMO.get_or_init(|| {
-        std::sync::Mutex::new(Memo {
+        parking_lot::Mutex::new(Memo {
             map: HashMap::new(),
             order: std::collections::VecDeque::new(),
         })
     });
     let key = ev.id.to_string();
-    let mut memo = memo.lock().unwrap();
+    let mut memo = memo.lock();
     if let Some(info) = memo.map.get(&key) {
         return info.clone();
     }
@@ -234,13 +234,13 @@ pub struct NotificationsView {
     window: NotifWindow,
     /// The dropdown open?
     window_open: bool,
-    profiles: HashMap<String, Profile>,
+    profiles: HashMap<PublicKey, Profile>,
     quotes: content::Quotes,
     /// What each notification answers (feed.rs's same resolver): id →
     /// author + snippet. `parents_asked` keeps misses from re-requesting.
     parents: HashMap<String, ParentNote>,
     parents_asked: HashSet<String>,
-    me: String,
+    me: Option<PublicKey>,
     status: String,
     /// §4.3: the kinded error strip (replaces "Could not load …: {e}").
     error: Option<states::PaneError>,
@@ -292,7 +292,7 @@ impl NotificationsView {
             quotes: HashMap::new(),
             parents: HashMap::new(),
             parents_asked: HashSet::new(),
-            me: String::new(),
+            me: None,
             status: states::loading("Gathering…"),
             error: None,
             prev,
@@ -460,14 +460,14 @@ impl NotificationsView {
                     .filter(|e| !e.content.trim().is_empty() || u16::from(e.kind) == 9735)
                     .collect();
                 for p in profiles {
-                    self.profiles.insert(p.pubkey.clone(), p);
+                    self.profiles.insert(p.pubkey, p);
                 }
                 for n in &notifs {
                     self.want_media(n, cx);
                     quotes::want_quotes(self, n, cx);
                 }
                 self.rows = sectioned(prev, &notifs);
-                self.me = self.core.me().unwrap_or_default();
+                self.me = self.core.pubkey();
                 self.want_parents(cx);
                 self.want_receipt_names(cx);
                 self.want_body_names(&notifs, cx);
@@ -486,7 +486,7 @@ impl NotificationsView {
                 // arm every pump's events fell through to `_ => {}` and
                 // receipt/mention names never patched.
                 for p in profiles {
-                    self.profiles.insert(p.pubkey.clone(), p);
+                    self.profiles.insert(p.pubkey, p);
                 }
                 cx.notify();
             }
@@ -521,7 +521,7 @@ impl NotificationsView {
         let mut painted: Vec<String> = Vec::new();
         for row in visible[win_start..win_end].iter() {
             let Row::Note(ev, _) = row else { continue };
-            if let Some(p) = self.profiles.get(&ev.pubkey.to_string())
+            if let Some(p) = self.profiles.get(&ev.pubkey)
                 && !p.picture.is_empty()
                 && !painted.contains(&p.picture)
             {
@@ -712,9 +712,7 @@ impl NotificationsView {
                 pks.extend(content::mention_pks_cached(n));
                 pks
             })
-            .filter(|pk| {
-                !self.profiles.contains_key(&pk.to_string()) && seen.insert(pk.to_string())
-            })
+            .filter(|pk| !self.profiles.contains_key(pk) && seen.insert(*pk))
             .collect();
         if missing.is_empty() {
             return;
@@ -737,7 +735,7 @@ impl NotificationsView {
             .suppressed_notifications()
             .iter()
             .map(|s| s.event.pubkey)
-            .filter(|pk| !self.profiles.contains_key(&pk.to_string()))
+            .filter(|pk| !self.profiles.contains_key(pk))
             .collect();
         if missing.is_empty() {
             return;
@@ -761,7 +759,7 @@ impl quotes::Host for NotificationsView {
     fn core(&self) -> &Arc<Core> {
         &self.core
     }
-    fn profiles(&self) -> &HashMap<String, Profile> {
+    fn profiles(&self) -> &HashMap<PublicKey, Profile> {
         &self.profiles
     }
 }
@@ -816,7 +814,7 @@ impl actions::ActionHost for NotificationsView {
     fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>) {
         engagement::toggle_like(self, ev, cx)
     }
-    fn toggle_reaction_picker(&mut self, id: &str, cx: &mut Context<Self>) {
+    fn toggle_reaction_picker(&mut self, id: EventId, cx: &mut Context<Self>) {
         engagement::toggle_reaction_picker(self, id, cx)
     }
     fn react_with(&mut self, ev: &Event, content: &str, cx: &mut Context<Self>) {
@@ -853,12 +851,12 @@ fn notif_whisper<V: EventEmitter<Nav> + 'static>(
     idx: usize,
     parent_id: &str,
     parents: &HashMap<String, ParentNote>,
-    profiles: &HashMap<String, Profile>,
-    me: &str,
+    profiles: &HashMap<PublicKey, Profile>,
+    me: Option<PublicKey>,
     handle: Entity<V>,
 ) -> Option<gpui::AnyElement> {
     let parent = parents.get(parent_id)?;
-    let label = if parent.author == me {
+    let label = if Some(parent.author) == me {
         "\u{21b3} on your note".to_string()
     } else {
         let name = content::display_name(profiles.get(&parent.author), &parent.author);
@@ -926,32 +924,38 @@ fn notif_card(
     ev: &Event,
     t: NotifType,
     st: actions::ActionState,
-    profiles: &HashMap<String, Profile>,
+    profiles: &HashMap<PublicKey, Profile>,
     parents: &HashMap<String, ParentNote>,
     media: &media::Snapshot,
     quotes: &content::Quotes,
-    me: &str,
+    me: Option<PublicKey>,
     time: String,
     core: &Arc<Core>,
     cx: &mut gpui::App,
     handle: Entity<NotificationsView>,
 ) -> gpui::AnyElement {
-    let key = ev.pubkey.to_string();
+    let key = ev.pubkey;
     let name = content::display_name(profiles.get(&key), &key);
     let picture = profiles
         .get(&key)
         .map(|p| p.picture.clone())
         .unwrap_or_default();
     let parent_id = notif_parent_id(ev);
-    // Clicking opens the conversation: the parent's thread when there is
-    // one (your note's thread, for a reply), else the note itself. A
-    // profile zap has no thread to open.
-    // The reference links a notice to the thread ROOT, never the immediate
-    // parent — a reply-to-a-reply lands in the root's conversation.
-    let open: Option<EventId> = satori_core::nip::nip10::reply_root(ev)
-        .and_then(|(id, _)| EventId::from_hex(&id).ok())
-        .or_else(|| parent_id.as_ref().and_then(|p| EventId::from_hex(p).ok()))
-        .or_else(|| matches!(t, NotifType::Reply | NotifType::Mention).then_some(ev.id));
+    // Clicking opens the conversation (thread option B, Nov 27 2026): a
+    // reply or mention opens FOCUSED on itself, its parent chain (your
+    // note) above it; a reaction, repost or zap opens the note it
+    // targets. A profile zap has no thread to open.
+    let open: Option<EventId> = if matches!(t, NotifType::Reply | NotifType::Mention) {
+        Some(ev.id)
+    } else {
+        parent_id
+            .as_ref()
+            .and_then(|p| EventId::from_hex(p).ok())
+            .or_else(|| {
+                satori_core::nip::nip10::reply_root(ev)
+                    .and_then(|(id, _)| EventId::from_hex(&id).ok())
+            })
+    };
     let ctx = content::Body {
         media,
         quotes,
@@ -1222,7 +1226,7 @@ impl Render for NotificationsView {
         self.pin_window(&rows, cx);
         let quotes = self.quotes.clone();
         let parents = self.parents.clone();
-        let me = self.me.clone();
+        let me = self.me;
         // The action row's glyph states, snapshotted per render (feed.rs's
         // FeedSnap discipline, inline — the page is bounded content). One
         // mirror clone seeds the rows' action_state lookups.
@@ -1237,13 +1241,13 @@ impl Render for NotificationsView {
         let receipts: Vec<(String, String, String, String)> = suppressed
             .iter()
             .map(|s| {
-                let key = s.event.pubkey.to_string();
+                let key = s.event.pubkey;
                 let name = content::display_name(self.profiles.get(&key), &key);
                 (
                     name,
                     action_parts(notif_type(&s.event), &s.event).0.to_string(),
                     s.reason.clone(),
-                    key,
+                    key.to_hex(),
                 )
             })
             .collect();
@@ -1337,7 +1341,7 @@ impl Render for NotificationsView {
                                     // can't loop a render. (pin_window's
                                     // old comment claimed notif_card did
                                     // this — it never did.)
-                                    if let Some(p) = profiles.get(&ev.pubkey.to_string())
+                                    if let Some(p) = profiles.get(&ev.pubkey)
                                         && !p.picture.is_empty()
                                     {
                                         media::fetch(
@@ -1355,9 +1359,8 @@ impl Render for NotificationsView {
                                     for u in content::og_image_urls(ev) {
                                         media::fetch(&core, u, list_handle.entity_id(), cx);
                                     }
-                                    let id_hex = ev.id.to_string();
                                     // The notification IS the reply.
-                                    let st = engagement.action_state(&id_hex, 0, reduced_motion);
+                                    let st = engagement.action_state(&ev.id, 0, reduced_motion);
                                     notif_card(
                                         idx,
                                         ev,
@@ -1367,7 +1370,7 @@ impl Render for NotificationsView {
                                         &parents,
                                         &media,
                                         &quotes,
-                                        &me,
+                                        me,
                                         time,
                                         &core,
                                         cx,

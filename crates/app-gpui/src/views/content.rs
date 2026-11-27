@@ -13,6 +13,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 
+use crate::a11y::A11y;
 use gpui::{
     AnimationExt, AnyElement, Div, Entity, EventEmitter, FontWeight, ObjectFit, SharedString, div,
     img, prelude::*, px, relative, rgb,
@@ -49,9 +50,9 @@ pub type Quotes = HashMap<String, Option<Embed>>;
 /// a PUBKEY hex only, and the byte cut is safe for it (ASCII) — never
 /// feed it a relay-controlled string (cards::short owns the
 /// char-boundary cut for those).
-pub(crate) fn display_name(p: Option<&satori_core::manager::Profile>, hex: &str) -> String {
+pub(crate) fn display_name(p: Option<&satori_core::manager::Profile>, pk: &PublicKey) -> String {
     p.map(|p| p.display())
-        .unwrap_or_else(|| format!("{}…", &hex[..8]))
+        .unwrap_or_else(|| format!("{}…", &pk.to_hex()[..8]))
 }
 
 /// Render-time context threaded from each view: the shared media snapshot,
@@ -59,7 +60,7 @@ pub(crate) fn display_name(p: Option<&satori_core::manager::Profile>, hex: &str)
 pub struct Body<'a> {
     pub media: &'a media::Snapshot,
     pub quotes: &'a Quotes,
-    pub profiles: &'a HashMap<String, Profile>,
+    pub profiles: &'a HashMap<PublicKey, Profile>,
     /// The event's NIP-30 emoji map (shortcode → url): `:code:` tokens in
     /// the body resolve here. The urls also ride `media_urls`, so every
     /// view's media sweep fetches them and the thumb replaces the bare
@@ -453,9 +454,9 @@ pub fn media_urls_cached(ev: &Event) -> std::sync::Arc<[String]> {
         map: HashMap<String, std::sync::Arc<[String]>>,
         order: std::collections::VecDeque<String>,
     }
-    static MEMO: std::sync::OnceLock<std::sync::Mutex<UrlsMemo>> = std::sync::OnceLock::new();
+    static MEMO: std::sync::OnceLock<parking_lot::Mutex<UrlsMemo>> = std::sync::OnceLock::new();
     let memo = MEMO.get_or_init(|| {
-        std::sync::Mutex::new(UrlsMemo {
+        parking_lot::Mutex::new(UrlsMemo {
             map: HashMap::new(),
             order: std::collections::VecDeque::new(),
         })
@@ -464,7 +465,7 @@ pub fn media_urls_cached(ev: &Event) -> std::sync::Arc<[String]> {
     // The mode rides the key: a strict-Tor switch must not keep emitting
     // the pre-switch sniffs for memoized events (and back).
     let key = format!("{strict}#{}", ev.id);
-    let mut memo = memo.lock().unwrap();
+    let mut memo = memo.lock();
     if let Some(hit) = memo.map.get(&key) {
         return hit.clone();
     }
@@ -594,9 +595,9 @@ pub(crate) fn web_url(url: &str) -> bool {
 /// UI-side). Maps and order queues grow in lockstep (insert both, evict
 /// both), so one loop serves the pre-insert evict (`len >= cap` evicts
 /// exactly once) and the batched trim alike.
-pub(crate) fn fifo_trim<V>(
-    map: &mut std::collections::HashMap<String, V>,
-    order: &mut std::collections::VecDeque<String>,
+pub(crate) fn fifo_trim<K: std::hash::Hash + Eq, V>(
+    map: &mut std::collections::HashMap<K, V>,
+    order: &mut std::collections::VecDeque<K>,
     cap: usize,
 ) {
     while order.len() > cap
@@ -800,14 +801,13 @@ pub(crate) fn token_el<V: EventEmitter<Nav> + 'static>(
             with_punct(el, punct)
         }
         Tok::Mention(pk) => {
-            let key = pk.to_string();
             let label = ctx
                 .profiles
-                .get(&key)
+                .get(&pk)
                 .map(|p| p.display())
-                .unwrap_or_else(|| short_bech32(&key));
+                .unwrap_or_else(|| short_bech32(&pk.to_string()));
             let handle = handle.clone();
-            let el = base(seg_id("mention", &format!("{n}{key}")))
+            let el = base(seg_id("mention", &format!("{n}{pk}")))
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
                     handle.update(cx, |_, cx| cx.emit(Nav::OpenProfile(pk)));
@@ -929,15 +929,15 @@ fn body_parse_cached(ev: &Event) -> std::sync::Arc<BodyParse> {
         map: HashMap<String, std::sync::Arc<BodyParse>>,
         order: std::collections::VecDeque<String>,
     }
-    static MEMO: std::sync::OnceLock<std::sync::Mutex<Memo>> = std::sync::OnceLock::new();
+    static MEMO: std::sync::OnceLock<parking_lot::Mutex<Memo>> = std::sync::OnceLock::new();
     let memo = MEMO.get_or_init(|| {
-        std::sync::Mutex::new(Memo {
+        parking_lot::Mutex::new(Memo {
             map: HashMap::new(),
             order: std::collections::VecDeque::new(),
         })
     });
     let key = ev.id.to_string();
-    let mut memo = memo.lock().unwrap();
+    let mut memo = memo.lock();
     if let Some(hit) = memo.map.get(&key) {
         return hit.clone();
     }
@@ -1089,30 +1089,28 @@ pub fn actor_header<V: EventEmitter<Nav> + 'static>(
 /// timefmt::Signal, which every timestamp-bearing view already observes
 /// for the mode cycle: one wake shows the check, the expiry wake turns
 /// it back. profile.rs's flash_copy acknowledgment, generalized.
-static COPIED: std::sync::Mutex<Option<(String, std::time::Instant)>> = std::sync::Mutex::new(None);
+static COPIED: parking_lot::Mutex<Option<(String, std::time::Instant)>> =
+    parking_lot::Mutex::new(None);
 
 const COPY_FLASH: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn copied_now(payload: &str) -> bool {
-    COPIED
-        .lock()
-        .unwrap()
-        .as_ref()
-        .is_some_and(|(p, _)| p == payload)
+    COPIED.lock().as_ref().is_some_and(|(p, _)| p == payload)
 }
 
 /// Copy `payload` (the note's NIP-21 URI) and flash the seal's glyph to a
 /// check for [`COPY_FLASH`].
 fn copy_id(payload: String, cx: &mut gpui::App) {
     cx.write_to_clipboard(gpui::ClipboardItem::new_string(payload.clone()));
-    *COPIED.lock().unwrap() = Some((payload.clone(), std::time::Instant::now()));
+    *COPIED.lock() = Some((payload.clone(), std::time::Instant::now()));
     cx.set_global(crate::timefmt::Signal);
     cx.spawn(async move |cx| {
         cx.background_executor().timer(COPY_FLASH).await;
-        if let Ok(mut held) = COPIED.lock()
-            && held.as_ref().is_some_and(|(p, _)| *p == payload)
         {
-            *held = None;
+            let mut held = COPIED.lock();
+            if held.as_ref().is_some_and(|(p, _)| *p == payload) {
+                *held = None;
+            }
         }
         // Wake the flash off even if a newer copy replaced it (that seal
         // re-rendered anyway; the wake is one cheap repaint).
@@ -1129,6 +1127,11 @@ pub(crate) fn copy_seal(id_prefix: &str, payload: String) -> impl IntoElement {
     div()
         .id(SharedString::from(format!("{id_prefix}-copy")))
         .cursor_pointer()
+        .a11y_button(if flashed {
+            "Copied note link"
+        } else {
+            "Copy note link"
+        })
         .text_color(rgb(theme::muted()))
         .hover(|s| s.text_color(rgb(theme::ink())))
         .on_click(move |_, _, cx| {
@@ -1149,6 +1152,7 @@ pub(crate) fn copy_seal(id_prefix: &str, payload: String) -> impl IntoElement {
 pub(crate) fn time_toggle(id: impl Into<SharedString>, time: String) -> gpui::Stateful<Div> {
     div()
         .id(id.into())
+        .a11y_button(format!("{time}, change time format"))
         .cursor_pointer()
         .text_size(px(theme::T_SMALL))
         .text_color(rgb(theme::muted()))
@@ -1188,15 +1192,15 @@ pub(crate) fn repost_inner_cached(ev: &Event) -> Option<std::sync::Arc<Event>> {
         map: HashMap<String, Option<std::sync::Arc<Event>>>,
         order: std::collections::VecDeque<String>,
     }
-    static MEMO: std::sync::OnceLock<std::sync::Mutex<RepostMemo>> = std::sync::OnceLock::new();
+    static MEMO: std::sync::OnceLock<parking_lot::Mutex<RepostMemo>> = std::sync::OnceLock::new();
     let memo = MEMO.get_or_init(|| {
-        std::sync::Mutex::new(RepostMemo {
+        parking_lot::Mutex::new(RepostMemo {
             map: HashMap::new(),
             order: std::collections::VecDeque::new(),
         })
     });
     let key = ev.id.to_string();
-    let mut memo = memo.lock().unwrap();
+    let mut memo = memo.lock();
     if let Some(inner) = memo.map.get(&key) {
         return inner.clone();
     }
@@ -1295,12 +1299,11 @@ pub fn body_with<V: EventEmitter<Nav> + 'static>(
                 // else: a media URL — the gallery section below renders it.
             }
             Some(Seg::User(pk)) => {
-                let key = pk.to_string();
                 let label = ctx
                     .profiles
-                    .get(&key)
+                    .get(&pk)
                     .map(|p| p.display())
-                    .unwrap_or_else(|| short_bech32(&key));
+                    .unwrap_or_else(|| short_bech32(&pk.to_string()));
                 let seg_handle = handle.clone();
                 let el = div()
                     .id(seg_id("mention", trimmed))
@@ -1382,14 +1385,14 @@ pub(crate) fn mention_pks_cached(ev: &Event) -> Vec<PublicKey> {
         map: HashMap<EventId, std::sync::Arc<[PublicKey]>>,
         order: std::collections::VecDeque<EventId>,
     }
-    static MEMO: std::sync::OnceLock<std::sync::Mutex<PksMemo>> = std::sync::OnceLock::new();
+    static MEMO: std::sync::OnceLock<parking_lot::Mutex<PksMemo>> = std::sync::OnceLock::new();
     let memo = MEMO.get_or_init(|| {
-        std::sync::Mutex::new(PksMemo {
+        parking_lot::Mutex::new(PksMemo {
             map: HashMap::new(),
             order: std::collections::VecDeque::new(),
         })
     });
-    let mut memo = memo.lock().unwrap();
+    let mut memo = memo.lock();
     if let Some(hit) = memo.map.get(&ev.id) {
         return hit.to_vec();
     }
@@ -1907,11 +1910,12 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
             // The imeta dim (describes the video) first, then the poster's
             // landed size, then the sniffed frame's (same key the tile
             // paints) — the provisional box wears otherwise.
-            let aspect = dims
-                .get(url)
-                .copied()
-                .flatten()
+            // A picture's decoded size outranks its imeta dim (dim_or).
+            let aspect = ctx
+                .media
+                .size(url)
                 .filter(|(w, _)| *w > 0)
+                .or_else(|| dims.get(url).copied().flatten().filter(|(w, _)| *w > 0))
                 .or_else(|| poster.and_then(|p| ctx.media.size(p)))
                 .or_else(|| ctx.media.size(&crate::poster::poster_key(url)));
             aspect.map_or(provisional, |(w, h)| {
@@ -2058,13 +2062,15 @@ pub(crate) fn media_section<V: EventEmitter<Nav> + 'static>(
     Some(strip.into_any_element())
 }
 
-/// The frame aspect for a media url: the author's imeta dim first, the
-/// decoded size once the bytes land, else nothing yet.
+/// The frame aspect for a media url: the decoded size once the bytes
+/// land (the truth: an author's imeta dim can be wrong, which used to
+/// leave the frame mis-shaped for good), the imeta dim as the
+/// placeholder before that, else nothing yet.
 fn dim_or(media: &media::Snapshot, url: &str, dim: Option<(u32, u32)>) -> Option<(u32, u32)> {
-    match dim {
-        Some(d) if d.0 > 0 => Some(d),
-        _ => media.size(url).filter(|d| d.0 > 0),
-    }
+    media
+        .size(url)
+        .filter(|d| d.0 > 0)
+        .or(dim.filter(|d| d.0 > 0))
 }
 
 /// One gallery tile: the picture when the shared cache has it, a quiet
@@ -2106,8 +2112,19 @@ fn media_tile<V: EventEmitter<Nav> + 'static>(
         });
     let frame = match ctx.media.png(url) {
         // Contain, not Cover: the whole picture shows (the quiet panel frame
-        // letterboxes); full size is the lightbox's job.
-        Some(png) => frame.child(img(png).w_full().h_full().object_fit(ObjectFit::Contain)),
+        // letterboxes); full size is the lightbox's job. The height is
+        // ABSOLUTE (the frame's, less its 1px hairlines): gpui stamps the
+        // picture's own aspect on an img, and with a percentage height
+        // the layout could derive the height from width × aspect instead,
+        // so a frame shaped unlike its picture (a lying imeta dim, any
+        // portrait over the cap) overflowed and the frame clipped the
+        // bottom: Contain painted like Cover (Nov 27 2026).
+        Some(png) => frame.child(
+            img(png)
+                .w_full()
+                .h(px((h - 2.0).max(1.0)))
+                .object_fit(ObjectFit::Contain),
+        ),
         None => frame.child(
             div()
                 .size_full()
@@ -2147,14 +2164,14 @@ fn media_tile<V: EventEmitter<Nav> + 'static>(
 /// the state IS the map. The wake-up rides the host entity's notify (the
 /// handle media_section already carries), so no view needs to observe a
 /// global and feed.rs stays untouched. Bounded, oldest-dropped.
-fn sel_map() -> &'static std::sync::Mutex<HashMap<String, usize>> {
-    static SEL: std::sync::OnceLock<std::sync::Mutex<HashMap<String, usize>>> =
+fn sel_map() -> &'static parking_lot::Mutex<HashMap<String, usize>> {
+    static SEL: std::sync::OnceLock<parking_lot::Mutex<HashMap<String, usize>>> =
         std::sync::OnceLock::new();
-    SEL.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+    SEL.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
 }
 
 fn carousel_sel(id: &str, n: usize) -> usize {
-    let map = sel_map().lock().unwrap();
+    let map = sel_map().lock();
     map.get(id).copied().unwrap_or(0).min(n.saturating_sub(1))
 }
 
@@ -2166,7 +2183,7 @@ fn carousel_step<V: 'static>(
     cx: &mut gpui::App,
 ) {
     {
-        let mut map = sel_map().lock().unwrap();
+        let mut map = sel_map().lock();
         if map.len() >= 4096 && !map.contains_key(id) {
             let oldest = map.keys().next().cloned();
             if let Some(k) = oldest {
@@ -2202,7 +2219,7 @@ pub fn carousel_key_step(ev: &Event, media: &media::Snapshot, delta: i64) -> boo
     }
     let n = urls.len();
     let key = seg_id("car", &urls.join("|"));
-    let mut map = sel_map().lock().unwrap();
+    let mut map = sel_map().lock();
     let cur = map.get(key.as_ref()).copied().unwrap_or(0).min(n - 1) as i64;
     // Same wrap-around as carousel_step: past the last image, the first.
     let next = ((cur + delta).rem_euclid(n as i64)) as usize;
@@ -2359,10 +2376,12 @@ fn embed_card<V: EventEmitter<Nav> + 'static>(
                 ),
         )
         .child(
+            // The quoted note's words in ink: they are content, not
+            // chrome (muted read as disabled; owner, Nov 27 2026).
             div()
                 .font_family(theme::SERIF)
                 .text_size(px(theme::T_BODY))
-                .text_color(rgb(theme::muted()))
+                .text_color(rgb(theme::ink()))
                 .child(text),
         )
         .into_any_element()
@@ -2377,13 +2396,13 @@ pub(crate) fn compact_card<V: EventEmitter<Nav> + 'static>(
     idx: usize,
     tag: &str,
     ev: &Event,
-    profiles: &HashMap<String, Profile>,
+    profiles: &HashMap<PublicKey, Profile>,
     media: &media::Snapshot,
     quotes: &Quotes,
     time: String,
     handle: Entity<V>,
 ) -> AnyElement {
-    let key = ev.pubkey.to_string();
+    let key = ev.pubkey;
     let name = display_name(profiles.get(&key), &key);
     let picture = profiles
         .get(&key)

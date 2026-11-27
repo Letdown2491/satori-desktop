@@ -22,3 +22,6 @@ prepared/
 app-tree.tar.gz
 sdkbuild/
 gifs_key.txt
+
+# Local flatpak bundle (a build output; was tracked by accident)
+/satori.flatpak

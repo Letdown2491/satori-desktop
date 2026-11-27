@@ -322,13 +322,16 @@ pub fn set_zap_instant_sats(sats: u64) {
     set_string("zap_instant_sats", &sats.to_string());
 }
 
+/// read_value's parse cache (one slot: PREFS is the only file it reads).
+#[allow(clippy::type_complexity)]
+static CACHE: parking_lot::Mutex<Option<(std::time::SystemTime, (u64, u64), serde_json::Value)>> =
+    parking_lot::Mutex::new(None);
+
 fn read_value(file: &str) -> serde_json::Value {
     // Parsed once per file change (mtime + size key — the core config.rs
     // prefs() pattern): the feed projection reads prefs per visible card
     // per frame (privacy_mode on the media path), and each read was a
     // full file read + JSON parse on the UI thread (audit perf H2).
-    static CACHE: std::sync::Mutex<Option<(std::time::SystemTime, u64, serde_json::Value)>> =
-        std::sync::Mutex::new(None);
     let path = config::state_file(file);
     let Ok(meta) = std::fs::metadata(&path) else {
         return serde_json::Value::Object(serde_json::Map::new());
@@ -336,10 +339,10 @@ fn read_value(file: &str) -> serde_json::Value {
     let Ok(modified) = meta.modified() else {
         return serde_json::Value::Object(serde_json::Map::new());
     };
-    let mut held = CACHE.lock().unwrap();
+    let mut held = CACHE.lock();
     if let Some((at, len, value)) = held.as_ref()
         && *at == modified
-        && *len == meta.len()
+        && *len == (meta.len(), std::os::unix::fs::MetadataExt::ino(&meta))
     {
         return value.clone();
     }
@@ -347,23 +350,21 @@ fn read_value(file: &str) -> serde_json::Value {
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-    *held = Some((modified, meta.len(), value.clone()));
+    *held = Some((
+        modified,
+        (meta.len(), std::os::unix::fs::MetadataExt::ino(&meta)),
+        value.clone(),
+    ));
     value
 }
 
 fn write_state(file: &str, body: &str) {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    if let Some(parent) = config::data_dir_parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(config::state_file(file))
-        .and_then(|mut f| f.write_all(body.as_bytes()));
+    // Atomic (tmp + rename): a crash mid-write used to leave a truncated
+    // prefs.json, which load() reads as defaults (every pref lost).
+    let _ = satori_core::sidecar::try_write_atomic(&config::state_file(file), body.as_bytes());
+    // Our own write invalidates the parse cache outright: an mtime+size
+    // key can miss a same-length rewrite inside one coarse mtime tick.
+    *CACHE.lock() = None;
 }
 
 fn path() -> std::path::PathBuf {

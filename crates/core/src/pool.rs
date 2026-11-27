@@ -16,11 +16,12 @@
 //!   kind:5s record their pinned tombstones at the door; reads filter
 //!   kind:5 + expired + author-deleted at consume_and_filter (D34).
 
+use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nostr::prelude::*;
@@ -175,15 +176,15 @@ struct PoolIdentity(Arc<RwLock<Option<Signer>>>);
 
 impl PoolIdentity {
     fn set(&self, signer: Signer) {
-        *self.0.write().unwrap() = Some(signer);
+        *self.0.write() = Some(signer);
     }
 
     fn clear(&self) {
-        *self.0.write().unwrap() = None;
+        *self.0.write() = None;
     }
 
     fn get(&self) -> Option<Signer> {
-        self.0.read().unwrap().clone()
+        self.0.read().clone()
     }
 }
 
@@ -396,7 +397,7 @@ impl Pool {
             let mut all = urls.clone();
             all.extend(own_reads.iter().cloned());
             let keep: HashSet<String> = all.into_iter().collect();
-            let mut reads = self.reads.lock().unwrap();
+            let mut reads = self.reads.lock();
             retired_reads = reads
                 .iter()
                 .filter(|u| !keep.contains(*u))
@@ -413,8 +414,8 @@ impl Pool {
             // never re-allows an already-registered relay's host.
             let host_still_used = url::Url::parse(url).ok().and_then(|p| {
                 p.host_str().map(|h| {
-                    let reg = self.writes.lock().unwrap();
-                    let reads = self.reads.lock().unwrap();
+                    let reg = self.writes.lock();
+                    let reads = self.reads.lock();
                     reg.iter()
                         .chain(reads.iter())
                         .filter_map(|u| url::Url::parse(u).ok())
@@ -433,7 +434,7 @@ impl Pool {
             crate::net_guard::allow_direct_url(url);
         }
         for url in urls {
-            self.reads.lock().unwrap().insert(url.clone());
+            self.reads.lock().insert(url.clone());
             // Read-scoped capability; bad relay = skip. and_connect: the
             // live relay-change path (manager.rs's set_reads caller) has
             // no client.connect() behind it — a relay added without it
@@ -462,10 +463,7 @@ impl Pool {
             // for a relay whose connection task already runs.
             .and_connect()
             .await;
-        self.routed
-            .lock()
-            .unwrap()
-            .insert(url.to_string(), Instant::now());
+        self.routed.lock().insert(url.to_string(), Instant::now());
     }
 
     /// Idle/cap eviction of routed relays — bounds sockets, fds and timers
@@ -476,7 +474,7 @@ impl Pool {
     /// reconnect, no re-arm).
     async fn trim_routed(&self) {
         let mut victims: Vec<String> = {
-            let mut map = self.routed.lock().unwrap();
+            let mut map = self.routed.lock();
             let now = Instant::now();
             let mut stale: Vec<String> = map
                 .iter()
@@ -514,10 +512,7 @@ impl Pool {
             if let Some((_, relay)) = relay
                 && !relay.subscriptions().await.is_empty()
             {
-                self.routed
-                    .lock()
-                    .unwrap()
-                    .insert(url.clone(), Instant::now());
+                self.routed.lock().insert(url.clone(), Instant::now());
                 continue;
             }
             let res = self.client.remove_relay(&url).force().await;
@@ -529,7 +524,7 @@ impl Pool {
     /// (any account) starts a clean route graph.
     pub async fn clear_routed(&self) {
         let urls: Vec<String> = {
-            let mut map = self.routed.lock().unwrap();
+            let mut map = self.routed.lock();
             map.drain().map(|(u, _)| u).collect()
         };
         for url in urls {
@@ -549,7 +544,7 @@ impl Pool {
 
     /// The session's connected read set (indexers + the NIP-65 reads).
     pub fn read_relays(&self) -> Vec<String> {
-        self.reads.lock().unwrap().iter().cloned().collect()
+        self.reads.lock().iter().cloned().collect()
     }
 
     /// NIP-45 COUNT over the read set: one COUNT per live read relay,
@@ -996,9 +991,9 @@ impl Pool {
         // pool's proxy screens everything not user-chosen through the
         // screening transport.
         let (known, routed_known, foreign): (Vec<String>, Vec<String>, Vec<String>) = {
-            let reg = self.writes.lock().unwrap();
-            let reads = self.reads.lock().unwrap();
-            let routed = self.routed.lock().unwrap();
+            let reg = self.writes.lock();
+            let reads = self.reads.lock();
+            let routed = self.routed.lock();
             let mut k = Vec::new();
             let mut r = Vec::new();
             let mut f = Vec::new();
@@ -1014,7 +1009,7 @@ impl Pool {
             (k, r, f)
         };
         let new_targets: Vec<String> = {
-            let reg = self.writes.lock().unwrap();
+            let reg = self.writes.lock();
             known
                 .iter()
                 .filter(|u| !reg.contains(*u))
@@ -1030,7 +1025,7 @@ impl Pool {
                     .add_relay(url.clone())
                     .capabilities(RelayCapabilities::WRITE)
                     .await;
-                self.writes.lock().unwrap().insert(url.clone());
+                self.writes.lock().insert(url.clone());
             }
             self.client.connect().await;
         }
@@ -1048,12 +1043,7 @@ impl Pool {
             // Claim an in-flight slot BEFORE the add (audit refcount):
             // a concurrent publish to the same inbox sees the count and
             // will not force-remove the socket under this send.
-            *self
-                .foreign_inflight
-                .lock()
-                .unwrap()
-                .entry(url.clone())
-                .or_insert(0) += 1;
+            *self.foreign_inflight.lock().entry(url.clone()).or_insert(0) += 1;
             let _ = self
                 .client
                 .add_relay(url.clone())
@@ -1110,7 +1100,7 @@ impl Pool {
         // await: remove_relay is a pool-wide operation, not one to
         // hold a mutex across.
         let to_remove: Vec<String> = {
-            let mut inflight = self.foreign_inflight.lock().unwrap();
+            let mut inflight = self.foreign_inflight.lock();
             let mut done = Vec::new();
             for url in &foreign {
                 if let Some(count) = inflight.get_mut(url) {
@@ -1460,7 +1450,7 @@ mod tests {
         // every routed call does (fetch_route, subscribe_routed,
         // get_routed all open with it).
         {
-            let mut map = pool.routed.lock().unwrap();
+            let mut map = pool.routed.lock();
             for at in map.values_mut() {
                 *at = Instant::now() - ROUTED_IDLE - Duration::from_secs(1);
             }

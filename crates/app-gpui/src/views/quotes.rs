@@ -21,7 +21,7 @@ pub trait Host: Sized + 'static {
     fn quotes(&mut self) -> &mut Quotes;
     fn core(&self) -> &Arc<Core>;
     /// The host's working profile map, for the resolved author's name.
-    fn profiles(&self) -> &std::collections::HashMap<String, satori_core::manager::Profile>;
+    fn profiles(&self) -> &std::collections::HashMap<PublicKey, satori_core::manager::Profile>;
     /// The host's snapshot invalidation on LANDING: thread's `touch()`
     /// (its render snapshot must rebuild); a no-op where render reads
     /// the mirror directly.
@@ -59,7 +59,7 @@ fn pump_quote<H: Host>(bech: String, mut rx: FeedRx, cx: &mut Context<H>) {
         while let Some(ev) = rx.recv().await {
             if let FeedEvent::One(Some(target), prof) = ev {
                 let _ = this.update(cx, |host, cx| {
-                    let key = target.pubkey.to_string();
+                    let key = target.pubkey;
                     let name = content::display_name(
                         prof.as_ref().or_else(|| host.profiles().get(&key)),
                         &key,

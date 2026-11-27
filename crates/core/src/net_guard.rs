@@ -285,9 +285,10 @@ impl std::fmt::Display for NetGuardError {
 /// `ws://192.168.1.10:7777`). Remote data (kind:10002s, hints) can
 /// never join this set; its members ride the screening path. Consumers
 /// land with the screening transport (M5 WP2).
-fn direct_hosts() -> &'static std::sync::RwLock<std::collections::HashSet<String>> {
+fn direct_hosts() -> &'static parking_lot::RwLock<std::collections::HashSet<String>> {
+    use parking_lot::RwLock;
     use std::collections::HashSet;
-    use std::sync::{OnceLock, RwLock};
+    use std::sync::OnceLock;
     static SET: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
     // Consent persists across restarts (review Tier 2.1): the ledger file
     // is the one source, reloaded lazily on first access.
@@ -340,7 +341,7 @@ fn write_ledger_file(set: &HashSet<String>) {
 /// Snapshot of the exempted hosts, sorted — the relay settings pane's
 /// revocation list (review Tier 2.1).
 pub fn direct_relays() -> Vec<String> {
-    let mut hosts: Vec<String> = direct_hosts().read().unwrap().iter().cloned().collect();
+    let mut hosts: Vec<String> = direct_hosts().read().iter().cloned().collect();
     hosts.sort();
     hosts
 }
@@ -357,7 +358,7 @@ where
 {
     let mut dirty = false;
     {
-        let mut set = direct_hosts().write().unwrap();
+        let mut set = direct_hosts().write();
         for host in hosts {
             let host = normalize_host(host);
             if host.is_empty() || host.starts_with('(') {
@@ -367,7 +368,7 @@ where
         }
     }
     if dirty {
-        write_ledger_file(&direct_hosts().read().unwrap().clone());
+        write_ledger_file(&direct_hosts().read().clone());
     }
 }
 
@@ -410,11 +411,8 @@ pub fn refused_verdicts(verdicts: &[RelayVerdict]) -> Vec<RelayVerdict> {
 
 /// Drop an exemption (relay retired from the session's lists).
 pub fn disallow_direct_relay(host: &str) {
-    direct_hosts()
-        .write()
-        .unwrap()
-        .remove(&normalize_host(host));
-    write_ledger_file(&direct_hosts().read().unwrap().clone());
+    direct_hosts().write().remove(&normalize_host(host));
+    write_ledger_file(&direct_hosts().read().clone());
 }
 
 /// Does this relay URL belong to the user-chosen set (direct dial)?
@@ -424,10 +422,7 @@ pub fn user_chosen_relay(url: &str) -> bool {
         return false;
     };
     match parsed.host_str() {
-        Some(host) => direct_hosts()
-            .read()
-            .unwrap()
-            .contains(&normalize_host(host)),
+        Some(host) => direct_hosts().read().contains(&normalize_host(host)),
         None => false,
     }
 }
@@ -843,11 +838,11 @@ mod tests {
     /// this lock so their mutations stay private (the v0.10.0 CI run
     /// interleaved the consent-ledger test's 127.0.0.1 exemption into
     /// the refusing test's screens; locally the timing never hit).
-    static LEDGER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static LEDGER_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
     #[test]
     fn user_relay_exemption_roundtrip() {
-        let _g = LEDGER_LOCK.lock().unwrap();
+        let _g = LEDGER_LOCK.lock();
         let _env = crate::test_env::EnvGuard::new("netguard");
         let url = "wss://umbrel.local:7777";
         assert!(!user_chosen_relay(url));
@@ -865,7 +860,7 @@ mod tests {
     /// strips the port (and the brackets) on the way in.
     #[test]
     fn exemption_normalization_strips_ports_and_brackets() {
-        let _g = LEDGER_LOCK.lock().unwrap();
+        let _g = LEDGER_LOCK.lock();
         let _env = crate::test_env::EnvGuard::new("netguard-port");
         allow_direct_relay("umbrel.local:7777");
         assert!(
@@ -892,7 +887,7 @@ mod tests {
 
     #[test]
     fn uri_relay_screen_refuses_private_dial_targets() {
-        let _g = LEDGER_LOCK.lock().unwrap();
+        let _g = LEDGER_LOCK.lock();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -928,7 +923,7 @@ mod tests {
 
     #[test]
     fn uri_relay_screen_honors_the_consent_ledger() {
-        let _g = LEDGER_LOCK.lock().unwrap();
+        let _g = LEDGER_LOCK.lock();
         let _env = crate::test_env::EnvGuard::new("netguard");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

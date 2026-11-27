@@ -6,8 +6,6 @@
 //! secret without a re-approval round-trip.
 
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 
 use crate::config;
 use crate::error::{LoginError, Result};
@@ -47,13 +45,7 @@ pub fn save(session: &Session) -> Result<()> {
     }
     let body =
         serde_json::to_string_pretty(session).map_err(|e| LoginError::Store(e.to_string()))?;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)
-        .and_then(|mut f| f.write_all(body.as_bytes()))
+    crate::sidecar::try_write_atomic(&path, body.as_bytes())
         .map_err(|e| LoginError::Store(e.to_string()))?;
     Ok(())
 }

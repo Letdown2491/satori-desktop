@@ -2,30 +2,16 @@
 resolver = "2"
 members = ["crates/core", "crates/app-gpui"]
 
-# D13: gpui 0.2.2 → zed-async-tar → xattr 0.2.3 does not compile on Linux
-# (ENOATTR is macOS-only there); 0.2.3 is the last of its semver line, so the
-# patch is a vendored copy with ENOATTR aliased to ENODATA (same errno).
-# RETIRED in P5 (D35): the gpui-pre 0.3.11 graph no longer carries the
-# xattr/async-tar chain — re-add a re-vendored fix if it returns.
-# Emoji face preference: distros ship Noto Color Emoji twice (COLRv1 + CBDT)
-# under one family name; COLRv1 renders EMPTY under swash (COLRv0-only), so
-# the matcher must prefer the CBDT face. Probed empirically (Nov 2026).
-# PENDING in P5 (D35): the vendored patch targets cosmic-text 0.14; the new
-# graph wants ^0.19 — port the patch if the duplicate-face regression
-# reappears (verify emoji at runtime before deciding).
-# E0365 future-incompat (rust #127909): 2.0.1 re-exports the `proc_macro`
-# extern crate through a private item — a hard error in a future release
-# (pulled in via gpui → stacksafe). The compiler's own one-word fix, vendored.
-# RETIRED in P5 (D35): re-add if the stacksafe chain returns.
+# Vendored patches (the D13/D29 mechanism: vendor/ + [patch.crates-io]).
+# The retired ones (xattr D13, cosmic-text D29, proc-macro-error2) live in
+# git history only; re-vendor from there if their chains return.
 #
-# D66 (Nov 2026): REINTRODUCED a vendored patch — gpui-pre-wgpu 0.3.9, one
-# guard, same mechanism as D13/D29. load_family's 'm' gate bars every color
-# emoji font from loading as a PRIMARY family (their cmaps carry no Latin),
-# so emoji requested by name silently fell back to the UI face and painted
-# monochrome through DejaVu/Adwaita outlines. The gate now exempts known
-# emoji fonts. D29's warning ("port the patch if the duplicate-face
-# regression reappears") came due one layer up: cosmic-text 0.19's own
-# matcher already prefers the CBDT face; gpui's gate was the blocker.
+# D66 (Nov 2026): gpui-pre-wgpu, one guard. load_family's 'm' gate bars
+# every color emoji font from loading as a PRIMARY family (their cmaps
+# carry no Latin), so emoji requested by name silently fell back to the UI
+# face and painted monochrome through DejaVu/Adwaita outlines. The gate
+# now exempts known emoji fonts. Re-ported onto 0.3.14 (D107; the gate is
+# unchanged upstream, so the clause is still needed).
 [patch.crates-io]
 gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 # D72 (Nov 2026): gpui-video-player 0.1.3 rejects caps framerate 0/1 —
@@ -46,16 +32,17 @@ authors = ["Letdown2491"]
 # D35/P5: the renderer migration. gpui 0.2.2's blade backend has an
 # unpublished fatal atlas race (create-then-evict within a frame panics
 # flush_initializations); Zed's own remedy was the wgpu renderer, which
-# ships in the gpui-pre crates.io snapshots (=0.3.9 is zed@<Oct 2026>).
+# ships in the gpui-pre crates.io snapshots (=0.3.14 is zed@<Nov 2026>).
 # The dep key stays `gpui` (package rename) so `use gpui::` imports
-# survive. Pinned =0.3.9 to unify with gpui-video-player's `gpui-pre`
-# feature (its VideoElement implements THAT snapshot's traits; two
-# snapshot versions would be two incompatible gpui copies). The vendored
+# survive. Pinned =0.3.14 (D107) to unify with gpui-video-player's
+# `gpui-pre` feature: its VideoElement implements THAT snapshot's
+# traits, and two snapshot versions would be two incompatible gpui
+# copies (the vendored copy's pin moves with this one). The vendored
 # patches are retired: the official-gpui graph (xattr/async-tar chain)
 # drops out entirely; cosmic-text re-check pending for D29.
 [workspace.dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.9" }
-gpui-pre-linux = "=0.3.9"
+gpui = { package = "gpui-pre", version = "=0.3.14" }
+gpui-pre-linux = "=0.3.14"
 nostr = "0.45"
 nostr-sdk = "0.45"
 nostr-connect = "0.45"
@@ -68,6 +55,9 @@ tokio-socks = "0.5"
 # ~2GB of freed churn in a long session (37 arenas x ~50MB; audit Nov 2026).
 mimalloc = "0.1"
 futures-util = "0.3"
+# Locks without poisoning (review Nov 27 2026): one panicking task used to
+# poison a Core mutex and turn every later UI read into a second panic.
+parking_lot = "0.12"
 qrcode = { version = "0.14", default-features = false }
 keyring = "4"
 serde = { version = "1", features = ["derive"] }

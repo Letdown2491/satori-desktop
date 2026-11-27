@@ -14,8 +14,9 @@
 //! The plumbing (write, flusher, LRU frame, url screen) is the sidecar
 //! kernel; this module owns only seen-relays semantics.
 
+use parking_lot::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 use nostr::prelude::*;
 
@@ -45,7 +46,7 @@ fn seen() -> &'static Mutex<sidecar::RelayLru> {
 }
 
 fn write_disk() {
-    let held = seen().lock().unwrap();
+    let held = seen().lock();
     let body = sidecar::relay_json(held.map.clone());
     drop(held);
     sidecar::write_atomic(config::state_file(config::files::SEEN_RELAYS), &body);
@@ -65,7 +66,7 @@ pub fn record(pk: &PublicKey, relay_urls: &[&str]) {
     }
     let key = pk.to_string();
     {
-        let mut held = seen().lock().unwrap();
+        let mut held = seen().lock();
         // Re-insert the author most-recently-used (TS: delete + set),
         // then each relay most-recent-last under the per-author cap.
         held.touch(&key, MAX_AUTHORS);
@@ -80,14 +81,14 @@ pub fn record(pk: &PublicKey, relay_urls: &[&str]) {
 /// seenRelaysFor), most recent last — to fold into an outbox/single-event
 /// query for their events.
 pub fn for_pubkey(pk: &PublicKey) -> Vec<String> {
-    let held = seen().lock().unwrap();
+    let held = seen().lock();
     held.map.get(&pk.to_string()).cloned().unwrap_or_default()
 }
 
 /// The most-recent seen relay, as an `e`/`q` tag relay hint (actions.ts:
 /// seenRelaysFor(author)[0] — the LAST element of our recency-ordered vec).
 pub fn first(pk: &PublicKey) -> Option<String> {
-    let held = seen().lock().unwrap();
+    let held = seen().lock();
     held.map
         .get(&pk.to_string())
         .and_then(|v| v.last().cloned())

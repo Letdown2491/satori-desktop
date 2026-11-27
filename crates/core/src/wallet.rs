@@ -20,9 +20,10 @@
 //! zap ledger. All I/O is async on the core's tokio runtime; results cross
 //! to the UI over the broadcast channel (the channel-pump seam, §3.2).
 
+use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use nostr::prelude::*;
@@ -214,16 +215,11 @@ fn load_ledger() -> Ledger {
 
 fn save_ledger(l: &Ledger) {
     if let Ok(body) = serde_json::to_string(l) {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         let _ = std::fs::create_dir_all(config::data_dir());
-        let _ = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(config::state_file(config::files::ZAPS))
-            .and_then(|mut f| f.write_all(body.as_bytes()));
+        let _ = crate::sidecar::try_write_atomic(
+            &config::state_file(config::files::ZAPS),
+            body.as_bytes(),
+        );
     }
 }
 
@@ -313,16 +309,11 @@ pub struct Conn {
 
 fn save_conn(c: &Conn) {
     if let Ok(body) = serde_json::to_string(c) {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         let _ = std::fs::create_dir_all(config::data_dir());
-        let _ = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(config::state_file(config::files::WALLET))
-            .and_then(|mut f| f.write_all(body.as_bytes()));
+        let _ = crate::sidecar::try_write_atomic(
+            &config::state_file(config::files::WALLET),
+            body.as_bytes(),
+        );
     }
 }
 
@@ -456,15 +447,15 @@ impl Wallet {
     }
 
     pub fn status(&self) -> Status {
-        self.status.lock().unwrap().clone()
+        self.status.lock().clone()
     }
 
     pub fn is_ready(&self) -> bool {
-        matches!(*self.status.lock().unwrap(), Status::Ready(_))
+        matches!(*self.status.lock(), Status::Ready(_))
     }
 
     fn set_status(&self, s: Status) {
-        *self.status.lock().unwrap() = s.clone();
+        *self.status.lock() = s.clone();
         let _ = self.events.send(WalletEvent::Status(s));
     }
 
@@ -533,7 +524,7 @@ impl Wallet {
                 // A live client (wallet B pasted while A is Ready, or a
                 // double connect) must be shut down, not just dropped:
                 // drop does not stop its relay sockets or pumps.
-                let old = self.client.lock().unwrap().replace(client);
+                let old = self.client.lock().replace(client);
                 if let Some(c) = old {
                     c.shutdown().await;
                 }
@@ -554,7 +545,7 @@ impl Wallet {
     /// Rebuild a persisted connection without user interaction (restart
     /// resume): wallet.json + the secret from the store. Best-effort probe.
     pub async fn resume(&self) {
-        if self.client.lock().unwrap().is_some() {
+        if self.client.lock().is_some() {
             return;
         }
         let Some(conn) = load_conn() else {
@@ -604,7 +595,7 @@ impl Wallet {
                 // A live client (wallet B pasted while A is Ready, or a
                 // double connect) must be shut down, not just dropped:
                 // drop does not stop its relay sockets or pumps.
-                let old = self.client.lock().unwrap().replace(client);
+                let old = self.client.lock().replace(client);
                 if let Some(c) = old {
                     c.shutdown().await;
                 }
@@ -623,19 +614,19 @@ impl Wallet {
 
     /// Disconnect and forget: shut the client down, wipe both stores.
     pub async fn disconnect(&self) {
-        let old = self.client.lock().unwrap().take();
+        let old = self.client.lock().take();
         if let Some(c) = old {
             c.shutdown().await;
         }
         clear_conn();
         secrets::delete(secrets::NWC_SECRET);
-        self.in_flight.lock().unwrap().clear();
+        self.in_flight.lock().clear();
         self.set_status(Status::Disconnected);
     }
 
     /// Pay one bolt11 invoice. Ok = the wallet confirmed (preimage back).
     pub async fn pay(&self, bolt11: &str) -> Result<String, PayError> {
-        let Some(client) = self.client.lock().unwrap().clone() else {
+        let Some(client) = self.client.lock().clone() else {
             return Err(PayError::NoWallet);
         };
         let req = PayInvoiceRequest::new(bolt11);
@@ -647,13 +638,13 @@ impl Wallet {
 
     /// One in-flight payment per note. True = this call owns the slot.
     pub fn claim_flight(&self, note: &str) -> bool {
-        let mut set = self.in_flight.lock().unwrap();
+        let mut set = self.in_flight.lock();
         // HashSet::insert is false when the key was already present.
         set.insert(note.to_string())
     }
 
     pub fn release_flight(&self, note: &str) {
-        self.in_flight.lock().unwrap().remove(note);
+        self.in_flight.lock().remove(note);
     }
 
     /// Push one event to every subscriber (the wallet broadcast). The

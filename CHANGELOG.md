@@ -6,6 +6,48 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
+## Unreleased
+
+Gifs animate on hover again: since 0.12.0 every hover preview was being
+refused, so the gif tiles stayed still. Two quick taps on different videos
+now always play the one you tapped last.
+
+Sturdier on disk. Your session, preferences, zap history and wallet
+connection are written atomically, so a crash or power loss mid-save can
+no longer sign you out or reset your settings. Older stores are recognized
+correctly for future format upgrades.
+
+The window appears immediately at launch, even while your keyring is
+still unlocking. Screen readers can now see and press the main controls:
+the note actions, the sidebar, the composer and the sign-in doors.
+
+Threads open faster: the replies you already have show at once, and
+the rest arrive in two quick rounds instead of four slow ones, without
+jumping you back to the top. Clicking a reply now opens that reply, with
+the conversation it answers just above it ("3 earlier posts", tap to
+expand) and a link to the full thread.
+
+Pictures and videos display whole again. Some pictures had their bottom
+cut off in the timeline (tall photos especially, and any post whose size
+tag didn't match the picture), and videos with unusual widths played
+sheared diagonally with green edges.
+
+Your mute and bookmark lists are safe with other clients. Muting or
+bookmarking in Satori used to rewrite entries it didn't understand: muted
+words and hashtags from another client came back as broken key entries,
+bookmarked articles and links were mangled, and a list carrying relay hints
+could be read as empty and overwritten. Every entry now survives untouched,
+and a list Satori can't decrypt is never overwritten.
+
+Safer QR sign-in: the nostrconnect library (0.45.3) now rejects a signer
+that answers without the connection secret, which could have let a
+stranger on the relay pose as your signer.
+
+Under the hood: the renderer moves to gpui-pre 0.3.14 (wgpu 30), the file
+picker to rfd 0.18, a crash in one background task can no longer cascade
+into the whole app, and profile and engagement lookups no longer build a
+text key for every visible note on every frame.
+
 ## 0.12.0 - 2026-11-21
 
 Gifs, done properly. The composer has a gif button: type to search, hover

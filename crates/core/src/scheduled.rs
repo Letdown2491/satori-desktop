@@ -40,9 +40,10 @@
 //! flusher (10s, the hints.rs/outbox_queue.rs cadence) — a crash before
 //! those flush at worst re-publishes, same dedupe argument.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 use nostr::prelude::*;
 
@@ -129,7 +130,7 @@ pub(crate) fn now_secs() -> u64 {
 /// cap (the caller surfaces SCHEDULE_FULL). Flushes SYNCHRONOUSLY: the
 /// write-ahead durability point.
 pub fn hold(me: &PublicKey, event: Event, scheduled_at: u64) -> Option<String> {
-    let mut held = book().lock().unwrap();
+    let mut held = book().lock();
     let mine = held
         .map
         .values()
@@ -162,7 +163,6 @@ pub fn hold(me: &PublicKey, event: Event, scheduled_at: u64) -> Option<String> {
 pub fn list(me: &PublicKey) -> Vec<ScheduledPost> {
     let mut mine: Vec<ScheduledPost> = book()
         .lock()
-        .unwrap()
         .map
         .values()
         .filter(|p| p.pubkey == me.to_string())
@@ -176,7 +176,7 @@ pub fn list(me: &PublicKey) -> Vec<ScheduledPost> {
 /// SYNCHRONOUSLY — a cancel the user saw confirmed must not resurrect
 /// after a restart.
 pub fn cancel(me: &PublicKey, token: &str) -> bool {
-    let mut held = book().lock().unwrap();
+    let mut held = book().lock();
     let gone = if held
         .map
         .get(token)
@@ -198,7 +198,6 @@ pub fn cancel(me: &PublicKey, token: &str) -> bool {
 fn due(now: u64) -> Vec<ScheduledPost> {
     book()
         .lock()
-        .unwrap()
         .map
         .values()
         .filter(|p| p.scheduled_at <= now && p.event.pubkey.to_string() == p.pubkey)
@@ -210,7 +209,7 @@ fn due(now: u64) -> Vec<ScheduledPost> {
 /// sweep (dropMany) — debounced, since a crash before the flush at worst
 /// re-publishes (relays dedupe by id).
 fn remove(tokens: &[String]) {
-    let mut held = book().lock().unwrap();
+    let mut held = book().lock();
     let mut changed = false;
     for t in tokens {
         if held.map.remove(t).is_some() {
@@ -272,7 +271,7 @@ pub fn sweep(now: u64, publish: impl Fn(&Event) -> bool) -> usize {
 
 fn write_disk() {
     let mut snap: Vec<ScheduledPost> = {
-        let held = book().lock().unwrap();
+        let held = book().lock();
         held.map.values().cloned().collect()
     };
     snap.sort_by_key(|p| p.scheduled_at);
@@ -350,7 +349,7 @@ mod tests {
     /// test (its fills/cancels) can't leak into this one's sweep counts.
     #[cfg(test)]
     fn clear() {
-        book().lock().unwrap().map.clear();
+        book().lock().map.clear();
     }
 
     /// Scheduling holds, lists soonest-first, respects the per-author
@@ -392,13 +391,13 @@ mod tests {
         let now = now_secs();
         let past = hold(&a.public_key(), note(&a, "past", now - 10), now - 10).unwrap();
         let future = hold(&a.public_key(), note(&a, "future", now + 999), now + 999).unwrap();
-        let published = std::sync::Mutex::new(Vec::new());
+        let published = parking_lot::Mutex::new(Vec::new());
         let n = sweep(now, |ev| {
-            published.lock().unwrap().push(ev.content.clone());
+            published.lock().push(ev.content.clone());
             true
         });
         assert_eq!(n, 1);
-        assert_eq!(*published.lock().unwrap(), vec!["past".to_string()]);
+        assert_eq!(*published.lock(), vec!["past".to_string()]);
         let rest = list(&a.public_key());
         assert_eq!(
             rest.iter().map(|p| p.token.as_str()).collect::<Vec<_>>(),
@@ -418,7 +417,7 @@ mod tests {
                 "mismatch",
             ))
             .unwrap();
-        book().lock().unwrap().map.insert(
+        book().lock().map.insert(
             "corrupt".into(),
             ScheduledPost {
                 token: "corrupt".into(),

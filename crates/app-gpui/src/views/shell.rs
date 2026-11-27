@@ -9,6 +9,7 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::a11y::A11y;
 use gpui::{
     AnyElement, AnyView, App, ClickEvent, Context, Div, DragMoveEvent, Entity, EventEmitter,
     FocusHandle, Focusable, KeyDownEvent, ObjectFit, Render, ScrollHandle, SharedString, Stateful,
@@ -449,7 +450,6 @@ impl Shell {
     /// Retry (2s apart, ~30s ceiling) until the profile lands.
     fn want_avatar(&self, cx: &mut Context<Self>) {
         let Some(me) = self.me else { return };
-        let me_hex = me.to_string();
         cx.spawn(async move |this, cx| {
             for _ in 0..15 {
                 let mut rx = this
@@ -458,7 +458,7 @@ impl Shell {
                 // One resolution per ask (the debouncer drops the waiter
                 // after its single send); a miss waits out the 2s, retries.
                 if let Some(FeedEvent::Profiles(ps)) = rx.recv().await
-                    && let Some(p) = ps.into_iter().find(|p| p.pubkey == me_hex)
+                    && let Some(p) = ps.into_iter().find(|p| p.pubkey == me)
                 {
                     let _ = this.update(cx, |shell, cx| {
                         shell.me_profile = Some(p);
@@ -1002,7 +1002,7 @@ impl Shell {
     fn column_label(&self, kind: &ColumnKind) -> SharedString {
         match kind {
             ColumnKind::Author(pk) => {
-                content::display_name(self.core.profile_of(pk).as_ref(), &pk.to_string()).into()
+                content::display_name(self.core.profile_of(pk).as_ref(), pk).into()
             }
             _ => kind.label(),
         }
@@ -1680,7 +1680,7 @@ impl Shell {
         let rail_snap = media::Snapshot::new(cx);
         let (me_pic, me_name) = match (&self.me_profile, self.me) {
             (Some(p), _) => (p.picture.clone(), p.display()),
-            (None, Some(pk)) => (String::new(), content::display_name(None, &pk.to_string())),
+            (None, Some(pk)) => (String::new(), content::display_name(None, &pk)),
             _ => (String::new(), "You".to_string()),
         };
         // The rail avatar comes back if the cache evicted it (silent no-op
@@ -1924,6 +1924,7 @@ impl Shell {
             .flex()
             .justify_center()
             .tooltip(tip(label))
+            .a11y_tab(label, active)
             .on_click(on_click)
             // The active tick: a small vermilion brush accent, not a pill.
             .when(active, |d| {

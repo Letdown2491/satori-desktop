@@ -107,7 +107,14 @@ impl WalletView {
                             break; // dead pane
                         }
                     }
-                    Ok(_) => {}
+                    // An event this pane ignores still proves the pump
+                    // alive: exit if the pane is gone, rather than wait
+                    // for the next Status to notice (review Nov 27 2026).
+                    Ok(_) => {
+                        if this.upgrade().is_none() {
+                            break;
+                        }
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(_) => continue, // lagged: the next event re-syncs
                 }

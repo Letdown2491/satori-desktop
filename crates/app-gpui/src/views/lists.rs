@@ -22,7 +22,7 @@ pub(crate) struct ListsView {
     /// The open list's detail (in-page second level): the list + its
     /// members' resolved profiles.
     open_list: Option<NostrList>,
-    members: HashMap<String, Profile>,
+    members: HashMap<PublicKey, Profile>,
 }
 
 impl EventEmitter<Nav> for ListsView {}
@@ -72,7 +72,7 @@ impl ListsView {
                 if let FeedEvent::Profiles(ps) = ev {
                     let _ = this.update(cx, |this, cx| {
                         for p in ps {
-                            this.members.insert(p.pubkey.clone(), p);
+                            this.members.insert(p.pubkey, p);
                         }
                         cx.notify();
                     });
@@ -99,7 +99,7 @@ impl ListsView {
                             if let FeedEvent::Profiles(ps) = ev {
                                 let _ = this.update(cx, |this, cx| {
                                     for p in ps {
-                                        this.members.insert(p.pubkey.clone(), p);
+                                        this.members.insert(p.pubkey, p);
                                     }
                                     cx.notify();
                                 });
@@ -178,7 +178,7 @@ impl ListsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let hex = pk.to_string();
-        let p = self.members.get(&hex);
+        let p = self.members.get(pk);
         let (name, picture, nip05) = match p {
             Some(p) => (p.display(), p.picture.clone(), p.nip05.clone()),
             None => (content::short_bech32(&hex), String::new(), String::new()),

@@ -3,6 +3,7 @@
 //!
 //! NOTE: shares the LMDB store with the GTK app — run one at a time until P4.
 
+mod a11y;
 mod audio;
 mod desktop;
 mod emoji;
@@ -54,29 +55,28 @@ struct Root {
 impl Root {
     fn new(
         core: Arc<Core>,
-        session: bool,
-        resume_error: Option<String>,
         argv_uri: Option<String>,
         uri_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (login, shell) = match session {
-            true => {
-                let shell = cx.new(|cx| Shell::new(core.clone(), cx));
-                Self::watch_shell(shell.clone(), cx);
-                (None, Some(shell))
-            }
-            false => {
-                // Resume failures surface on the doors — the user must know
-                // why they're back here (login.rs set_resume_error).
-                (
-                    Some(cx.new(|cx| LoginView::new(core.clone(), resume_error, cx))),
-                    None,
-                )
-            }
-        };
-        if let Some(login) = login.clone() {
-            Self::watch_login(&login, cx);
+        // The session resume runs OFF the UI thread (review Nov 27 2026):
+        // it reads the keyring over D-Bus (a locked keyring prompts) and
+        // opens the pool, and it used to run before the window existed, so
+        // a slow keyring meant no window at all. The window paints the
+        // washi at once; the doors or the shell arrive when it answers.
+        {
+            let core = core.clone();
+            cx.spawn(async move |this, cx| {
+                let (session, err) = cx
+                    .background_executor()
+                    .spawn(async move { core.init() })
+                    .await;
+                if err.is_some() {
+                    eprintln!("[satori-gpui] resume error (surfaced on the login doors)");
+                }
+                let _ = this.update(cx, |root, cx| root.resumed(session.is_some(), err, cx));
+            })
+            .detach();
         }
         // The single-instance socket pump: forwarded URIs (and bare
         // "activate" pings) arrive here on a tokio channel and route into
@@ -93,15 +93,35 @@ impl Root {
         }
         let mut root = Self {
             core,
-            login,
-            shell,
+            login: None,
+            shell: None,
             pending: None,
         };
-        // argv on a resumed session routes immediately; pre-login it parks.
+        // argv parks until the resume answers (route_target parks while
+        // there is no shell); resumed() routes it.
         if let Some(uri) = argv_uri {
             root.route(&uri, cx);
         }
         root
+    }
+
+    /// The resume answered: the shell for a live session, else the doors
+    /// (with the resume failure, if any — the user must know why they're
+    /// back here; login.rs set_resume_error).
+    fn resumed(&mut self, session: bool, resume_error: Option<String>, cx: &mut Context<Self>) {
+        if session {
+            let shell = cx.new(|cx| Shell::new(self.core.clone(), cx));
+            Self::watch_shell(shell.clone(), cx);
+            self.shell = Some(shell);
+            if let Some(t) = self.pending.take() {
+                self.route_target(t, cx);
+            }
+        } else {
+            let login = cx.new(|cx| LoginView::new(self.core.clone(), resume_error, cx));
+            Self::watch_login(&login, cx);
+            self.login = Some(login);
+        }
+        cx.notify();
     }
 
     /// A `nostr:` URI arrived (socket or argv): parse and route.
@@ -198,7 +218,11 @@ impl Render for Root {
         } else if let Some(shell) = self.shell.clone() {
             shell.into_any_element()
         } else {
-            div().into_any_element()
+            // Resuming: the bare washi, never an unpainted window.
+            div()
+                .size_full()
+                .bg(rgb(crate::theme::washi()))
+                .into_any_element()
         }
     }
 }
@@ -365,10 +389,6 @@ fn main() {
         // The blocktime bridge (timefmt.rs): the core handle + ask dedup
         // behind every tappable timestamp, before any window renders.
         crate::timefmt::init(core.clone(), cx);
-        let (session, err) = core.init();
-        if err.is_some() {
-            eprintln!("[satori-gpui] resume error (surfaced on the login doors)");
-        }
         // NIP-21 (D25 follow-up): the .desktop handler passes a nostr: URI
         // as argv. The single-instance socket was owned BEFORE the boot
         // gate (D84 audit) — acquire ran at the top of main().
@@ -387,10 +407,7 @@ fn main() {
                 app_id: Some(satori_core::config::APP_ID.into()),
                 ..Default::default()
             },
-            |_window, cx| {
-                let session_ok = session.is_some();
-                cx.new(|cx| Root::new(core, session_ok, err, argv, uri_rx, cx))
-            },
+            |_window, cx| cx.new(|cx| Root::new(core, argv, uri_rx, cx)),
         )
         .expect("failed to open Satori window");
         cx.activate(true);

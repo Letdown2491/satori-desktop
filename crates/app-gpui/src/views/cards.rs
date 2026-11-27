@@ -11,6 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::a11y::A11y;
 use gpui::{
     ClipboardItem, Div, Entity, FontWeight, SharedString, div, prelude::*, px, relative, rgb,
 };
@@ -296,6 +297,7 @@ fn badge(text: &str, color: u32) -> Div {
 fn seal(id: String, label: &str, color: u32, engaged: bool) -> gpui::Stateful<gpui::Div> {
     div()
         .id(SharedString::from(id))
+        .a11y_button(label.to_string())
         .cursor_pointer()
         .px_2()
         .py_0p5()
@@ -892,8 +894,10 @@ fn highlight_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) 
             .authors
             .iter()
             .map(|pk| {
-                ctx.profiles
-                    .get(pk)
+                // Relay-written tag text: a malformed key just misses.
+                PublicKey::from_hex(pk)
+                    .ok()
+                    .and_then(|k| ctx.profiles.get(&k))
                     .map(|p| p.display())
                     .unwrap_or_else(|| short(pk))
             })

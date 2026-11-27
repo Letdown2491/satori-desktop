@@ -13,9 +13,10 @@
 //! PERSISTED (debounced ~15s, json-store like the TS) so the profile
 //! survives restarts. Bounded: MAX_RELAYS LRU.
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::config;
@@ -143,7 +144,7 @@ fn read_disk() -> Vec<(String, RelayStat)> {
 }
 
 fn write_disk() {
-    let held = stats().lock().unwrap();
+    let held = stats().lock();
     let mut out = serde_json::Map::new();
     for (url, s) in &held.map {
         out.insert(url.clone(), serde_json::to_value(s).unwrap_or_default());
@@ -211,7 +212,7 @@ pub fn record(relay: &str, ms: u64, truncated: bool, events: usize) {
     if url.is_empty() {
         return;
     }
-    let mut held = stats().lock().unwrap();
+    let mut held = stats().lock();
     held.order.retain(|u| u != &url);
     let prev = held.map.get(&url).cloned();
     // EWMA with the alpha fold-in; seed ev from the current sample when
@@ -283,7 +284,7 @@ pub fn record(relay: &str, ms: u64, truncated: bool, events: usize) {
 /// - otherwise (delivers and finishes in time) or too little evidence →
 ///   `base`. Pure profile read; cheap per query.
 pub fn budget(relay: &str, floor: Duration, base: Duration, ceiling: Duration) -> Duration {
-    let held = stats().lock().unwrap();
+    let held = stats().lock();
     let Some(s) = held.map.get(&key(relay)) else {
         return base;
     };
@@ -312,7 +313,7 @@ pub fn record_read_denial(relay: &str) {
     if url.is_empty() {
         return;
     }
-    let mut held = stats().lock().unwrap();
+    let mut held = stats().lock();
     held.order.retain(|u| u != &url);
     let prev = held.map.get(&url).cloned();
     held.map.insert(
@@ -362,7 +363,7 @@ fn stat_read_dead(s: &RelayStat) -> bool {
 /// write-only-blaster shape. Routing treats read-dead as score 0 (never
 /// picked) and shard skips drop it at query time.
 pub fn is_read_dead(relay: &str) -> bool {
-    let held = stats().lock().unwrap();
+    let held = stats().lock();
     held.map.get(&key(relay)).is_some_and(stat_read_dead)
 }
 
@@ -375,7 +376,7 @@ pub fn record_write_result(relay: &str, ok: bool) {
     if url.is_empty() {
         return;
     }
-    let mut held = stats().lock().unwrap();
+    let mut held = stats().lock();
     held.order.retain(|u| u != &url);
     let prev = held.map.get(&url).cloned();
     let fails = if ok {
@@ -430,7 +431,7 @@ pub fn record_write_result(relay: &str, ok: bool) {
 /// production caller.
 #[cfg(test)]
 pub fn age_write_at(relay: &str, secs: u64) {
-    let mut held = stats().lock().unwrap();
+    let mut held = stats().lock();
     if let Some(s) = held.map.get_mut(&key(relay)) {
         s.write_at = s.write_at.map(|at| at.saturating_sub(secs));
     }
@@ -438,7 +439,7 @@ pub fn age_write_at(relay: &str, secs: u64) {
 
 pub fn is_write_dead(relay: &str) -> bool {
     const WRITE_DEAD_COOLDOWN_SECS: u64 = 600;
-    let held = stats().lock().unwrap();
+    let held = stats().lock();
     held.map.get(&key(relay)).is_some_and(|s| {
         s.write_fails >= WRITE_DEAD_N
             && s.write_at
@@ -455,7 +456,7 @@ pub fn mark_delivery(relay: &str) {
     if url.is_empty() {
         return;
     }
-    let mut held = stats().lock().unwrap();
+    let mut held = stats().lock();
     match held.map.get_mut(&url) {
         Some(s) => {
             s.ok_at = Some(now_secs());
@@ -496,7 +497,7 @@ pub struct RelayHealth {
 /// Snapshot of every profiled relay, unordered (settings.rs relay-health
 /// pane sorts and merges it with the configured list).
 pub fn snapshot() -> Vec<RelayHealth> {
-    let held = stats().lock().unwrap();
+    let held = stats().lock();
     held.map
         .iter()
         .map(|(url, s)| RelayHealth {
@@ -517,7 +518,7 @@ pub fn snapshot() -> Vec<RelayHealth> {
 /// Unknown or low-confidence relays are neutral (1.0): don't penalize one
 /// we haven't profiled — it may be great.
 pub fn quality(relay: &str) -> f64 {
-    let held = stats().lock().unwrap();
+    let held = stats().lock();
     let Some(s) = held.map.get(&key(relay)) else {
         return 1.0;
     };
@@ -587,7 +588,7 @@ mod tests {
         let _env = EnvGuard::new("lat-ewma");
         record("wss://r.example", 1000, false, 10);
         record("wss://r.example", 3000, true, 0);
-        let held = stats().lock().unwrap();
+        let held = stats().lock();
         let s = held.map.get("wss://r.example").unwrap();
         // ms: 1000*(0.7) + 3000*(0.3) = 1600
         assert_eq!(s.ms, 1600);
@@ -730,7 +731,7 @@ mod tests {
         // the first draft of this test held it across record_write_result
         // and deadlocked the suite): the failure mark accumulated, the
         // success stamp stands, and an unprofiled relay has neither.
-        let held = stats().lock().unwrap();
+        let held = stats().lock();
         let ack = held.map.get("wss://ack.example").unwrap();
         assert_eq!(ack.write_fails, 1);
         assert!(ack.ok_at.is_some());

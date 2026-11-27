@@ -200,6 +200,11 @@ fn open_inner(url: String, mime: Option<String>, preview: bool, cx: &mut gpui::A
             "[video] open: preempting the in-flight hover preview build (the tap outranks hover)"
         );
         clear_want();
+        // A promotion still pending on the superseded build is stale too:
+        // the newer tap is the intent now.
+        if let Ok(mut g) = PROMOTED.write() {
+            *g = None;
+        }
     }
     // Already open or building — a second tap on the same tile is a no-op,
     // not a second pipeline.
@@ -220,6 +225,7 @@ fn open_inner(url: String, mime: Option<String>, preview: bool, cx: &mut gpui::A
         return;
     };
     let crate::media_guard::Door {
+        ticket,
         parsed,
         proxy,
         proxied,
@@ -227,9 +233,11 @@ fn open_inner(url: String, mime: Option<String>, preview: bool, cx: &mut gpui::A
     cx.spawn(async move |cx| {
         if !crate::media_guard::screened(parsed.host_str().map(str::to_string), "[video]").await {
             cx.update(|cx| {
-                crate::media_guard::clear(&url);
-                // A preview's degrade is a no-op — never the browser.
-                if !preview {
+                let live = crate::media_guard::current(ticket);
+                crate::media_guard::release(ticket);
+                // A preview's degrade is a no-op — never the browser; nor
+                // is a superseded tap's (a newer tap is the intent).
+                if !preview && live {
                     cx.open_url(&url);
                 }
                 cx.set_global(Signal);
@@ -268,15 +276,17 @@ fn open_inner(url: String, mime: Option<String>, preview: bool, cx: &mut gpui::A
                 // would loop a pipeline nobody paints. Drop it instead.
                 if preview && preview_want().as_deref() != Some(url.as_str()) {
                     std::thread::spawn(move || drop(video));
-                    crate::media_guard::clear(&url);
+                    crate::media_guard::release(ticket);
                     cx.set_global(Signal);
                     return;
                 }
                 // One player per process: a replaced player's Drop joins
                 // its worker — defer that off the UI thread.
+                // A build a newer tap superseded drops itself here
+                // instead of replacing the newer player (the ticket).
                 crate::media_guard::land(
                     &ACTIVE,
-                    &url,
+                    ticket,
                     Player {
                         url: url.clone(),
                         video,
@@ -296,11 +306,14 @@ fn open_inner(url: String, mime: Option<String>, preview: bool, cx: &mut gpui::A
                     "[video] pipeline failed for {}: {e:?}; degrading to browser",
                     satori_core::pool::clean_reason(&url)
                 );
-                crate::media_guard::clear(&url);
+                let live = crate::media_guard::current(ticket);
+                crate::media_guard::release(ticket);
                 // A promoted build failed: the TAP was intent, so the
                 // browser fallback the tap earns still applies (a plain
-                // preview never degrades to the browser).
-                if (!preview || take_promoted(&url)) && crate::views::content::web_url(&url) {
+                // preview never degrades to the browser, and a build a
+                // newer tap superseded never opens one).
+                if live && (!preview || take_promoted(&url)) && crate::views::content::web_url(&url)
+                {
                     cx.open_url(&url);
                 }
             }

@@ -12,8 +12,9 @@
 //! D33 sidecar discipline — capabilities are static, so the write is
 //! write-through on each fetch, rare by construction: TTL-gated sweeps).
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 /// A capability document outlives a session (relay metadata changes in
 /// human time); the refresher re-asks after a week.
@@ -96,7 +97,7 @@ fn now_secs() -> u64 {
 /// Snapshot of every remembered relay, unordered (the manager's free
 /// accessor hands it to capability-dependent surfaces).
 pub fn snapshot() -> Vec<RelayCaps> {
-    let held = map().lock().unwrap();
+    let held = map().lock();
     held.iter()
         .map(|(url, e)| RelayCaps {
             url: url.clone(),
@@ -108,7 +109,7 @@ pub fn snapshot() -> Vec<RelayCaps> {
 
 /// The advertised NIP-50 search support for one relay (None = unknown).
 pub fn search(relay: &str) -> Option<bool> {
-    let held = map().lock().unwrap();
+    let held = map().lock();
     held.get(&crate::outbox::relay_key(relay))
         .and_then(|e| e.search)
 }
@@ -159,7 +160,7 @@ pub async fn refresh(relay: &str) -> bool {
         .and_then(|l| l.get("search"))
         .and_then(|v| v.as_bool());
     let key = crate::outbox::relay_key(relay);
-    let mut held = map().lock().unwrap();
+    let mut held = map().lock();
     held.insert(
         key,
         Entry {
@@ -178,7 +179,7 @@ pub async fn refresh(relay: &str) -> bool {
 pub async fn refresh_stale(relays: &[String]) {
     let now = now_secs();
     let stale: Vec<String> = {
-        let held = map().lock().unwrap();
+        let held = map().lock();
         relays
             .iter()
             .filter(|u| {
@@ -207,7 +208,7 @@ mod tests {
         assert_eq!(search("wss://quiet.example"), None);
         // A stored entry round-trips through snapshot().
         let key = crate::outbox::relay_key("wss://r.example");
-        map().lock().unwrap().insert(
+        map().lock().insert(
             key,
             Entry {
                 search: Some(true),

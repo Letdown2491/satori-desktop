@@ -34,7 +34,7 @@ pub struct SearchView {
     input: Entity<Input>,
     focus: FocusHandle,
     results: Vec<Event>,
-    profiles: HashMap<String, Profile>,
+    profiles: HashMap<PublicKey, Profile>,
     quotes: content::Quotes,
     status: String,
     /// §4.3: the kinded error strip (replaces "Search failed: {m}").
@@ -44,7 +44,7 @@ pub struct SearchView {
     /// People matches (pubkeys, row order; the display data lives in
     /// `profiles`) and the direct-open target when the query parses as a
     /// NIP-21 entity. Both computed at run time, cleared on the next run.
-    people: Vec<String>,
+    people: Vec<PublicKey>,
     target: Option<uris::UriTarget>,
     tab: SearchTab,
     /// Each run invalidates the previous pump — a slow answer to an old
@@ -150,7 +150,7 @@ impl SearchView {
             if !p.picture.is_empty() {
                 painted.push(p.picture.clone());
             }
-            self.profiles.insert(p.pubkey.clone(), p.clone());
+            self.profiles.insert(p.pubkey, p.clone());
             self.people.push(p.pubkey);
         }
         media::repin(cx.entity_id(), painted, cx);
@@ -196,7 +196,7 @@ impl SearchView {
                     if !url.is_empty() {
                         media::fetch(&self.core, url, cx.entity_id(), cx);
                     }
-                    self.profiles.insert(p.pubkey.clone(), p);
+                    self.profiles.insert(p.pubkey, p);
                 }
                 for n in &results {
                     for url in content::media_urls_cached(n).iter().cloned() {
@@ -230,7 +230,7 @@ impl quotes::Host for SearchView {
     fn core(&self) -> &Arc<Core> {
         &self.core
     }
-    fn profiles(&self) -> &HashMap<String, Profile> {
+    fn profiles(&self) -> &HashMap<PublicKey, Profile> {
         &self.profiles
     }
 }
@@ -455,7 +455,8 @@ impl Render for SearchView {
                             let Some(p) = self.profiles.get(pk) else {
                                 continue;
                             };
-                            let pk = pk.clone();
+                            let pk = *pk;
+                            let hex = pk.to_hex();
                             rows = rows.child(
                                 div()
                                     .id(SharedString::from(format!("person-{i}")))
@@ -471,20 +472,13 @@ impl Render for SearchView {
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         // The row is a profile link: the
                                         // same nav the cards' name taps
-                                        // use. (Parsed here — the row
-                                        // closure owns its pk copy.)
-                                        if let Ok(who) = PublicKey::parse(&pk) {
-                                            cx.emit(Nav::OpenProfile(who));
-                                        }
+                                        // use.
+                                        cx.emit(Nav::OpenProfile(pk));
                                     }))
                                     .child(media::avatar(
                                         &media,
                                         &p.picture,
-                                        if p.name.is_empty() {
-                                            &p.pubkey
-                                        } else {
-                                            &p.name
-                                        },
+                                        if p.name.is_empty() { &hex } else { &p.name },
                                         26.0,
                                     ))
                                     .child(
@@ -492,7 +486,7 @@ impl Render for SearchView {
                                             .text_size(px(theme::T_BODY))
                                             .text_color(rgb(theme::ink()))
                                             .child(if p.name.is_empty() {
-                                                content::short_bech32(&p.pubkey)
+                                                content::short_bech32(&hex)
                                             } else {
                                                 p.name.clone()
                                             }),

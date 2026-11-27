@@ -23,34 +23,46 @@ use crate::outbox;
 pub(crate) const FLUSH_SECS: u64 = 10;
 
 /// Write `body` to `path` via a temp sibling + rename, 0600 — the
-/// state-file discipline (read_state, secrets): never rewrite in
-/// place, never follow a planted link. A failed open or write removes
+/// state-file discipline: never rewrite in place (a crash mid-write
+/// left an EMPTY session.json, i.e. a silent sign-out; review Nov 27
+/// 2026), never follow a planted link. A failed open or write removes
 /// the temp and leaves the previous file intact.
 pub(crate) fn write_atomic(path: PathBuf, body: &str) {
+    let _ = try_write_atomic(&path, body.as_bytes());
+}
+
+/// `write_atomic` with the error kept (callers that report it: the
+/// session save). The temp is fsync'd before the rename, so the swap
+/// never exposes a name pointing at unflushed bytes.
+pub fn try_write_atomic(path: &std::path::Path, body: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
-    let tmp = path.with_extension(format!("tmp-{}-{nanos}", std::process::id()));
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.tmp-{}-{nanos}", std::process::id()));
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt;
-    let Ok(mut f) = std::fs::OpenOptions::new()
+    let result = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&tmp)
-    else {
-        return;
-    };
-    if f.write_all(body.as_bytes()).is_ok() {
-        drop(f);
-        let _ = std::fs::rename(&tmp, &path);
-    } else {
+        .and_then(|mut f| {
+            f.write_all(body)?;
+            f.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
+    result
 }
 
 /// The flusher thread: park_timeout wakeups scanning the module's dirty
@@ -200,6 +212,38 @@ impl RelayLru {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The state-file discipline: replace in place via rename, 0600, and
+    /// no temp siblings left behind (review Nov 27 2026: session.json,
+    /// prefs.json and the zap ledger used to truncate-then-write).
+    #[test]
+    fn write_atomic_replaces_whole_and_cleans_up() {
+        use std::os::unix::fs::PermissionsExt;
+        let env = crate::test_env::EnvGuard::new("atomic");
+        let path = env.dir().join("state.json");
+        try_write_atomic(&path, b"{\"a\":1,\"long\":\"xxxxxxxx\"}").unwrap();
+        try_write_atomic(&path, b"{\"a\":2}").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":2}");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let leftovers = std::fs::read_dir(env.dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0);
+        // A write that cannot land (the target is a directory) leaves no
+        // temp behind either, and reports the failure.
+        let dir_target = env.dir().join("is-a-dir");
+        std::fs::create_dir_all(&dir_target).unwrap();
+        assert!(try_write_atomic(&dir_target, b"x").is_err());
+        let leftovers = std::fs::read_dir(env.dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0);
+    }
 
     /// Kernel semantics the sidecars lean on: hydrate keeps tails and
     /// drops oldest keys; touch re-inserts MRU; touch_fifo never scans

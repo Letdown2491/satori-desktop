@@ -8,29 +8,47 @@
 //! door is here.
 
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The build window: the URL whose pipeline is constructing right now
-/// (one slot — each player is one-per-process, and the two never build
-/// concurrently). A second tap inside the window is a no-op, not a
-/// second pipeline: the video player's OPENING registry, now shared.
-static OPENING: RwLock<Option<String>> = RwLock::new(None);
+/// The build window: the URL whose pipeline is constructing right now,
+/// with the TICKET its open was granted (one slot — each player is
+/// one-per-process, and the two never build concurrently). A second tap
+/// inside the window on the same URL is a no-op, not a second pipeline:
+/// the video player's OPENING registry, now shared. The ticket is what
+/// makes "the newest tap wins" true at LANDING time: a tap preempts a
+/// build in flight (D106) by taking a fresh ticket, and the superseded
+/// build's landing is refused (it drops itself instead of replacing the
+/// newer player, whichever finishes first).
+static OPENING: RwLock<Option<(String, u64)>> = RwLock::new(None);
+
+/// Ticket serial (0 is never issued).
+static TICKET: AtomicU64 = AtomicU64::new(1);
 
 /// Is `url` the one currently building? cx-less.
 pub fn opening(url: &str) -> bool {
     OPENING
         .read()
         .ok()
-        .is_some_and(|g| g.as_deref() == Some(url))
+        .is_some_and(|g| g.as_ref().is_some_and(|(u, _)| u == url))
 }
 
-/// Give the slot back (only the URL that owns it clears — a second tap
-/// on another URL while one builds never clobbers the first's mark).
-pub fn clear(url: &str) {
-    if let Ok(mut g) = OPENING.write()
-        && g.as_deref() == Some(url)
-    {
-        *g = None;
+/// Take the build window for `url` (a fresh ticket supersedes whatever
+/// build is in flight).
+fn mark(url: &str) -> u64 {
+    let ticket = TICKET.fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut g) = OPENING.write() {
+        *g = Some((url.to_string(), ticket));
     }
+    ticket
+}
+
+/// Does `ticket` still own the build window? A build whose ticket was
+/// superseded by a newer tap must not land.
+pub fn current(ticket: u64) -> bool {
+    OPENING
+        .read()
+        .ok()
+        .is_some_and(|g| g.as_ref().is_some_and(|(_, t)| *t == ticket))
 }
 
 /// What `gate` decided.
@@ -65,11 +83,17 @@ fn fall_back(url: &str, degrade: Degrade, cx: &mut gpui::App) {
 /// concurrently; a second open inside a build window is a no-op, not a
 /// second concurrent pipeline+proxy+download.
 pub fn opening_busy() -> bool {
-    OPENING.read().ok().is_some()
+    // The SLOT's occupancy, not the lock's: `read().ok().is_some()` was
+    // true whenever the lock wasn't poisoned, which refused every hover
+    // preview since D105 (review, Nov 27 2026).
+    OPENING.read().is_ok_and(|g| g.is_some())
 }
 
 /// `Gate::Door`'s payload, boxed (clippy: the variant dwarfed Handled).
 pub struct Door {
+    /// The build window's ticket: `land` refuses it once a newer open
+    /// superseded it.
+    pub ticket: u64,
     /// The ORIGIN url, parsed (the screen's host comes from here).
     pub parsed: url::Url,
     pub proxy: satori_core::video_proxy::RangeProxy,
@@ -126,9 +150,7 @@ pub fn gate(
         }
         return Gate::Handled;
     }
-    if let Ok(mut g) = OPENING.write() {
-        *g = Some(url.to_string());
-    }
+    let ticket = mark(url);
     cx.set_global(crate::video::Signal);
     // M5 WP3: the guarded door. Playbin never sees the origin URL — its
     // souphttpsrc resolves and redirects outside every guard we have.
@@ -136,7 +158,7 @@ pub fn gate(
         Ok(proxy) => proxy,
         Err(e) => {
             eprintln!("[{tag}] proxy spawn failed ({e}); degrading to browser");
-            clear(url);
+            release(ticket);
             fall_back(url, degrade, cx);
             cx.set_global(crate::video::Signal);
             return Gate::Handled;
@@ -146,13 +168,14 @@ pub fn gate(
         Ok(u) => u,
         Err(e) => {
             eprintln!("[{tag}] proxy uri unparseable ({e}); degrading to browser");
-            clear(url);
+            release(ticket);
             fall_back(url, degrade, cx);
             cx.set_global(crate::video::Signal);
             return Gate::Handled;
         }
     };
     Gate::Door(Box::new(Door {
+        ticket,
         parsed,
         proxy,
         proxied,
@@ -184,17 +207,91 @@ pub async fn screened(host: Option<String>, tag: &str) -> bool {
 /// The land tail: register the new player, defer the replaced player's
 /// drop off the UI thread (set_state(Null) can block on a live sink),
 /// and give the build window back. The entry must be `Send` (the
-/// deferred thread) — both players' handles are.
-pub fn land<R: Send + 'static>(registry: &RwLock<Option<R>>, url: &str, entry: R) {
+/// deferred thread) — both players' handles are. A build whose ticket a
+/// newer open superseded does NOT land: its entry drops (deferred, same
+/// reason) and the newer build keeps the window. Returns whether it
+/// landed.
+pub fn land<R: Send + 'static>(registry: &RwLock<Option<R>>, ticket: u64, entry: R) -> bool {
+    if !current(ticket) {
+        std::thread::spawn(move || drop(entry));
+        return false;
+    }
     let old = {
         let mut guard = match registry.write() {
             Ok(g) => g,
-            Err(_) => return,
+            Err(_) => return false,
         };
         guard.replace(entry)
     };
     if let Some(old) = old {
         std::thread::spawn(move || drop(old));
     }
-    clear(url);
+    release(ticket);
+    true
+}
+
+/// Give the window back by ticket (a superseded build never clears the
+/// newer build's mark).
+pub fn release(ticket: u64) {
+    if let Ok(mut g) = OPENING.write()
+        && g.as_ref().is_some_and(|(_, t)| *t == ticket)
+    {
+        *g = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The window statics are process-wide: serialize the tests on them.
+    static SERIAL: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    fn reset() {
+        *OPENING.write().unwrap() = None;
+    }
+
+    /// The D105 regression: an EMPTY window is not busy (the old check
+    /// tested the lock, not the slot, and refused every hover preview).
+    #[test]
+    fn empty_window_is_not_busy() {
+        let _s = SERIAL.lock();
+        reset();
+        assert!(!opening_busy());
+        let t = mark("https://a.example/x.mp4");
+        assert!(opening_busy());
+        release(t);
+        assert!(!opening_busy());
+    }
+
+    /// Tap A, tap B, A finishes LAST: B must still be the one playing.
+    #[test]
+    fn superseded_build_never_lands() {
+        let _s = SERIAL.lock();
+        reset();
+        let registry: RwLock<Option<&'static str>> = RwLock::new(None);
+        let a = mark("https://a.example/x.mp4");
+        let b = mark("https://b.example/y.mp4");
+        assert!(land(&registry, b, "b"));
+        assert!(!land(&registry, a, "a"));
+        assert_eq!(*registry.read().unwrap(), Some("b"));
+        assert!(!opening_busy());
+    }
+
+    /// Same race, A finishes FIRST: A is refused, B lands on its own.
+    #[test]
+    fn superseded_build_refused_before_newer_lands() {
+        let _s = SERIAL.lock();
+        reset();
+        let registry: RwLock<Option<&'static str>> = RwLock::new(None);
+        let a = mark("https://a.example/x.mp4");
+        let b = mark("https://b.example/y.mp4");
+        assert!(!land(&registry, a, "a"));
+        assert!(
+            opening("https://b.example/y.mp4"),
+            "A's refusal kept B's window"
+        );
+        assert!(land(&registry, b, "b"));
+        assert_eq!(*registry.read().unwrap(), Some("b"));
+    }
 }

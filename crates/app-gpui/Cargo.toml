@@ -69,6 +69,7 @@ gstreamer1-libav = ""
 "io.github.Letdown2491.satori" = ""
 
 [dependencies]
+parking_lot = { workspace = true }
 gpui = { workspace = true }
 gpui-pre-linux = { workspace = true }
 nostr = { workspace = true }
@@ -82,7 +83,7 @@ unicode-properties = "0.1"
 # QR codes for the nostrconnect login door (rendered to PNG, handed to gpui).
 qrcode = { workspace = true }
 # File picker for the composer's attachments (xdg-desktop-portal backend).
-rfd = "0.15"
+rfd = "0.18"
 # The appearance portal (color-scheme, prefers-reduced-motion) — one
 # ReadOne pair at startup, blocking (desktop.rs).
 zbus = { version = "5", default-features = false, features = ["blocking", "tokio"] }

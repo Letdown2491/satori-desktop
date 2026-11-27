@@ -18,8 +18,9 @@
 //! memory, the newest `PERSISTED_AUTHORS` written out on flush.
 //! Core-clean: no UI deps.
 
+use parking_lot::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 use std::str::FromStr;
 
@@ -53,7 +54,7 @@ fn hints() -> &'static Mutex<sidecar::RelayLru> {
 }
 
 fn write_disk() {
-    let held = hints().lock().unwrap();
+    let held = hints().lock();
     // Persist only the newest PERSISTED_AUTHORS (LRU order: the front is
     // the oldest — skip it).
     let skip = held.order.len().saturating_sub(PERSISTED_AUTHORS);
@@ -79,7 +80,7 @@ fn add(pk: &str, url: &str) {
         return;
     };
     {
-        let mut held = hints().lock().unwrap();
+        let mut held = hints().lock();
         held.touch(pk, MAX_AUTHORS);
         held.push_relay(pk, key, MAX_HINTS_PER_AUTHOR);
     }
@@ -132,7 +133,7 @@ pub fn observe(ev: &Event, relay_url: &str) {
 /// The author's hint relays (RelayHintStore.kt getHints), recency-ordered
 /// most-recent LAST — to seed routing for an author with no kind:10002.
 pub fn for_pubkey(pk: &PublicKey) -> Vec<String> {
-    let held = hints().lock().unwrap();
+    let held = hints().lock();
     held.map.get(&pk.to_string()).cloned().unwrap_or_default()
 }
 

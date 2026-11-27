@@ -43,7 +43,7 @@ const PENDING_CAP: usize = 1024;
 #[derive(Clone)]
 struct WireSnap {
     rows: Arc<Vec<Arc<Event>>>,
-    profiles: Arc<HashMap<String, Profile>>,
+    profiles: Arc<HashMap<PublicKey, Profile>>,
     quotes: Arc<content::Quotes>,
     engagement: Arc<engagement::Engagement>,
 }
@@ -53,18 +53,18 @@ pub struct WireView {
     /// The relay this wire listens to (the status whisper's host).
     relay: String,
     rows: Vec<Arc<Event>>,
-    profiles: HashMap<String, Profile>,
+    profiles: HashMap<PublicKey, Profile>,
     /// First-sight ledger for the profile eviction (FIFO, seen.rs's
     /// convention).
-    profiles_order: VecDeque<String>,
+    profiles_order: VecDeque<PublicKey>,
     /// Authors with a fetch in flight: one ask per author, ever in
     /// flight — a never-resolving kind-0 must not re-fire per note.
     /// FIFO-capped like its siblings (the audit's memory lens: a
     /// never-resolving author used to hold its hex for the view's
     /// lifetime; the firehose grows those fast). Re-asking an evicted
     /// author is harmless — one refetch.
-    pending: HashSet<String>,
-    pending_order: VecDeque<String>,
+    pending: HashSet<PublicKey>,
+    pending_order: VecDeque<PublicKey>,
     quotes: content::Quotes,
     quotes_order: VecDeque<String>,
     engagement: engagement::Engagement,
@@ -195,9 +195,8 @@ impl WireView {
             content::fifo_trim(&mut self.quotes, &mut self.quotes_order, QUOTES_CAP);
             let pk = ev.pubkey;
             self.rows.insert(0, Arc::new(ev));
-            let hex = pk.to_string();
-            if !self.profiles.contains_key(&hex) && self.pending.insert(hex.clone()) {
-                self.pending_order.push_back(hex);
+            if !self.profiles.contains_key(&pk) && self.pending.insert(pk) {
+                self.pending_order.push_back(pk);
                 // FIFO by first ask: the set must not grow with the
                 // relay's count of never-resolving authors.
                 while self.pending_order.len() > PENDING_CAP
@@ -234,13 +233,13 @@ impl WireView {
     fn on_profiles(&mut self, fe: FeedEvent, cx: &mut Context<Self>) {
         if let FeedEvent::Profiles(profs) = fe {
             for p in profs {
-                let hex = p.pubkey.clone();
-                self.pending.remove(&hex);
-                if let Some(pos) = self.pending_order.iter().position(|h| *h == hex) {
+                let pk = p.pubkey;
+                self.pending.remove(&pk);
+                if let Some(pos) = self.pending_order.iter().position(|h| *h == pk) {
                     self.pending_order.remove(pos);
                 }
-                if self.profiles.insert(hex.clone(), p).is_none() {
-                    self.profiles_order.push_back(hex);
+                if self.profiles.insert(pk, p).is_none() {
+                    self.profiles_order.push_back(pk);
                 }
             }
             // FIFO by first sight: the map must not grow with the
@@ -256,7 +255,7 @@ impl actions::ActionHost for WireView {
     fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>) {
         engagement::toggle_like(self, ev, cx)
     }
-    fn toggle_reaction_picker(&mut self, id: &str, cx: &mut Context<Self>) {
+    fn toggle_reaction_picker(&mut self, id: EventId, cx: &mut Context<Self>) {
         engagement::toggle_reaction_picker(self, id, cx)
     }
     fn react_with(&mut self, ev: &Event, content: &str, cx: &mut Context<Self>) {
@@ -297,7 +296,7 @@ impl quotes::Host for WireView {
     fn core(&self) -> &Arc<Core> {
         &self.core
     }
-    fn profiles(&self) -> &HashMap<String, Profile> {
+    fn profiles(&self) -> &HashMap<PublicKey, Profile> {
         &self.profiles
     }
     /// Re-ledger an embed that landed after its reservation was evicted
@@ -319,13 +318,13 @@ fn wire_card(
     idx: usize,
     ev: &Arc<Event>,
     st: actions::ActionState,
-    profiles: &HashMap<String, Profile>,
+    profiles: &HashMap<PublicKey, Profile>,
     media_snap: &media::Snapshot,
     quotes: &content::Quotes,
     time: String,
     handle: Entity<WireView>,
 ) -> gpui::AnyElement {
-    let key = ev.pubkey.to_string();
+    let key = ev.pubkey;
     let name = content::display_name(profiles.get(&key), &key);
     let picture = profiles
         .get(&key)
@@ -490,7 +489,7 @@ impl Render for WireView {
                                     // previews (on_notes's doc). fetch is a
                                     // silent no-op for entries the cache
                                     // holds; only a landing notifies.
-                                    if let Some(p) = snap.profiles.get(&ev.pubkey.to_string())
+                                    if let Some(p) = snap.profiles.get(&ev.pubkey)
                                         && !p.picture.is_empty()
                                     {
                                         media::fetch(
@@ -508,11 +507,8 @@ impl Render for WireView {
                                     let secs = ev.created_at.as_secs();
                                     let time = crate::timefmt::stamp(secs, cx);
                                     crate::timefmt::ensure(secs, cx);
-                                    let st = snap.engagement.action_state(
-                                        &ev.id.to_string(),
-                                        0,
-                                        reduced_motion,
-                                    );
+                                    let st =
+                                        snap.engagement.action_state(&ev.id, 0, reduced_motion);
                                     wire_card(
                                         idx,
                                         ev,

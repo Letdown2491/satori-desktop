@@ -6,7 +6,7 @@
 //! (`select` writes it, `ThemeSignal`'s gpui-global effects wake every
 //! watching view). Fonts stay constants — both palettes share them.
 
-use std::sync::RwLock;
+use parking_lot::RwLock;
 
 /// The token contract. u32 RGB — callsites say `rgb(theme::ink())`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,11 +55,11 @@ static CURRENT: RwLock<Palette> = RwLock::new(DARK);
 
 /// Swap the palette. Views observe [`ThemeSignal`] to repaint.
 pub fn select(palette: Palette) {
-    *CURRENT.write().unwrap() = palette;
+    *CURRENT.write() = palette;
 }
 
 pub fn current() -> Palette {
-    *CURRENT.read().unwrap()
+    *CURRENT.read()
 }
 
 pub fn washi() -> u32 {

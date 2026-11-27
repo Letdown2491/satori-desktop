@@ -19,8 +19,9 @@
 //! weather cools off with a doubling backoff; a NotMedia verdict is
 //! terminal for the session).
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use gpui::EntityId;
@@ -41,7 +42,7 @@ const RETRY_CAP: u8 = 5;
 /// real pipeline, this only opens the lock.
 #[cfg(test)]
 pub(crate) fn seed_test_preview(page_url: &str, preview: LinkPreview) {
-    let mut store = store().lock().unwrap();
+    let mut store = store().lock();
     store
         .map
         .insert(page_url.to_string(), State::Ready(Arc::new(preview)));
@@ -83,7 +84,7 @@ fn store() -> &'static Mutex<Store> {
 
 /// The preview for `page_url`, when one landed.
 pub(crate) fn get(page_url: &str) -> Option<Arc<LinkPreview>> {
-    match store().lock().unwrap().map.get(page_url) {
+    match store().lock().map.get(page_url) {
         Some(State::Ready(p)) => Some(Arc::clone(p)),
         _ => None,
     }
@@ -102,7 +103,7 @@ pub(crate) fn fetch(core: &Arc<Core>, page_url: String, view: EntityId, cx: &mut
         Done,
     }
     let action = {
-        let mut store = store().lock().unwrap();
+        let mut store = store().lock();
         match store.map.get_mut(&page_url) {
             Some(State::Ready(_) | State::NotMedia) => Action::Done,
             Some(State::Loading(waiters)) => {
@@ -188,7 +189,7 @@ pub(crate) fn fetch(core: &Arc<Core>, page_url: String, view: EntityId, cx: &mut
             // retry booking below only fire for a verdict we actually
             // landed.
             let (waiters, replaced) = {
-                let mut store = store().lock().unwrap();
+                let mut store = store().lock();
                 let replaced = matches!(store.map.get(&page_url), Some(State::Loading(_)));
                 if replaced {
                     let waiters = match store.map.insert(page_url.clone(), state) {

@@ -19,10 +19,9 @@
 //! compiled-in anchor so interpolation works on first run, before any
 //! network answer.
 
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
@@ -84,7 +83,7 @@ impl Blocktime {
     /// The display-ready answer: exact when known, interpolated from the
     /// nearest point otherwise. Pure read — per-frame safe, never fetches.
     pub fn cached(&self, ts: u64) -> Option<u64> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         if let Some(h) = inner.lru.get(&ts).copied() {
             inner.touch(ts, h);
             return Some(h);
@@ -98,7 +97,7 @@ impl Blocktime {
     /// Is there an exact (fetched or recorded) height for this timestamp?
     /// Interpolation doesn't count — that's what a fetch refines.
     pub fn known(&self, ts: u64) -> bool {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         inner.lru.contains_key(&ts) || inner.points.contains_key(&ts)
     }
 
@@ -108,7 +107,7 @@ impl Blocktime {
     /// on every waiter's channel.
     pub fn get(self: &Arc<Self>, ts: u64) -> BlockRx {
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         if let Some(h) = inner
             .lru
             .get(&ts)
@@ -138,7 +137,7 @@ impl Blocktime {
     /// table (a fetched window) answers offline — one fetch per region,
     /// not one per note.
     async fn fetch_and_refine(&self, ts: u64) -> Result<u64, String> {
-        let mut points = { self.inner.lock().unwrap().points.clone() };
+        let mut points = { self.inner.lock().points.clone() };
         if densely_bracketed(&points, ts) {
             return Ok(interp_height(&points, ts));
         }
@@ -148,7 +147,7 @@ impl Blocktime {
             points.insert(bts, bh);
         }
         let answer = interp_height(&points, ts);
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         for (bts, bh) in points {
             inner.points.entry(bts).or_insert(bh);
         }
@@ -160,7 +159,7 @@ impl Blocktime {
     async fn resolve(self: Arc<Self>, ts: u64) {
         let res = self.fetch_and_refine(ts).await;
         let snapshot = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock();
             if let Ok(h) = res {
                 inner.record(ts, h);
             }
@@ -265,13 +264,7 @@ fn persist(points: &BTreeMap<u64, u64>) {
     {
         return;
     }
-    let _ = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)
-        .and_then(|mut f| f.write_all(json.as_bytes()));
+    let _ = crate::sidecar::try_write_atomic(&path, json.as_bytes());
 }
 
 #[cfg(test)]

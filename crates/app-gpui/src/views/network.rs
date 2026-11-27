@@ -29,7 +29,7 @@ pub(crate) struct NetworkView {
     /// The own mute set (kind:10000, decrypted at session start).
     mutes: Vec<PublicKey>,
     /// Resolved profiles for every pk on any segment.
-    profiles: HashMap<String, Profile>,
+    profiles: HashMap<PublicKey, Profile>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -79,7 +79,7 @@ impl NetworkView {
             if let FeedEvent::Profiles(ps) = ev {
                 let _ = this.update(cx, |this, cx| {
                     for p in ps {
-                        this.profiles.insert(p.pubkey.clone(), p);
+                        this.profiles.insert(p.pubkey, p);
                     }
                     cx.notify();
                 });
@@ -147,7 +147,7 @@ impl NetworkView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let hex = pk.to_string();
-        let p = self.profiles.get(&hex);
+        let p = self.profiles.get(pk);
         let (name, picture, nip05) = match p {
             Some(p) => (p.display(), p.picture.clone(), p.nip05.clone()),
             None => (content::short_bech32(&hex), String::new(), String::new()),
@@ -242,7 +242,7 @@ impl Render for NetworkView {
         // allocating key per comparison, on all three clones, every
         // paint; D84 audit M1).
         let name_of = |pk: &PublicKey| -> String {
-            match self.profiles.get(&pk.to_string()) {
+            match self.profiles.get(pk) {
                 Some(p) => p.display(),
                 None => String::new(),
             }
@@ -286,7 +286,7 @@ impl Render for NetworkView {
                         .skip(range.start)
                         .take(range.end.saturating_sub(range.start))
                     {
-                        if let Some(p) = this.profiles.get(&pk.to_string()) {
+                        if let Some(p) = this.profiles.get(pk) {
                             media::fetch(&this.core, p.picture.clone(), viewer, cx);
                             if !p.picture.is_empty() && seen.insert(p.picture.clone()) {
                                 painted.push(p.picture.clone());

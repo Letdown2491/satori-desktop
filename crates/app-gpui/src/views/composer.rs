@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::a11y::A11y;
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Global, Render,
     ScrollHandle, SharedString, Window, actions, div, img, prelude::*, px, relative, rgb,
@@ -321,7 +322,7 @@ pub struct Composer {
     previewing: bool,
     /// Names/avatars for the preview's byline + body mentions (reader.rs
     /// want_names' shape: pump ensure_profiles, merge on landing).
-    preview_profiles: HashMap<String, Profile>,
+    preview_profiles: HashMap<PublicKey, Profile>,
     /// The two-step Esc: the content fingerprint the first Esc saved.
     /// A second Esc with the SAME fingerprint passes through to
     /// escape-to-back; typing changes the fingerprint, so the next Esc
@@ -1063,8 +1064,8 @@ impl Composer {
             let insert = if article {
                 // The resolvable form; the display name stays for note
                 // bodies, where the p tag carries the identity.
-                match PublicKey::from_hex(&profile.pubkey) {
-                    Ok(pk) => format!("nostr:{} ", pk.to_bech32().unwrap_or_default()),
+                match profile.pubkey.to_bech32() {
+                    Ok(npub) => format!("nostr:{npub} "),
                     Err(_) => format!("@{} ", profile.display()),
                 }
             } else {
@@ -1081,10 +1082,8 @@ impl Composer {
             next.push_str(&text[cursor..]);
             self.input.update(cx, |i, cx| i.set_text(&next, cx));
         }
-        let pk_hex = profile.pubkey.clone();
-        if let Ok(pk) = PublicKey::from_hex(&pk_hex)
-            && !self.mentions.contains(&pk)
-        {
+        let pk = profile.pubkey;
+        if !self.mentions.contains(&pk) {
             self.mentions.push(pk);
         }
         self.suggest.clear();
@@ -2117,7 +2116,7 @@ impl Render for Composer {
         let quote_prev = self.quote.as_ref().map(|q| {
             let prof = self.core.profile_of(&q.pubkey);
             (
-                content::display_name(prof.as_ref(), &q.pubkey.to_string()),
+                content::display_name(prof.as_ref(), &q.pubkey),
                 q.content
                     .split_whitespace()
                     .collect::<Vec<_>>()
@@ -2131,7 +2130,7 @@ impl Render for Composer {
         let reply_prev = self.reply_to.as_ref().map(|r| {
             let prof = self.core.profile_of(&r.pubkey);
             (
-                content::display_name(prof.as_ref(), &r.pubkey.to_string()),
+                content::display_name(prof.as_ref(), &r.pubkey),
                 r.content
                     .split_whitespace()
                     .collect::<Vec<_>>()
@@ -2708,6 +2707,7 @@ impl Render for Composer {
                         .child(
                             div()
                                 .id("add-option")
+                                .a11y_button("Add another option")
                                 .cursor_pointer()
                                 .flex()
                                 .items_center()
@@ -2857,6 +2857,7 @@ impl Render for Composer {
                         .child(
                             div()
                                 .id("nsec-dismiss")
+                                .a11y_button("Dismiss")
                                 .cursor_pointer()
                                 .text_size(px(theme::T_SMALL))
                                 .text_color(rgb(theme::muted()))
@@ -3007,6 +3008,7 @@ impl Render for Composer {
                         d.child(
                             div()
                                 .id("attach")
+                                .a11y_button("Attach media")
                                 .cursor_pointer()
                                 .px_3()
                                 .py_1()
@@ -3028,6 +3030,7 @@ impl Render for Composer {
                             d.child(
                                 div()
                                     .id("gif")
+                                    .a11y_toggle("GIF picker", gifs_open)
                                     .cursor_pointer()
                                     .px_3()
                                     .py_1()
@@ -3055,6 +3058,7 @@ impl Render for Composer {
                         d.child(
                             div()
                                 .id("schedule-toggle")
+                                .a11y_toggle("Schedule", sched_on)
                                 .cursor_pointer()
                                 .px_3()
                                 .py_1()
@@ -3083,6 +3087,7 @@ impl Render for Composer {
                         d.child(
                             div()
                                 .id("preview-toggle")
+                                .a11y_toggle("Preview", previewing)
                                 .cursor_pointer()
                                 .px_3()
                                 .py_1()
@@ -3113,6 +3118,7 @@ impl Render for Composer {
                     .child(
                         div()
                             .id("send")
+                            .a11y_button(if posting { "Publishing" } else if sched_on { "Schedule" } else if replying { "Reply" } else { "Publish" })
                             .cursor_pointer()
                             .px_4()
                             .py_1()
@@ -3200,7 +3206,7 @@ impl Composer {
         let seen = self.preview_profiles.clone();
         let missing: Vec<PublicKey> = want
             .into_iter()
-            .filter(|pk| !seen.contains_key(&pk.to_string()))
+            .filter(|pk| !seen.contains_key(pk))
             .collect();
         self.pump_profiles(missing, cx);
     }
@@ -3216,7 +3222,7 @@ impl Composer {
                 let _ = this.update(cx, |this, cx| {
                     if let FeedEvent::Profiles(profiles) = ev {
                         for p in profiles {
-                            this.preview_profiles.insert(p.pubkey.clone(), p);
+                            this.preview_profiles.insert(p.pubkey, p);
                         }
                         cx.notify();
                     }
@@ -3239,7 +3245,7 @@ impl Composer {
         let cover = draft.image.clone();
         let minutes = satori_core::nip::article::reading_minutes(&body);
         let me = self.core.me().and_then(|m| m.parse::<PublicKey>().ok());
-        let prof = me.and_then(|pk| self.preview_profiles.get(&pk.to_string()));
+        let prof = me.and_then(|pk| self.preview_profiles.get(&pk));
         let name = prof.map(|p| p.display()).unwrap_or_else(|| "you".into());
         let pic = prof.map(|p| p.picture.clone()).unwrap_or_default();
         let empty = body.trim().is_empty();
@@ -3448,7 +3454,7 @@ impl Composer {
             }
             Tab::Article => None, // unreachable: the flip gates this tab out
         };
-        let prof = self.preview_profiles.get(&pk.to_string());
+        let prof = self.preview_profiles.get(&pk);
         let name = prof.map(|p| p.display()).unwrap_or_else(|| "you".into());
         let pic = prof.map(|p| p.picture.clone()).unwrap_or_default();
         if !pic.is_empty() {
@@ -3732,6 +3738,7 @@ impl Composer {
                     .child(
                         div()
                             .id("alt-save")
+                            .a11y_button("Save alt text")
                             .cursor_pointer()
                             .text_size(px(theme::T_SMALL))
                             .child(theme::pressable(div().child("save")))

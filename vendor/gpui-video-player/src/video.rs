@@ -49,9 +49,78 @@ impl Frame {
         Self(gst::Sample::builder().build())
     }
 
-    pub fn readable(&'_ self) -> Option<gst::BufferMap<'_, gst::buffer::Readable>> {
-        self.0.buffer().and_then(|x| x.map_readable().ok())
+    /// VENDORED PATCH (stride): the frame as TIGHT NV12 (Y rows of
+    /// `width` bytes, then ceil(h/2) UV rows of 2*ceil(w/2) bytes) at the
+    /// sample's OWN size. GStreamer pads rows to 4 bytes (and a VideoMeta
+    /// may carry other strides/offsets); upstream copied the raw buffer
+    /// and the converter read it as tight, so any width that is not a
+    /// multiple of 4 (common after the 1:1 pixel-aspect rescale) painted
+    /// sheared diagonally with green edges. Upstream's guard was a
+    /// debug_assert, compiled out of release.
+    pub fn tight_nv12(&self) -> Option<(Vec<u8>, u32, u32)> {
+        let caps = self.0.caps()?;
+        let info = gst_video::VideoInfo::from_caps(caps).ok()?;
+        let buffer = self.0.buffer()?;
+        let (strides, offsets): (Vec<i32>, Vec<usize>) =
+            match buffer.meta::<gst_video::VideoMeta>() {
+                Some(meta) => (meta.stride().to_vec(), meta.offset().to_vec()),
+                None => (info.stride().to_vec(), info.offset().to_vec()),
+            };
+        let map = buffer.map_readable().ok()?;
+        let (w, h) = (info.width(), info.height());
+        let packed = pack_nv12(
+            map.as_slice(),
+            w as usize,
+            h as usize,
+            [*strides.first()?, *strides.get(1)?],
+            [*offsets.first()?, *offsets.get(1)?],
+        )?;
+        Some((packed, w, h))
     }
+}
+
+/// Bytes per tight NV12 UV row and the UV row count for a w×h frame.
+pub(crate) fn nv12_uv_dims(w: usize, h: usize) -> (usize, usize) {
+    (w.div_ceil(2) * 2, h.div_ceil(2))
+}
+
+/// Repack a strided NV12 buffer into the tight layout the converter
+/// reads. Borrow-free fast path: an already-tight buffer is one copy.
+/// None when the buffer is shorter than its own layout claims.
+pub(crate) fn pack_nv12(
+    data: &[u8],
+    w: usize,
+    h: usize,
+    stride: [i32; 2],
+    offset: [usize; 2],
+) -> Option<Vec<u8>> {
+    if w == 0 || h == 0 || stride[0] < 0 || stride[1] < 0 {
+        return None;
+    }
+    let (ys, uvs) = (stride[0] as usize, stride[1] as usize);
+    let (uv_w, uv_h) = nv12_uv_dims(w, h);
+    if ys < w || uvs < uv_w {
+        return None;
+    }
+    let y_end = offset[0] + ys * (h - 1) + w;
+    let uv_end = offset[1] + uvs * (uv_h - 1) + uv_w;
+    if data.len() < y_end || data.len() < uv_end {
+        return None;
+    }
+    let mut out = Vec::with_capacity(w * h + uv_w * uv_h);
+    if ys == w && uvs == uv_w && offset[0] == 0 && offset[1] == w * h {
+        out.extend_from_slice(&data[..w * h + uv_w * uv_h]);
+        return Some(out);
+    }
+    for row in 0..h {
+        let at = offset[0] + row * ys;
+        out.extend_from_slice(&data[at..at + w]);
+    }
+    for row in 0..uv_h {
+        let at = offset[1] + row * uvs;
+        out.extend_from_slice(&data[at..at + uv_w]);
+    }
+    Some(out)
 }
 
 /// Options for initializing a `Video` without post-construction locking.
@@ -330,20 +399,19 @@ impl Video {
         } else {
             0
         };
-        let expected_size = expected_y_size + expected_y_size / 2;
-        debug_assert!(
-            width > 0
-                && height > 0
-                && vinfo.stride().first().copied() == Some(width)
-                && vinfo.stride().get(1).copied() == Some(width)
-                && vinfo.offset().first().copied() == Some(0)
-                && vinfo.offset().get(1).copied() == Some(expected_y_size)
-                && vinfo.size() == expected_size,
-            "non-tight NV12 video layouts are not supported yet: {width}x{height}, stride={:?}, offset={:?}, size={}",
-            vinfo.stride(),
-            vinfo.offset(),
-            vinfo.size(),
-        );
+        // VENDORED PATCH (stride): a padded layout is fine now (frames are
+        // repacked per sample, `Frame::tight_nv12`); upstream asserted
+        // tightness in debug builds only.
+        if vinfo.stride().first().copied() != Some(width)
+            || vinfo.offset().get(1).copied() != Some(expected_y_size)
+        {
+            log::debug!(
+                "padded NV12 layout {width}x{height}, stride={:?}, offset={:?}, size={}; repacking per frame",
+                vinfo.stride(),
+                vinfo.offset(),
+                vinfo.size(),
+            );
+        }
 
         // VENDORED PATCH (D69): 0/1 fps is LEGAL here — GIF-to-MP4 converters
         // (nostr.build, 21media) emit variable-framerate loops with a zero
@@ -790,17 +858,7 @@ impl Video {
 
     /// Get the current NV12 frame data if available.
     pub fn current_frame_data(&self) -> Option<(Vec<u8>, u32, u32)> {
-        let inner = self.read();
-
-        // Check if we have frame data available
-        if let Some(readable) = inner.frame.lock().readable() {
-            let data = readable.as_slice().to_vec();
-            if !data.is_empty() {
-                return Some((data, inner.width as u32, inner.height as u32));
-            }
-        }
-
-        None
+        self.read().frame.lock().tight_nv12()
     }
 
     /// Returns true if a new frame arrived since last check and resets the flag.
@@ -832,22 +890,60 @@ impl Video {
     /// Pop the oldest buffered frame, returning raw NV12 bytes with width/height.
     /// Returns None if the buffer is empty or mapping fails.
     pub fn pop_buffered_frame(&self) -> Option<(Vec<u8>, u32, u32)> {
-        let (width, height) = self.size();
-        let inner = self.read();
-        let maybe_frame = inner.frame_buffer.lock().pop_front();
-        if let Some(frame) = maybe_frame
-            && let Some(readable) = frame.readable()
-        {
-            let data = readable.as_slice().to_vec();
-            if !data.is_empty() {
-                return Some((data, width as u32, height as u32));
-            }
-        }
-        None
+        let maybe_frame = self.read().frame_buffer.lock().pop_front();
+        maybe_frame.and_then(|frame| frame.tight_nv12())
     }
 
     /// Number of frames currently buffered.
     pub fn buffered_len(&self) -> usize {
         self.read().frame_buffer.lock().len()
+    }
+}
+
+#[cfg(test)]
+mod stride_tests {
+    use super::*;
+
+    #[test]
+    fn padded_odd_width_repacks_tight() {
+        // 3x3: Y stride 4 (GStreamer's 4-byte row rounding), UV rows of
+        // 2*ceil(3/2)=4 bytes padded to 4, two UV rows (ceil(3/2)).
+        let (w, h) = (3usize, 3usize);
+        let mut data = Vec::new();
+        for r in 0..h {
+            data.extend((0..w).map(|c| (r * 10 + c) as u8));
+            data.push(0xEE); // pad
+        }
+        let uv_off = data.len();
+        for r in 0..2 {
+            data.extend((0..4).map(|c| (100 + r * 10 + c) as u8));
+        }
+        let out = pack_nv12(&data, w, h, [4, 4], [0, uv_off]).unwrap();
+        assert_eq!(&out[..9], &[0, 1, 2, 10, 11, 12, 20, 21, 22], "pad bytes gone");
+        assert_eq!(&out[9..], &[100, 101, 102, 103, 110, 111, 112, 113]);
+    }
+
+    #[test]
+    fn padded_718_wide_frame_rows_line_up() {
+        let (w, h) = (718usize, 4usize);
+        let (ys, uvs) = (720usize, 720usize);
+        let mut data = vec![0xEEu8; ys * h + uvs * 2];
+        for r in 0..h {
+            data[r * ys..r * ys + w].fill(r as u8);
+        }
+        for r in 0..2 {
+            data[ys * h + r * uvs..ys * h + r * uvs + w].fill(50 + r as u8);
+        }
+        let out = pack_nv12(&data, w, h, [ys as i32, uvs as i32], [0, ys * h]).unwrap();
+        assert_eq!(out.len(), w * h + w * 2);
+        for r in 0..h {
+            assert!(out[r * w..(r + 1) * w].iter().all(|b| *b == r as u8), "row {r} shifted");
+        }
+        assert!(!out.contains(&0xEE), "no padding leaks into the picture");
+    }
+
+    #[test]
+    fn short_buffer_is_refused_not_read_past() {
+        assert!(pack_nv12(&[0u8; 10], 4, 4, [4, 4], [0, 16]).is_none());
     }
 }

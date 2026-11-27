@@ -84,6 +84,7 @@ pub fn open(url: String, cx: &mut gpui::App) {
         return;
     };
     let crate::media_guard::Door {
+        ticket,
         parsed,
         proxy,
         proxied,
@@ -91,7 +92,7 @@ pub fn open(url: String, cx: &mut gpui::App) {
     cx.spawn(async move |cx| {
         if !crate::media_guard::screened(parsed.host_str().map(str::to_string), "[audio]").await {
             cx.update(|cx| {
-                crate::media_guard::clear(&url);
+                crate::media_guard::release(ticket);
                 cx.open_url(&url);
                 cx.set_global(crate::video::Signal);
             });
@@ -114,7 +115,7 @@ pub fn open(url: String, cx: &mut gpui::App) {
                 let _ = pipeline.set_state(gst::State::Playing);
                 crate::media_guard::land(
                     &ACTIVE,
-                    &url,
+                    ticket,
                     Audio {
                         url: url.clone(),
                         pipeline,
@@ -125,7 +126,7 @@ pub fn open(url: String, cx: &mut gpui::App) {
             }
             Err(e) => {
                 eprintln!("[audio] pipeline failed: {e}; degrading to browser");
-                crate::media_guard::clear(&url);
+                crate::media_guard::release(ticket);
                 cx.open_url(&url);
                 cx.set_global(crate::video::Signal);
             }

@@ -7,14 +7,18 @@ use crate::pool::Pool;
 use futures_util::{SinkExt, StreamExt};
 use nostr::prelude::*;
 use nostr_sdk::client::ClientNotification;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
+
+/// Live connections: each socket's sender plus the REQ ids it holds.
+type Conns = Arc<Mutex<Vec<(mpsc::UnboundedSender<Message>, Arc<Mutex<Vec<String>>>)>>>;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 pub struct MockRelay {
     addr: std::net::SocketAddr,
     /// Every live connection: its broadcast sink + its open sub ids.
-    conns: Arc<Mutex<Vec<(mpsc::UnboundedSender<Message>, Arc<Mutex<Vec<String>>>)>>>,
+    conns: Conns,
     /// Published events, replayed to late REQs.
     events: Arc<Mutex<Vec<Event>>>,
     /// Total WS connections ever accepted (reconnect detection).
@@ -41,8 +45,7 @@ impl MockRelay {
             .await
             .expect("bind loopback mock relay");
         let addr = listener.local_addr().unwrap();
-        let conns: Arc<Mutex<Vec<(mpsc::UnboundedSender<Message>, Arc<Mutex<Vec<String>>>)>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let conns: Conns = Arc::new(Mutex::new(Vec::new()));
         // Published events, replayed to late REQs (a REQ may land
         // after the test publishes — the relay still serves it).
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -61,10 +64,7 @@ impl MockRelay {
                 let subs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
                 // Broadcast pump: frames the relay "sends" land here.
                 let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-                conns_accept
-                    .lock()
-                    .unwrap()
-                    .push((tx.clone(), subs.clone()));
+                conns_accept.lock().push((tx.clone(), subs.clone()));
                 tokio::spawn(async move {
                     while let Some(frame) = rx.recv().await {
                         if sink.send(frame).await.is_err() {
@@ -99,7 +99,7 @@ impl MockRelay {
                             // ["AUTH", <event>]: the client's NIP-42
                             // answer. Verify kind, challenge, relay tag,
                             // and the signature itself.
-                            let want_challenge = challenge.lock().unwrap().clone();
+                            let want_challenge = challenge.lock().clone();
                             let parsed = arr
                                 .get(1)
                                 .and_then(|v| serde_json::from_value::<Event>(v.clone()).ok());
@@ -115,7 +115,7 @@ impl MockRelay {
                                 u16::from(ev.kind) == 22242 && tags_ok && ev.verify().is_ok()
                             });
                             if valid {
-                                *authed.lock().unwrap() = true;
+                                *authed.lock() = true;
                                 if let Some(ev) = parsed {
                                     let ok = Message::Text(
                                         serde_json::json!(["OK", ev.id.to_string(), true, ""])
@@ -142,11 +142,11 @@ impl MockRelay {
                         let Some(sub_id) = arr.get(1).and_then(|v| v.as_str()) else {
                             continue;
                         };
-                        if auth_required && kind == "REQ" && !*authed.lock().unwrap() {
+                        if auth_required && kind == "REQ" && !*authed.lock() {
                             // Unauthenticated REQ: issue the challenge
                             // (if not yet issued) and refuse the sub —
                             // the relay.nostr.build shape.
-                            let issued = challenge.lock().unwrap().clone();
+                            let issued = challenge.lock().clone();
                             let challenge_str = if issued.is_empty() {
                                 let c = format!(
                                     "challenge-{}",
@@ -155,7 +155,7 @@ impl MockRelay {
                                         .map(|d| d.as_nanos())
                                         .unwrap_or(0)
                                 );
-                                *challenge.lock().unwrap() = c.clone();
+                                *challenge.lock() = c.clone();
                                 c
                             } else {
                                 issued
@@ -180,10 +180,10 @@ impl MockRelay {
                         }
                         match kind {
                             "REQ" => {
-                                subs_in.lock().unwrap().push(sub_id.to_string());
+                                subs_in.lock().push(sub_id.to_string());
                                 // Replay the store (naive kind+author
                                 // match — the test controls both).
-                                let store = events_in.lock().unwrap().clone();
+                                let store = events_in.lock().clone();
                                 for ev in store {
                                     let ev_kind: u16 = ev.kind.into();
                                     let kind_ok = arr[2..].iter().all(|f| {
@@ -228,7 +228,7 @@ impl MockRelay {
                                 let _ = tx_in.send(eose);
                             }
                             "CLOSE" => {
-                                subs_in.lock().unwrap().retain(|id| id != sub_id);
+                                subs_in.lock().retain(|id| id != sub_id);
                             }
                             _ => {}
                         }
@@ -261,9 +261,8 @@ impl MockRelay {
             let open: usize = self
                 .conns
                 .lock()
-                .unwrap()
                 .iter()
-                .map(|(_, subs)| subs.lock().unwrap().len())
+                .map(|(_, subs)| subs.lock().len())
                 .sum();
             if open >= want {
                 return;
@@ -279,15 +278,15 @@ impl MockRelay {
     /// Broadcast an event to every connection with an open
     /// subscription, framed under that connection's first sub id.
     pub fn publish(&self, event: &Event) {
-        let mut conns = self.conns.lock().unwrap();
+        let mut conns = self.conns.lock();
         // Prune dead connections first (memory-lens audit): kick() +
         // reconnect used to leave every dead sender in the vec forever,
         // and publish/closed_sub iterated them on every call.
         conns.retain(|(tx, _)| !tx.is_closed());
-        self.events.lock().unwrap().push(event.clone());
+        self.events.lock().push(event.clone());
         let wire = serde_json::to_value(event).expect("event serializes");
         for (tx, subs) in conns.iter() {
-            let guard = subs.lock().unwrap();
+            let guard = subs.lock();
             let Some(sub_id) = guard.first() else {
                 continue;
             };
@@ -312,8 +311,8 @@ impl MockRelay {
     /// connection, with a reason string (machine-readable prefix tests:
     /// auth-required vs restricted vs bare).
     pub fn closed_sub_reason(&self, idx: usize, reason: &str) {
-        for (tx, subs) in self.conns.lock().unwrap().iter() {
-            let Some(sub_id) = subs.lock().unwrap().get(idx).cloned() else {
+        for (tx, subs) in self.conns.lock().iter() {
+            let Some(sub_id) = subs.lock().get(idx).cloned() else {
                 continue;
             };
             let frame = Message::Text(
@@ -328,7 +327,7 @@ impl MockRelay {
     /// Server-side disconnect of every connection (kick the client;
     /// a healthy SDK reconnects and resubscribes).
     pub fn kick(&self) {
-        for (tx, _) in self.conns.lock().unwrap().iter() {
+        for (tx, _) in self.conns.lock().iter() {
             let _ = tx.send(Message::Close(None));
         }
     }
@@ -352,21 +351,15 @@ impl MockRelay {
 
     /// Total open subscriptions across every connection right now.
     pub fn open_subs(&self) -> usize {
-        self.conns
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(_, s)| s.lock().unwrap().len())
-            .sum()
+        self.conns.lock().iter().map(|(_, s)| s.lock().len()).sum()
     }
 
     /// Map of open sub ids across connections (test introspection).
     pub fn sub_ids(&self) -> Vec<String> {
         self.conns
             .lock()
-            .unwrap()
             .iter()
-            .flat_map(|(_, s)| s.lock().unwrap().clone())
+            .flat_map(|(_, s)| s.lock().clone())
             .collect()
     }
 }

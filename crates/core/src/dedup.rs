@@ -29,10 +29,11 @@
 //! the events, the LRU only needs recent traffic. Core-clean: no UI
 //! deps.
 
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 use nostr::prelude::*;
 
@@ -108,9 +109,7 @@ fn filter() -> &'static Mutex<Filter> {
 /// The exemption set (the user + their follows). The manager re-arms it
 /// at every bootstrap, alongside the WoT graph identity.
 pub fn set_exemptions(me: PublicKey, follows: &[PublicKey]) {
-    let mut f = filter()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut f = filter().lock();
     f.exempt.clear();
     f.exempt.insert(me.to_string());
     for pk in follows {
@@ -180,9 +179,7 @@ pub fn observe(ev: &Event, relay: &str) -> bool {
     let author = ev.pubkey.to_string();
     let key = dup_key(ev);
 
-    let mut f = filter()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut f = filter().lock();
     // Exemptions (AntiSpamFilter.kt): account + follows set first —
     // their events never even join the recent LRU.
     if f.exempt.contains(&author) {
@@ -220,9 +217,7 @@ pub fn observe(ev: &Event, relay: &str) -> bool {
 /// duplicate first. A `count >= DUPLICATES_TO_HIDE` record is currently
 /// hidden; lower counts are the visible receipts.
 pub fn snapshot() -> Vec<SpamRecord> {
-    let f = filter()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let f = filter().lock();
     let mut out: Vec<SpamRecord> = f
         .spammers
         .iter()
@@ -246,9 +241,7 @@ pub fn is_hidden(pubkey: &str) -> bool {
     if !enabled() {
         return false; // the switch is off: the ledger stops deciding
     }
-    let f = filter()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let f = filter().lock();
     f.spammers
         .get(pubkey)
         .is_some_and(|s| s.count >= DUPLICATES_TO_HIDE)
@@ -259,9 +252,7 @@ pub fn is_hidden(pubkey: &str) -> bool {
 /// DUPLICATES_TO_HIDE re-hides them). The duplicate-key LRU is NOT
 /// cleared — the same content re-delivered still counts.
 pub fn unhide(pubkey: &str) {
-    let mut f = filter()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut f = filter().lock();
     f.spammers.remove(pubkey);
     f.spammer_order.retain(|p| p != pubkey);
     mark_dirty(); // the durable ledger un-hides them too
@@ -272,9 +263,7 @@ pub fn unhide(pubkey: &str) {
 /// PERSISTED ledger is untouched — who the filter caught is a durable
 /// record, and the next arm reloads it (D48).
 pub fn clear() {
-    let mut f = filter()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut f = filter().lock();
     *f = Filter {
         recent: HashMap::new(),
         order: VecDeque::new(),
@@ -318,9 +307,7 @@ fn mark_dirty() {
 }
 
 fn write_disk() {
-    let f = filter()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let f = filter().lock();
     let spammers: Vec<serde_json::Value> = f
         .spammer_order
         .iter()
@@ -380,9 +367,7 @@ pub fn load_disk() {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return;
     };
-    let mut f = filter()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut f = filter().lock();
     if let Some(list) = v.get("spammers").and_then(|x| x.as_array()) {
         for e in list {
             let Some(pk) = e.get("pk").and_then(|x| x.as_str()) else {

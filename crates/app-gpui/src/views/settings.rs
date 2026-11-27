@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::a11y::A11y;
 use gpui::{
     AnyElement, App, Context, Div, Entity, FocusHandle, Focusable, KeyDownEvent, Render,
     SharedString, Stateful, Window, div, prelude::*, px, rgb,
@@ -263,7 +264,14 @@ impl SettingsView {
                             break; // dead pane
                         }
                     }
-                    Ok(_) => {}
+                    // An event this pane ignores still proves the pump
+                    // alive: exit if the pane is gone, rather than wait
+                    // for the next Status to notice (review Nov 27 2026).
+                    Ok(_) => {
+                        if this.upgrade().is_none() {
+                            break;
+                        }
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(_) => continue,
                 }
@@ -2048,6 +2056,7 @@ fn field(input: Entity<Input>, id: &str) -> impl IntoElement {
 fn seal(id: impl Into<SharedString>, label: &str, color: u32) -> Stateful<Div> {
     div()
         .id(id.into())
+        .a11y_button(label.to_string())
         .cursor_pointer()
         .px_2()
         .py_1()

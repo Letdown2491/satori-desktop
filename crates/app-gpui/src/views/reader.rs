@@ -25,7 +25,7 @@ pub struct ArticleView {
     core: Arc<Core>,
     ev: Event,
     data: article::ArticleData,
-    profiles: HashMap<String, Profile>,
+    profiles: HashMap<PublicKey, Profile>,
     /// The NIP-22 comments on this article (kind 1111, oldest first —
     /// manager::comments's order), pumped in as they land.
     comments: Vec<Event>,
@@ -119,9 +119,7 @@ impl ArticleView {
         let mut seen = std::collections::HashSet::new();
         let missing: Vec<PublicKey> = want
             .into_iter()
-            .filter(|pk| {
-                !self.profiles.contains_key(&pk.to_string()) && seen.insert(pk.to_string())
-            })
+            .filter(|pk| !self.profiles.contains_key(pk) && seen.insert(*pk))
             .collect();
         if !missing.is_empty() {
             self.pump(self.core.ensure_profiles(missing), cx);
@@ -160,13 +158,13 @@ impl ArticleView {
         match ev {
             FeedEvent::Profiles(profiles) => {
                 for p in profiles {
-                    self.profiles.insert(p.pubkey.clone(), p);
+                    self.profiles.insert(p.pubkey, p);
                 }
                 cx.notify();
             }
             FeedEvent::Comments(comments, profiles) => {
                 for p in profiles {
-                    self.profiles.insert(p.pubkey.clone(), p);
+                    self.profiles.insert(p.pubkey, p);
                 }
                 self.comments = comments;
                 cx.notify();
@@ -176,8 +174,7 @@ impl ArticleView {
     }
 
     fn name_for(&self, pk: &PublicKey) -> String {
-        let hex = pk.to_string();
-        content::display_name(self.profiles.get(&hex), &hex)
+        content::display_name(self.profiles.get(pk), pk)
     }
 }
 
@@ -514,7 +511,7 @@ impl Render for ArticleView {
         let author = self.name_for(&author_pk);
         let author_pic = self
             .profiles
-            .get(&author_pk.to_string())
+            .get(&author_pk)
             .map(|p| p.picture.clone())
             .unwrap_or_default();
         // Evicted media comes back on render (thread.rs render, same
@@ -598,7 +595,7 @@ impl Render for ArticleView {
         for c in self.comments[av_lo..av_hi.max(av_lo)].iter() {
             let pic = self
                 .profiles
-                .get(&c.pubkey.to_string())
+                .get(&c.pubkey)
                 .map(|p| p.picture.clone())
                 .unwrap_or_default();
             if !pic.is_empty() {
@@ -638,7 +635,7 @@ impl Render for ArticleView {
                 (
                     self.name_for(&c.pubkey),
                     self.profiles
-                        .get(&c.pubkey.to_string())
+                        .get(&c.pubkey)
                         .map(|p| p.picture.clone())
                         .unwrap_or_default(),
                     crate::timefmt::stamp(ts, cx),

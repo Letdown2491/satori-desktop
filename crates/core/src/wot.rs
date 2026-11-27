@@ -56,9 +56,10 @@
 //! construction, nothing to persist; the D33 sidecar discipline is for
 //! state the store DOESN'T hold). Core-clean: no UI deps.
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex, OnceLock};
+use std::sync::{LazyLock, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nostr::prelude::*;
@@ -199,11 +200,9 @@ fn now_secs() -> u64 {
 /// EnvGuard — Session::new's order — so no test holds the env lock
 /// while waiting on this one (a lock cycle would deadlock the run).
 #[cfg(test)]
-pub(crate) fn test_serial() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn test_serial() -> parking_lot::MutexGuard<'static, ()> {
     static TEST_SERIAL: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-    TEST_SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    TEST_SERIAL.lock()
 }
 
 fn fresh(created_at: u64) -> bool {
@@ -212,10 +211,8 @@ fn fresh(created_at: u64) -> bool {
 
 /// The lifetime graph lock. Identities and state live for the process;
 /// the manager re-arms at every bootstrap.
-fn graph() -> std::sync::MutexGuard<'static, Graph> {
-    GRAPH
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn graph() -> parking_lot::MutexGuard<'static, Graph> {
+    GRAPH.lock()
 }
 
 // --- Persistence (D45) — the sidecar that survives restarts. The SDK's
@@ -729,7 +726,7 @@ mod tests {
         /// module's tests in parallel threads) flake — one test's cleanup
         /// wipes another's observed kind-3s mid-assert. Hold the lock for
         /// the Session's whole life.
-        _serial: std::sync::MutexGuard<'static, ()>,
+        _serial: parking_lot::MutexGuard<'static, ()>,
     }
 
     impl Session {
@@ -742,7 +739,7 @@ mod tests {
         /// (tests that mutate OUTSIDE a Session — the signed-out replay,
         /// the follows cap — take the lock themselves so no graph write
         /// runs beside another test's assertions).
-        fn locked(follows: &[Keys], _serial: std::sync::MutexGuard<'static, ()>) -> Self {
+        fn locked(follows: &[Keys], _serial: parking_lot::MutexGuard<'static, ()>) -> Self {
             let env = EnvGuard::new("wot");
             let me = Keys::generate();
             set_identity(

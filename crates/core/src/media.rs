@@ -26,8 +26,6 @@
 //! URL string to the resolved addresses). Per-redirect re-validation
 //! LANDED earlier (F5): every hop re-runs the URL guard.
 
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -857,13 +855,7 @@ fn write_cache(path: &std::path::Path, body: &[u8]) {
     if std::fs::create_dir_all(config::media_cache_dir()).is_err() {
         return;
     }
-    let _ = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .and_then(|mut f| f.write_all(body));
+    let _ = crate::sidecar::try_write_atomic(path, body);
     WRITE_COUNT.fetch_add(1, Ordering::Relaxed);
     // Trim cadence vs overshoot: media files average whole MBs, so a
     // sparse cadence lets the dir balloon between trims (every 50th

@@ -595,15 +595,14 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                 // timestamp feeds the eviction grace window (the deque
                 // only carries the ORDER).
                 {
-                    let mut order = cache.order.borrow_mut();
-                    if order.back().map(|b| b != &url).unwrap_or(true) {
-                        order.retain(|u| u != &url);
-                        order.push_back(url.clone());
-                    }
                     // Touch at most once a second per url (audit perf L3):
                     // interleaved visible images made every frame pay an
                     // O(entries) retain + a map write. The eviction grace
-                    // window is seconds - a 1s staleness is nothing.
+                    // window is seconds - a 1s staleness is nothing. The
+                    // ORDER move rides the same throttle (review Nov 27
+                    // 2026: the retain used to sit outside it, so the
+                    // O(entries) scan still ran per visible image per
+                    // frame).
                     let mut touched = cache.touched.borrow_mut();
                     let now = Instant::now();
                     if touched
@@ -611,12 +610,22 @@ pub fn fetch(core: &Arc<Core>, url: String, view: EntityId, cx: &mut gpui::App) 
                         .is_none_or(|t| now.duration_since(*t) >= std::time::Duration::from_secs(1))
                     {
                         touched.insert(url.clone(), now);
+                        let mut order = cache.order.borrow_mut();
+                        if order.back().map(|b| b != &url).unwrap_or(true) {
+                            order.retain(|u| u != &url);
+                            order.push_back(url.clone());
+                        }
                     }
                 }
                 match e.get_mut() {
                     Entry::Ready(_) | Entry::NotMedia => Action::Ready,
                     Entry::Loading(waiters) => {
-                        waiters.push(view);
+                        // Once per view: a visible card re-requests every
+                        // frame while its image loads, and the landing
+                        // notifies each waiter (review Nov 27 2026).
+                        if !waiters.contains(&view) {
+                            waiters.push(view);
+                        }
                         Action::Joined
                     }
                     Entry::Failed { at, backoff } => {

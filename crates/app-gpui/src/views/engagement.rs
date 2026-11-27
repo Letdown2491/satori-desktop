@@ -25,17 +25,17 @@ use crate::prefs;
 /// sets at construction.
 #[derive(Clone)]
 pub struct Engagement {
-    pub liked: HashSet<String>,
-    pub reposted: HashSet<String>,
-    pub bookmarked: HashSet<String>,
-    pub zapped: HashSet<String>,
+    pub liked: HashSet<EventId>,
+    pub reposted: HashSet<EventId>,
+    pub bookmarked: HashSet<EventId>,
+    pub zapped: HashSet<EventId>,
     /// Session zap-in-flight set; the wallet broadcast clears it.
-    pub zap_pending: HashSet<String>,
+    pub zap_pending: HashSet<EventId>,
     /// Whether the NWC wallet answers (the dim-bolt affordance).
     pub wallet_ready: bool,
     /// The row (note id) whose reaction quick-set is open, if any — one
     /// at a time; a pick or a second right-click closes it.
-    pub reaction_picker: Option<String>,
+    pub reaction_picker: Option<EventId>,
 }
 
 impl Engagement {
@@ -60,7 +60,7 @@ impl Engagement {
     /// booleans are computed, not mirror lookups) and stay hand-rolled.
     pub fn action_state(
         &self,
-        id: &str,
+        id: &EventId,
         replies: usize,
         reduced_motion: bool,
     ) -> super::actions::ActionState {
@@ -71,7 +71,7 @@ impl Engagement {
             zapped: self.zapped.contains(id),
             zapping: self.zap_pending.contains(id),
             wallet_ready: self.wallet_ready,
-            picker_open: self.reaction_picker.as_deref() == Some(id),
+            picker_open: self.reaction_picker.as_ref() == Some(id),
             replies,
             reduced_motion,
         }
@@ -125,20 +125,28 @@ pub fn on_wallet<H: Host>(host: &mut H, ev: WalletEvent, cx: &mut Context<H>) {
             // and the allow list); the mirrors keep their glyph states.
         }
         WalletEvent::ZapPaid { note, .. } => {
-            let e = host.engagement();
-            e.zap_pending.remove(&note);
-            e.zapped.insert(note);
+            if let Ok(note) = EventId::from_hex(&note) {
+                let e = host.engagement();
+                e.zap_pending.remove(&note);
+                e.zapped.insert(note);
+            }
         }
         WalletEvent::ZapUncertain { note, .. } => {
-            host.engagement().zap_pending.remove(&note);
+            if let Ok(note) = EventId::from_hex(&note) {
+                host.engagement().zap_pending.remove(&note);
+            }
             host.whisper("zap state unknown, check your wallet before retrying".into());
         }
         WalletEvent::ZapFailed { note, reason } => {
-            host.engagement().zap_pending.remove(&note);
+            if let Ok(note) = EventId::from_hex(&note) {
+                host.engagement().zap_pending.remove(&note);
+            }
             host.whisper(format!("zap didn't go through: {reason}"));
         }
         WalletEvent::ZapReceipt { note, .. } => {
-            host.engagement().zapped.insert(note);
+            if let Ok(note) = EventId::from_hex(&note) {
+                host.engagement().zapped.insert(note);
+            }
         }
         WalletEvent::ConnectFailed(_) => {}
     }
@@ -180,8 +188,7 @@ pub fn pump_wallet<H: Host>(core: &Arc<Core>, entity: &Entity<H>, cx: &mut Conte
 /// Optimistic like, per §1.2: mutate state first (glyph flips vermilion
 /// now), reconcile against core's publish events later.
 pub fn toggle_like<H: Host>(host: &mut H, ev: &Event, cx: &mut Context<H>) {
-    let id = ev.id.to_string();
-    if !host.engagement().liked.insert(id) {
+    if !host.engagement().liked.insert(ev.id) {
         return;
     }
     host.touched();
@@ -193,12 +200,12 @@ pub fn toggle_like<H: Host>(host: &mut H, ev: &Event, cx: &mut Context<H>) {
 
 /// The row's reaction quick-set toggle (the heart's right-click): one
 /// picker open at a time; a second right-click closes it.
-pub fn toggle_reaction_picker<H: Host>(host: &mut H, id: &str, cx: &mut Context<H>) {
+pub fn toggle_reaction_picker<H: Host>(host: &mut H, id: EventId, cx: &mut Context<H>) {
     let e = host.engagement();
-    e.reaction_picker = if e.reaction_picker.as_deref() == Some(id) {
+    e.reaction_picker = if e.reaction_picker == Some(id) {
         None
     } else {
-        Some(id.to_string())
+        Some(id)
     };
     host.touched();
     cx.notify();
@@ -208,8 +215,7 @@ pub fn toggle_reaction_picker<H: Host>(host: &mut H, id: &str, cx: &mut Context<
 /// own reaction lights the glyph — then publish with that content. The
 /// picker closes behind it.
 pub fn react_with<H: Host>(host: &mut H, ev: &Event, content: &str, cx: &mut Context<H>) {
-    let id = ev.id.to_string();
-    host.engagement().liked.insert(id);
+    host.engagement().liked.insert(ev.id);
     host.engagement().reaction_picker = None;
     host.touched();
     let mut rx = host.core().react(ev, content);
@@ -222,8 +228,8 @@ pub fn react_with<H: Host>(host: &mut H, ev: &Event, content: &str, cx: &mut Con
 /// event waits out the undo window in core (the shell's toast carries
 /// Undo), and a failure — or an undo — rolls the glyph back.
 pub fn toggle_repost<H: Host>(host: &mut H, ev: &Event, cx: &mut Context<H>) {
-    let id = ev.id.to_string();
-    if !host.engagement().reposted.insert(id.clone()) {
+    let id = ev.id;
+    if !host.engagement().reposted.insert(id) {
         return;
     }
     host.touched();
@@ -254,9 +260,9 @@ pub fn toggle_repost<H: Host>(host: &mut H, ev: &Event, cx: &mut Context<H>) {
 /// both. Optimistic, with rollback (the old add-only star made a second
 /// click a no-op).
 pub fn toggle_bookmark<H: Host>(host: &mut H, ev: &Event, cx: &mut Context<H>) {
-    let id = ev.id.to_string();
+    let id = ev.id;
     let ev_id = ev.id;
-    let adding = host.engagement().bookmarked.insert(id.clone());
+    let adding = host.engagement().bookmarked.insert(id);
     if !adding {
         host.engagement().bookmarked.remove(&id);
     }
@@ -279,7 +285,7 @@ pub fn toggle_bookmark<H: Host>(host: &mut H, ev: &Event, cx: &mut Context<H>) {
                         if adding {
                             e.bookmarked.remove(&id);
                         } else {
-                            e.bookmarked.insert(id.clone());
+                            e.bookmarked.insert(id);
                         }
                         host.whisper("bookmark didn't go through, try again".into());
                         host.touched();
@@ -318,7 +324,7 @@ pub fn zap_tap<H: Host>(host: &mut H, ev: &Event, cx: &mut Context<H>) {
         return;
     }
     // One zap in flight per note (the Feather rule; core enforces too).
-    if !host.engagement().zap_pending.insert(ev.id.to_string()) {
+    if !host.engagement().zap_pending.insert(ev.id) {
         return;
     }
     host.touched();

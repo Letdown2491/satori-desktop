@@ -31,7 +31,7 @@ pub struct ThreadView {
     /// expanded stays open until the pane closes (click is a state change,
     /// not a re-hide).
     expanded: HashSet<EventId>,
-    profiles: HashMap<String, Profile>,
+    profiles: HashMap<PublicKey, Profile>,
     quotes: content::Quotes,
     status: String,
     /// §4.3: the kinded error strip (replaces the raw `… {e}` status dump).
@@ -64,6 +64,16 @@ pub struct ThreadView {
     /// scroll stream keeps it current; the media pins read it.
     first_visible_start: usize,
     last_visible_end: usize,
+    /// Thread option B (Nov 27 2026): a reply opens FOCUSED, its parent
+    /// chain (root first, `Core::ancestors`) compact above it, expandable,
+    /// with a door to the full thread at the root.
+    ancestors: Vec<Event>,
+    /// The walk stopped at an unreachable parent.
+    ancestors_gap: bool,
+    /// The chain is expanded (collapsed to a count line by default).
+    ancestors_open: bool,
+    /// The walk was started for this anchor (once per pane).
+    ancestors_asked: bool,
 }
 
 /// The render-time snapshot: everything the item closure reads, rebuilt
@@ -72,7 +82,7 @@ pub struct ThreadView {
 struct ThreadSnap {
     anchor: std::sync::Arc<Option<Event>>,
     replies: std::sync::Arc<Vec<(Event, usize)>>,
-    profiles: std::sync::Arc<HashMap<String, Profile>>,
+    profiles: std::sync::Arc<HashMap<PublicKey, Profile>>,
     quotes: std::sync::Arc<content::Quotes>,
     engagement: std::sync::Arc<engagement::Engagement>,
 }
@@ -87,7 +97,7 @@ impl actions::ActionHost for ThreadView {
     fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>) {
         engagement::toggle_like(self, ev, cx)
     }
-    fn toggle_reaction_picker(&mut self, id: &str, cx: &mut Context<Self>) {
+    fn toggle_reaction_picker(&mut self, id: EventId, cx: &mut Context<Self>) {
         engagement::toggle_reaction_picker(self, id, cx)
     }
     fn react_with(&mut self, ev: &Event, content: &str, cx: &mut Context<Self>) {
@@ -128,7 +138,7 @@ impl quotes::Host for ThreadView {
     fn core(&self) -> &Arc<Core> {
         &self.core
     }
-    fn profiles(&self) -> &HashMap<String, Profile> {
+    fn profiles(&self) -> &HashMap<PublicKey, Profile> {
         &self.profiles
     }
     fn touched(&mut self) {
@@ -190,6 +200,10 @@ impl ThreadView {
             snap: None,
             snap_dirty: true,
             first_visible_start: 0,
+            ancestors: Vec::new(),
+            ancestors_gap: false,
+            ancestors_open: false,
+            ancestors_asked: false,
             last_visible_end: 0,
         };
         // The wallet broadcast (D20): the thread's bolts follow every zap,
@@ -258,9 +272,7 @@ impl ThreadView {
                 pks.extend(content::mention_pks_cached(n));
                 pks
             })
-            .filter(|pk| {
-                !self.profiles.contains_key(&pk.to_string()) && seen.insert(pk.to_string())
-            })
+            .filter(|pk| !self.profiles.contains_key(pk) && seen.insert(*pk))
             .collect();
         if !missing.is_empty() {
             self.pump(self.core.ensure_profiles(missing), cx);
@@ -287,10 +299,15 @@ impl ThreadView {
                     self.anchor_id = Some(note.id);
                     self.pump(self.core.thread(note.id), cx);
                 }
+                // Option B: a reply anchor is a FOCUS; walk its parents.
+                if !self.ancestors_asked && satori_core::nip::nip10::reply_parent(&note).is_some() {
+                    self.ancestors_asked = true;
+                    self.pump(self.core.ancestors(note.clone()), cx);
+                }
                 self.anchor = Some(note.clone());
                 self.error = None;
                 if let Some(p) = profile {
-                    self.profiles.insert(p.pubkey.clone(), p);
+                    self.profiles.insert(p.pubkey, p);
                 }
                 self.touch();
                 self.want_media(&note, cx);
@@ -306,12 +323,35 @@ impl ThreadView {
                 }
                 self.replies = nest_replies(&replies);
                 for p in profiles {
-                    self.profiles.insert(p.pubkey.clone(), p);
+                    self.profiles.insert(p.pubkey, p);
                 }
                 self.status.clear();
                 self.touch();
                 self.want_names(&replies, cx);
                 self.want_parents(&replies, cx);
+            }
+            FeedEvent::Ancestors(chain, profiles, gap) => {
+                for p in profiles {
+                    self.profiles.insert(p.pubkey, p);
+                }
+                self.ancestors = chain;
+                self.ancestors_gap = gap;
+                for i in 0..self.ancestors.len() {
+                    let ev = self.ancestors[i].clone();
+                    self.want_media(&ev, cx);
+                    self.want_quotes(&ev, cx);
+                }
+                // The chain's names: authors the page didn't carry.
+                let missing: Vec<PublicKey> = self
+                    .ancestors
+                    .iter()
+                    .map(|e| e.pubkey)
+                    .filter(|pk| !self.profiles.contains_key(pk))
+                    .collect();
+                if !missing.is_empty() {
+                    self.pump(self.core.ensure_profiles(missing), cx);
+                }
+                self.touch();
             }
             FeedEvent::Profiles(profiles) => {
                 // The snapshot gate (D80 perf lens): only a real patch
@@ -320,7 +360,7 @@ impl ThreadView {
                 // full ThreadSnap deep clone for nothing.
                 if !profiles.is_empty() {
                     for p in profiles {
-                        self.profiles.insert(p.pubkey.clone(), p);
+                        self.profiles.insert(p.pubkey, p);
                     }
                     self.touch();
                 }
@@ -339,10 +379,8 @@ impl ThreadView {
                 let mut missing: Vec<PublicKey> = Vec::new();
                 for (pid, note) in p {
                     self.parents.insert(pid, note.clone());
-                    if !self.profiles.contains_key(&note.author)
-                        && let Ok(pk) = PublicKey::from_hex(&note.author)
-                    {
-                        missing.push(pk);
+                    if !self.profiles.contains_key(&note.author) {
+                        missing.push(note.author);
                     }
                 }
                 if !missing.is_empty() {
@@ -352,7 +390,13 @@ impl ThreadView {
             _ => {}
         }
         if self.replies.len() != before {
+            // The replies stream in (store paint, then relay rounds): a
+            // later landing must not yank a reader who already scrolled.
+            let top = self.list.logical_scroll_top();
             self.list.reset(self.replies.len());
+            if before > 0 {
+                self.list.scroll_to(top);
+            }
         }
         cx.notify();
     }
@@ -391,14 +435,17 @@ impl ThreadView {
         // + pin by thumb key after — the thumb is the entry the avatar
         // paints and it is near-byte-free in the pin budget.
         let mut avatar_urls: Vec<String> = Vec::new();
-        if let Some(a) = self.anchor.as_ref()
-            && let Some(p) = self.profiles.get(&a.pubkey.to_string())
-            && !p.picture.is_empty()
-        {
-            avatar_urls.push(p.picture.clone());
+        // The anchor and its parent chain (option B) never scroll out.
+        for a in self.anchor.iter().chain(self.ancestors.iter()) {
+            if let Some(p) = self.profiles.get(&a.pubkey)
+                && !p.picture.is_empty()
+                && !avatar_urls.contains(&p.picture)
+            {
+                avatar_urls.push(p.picture.clone());
+            }
         }
         for (ev, _) in self.replies[win_start..win_end].iter() {
-            if let Some(p) = self.profiles.get(&ev.pubkey.to_string())
+            if let Some(p) = self.profiles.get(&ev.pubkey)
                 && !p.picture.is_empty()
                 && !avatar_urls.contains(&p.picture)
             {
@@ -409,7 +456,7 @@ impl ThreadView {
             media::fetch(&self.core, url.clone(), viewer, cx);
             painted.push(media::thumb_key(&url));
         }
-        for a in self.anchor.as_ref().into_iter() {
+        for a in self.anchor.iter().chain(self.ancestors.iter()) {
             for url in content::note_media_urls(a) {
                 if !painted.contains(&url) {
                     media::fetch(&self.core, url.clone(), viewer, cx);
@@ -429,7 +476,7 @@ impl ThreadView {
     }
 
     fn name_for(&self, ev: &Event) -> String {
-        let key = ev.pubkey.to_string();
+        let key = ev.pubkey;
         content::display_name(self.profiles.get(&key), &key)
     }
 
@@ -440,16 +487,17 @@ impl ThreadView {
     /// trip for the misses) instead of blocking the tree on it. The
     /// asked-set keeps misses from re-requesting per render.
     fn want_parents(&mut self, notes: &[Event], cx: &mut Context<Self>) {
-        let present: HashSet<String> = self
+        let present: HashSet<EventId> = self
             .replies
             .iter()
-            .map(|(e, _)| e.id.to_string())
-            .chain(self.anchor.iter().map(|a| a.id.to_string()))
+            .map(|(e, _)| e.id)
+            .chain(self.anchor.iter().map(|a| a.id))
             .collect();
         let mut ids: Vec<String> = Vec::new();
         for ev in notes {
             if let Some(pid) = direct_parent_id(ev)
                 && !present.contains(&pid)
+                && let pid = pid.to_hex()
                 && !self.parents.contains_key(&pid)
                 && self.parents_asked.insert(pid.clone())
             {
@@ -468,9 +516,201 @@ impl ThreadView {
         .detach();
     }
 
+    /// Option B's context above a focused reply: the parent chain root
+    /// first, each post a compact card (avatar, name, time, its words in
+    /// ink) on a hairline thread rail that runs down to the focus. Up to
+    /// three show whole; a longer chain shows the direct parent under a
+    /// "Show N earlier posts" line. "Full thread" opens the root once the
+    /// walk reaches it. None when the anchor is not a reply.
+    fn ancestors_block(
+        &self,
+        handle: &Entity<Self>,
+        media: &media::Snapshot,
+        quotes: &content::Quotes,
+        profiles: &HashMap<PublicKey, Profile>,
+    ) -> Option<gpui::AnyElement> {
+        let anchor = self.anchor.as_ref()?;
+        satori_core::nip::nip10::reply_parent(anchor)?;
+        let quiet = |text: String| {
+            div()
+                .text_size(px(theme::T_SMALL))
+                .text_color(rgb(theme::muted()))
+                .child(text)
+        };
+        if self.ancestors.is_empty() {
+            return Some(
+                quiet(if self.ancestors_gap {
+                    "The earlier posts in this thread are unavailable".into()
+                } else {
+                    "Loading earlier posts…".into()
+                })
+                .into_any_element(),
+            );
+        }
+        let n = self.ancestors.len();
+        let root_reached = !self.ancestors_gap
+            && satori_core::nip::nip10::reply_parent(&self.ancestors[0]).is_none();
+        let folded = n > 3 && !self.ancestors_open;
+        let link = |id: &'static str, text: String| {
+            div()
+                .id(id)
+                .cursor_pointer()
+                .text_size(px(theme::T_SMALL))
+                .text_color(rgb(theme::muted()))
+                .hover(|s| s.text_color(rgb(theme::ink())))
+                .child(text)
+        };
+        let unfold = folded.then(|| {
+            let handle = handle.clone();
+            link(
+                "thread-ancestors-toggle",
+                format!("Show {} earlier posts", n - 1),
+            )
+            .on_click(move |_, _, cx| {
+                handle.update(cx, |view, cx| {
+                    view.ancestors_open = true;
+                    cx.notify();
+                })
+            })
+        });
+        let full = root_reached.then(|| {
+            let handle = handle.clone();
+            let root = self.ancestors[0].id;
+            link("thread-full", "Full thread".into())
+                .on_click(move |_, _, cx| handle.update(cx, |_, cx| cx.emit(Nav::OpenThread(root))))
+        });
+        let mut block = div().w_full().flex().flex_col();
+        if self.ancestors_gap {
+            block = block.child(
+                div()
+                    .pb_2()
+                    .child(quiet("Earlier posts are unavailable".into())),
+            );
+        }
+        if unfold.is_some() || full.is_some() {
+            block = block.child(
+                div()
+                    .w_full()
+                    .pb_2()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .children(unfold)
+                    .child(div().flex_1())
+                    .children(full),
+            );
+        }
+        let shown = if folded {
+            &self.ancestors[n - 1..]
+        } else {
+            &self.ancestors[..]
+        };
+        let first = if folded { n - 1 } else { 0 };
+        for (k, ev) in shown.iter().enumerate() {
+            block = block.child(self.ancestor_card(first + k, ev, handle, media, quotes, profiles));
+        }
+        Some(block.into_any_element())
+    }
+
+    /// One post in the parent chain. The left column carries the avatar
+    /// and the rail down to the next post; the body is the real body
+    /// (ink, media, mentions), a click on it focusing that post.
+    fn ancestor_card(
+        &self,
+        i: usize,
+        ev: &Event,
+        handle: &Entity<Self>,
+        media: &media::Snapshot,
+        quotes: &content::Quotes,
+        profiles: &HashMap<PublicKey, Profile>,
+    ) -> gpui::AnyElement {
+        let picture = profiles
+            .get(&ev.pubkey)
+            .map(|p| p.picture.clone())
+            .unwrap_or_default();
+        let name = self.name_for(ev);
+        let open = {
+            let handle = handle.clone();
+            let id = ev.id;
+            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                handle.update(cx, |_, cx| cx.emit(Nav::OpenThread(id)))
+            }
+        };
+        let who = {
+            let handle = handle.clone();
+            let pk = ev.pubkey;
+            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                handle.update(cx, |_, cx| cx.emit(Nav::OpenProfile(pk)))
+            }
+        };
+        div()
+            .w_full()
+            .flex()
+            .gap_2()
+            .child(
+                // The rail: avatar, then a hairline to the next post.
+                div()
+                    .flex_none()
+                    .w(px(28.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(media::avatar(media, &picture, &name, 28.0))
+                    .child(div().flex_1().w(px(2.0)).mt_1().bg(rgb(theme::hairline()))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pb_3()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("ancestor-who-{i}")))
+                                    .cursor_pointer()
+                                    .text_size(px(theme::T_UI))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme::ink()))
+                                    .child(name)
+                                    .on_click(who),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(theme::T_SMALL))
+                                    .text_color(rgb(theme::muted()))
+                                    .child(crate::timefmt::stamp_text(ev.created_at.as_secs())),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("ancestor-{i}")))
+                            .cursor_pointer()
+                            .on_click(open)
+                            .child(content::body(
+                                ev,
+                                &content::Body {
+                                    media,
+                                    quotes,
+                                    profiles,
+                                    emoji: content::body_parse(ev).emoji.clone(),
+                                },
+                                handle.clone(),
+                            )),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// The whisper text for an unloaded parent: the generic line until the
     /// lazy fetch lands, then author + a one-line snippet (T_SMALL quiet,
-    /// ink_faint — context, not content).
+    /// muted, context, not content).
     fn parent_whisper(&self, pid: &str) -> String {
         match self.parents.get(pid) {
             Some(p) => {
@@ -489,19 +729,18 @@ impl ThreadView {
 /// A note's direct parent id (NIP-10 marked-e reads right-to-left: the
 /// LAST e tag), when that isn't the note itself — the same rule
 /// nest_replies uses to place rows.
-fn direct_parent_id(ev: &Event) -> Option<String> {
+fn direct_parent_id(ev: &Event) -> Option<EventId> {
     ev.tags
         .clone()
         .event_ids()
         .last()
-        .map(|id| id.to_string())
-        .filter(|pid| *pid != ev.id.to_string())
+        .filter(|pid| *pid != ev.id)
 }
 
 /// The NIP-10 tree, flattened pre-order with depths (thread.rs nest_replies).
 fn nest_replies(replies: &[Event]) -> Vec<(Event, usize)> {
-    let ids: HashSet<String> = replies.iter().map(|r| r.id.to_string()).collect();
-    let mut children: HashMap<String, Vec<Event>> = HashMap::new();
+    let ids: HashSet<EventId> = replies.iter().map(|r| r.id).collect();
+    let mut children: HashMap<EventId, Vec<Event>> = HashMap::new();
     let mut roots: Vec<Event> = Vec::new();
     for r in replies {
         // Last e tag = direct parent (NIP-10 marked-e reads right-to-left).
@@ -510,21 +749,21 @@ fn nest_replies(replies: &[Event]) -> Vec<(Event, usize)> {
             .clone()
             .event_ids()
             .last()
-            .filter(|pid| ids.contains(&pid.to_string()) && *pid != r.id);
+            .filter(|pid| ids.contains(pid) && *pid != r.id);
         match parent {
-            Some(pid) => children.entry(pid.to_string()).or_default().push(r.clone()),
+            Some(pid) => children.entry(pid).or_default().push(r.clone()),
             None => roots.push(r.clone()),
         }
     }
     fn walk(
         ev: &Event,
-        children: &HashMap<String, Vec<Event>>,
+        children: &HashMap<EventId, Vec<Event>>,
         depth: usize,
         out: &mut Vec<(Event, usize)>,
     ) {
         out.push((ev.clone(), depth));
         if depth < 3
-            && let Some(kids) = children.get(&ev.id.to_string())
+            && let Some(kids) = children.get(&ev.id)
         {
             for kid in kids {
                 walk(kid, children, depth + 1, out);
@@ -609,13 +848,13 @@ fn reply_row(
     parent_whisper: Option<String>,
     media: &media::Snapshot,
     quotes: &content::Quotes,
-    profiles: &HashMap<String, Profile>,
+    profiles: &HashMap<PublicKey, Profile>,
     time: String,
     state: actions::ActionState,
     handle: Entity<ThreadView>,
 ) -> impl IntoElement {
     let picture = profiles
-        .get(&ev.pubkey.to_string())
+        .get(&ev.pubkey)
         .map(|p| p.picture.clone())
         .unwrap_or_default();
     let ev_for_click = ev.clone();
@@ -643,7 +882,7 @@ fn reply_row(
         .children(parent_whisper.map(|w| {
             div()
                 .text_size(px(theme::T_SMALL))
-                .text_color(theme::ink_faint())
+                .text_color(rgb(theme::muted()))
                 .child(w)
         }))
         .child(
@@ -697,15 +936,12 @@ fn reply_row(
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     let ev = ev_for_click.clone();
-                    // A reply opens the conversation at its ROOT (the
-                    // reference never links the immediate parent) — unless
-                    // we're already reading that root's thread.
+                    // Thread option B: a reply row drills in FOCUSED on
+                    // that reply (its subtree below, this conversation as
+                    // its chain above); back returns here.
                     open_handle.update(cx, |view, cx| {
-                        let root = satori_core::nip::nip10::reply_root(&ev)
-                            .and_then(|(id, _)| EventId::from_hex(&id).ok())
-                            .unwrap_or(ev.id);
-                        if view.anchor.as_ref().map(|a| a.id) != Some(root) {
-                            cx.emit(Nav::OpenThread(root));
+                        if view.anchor.as_ref().map(|a| a.id) != Some(ev.id) {
+                            cx.emit(Nav::OpenThread(ev.id));
                         }
                     });
                 })
@@ -769,7 +1005,7 @@ impl Render for ThreadView {
         let reduced_motion = actions::reduced_motion(cx);
         let note_state = move |note: &Event| {
             eng.action_state(
-                &note.id.to_string(),
+                &note.id,
                 // The thread pane shows the conversation itself; a count
                 // on the bubble would repeat what the pane already renders.
                 0,
@@ -781,24 +1017,27 @@ impl Render for ThreadView {
         let collapse_handle = handle.clone();
         // Lazy-parent whispers (want_parents): computed once per render —
         // the generic line until the fetch lands, then author + snippet.
-        let present: HashSet<String> = replies
+        let present: HashSet<EventId> = replies
             .iter()
-            .map(|(e, _)| e.id.to_string())
-            .chain(anchor.iter().map(|a| a.id.to_string()))
+            .map(|(e, _)| e.id)
+            .chain(anchor.iter().map(|a| a.id))
             .collect();
         let whispers: Vec<Option<String>> = replies
             .iter()
             .map(|(ev, _)| {
                 direct_parent_id(ev)
                     .filter(|pid| !present.contains(pid))
-                    .map(|pid| self.parent_whisper(&pid))
+                    .map(|pid| self.parent_whisper(&pid.to_hex()))
             })
             .collect();
+        // The chain above the focus names the parent already: the one-line
+        // whisper only stands in until it lands.
         let anchor_whisper = anchor
             .as_ref()
+            .filter(|_| self.ancestors.is_empty())
             .and_then(direct_parent_id)
             .filter(|pid| !present.contains(pid))
-            .map(|pid| self.parent_whisper(&pid));
+            .map(|pid| self.parent_whisper(&pid.to_hex()));
         // WS3 collapse plan: out-of-network replies start collapsed, their
         // descendants folded under them and counted (never deleted). The
         // pref (`thread_collapse`, default ON) turns the whole rule off.
@@ -830,7 +1069,11 @@ impl Render for ThreadView {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .p_4()
+                                // No left inset: the focus and its chain
+                                // share the reply rows' left edge.
+                                .pr_4()
+                                .py_4()
+                                .children(self.ancestors_block(&handle, &media, &quotes, &profiles))
                                 .child(
                                     // The identity opens the profile (the
                                     // reply rows wear the same click): one
@@ -854,7 +1097,7 @@ impl Render for ThreadView {
                                             &media,
                                             &self
                                                 .profiles
-                                                .get(&note.pubkey.to_string())
+                                                .get(&note.pubkey)
                                                 .map(|p| p.picture.clone())
                                                 .unwrap_or_default(),
                                             &self.name_for(note),
@@ -871,7 +1114,7 @@ impl Render for ThreadView {
                                 .children(anchor_whisper.map(|w| {
                                     div()
                                         .text_size(px(theme::T_SMALL))
-                                        .text_color(theme::ink_faint())
+                                        .text_color(rgb(theme::muted()))
                                         .child(w)
                                 }))
                                 .child(content::body(
@@ -984,7 +1227,7 @@ impl Render for ThreadView {
                                         }
                                         Some(_) => div().into_any_element(),
                                         None => {
-                                            let key = ev.pubkey.to_string();
+                                            let key = ev.pubkey;
                                             let name =
                                                 content::display_name(profiles.get(&key), &key);
                                             // The stamp reads the current mode +

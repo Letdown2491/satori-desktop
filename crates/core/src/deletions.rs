@@ -24,9 +24,10 @@
 //! must outlive the LMDB store's retention and restarts, or deleted
 //! events resurrect on reboot. Bounded like seen-relays.
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 use nostr::prelude::*;
 
@@ -122,7 +123,7 @@ fn write_disk() {
     // Snapshot under the lock, serialize OUTSIDE it: this same mutex
     // gates every is_deleted render lookup, and JSON-formatting ~10k
     // entries must not stall a paint (audit perf).
-    let snap = deletions().lock().unwrap().maps.clone();
+    let snap = deletions().lock().maps.clone();
     let body = serde_json::to_string(&snap).unwrap_or_default();
     // Temp sibling + rename, 0600 — the sidecar kernel's discipline.
     let path = config::state_file(config::files::DELETIONS);
@@ -176,7 +177,7 @@ pub fn record(ev: &Event, pin: bool) {
     let at = ev.created_at.as_secs();
     let mut touched = false;
     let mut consumed = 0usize;
-    let mut held = deletions().lock().unwrap();
+    let mut held = deletions().lock();
     let d = &mut *held;
     for t in ev.tags.iter() {
         let s = t.as_slice();
@@ -232,7 +233,7 @@ fn coord_parts(coord: &str) -> Option<(u32, PublicKey, String)> {
 /// deletion time, so a re-published (newer) version renders again.
 /// Pinned (own) tombstones are checked alongside the relay-fed maps.
 pub fn is_deleted(ev: &Event) -> bool {
-    let held = deletions().lock().unwrap();
+    let held = deletions().lock();
     let id_key = format!("{}:{}", ev.id, ev.pubkey).to_lowercase();
     if held.maps.ids.contains_key(&id_key) || held.maps.pids.contains_key(&id_key) {
         return true;
@@ -273,7 +274,7 @@ pub fn should_check(key: &str) -> bool {
         return false;
     }
     let now = now_secs();
-    let mut held = deletions().lock().unwrap();
+    let mut held = deletions().lock();
     if let Some(last) = held.checked.get(key)
         && now.saturating_sub(*last) < CHECK_TTL_SECS
     {

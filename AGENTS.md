@@ -14,11 +14,14 @@ is commit `a4b09e8`: `git show a4b09e8:src/<file>`). The build spec is
   the app (the P4 cutover pulled forward: `crates/app`, the old GTK binary,
   was deleted; its `TODO(port)` citations now point into git history). Tokens in
   `theme.rs`, stroke-drawn glyphs in `icons.rs`, views in `views/`.
-- `vendor/xattr`: one-line Linux compile fix for a gpui 0.2.2 transitive dep
-  (D13); wired via `[patch.crates-io]` in the root `Cargo.toml`.
-- `vendor/gpui-pre-wgpu`: frozen gpui-pre snapshot with one guard clause:
-  known emoji fonts are exempt from the primary-font 'm' gate, so color
-  emoji can load as a run's primary face (D66); wired via the same
+- `vendor/gpui-pre-wgpu`: the gpui-pre-wgpu snapshot (=0.3.14) with one
+  guard clause: known emoji fonts are exempt from the primary-font 'm'
+  gate, so color emoji can load as a run's primary face (D66); wired via
+  `[patch.crates-io]` in the root `Cargo.toml`. Re-port the clause when
+  bumping gpui-pre (all gpui-pre crates move together, `=`-pinned).
+- `vendor/gpui-video-player`: 0.1.3 with the zero-framerate fixes (D72),
+  the per-frame NV12 stride repack (`Frame::tight_nv12`; padded rows sheared)
+  and its gpui-pre pin moved in lockstep with the workspace's; same
   `[patch.crates-io]`.
 - `packaging/`: `install-local.sh` ships the release (bin + wrapper + desktop
   file + hicolor icons into `~/.local`). `self/` +

@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use crate::a11y::A11y;
 use gpui::{
     Animation, AnimationExt, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Image,
     ImageFormat, KeyDownEvent, Render, TextAlign, Window, div, img, prelude::*, px, rgb,
@@ -302,6 +303,7 @@ impl Render for LoginView {
                                 let open = qr_uri.clone();
                                 div()
                                     .id("waiting-qr-open")
+                                    .a11y_button("Open in signer app")
                                     .cursor_pointer()
                                     .rounded(px(theme::R_EMBED))
                                     .border_1()
@@ -390,6 +392,7 @@ impl Render for LoginView {
                                 .unwrap_or_else(|| div().into_any_element()),
                             div()
                                 .id("login-cancel")
+                                .a11y_button("Cancel")
                                 .cursor_pointer()
                                 .p_1()
                                 .px_2()
@@ -476,6 +479,7 @@ impl Render for LoginView {
                                 .child(
                                     div()
                                         .id("connect-bunker")
+                                        .a11y_button("Connect")
                                         .cursor_pointer()
                                         .p_1()
                                         .px_2()
@@ -522,6 +526,7 @@ impl Render for LoginView {
                                     match &qr {
                                         Some(code) => div()
                                             .id("qr-open")
+                                            .a11y_button("Open in signer app")
                                             .cursor_pointer()
                                             .rounded(px(theme::R_EMBED))
                                             .border_1()
@@ -574,6 +579,7 @@ impl Render for LoginView {
                                 .child(
                                     div()
                                         .id("qr-uri-copy")
+                                        .a11y_button("Copy connection link")
                                         .cursor_pointer()
                                         .p_1()
                                         .px_2()

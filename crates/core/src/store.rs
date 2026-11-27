@@ -776,7 +776,7 @@ fn write_vacuum_state(dir: &std::path::Path, state: &str, cutoff: u64, cursor: u
         "copied": copied,
     });
     if let Ok(json) = serde_json::to_string(&json) {
-        let _ = std::fs::write(vacuum_state_path(dir), json);
+        let _ = crate::sidecar::try_write_atomic(&vacuum_state_path(dir), json.as_bytes());
     }
 }
 
@@ -863,7 +863,7 @@ fn write_schema_version(dir: &std::path::Path, version: u32) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     if let Ok(json) = serde_json::to_string(&serde_json::json!({ "version": version, "at": at })) {
-        let _ = std::fs::write(schema_path(dir), json);
+        let _ = crate::sidecar::try_write_atomic(&schema_path(dir), json.as_bytes());
     }
 }
 
@@ -881,19 +881,36 @@ pub enum SchemaCheck {
 }
 
 pub fn check_schema(dir: &std::path::Path) -> SchemaCheck {
-    match read_schema_version(dir) {
-        None => {
-            // Retroactive stamp: whatever is here (or nothing) is v1.
-            write_schema_version(dir, CODE_SCHEMA);
-            if dir.join("data.mdb").exists() {
-                SchemaCheck::Current
-            } else {
-                SchemaCheck::Fresh
-            }
+    check_schema_for(dir, CODE_SCHEMA)
+}
+
+/// The schema every store written before versioning existed speaks
+/// (D100's retroactive stamp). NOT `CODE_SCHEMA`: an unstamped store is
+/// a pre-0.12 store (or one whose stamp was lost), and stamping it with
+/// whatever this binary speaks would skip every migration the day v2
+/// lands (review, Nov 27 2026).
+const UNSTAMPED_SCHEMA: u32 = 1;
+
+/// `check_schema` against an explicit code schema (the tests drive a
+/// future v2 binary through it).
+fn check_schema_for(dir: &std::path::Path, code: u32) -> SchemaCheck {
+    let version = match read_schema_version(dir) {
+        Some(v) => v,
+        None if dir.join("data.mdb").exists() => {
+            // Retroactive stamp: an existing, unstamped store is v1.
+            write_schema_version(dir, UNSTAMPED_SCHEMA);
+            UNSTAMPED_SCHEMA
         }
-        Some(v) if v == CODE_SCHEMA => SchemaCheck::Current,
-        Some(v) if v < CODE_SCHEMA => SchemaCheck::Outdated(v),
-        Some(v) => SchemaCheck::TooNew(v),
+        None => {
+            // No store yet: it will be born in this binary's schema.
+            write_schema_version(dir, code);
+            return SchemaCheck::Fresh;
+        }
+    };
+    match version {
+        v if v == code => SchemaCheck::Current,
+        v if v < code => SchemaCheck::Outdated(v),
+        v => SchemaCheck::TooNew(v),
     }
 }
 
@@ -1269,7 +1286,7 @@ fn record_watermark(dir: &std::path::Path, bytes: u64) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     if let Ok(json) = serde_json::to_string(&serde_json::json!({ "bytes": bytes, "at": at })) {
-        let _ = std::fs::write(watermark_path(dir), json);
+        let _ = crate::sidecar::try_write_atomic(&watermark_path(dir), json.as_bytes());
     }
 }
 
@@ -1804,6 +1821,29 @@ mod tests {
         let opened = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
         assert_eq!(rt.block_on(opened.count(Filter::new())).unwrap(), 2);
         drop(opened);
+        drop(env);
+    }
+
+    /// An unstamped store is a PRE-versioning store: a v2 binary must
+    /// see it as Outdated(1) and migrate it, never stamp it v2 and open
+    /// v1 bytes as Current (review, Nov 27 2026).
+    #[test]
+    fn unstamped_store_is_v1_not_code_schema() {
+        let env = EnvGuard::new("schema-unstamped");
+        let (store_dir, _) = planted_store("schema-unstamped");
+        let _ = std::fs::remove_file(store_dir.join("schema.json"));
+        assert_eq!(check_schema_for(&store_dir, 2), SchemaCheck::Outdated(1));
+        // The stamp written is 1, so the next boot agrees.
+        assert_eq!(read_schema_version(&store_dir), Some(1));
+        assert_eq!(check_schema_for(&store_dir, 2), SchemaCheck::Outdated(1));
+        // A torn stamp reads as unstamped: same verdict.
+        std::fs::write(store_dir.join("schema.json"), "{\"vers").unwrap();
+        assert_eq!(check_schema_for(&store_dir, 2), SchemaCheck::Outdated(1));
+        // No store at all: born in the binary's schema.
+        let empty = env.dir().join("empty-events-v2");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(check_schema_for(&empty, 2), SchemaCheck::Fresh);
+        assert_eq!(read_schema_version(&empty), Some(2));
         drop(env);
     }
 

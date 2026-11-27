@@ -14,6 +14,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::a11y::A11y;
 use gpui::{
     AnimationExt, Context, Div, Entity, EventEmitter, SharedString, div, prelude::*, px, rgb,
 };
@@ -31,7 +32,7 @@ const ZAP_HOLD: Duration = Duration::from_millis(500);
 pub trait ActionHost: EventEmitter<Nav> + Sized + 'static {
     fn toggle_like(&mut self, ev: &Event, cx: &mut Context<Self>);
     /// The heart's right-click: open/close the row's reaction quick-set.
-    fn toggle_reaction_picker(&mut self, id: &str, cx: &mut Context<Self>);
+    fn toggle_reaction_picker(&mut self, id: EventId, cx: &mut Context<Self>);
     /// A picked quick-set reaction (positive unicode glyphs; the heart
     /// stays the plain click).
     fn react_with(&mut self, ev: &Event, content: &str, cx: &mut Context<Self>);
@@ -104,6 +105,11 @@ pub(crate) fn action_row<H: ActionHost>(
         .child(
             div()
                 .id(SharedString::from(format!("reply-{key}")))
+                .a11y_button(if st.replies > 0 {
+                    format!("Reply, {} replies", st.replies)
+                } else {
+                    "Reply".to_string()
+                })
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     let ev = ev_for_reply.clone();
@@ -128,6 +134,7 @@ pub(crate) fn action_row<H: ActionHost>(
         .child(
             div()
                 .id(SharedString::from(format!("like-{key}")))
+                .a11y_toggle("Like", st.liked)
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     let ev = ev_for_like.clone();
@@ -136,10 +143,10 @@ pub(crate) fn action_row<H: ActionHost>(
                 // Right-click = the reaction quick-set (more than just the
                 // heart): the bolt's pattern, one pane-local strip.
                 .on_mouse_down(gpui::MouseButton::Right, {
-                    let key = key.to_string();
+                    let id = ev.id;
                     let handle_picker = handle_picker.clone();
                     move |_, _, cx| {
-                        handle_picker.update(cx, |host, cx| host.toggle_reaction_picker(&key, cx));
+                        handle_picker.update(cx, |host, cx| host.toggle_reaction_picker(id, cx));
                     }
                 })
                 .hover(|s| s.bg(theme::hover_wash()))
@@ -170,6 +177,7 @@ pub(crate) fn action_row<H: ActionHost>(
             let start = std::rc::Rc::new(std::cell::Cell::new(Option::<std::time::Instant>::None));
             let bolt = div()
                 .id(SharedString::from(format!("zap-{key}")))
+                .a11y_button(if st.zapped { "Zapped" } else { "Zap" })
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::hover_wash()))
                 // Right-click opens the sheet at once.
@@ -226,6 +234,7 @@ pub(crate) fn action_row<H: ActionHost>(
         .child(
             div()
                 .id(SharedString::from(format!("repost-{key}")))
+                .a11y_toggle("Repost", st.reposted)
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     let ev = ev_for_repost.clone();
@@ -241,6 +250,7 @@ pub(crate) fn action_row<H: ActionHost>(
         .child(
             div()
                 .id(SharedString::from(format!("quote-{key}")))
+                .a11y_button("Quote")
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     let ev = ev_for_quote.clone();
@@ -254,6 +264,7 @@ pub(crate) fn action_row<H: ActionHost>(
         .child(
             div()
                 .id(SharedString::from(format!("bookmark-{key}")))
+                .a11y_toggle("Bookmark", st.bookmarked)
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     let ev = ev_for_bookmark.clone();
@@ -277,6 +288,7 @@ pub(crate) fn action_row<H: ActionHost>(
             strip = strip.child(
                 div()
                     .id(SharedString::from(format!("react-{key}-{label}")))
+                    .a11y_button(*label)
                     .cursor_pointer()
                     .px_1()
                     .rounded(px(theme::R_EMBED))

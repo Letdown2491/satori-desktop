@@ -92,6 +92,46 @@ fn socket_path() -> Option<PathBuf> {
     })
 }
 
+/// Hand `uri` (or a bare activate) to a live primary, if one listens.
+fn forward(path: &std::path::Path, uri: Option<&str>) -> bool {
+    match UnixStream::connect(path) {
+        Ok(mut stream) => {
+            if let Some(uri) = uri {
+                let _ = stream.write_all(uri.as_bytes());
+            }
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Take the process-lifetime primary lock beside the socket. The fd is
+/// leaked on purpose: the kernel drops the lock when the process dies,
+/// crash included, so a stale lock can never outlive its owner.
+fn take_primary_lock(socket: &std::path::Path) -> bool {
+    use std::os::fd::IntoRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(socket.with_extension("lock"))
+    else {
+        // No lock file possible: the pre-lock behavior (take the socket).
+        return true;
+    };
+    let fd = file.into_raw_fd();
+    // SAFETY: fd is a valid, owned descriptor we just opened.
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        true
+    } else {
+        // SAFETY: we own fd and nothing else refers to it.
+        unsafe { libc::close(fd) };
+        false
+    }
+}
+
 /// Connect-first: forward `uri` to the running primary and report
 /// `Forwarded`, or take the socket and serve it.
 pub fn acquire(uri: Option<&str>) -> Instance {
@@ -100,15 +140,26 @@ pub fn acquire(uri: Option<&str>) -> Instance {
     };
     // Connect-first: a live listener answers immediately or the OS returns
     // ECONNREFUSED — an AF_UNIX connect never parks the way TCP can.
-    if let Ok(mut stream) = UnixStream::connect(&path) {
-        if let Some(uri) = uri {
-            let _ = stream.write_all(uri.as_bytes());
-        }
+    if forward(&path, uri) {
         return Instance::Forwarded;
     }
-    // Nobody answered: stale file from a crashed primary, or nothing. Take
-    // ownership (bind fails only if a simultaneous launch won the race —
-    // then run unowned rather than not at all).
+    // Nobody answered. Ownership is decided by an flock, not by the
+    // socket file (review Nov 27 2026): two simultaneous launches used to
+    // both see ECONNREFUSED, and the second remove_file deleted the
+    // first's freshly bound socket — two primaries, one unreachable. The
+    // lock holder alone may clear a stale file and bind; a loser waits
+    // briefly for the winner's listener and forwards to it.
+    if !take_primary_lock(&path) {
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if forward(&path, uri) {
+                return Instance::Forwarded;
+            }
+        }
+        // The lock holder never listened (IPC broken there): run unowned
+        // rather than not at all.
+        return Instance::Primary(None);
+    }
     let _ = std::fs::remove_file(&path);
     let Ok(listener) = std::os::unix::net::UnixListener::bind(&path) else {
         return Instance::Primary(None);

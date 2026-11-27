@@ -37,16 +37,12 @@ pub fn advance(update: impl FnOnce(&mut ReadState)) {
     let mut state = load();
     update(&mut state);
     if let Ok(body) = serde_json::to_string(&state) {
-        use std::os::unix::fs::OpenOptionsExt;
         if let Some(parent) = config::data_dir_parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(config::state_file(config::files::READ_STATE))
-            .and_then(|mut f| std::io::Write::write_all(&mut f, body.as_bytes()));
+        let _ = crate::sidecar::try_write_atomic(
+            &config::state_file(config::files::READ_STATE),
+            body.as_bytes(),
+        );
     }
 }

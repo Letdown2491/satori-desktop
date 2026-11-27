@@ -24,9 +24,9 @@
 //! NotInNetwork replies never reach this module — they are gated by the
 //! tier itself (rule 1), regardless of velocity.
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::sync::LazyLock;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -122,7 +122,7 @@ impl Rate {
 /// cached-phase split uses it so both phases wear the same gate (the
 /// phase-equality rule) without double-feeding the counter.
 pub fn reply_flooded(author: &PublicKey, at: u64) -> bool {
-    let mut r = RATE.lock().unwrap();
+    let mut r = RATE.lock();
     let key = author.to_string();
     r.evict(&key, at);
     r.stamps
@@ -136,7 +136,7 @@ pub fn reply_flooded(author: &PublicKey, at: u64) -> bool {
 /// caller suppresses it instead); true if admitted and counted. A
 /// re-delivered event id never counts twice.
 pub fn admit_reply(author: &PublicKey, at: u64, event_id: &str) -> bool {
-    let mut r = RATE.lock().unwrap();
+    let mut r = RATE.lock();
     if r.counted.contains_key(event_id) {
         return true; // already counted — admission without a second stamp
     }
@@ -167,7 +167,7 @@ pub fn admit_reply(author: &PublicKey, at: u64, event_id: &str) -> bool {
 /// counted ids are untouched (D48): the window's remaining life belongs
 /// to the bot's behavior, not to this login.
 pub fn clear() {
-    let mut r = RATE.lock().unwrap();
+    let mut r = RATE.lock();
     r.stamps.clear();
     r.order.clear();
     r.counted.clear();
@@ -205,7 +205,7 @@ fn mark_dirty() {
 }
 
 fn write_disk() {
-    let r = RATE.lock().unwrap();
+    let r = RATE.lock();
     let stamps: serde_json::Map<String, serde_json::Value> = r
         .order
         .iter()
@@ -252,7 +252,7 @@ fn write_disk() {
 /// the next login reloads).
 pub fn load_disk() {
     {
-        let mut r = RATE.lock().unwrap();
+        let mut r = RATE.lock();
         if r.loaded {
             return;
         }
@@ -266,7 +266,7 @@ pub fn load_disk() {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return;
     };
-    let mut r = RATE.lock().unwrap();
+    let mut r = RATE.lock();
     if let Some(map) = v.get("stamps").and_then(|x| x.as_object()) {
         for (pk, ring) in map {
             let Some(ring) = ring.as_array() else {
@@ -425,7 +425,7 @@ mod tests {
             let k = Keys::generate();
             admit_reply(&k.public_key(), now, &k.public_key().to_string());
         }
-        let r = RATE.lock().unwrap();
+        let r = RATE.lock();
         assert_eq!(r.stamps.len(), AUTHOR_CAP, "cap holds");
         assert_eq!(r.order.len(), AUTHOR_CAP, "order mirrors the map");
         drop(r);

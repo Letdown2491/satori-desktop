@@ -19,8 +19,9 @@
 //! stay, so the per-ingest O(cap) MRU scan is gone; the per-event
 //! relay list still reorders.
 
+use parking_lot::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 use nostr::prelude::*;
 
@@ -51,7 +52,7 @@ fn seen_event() -> &'static Mutex<sidecar::RelayLru> {
 }
 
 fn write_disk() {
-    let held = seen_event().lock().unwrap();
+    let held = seen_event().lock();
     let body = sidecar::relay_json(held.map.clone());
     drop(held);
     sidecar::write_atomic(config::state_file(config::files::SEEN_EVENT), &body);
@@ -68,7 +69,7 @@ pub fn record(id: &EventId, relay_url: &str) {
     };
     let ekey = id.to_string();
     {
-        let mut held = seen_event().lock().unwrap();
+        let mut held = seen_event().lock();
         // FIFO key insert (audit): no MRU retain — the per-event O(cap)
         // scan under this mutex cost a page load millions of string
         // compares, and the consumer doesn't care WHICH capped events
@@ -83,7 +84,7 @@ pub fn record(id: &EventId, relay_url: &str) {
 /// the targeted ask for its deletion tombstone (and later, per-event
 /// fetch hints).
 pub fn for_event(id: &EventId) -> Vec<String> {
-    let held = seen_event().lock().unwrap();
+    let held = seen_event().lock();
     held.map.get(&id.to_string()).cloned().unwrap_or_default()
 }
 
