@@ -33,7 +33,7 @@ nostr-lmdb = { path = "vendor/nostr-lmdb" }
 gpui-video-player = { path = "vendor/gpui-video-player" }
 
 [workspace.package]
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 license = "MIT"
 authors = ["Letdown2491"]

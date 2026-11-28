@@ -29,6 +29,20 @@
   <launchable type="desktop-id">io.github.Letdown2491.satori.desktop</launchable>
   <url type="homepage">https://github.com/Letdown2491/satori-desktop</url>
   <releases>
+    <release version="0.14.0" date="2026-11-27">
+      <description>
+        <p>Spam replies no longer ring the bell. Someone none of your follows follow now counts as outside your network once enough of your follows' contact lists are loaded, so a brand new throwaway account replying to you lands in the hidden list instead of your notifications. Mentions from outside your network are held the same way, the bell dot no longer lights for anything the notifications page would hide, and zaps always come through.</p>
+        <p>A new Filters tab in Settings. Mute words, phrases, hashtags and regular expressions; matching notes collapse with the reason and a Show button, in timelines, threads and search, and move to the hidden list in notifications. Words and hashtags are saved privately in your mute list, so other clients can use them. Satori also spots disguised spam on its own: notes that swap in lookalike letters from other alphabets, or the same message sent by several accounts, from people outside your network. Muted accounts no longer show up in threads or search results.</p>
+        <p>Settings tabs are reordered: General, Content, Filters, Trust, Notifications, Composing, Relays, Wallet. The duplicate-content filter and its list of caught spammers moved to Filters.</p>
+        <p>Threads and notifications are tidier. Reply counts skip replies the thread hides, so a note whose only reply is spam no longer shows a 1. Hidden and collapsed replies sink to the bottom of the thread. The notifications page opens with the newest items already in place, and clicking the bell while you are on it loads what just arrived. Reaction rows now show which of your notes was reacted to.</p>
+        <p>Faster, quieter startup. The timeline shows placeholder rows while it loads instead of "connecting to the relays" in two places, and says "Still reaching your relays" only if they take more than a few seconds. With a remote signer, the fresh timeline no longer waits for your private lists to decrypt. Satori starts connecting to your relays while the saved timeline is still loading, and the saved timeline itself loads in a fraction of a second right after a reboot, down from several seconds. Nothing heavy runs before your timeline appears anymore.</p>
+        <p>On btrfs (the Fedora default), Satori now keeps its local store out of copy-on-write, which made the first launch after a reboot very slow. An existing store is copied once in the background while you use the app, and the new copy takes over at your next launch.</p>
+        <p>Store maintenance stays out of your way. The occasional store compaction now copies in the background during a session and hands over in about a second at the next launch. Before, a compaction that couldn't finish in the background rebuilt the whole store before the window appeared, which could take minutes. The daily cleanup of old notes also removes them in batches instead of one disk write each.</p>
+        <p>Avatars and images now stay cached between launches. Until now, every launch emptied the image cache and downloaded everything again.</p>
+        <p>Settings, General has a new Text group: pick a font for the whole app, and a size for notes, replies and articles. Any installed font works.</p>
+        <p>Smaller fixes: scrolling the gif picker no longer scrolls the timeline behind the composer, and the Settings tabs are evenly spaced.</p>
+      </description>
+    </release>
     <release version="0.13.0" date="2026-11-27">
       <description>
         <p>Gifs animate on hover again: since 0.12.0 every hover preview was being refused, so the gif tiles stayed still. Two quick taps on different videos now always play the one you tapped last.</p>

@@ -6,7 +6,7 @@ becomes the `<release>` entry in
 `packaging/io.github.Letdown2491.satori.metainfo.xml` (Keep this source of
 truth, not the other way around).
 
-## Unreleased
+## 0.14.0 - 2026-11-27
 
 Spam replies no longer ring the bell. Someone none of your follows follow
 now counts as outside your network once enough of your follows' contact
