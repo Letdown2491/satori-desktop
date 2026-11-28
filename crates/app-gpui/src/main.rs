@@ -91,6 +91,23 @@ impl Root {
             })
             .detach();
         }
+        satori_core::boot_mark!("window created");
+        // UI stall watchdog (D116): the core runtime has its own; this
+        // one catches the UI thread blocking during the first minute.
+        cx.spawn(async move |_, cx| {
+            let start = std::time::Instant::now();
+            while start.elapsed() < std::time::Duration::from_secs(60) {
+                let t = std::time::Instant::now();
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                let late = t.elapsed().as_millis().saturating_sub(100);
+                if late >= 300 {
+                    satori_core::boot_mark!("UI thread stalled {late}ms");
+                }
+            }
+        })
+        .detach();
         let mut root = Self {
             core,
             login: None,
@@ -111,6 +128,7 @@ impl Root {
     fn resumed(&mut self, session: bool, resume_error: Option<String>, cx: &mut Context<Self>) {
         if session {
             let shell = cx.new(|cx| Shell::new(self.core.clone(), cx));
+            satori_core::boot_mark!("shell built");
             Self::watch_shell(shell.clone(), cx);
             self.shell = Some(shell);
             if let Some(t) = self.pending.take() {
@@ -236,6 +254,8 @@ impl Render for Root {
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
+    // The cold-start clock (D116): every boot mark measures from here.
+    satori_core::diag::boot_start();
     // The vacuum door (WS3, issue #23): an offline store rebuild, run
     // INSTEAD of the app — two writers on one LMDB is corruption. The
     // rebuild copies every surviving event into a fresh env, verifies
@@ -370,6 +390,7 @@ fn main() {
         if let Some(false) = crate::prefs::load().dark.or(desktop.dark) {
             crate::theme::select(crate::theme::LIGHT)
         }
+        crate::prefs::apply_text_prefs();
         cx.set_global(desktop);
         let core = Arc::new(Core::new());
         // The boot gate's hand-through (D100): a migrated or adopted
@@ -434,7 +455,7 @@ impl Render for SchemaRefusal {
             .gap_3()
             .child(
                 div()
-                    .text_size(px(crate::theme::T_BODY))
+                    .text_size(px(crate::theme::t_body()))
                     .text_color(rgb(crate::theme::ink()))
                     .child("This store was written by a newer Satori"),
             )

@@ -298,7 +298,7 @@ pub(crate) fn action_row<H: ActionHost>(
                         let content = (*glyph).to_string();
                         handle.update(cx, |host, cx| host.react_with(&ev, &content, cx));
                     })
-                    .text_size(px(theme::T_BODY))
+                    .text_size(px(theme::t_body()))
                     // The color emoji face as the run's primary font (see
                     // theme::EMOJI): through the UI face these five paint
                     // as DejaVu/Adwaita monochrome outlines.

@@ -86,7 +86,7 @@ pub struct Store {
 
 impl Store {
     pub async fn open() -> NostrResult<Self> {
-        std::fs::create_dir_all(config::events_dir()).map_err(|e| DbError::other(e.to_string()))?;
+        make_store_dir(&config::events_dir()).map_err(|e| DbError::other(e.to_string()))?;
         // A staging dir from a crashed vacuum is debris — unless the
         // state file says a deferred walk is mid-copy (D87): the walk
         // resumes from its cursor instead of restarting from scratch
@@ -101,7 +101,7 @@ impl Store {
             .as_deref()
             == Some("copying");
         if !pending {
-            let _ = std::fs::remove_dir_all(config::events_dir().with_extension("vacuum"));
+            retire_dir(&config::events_dir().with_extension("vacuum"));
         }
         // The prev delete is conditional (D89 audit): a half-finished
         // swap leaves a just-created live dir beside prev, the only
@@ -148,7 +148,9 @@ impl Store {
         let db = NostrLmdb::open(config::events_dir()).await?;
         if had_store {
             // The rebuilt store opened: the previous generation is dead now.
-            let _ = std::fs::remove_dir_all(config::events_dir().with_extension("prev"));
+            // Retired, not deleted (D122): deleting a 1.9 GB file in 357k
+            // extents took 16.6 s here, before the first paint.
+            retire_dir(&config::events_dir().with_extension("prev"));
         }
         Ok(Self { db: Arc::new(db) })
     }
@@ -175,6 +177,10 @@ impl Store {
             .await
     }
 
+    /// The feed page's look-back windows (D117), narrowest first; `None` is
+    /// the unbounded query, the last resort.
+    const FEED_WINDOWS: &[Option<u64>] = &[Some(86_400), Some(7 * 86_400), None];
+
     /// feed_page over an explicit kind set — the articles surface (30023
     /// only) reads through the same chokepoint with a narrower filter.
     pub async fn feed_page_kinds(
@@ -184,14 +190,31 @@ impl Store {
         limit: usize,
         kinds: Vec<Kind>,
     ) -> NostrResult<Vec<Event>> {
-        let mut filter = Filter::new()
-            .kinds(kinds)
-            .authors(authors.to_vec())
-            .limit(limit);
-        if let Some(ts) = until {
-            filter = filter.until(Timestamp::from(ts));
+        // D117: windowed first. The authors x kinds index scan reads up
+        // to `limit` event bodies PER PAIR before trimming to the newest
+        // `limit`: with 258 follows that is thousands of random reads,
+        // seconds on a cold page cache. A `since` bound stops each pair at
+        // the window edge. When the window holds at least `limit` events
+        // the result is exactly the unbounded query's (anything older
+        // ranks below them); otherwise the next, wider window runs.
+        let base = until.unwrap_or_else(|| Timestamp::now().as_secs());
+        let mut events: Vec<Event> = Vec::new();
+        for window in Self::FEED_WINDOWS {
+            let mut filter = Filter::new()
+                .kinds(kinds.clone())
+                .authors(authors.to_vec())
+                .limit(limit);
+            if let Some(ts) = until {
+                filter = filter.until(Timestamp::from(ts));
+            }
+            if let Some(w) = window {
+                filter = filter.since(Timestamp::from(base.saturating_sub(*w)));
+            }
+            events = self.query(filter).await?.into_iter().collect();
+            if events.len() >= limit {
+                break;
+            }
         }
-        let mut events: Vec<Event> = self.query(filter).await?.into_iter().collect();
         // BTreeSet orders by id; the feed needs created_at order. Machine
         // notes drop here — every feed path crosses this chokepoint.
         let drop_machines = machine_notes_hidden();
@@ -287,6 +310,59 @@ impl Store {
             .kinds([Kind::Reaction, Kind::Custom(9735), Kind::Custom(1018)])
             .events(ids);
         Ok(self.query(filter).await?.into_iter().collect())
+    }
+
+    /// The rest of the notifications cached phase (D113): bare mentions
+    /// (#p=me: notes, comments, zaps, reactions), reposts of my notes, and
+    /// quotes of them (`q` tags). The instant paint read only replies and
+    /// engagement on my notes, so a fresh mention (the very thing that lit
+    /// the bell, already persisted by the live sub) waited for the relay
+    /// round. Three index passes; `limit` bounds the mention pass.
+    pub async fn notif_extras(
+        &self,
+        me: PublicKey,
+        ids: Vec<EventId>,
+        limit: usize,
+    ) -> NostrResult<Vec<Event>> {
+        let mut out: Vec<Event> = self
+            .query(
+                Filter::new()
+                    .kinds([
+                        Kind::TextNote,
+                        Kind::Custom(1111),
+                        Kind::Custom(9735),
+                        Kind::Reaction,
+                    ])
+                    .pubkey(me)
+                    .limit(limit),
+            )
+            .await?
+            .into_iter()
+            .collect();
+        if !ids.is_empty() {
+            out.extend(
+                self.query(
+                    Filter::new()
+                        .kinds([Kind::Repost, Kind::Custom(16)])
+                        .events(ids.clone())
+                        .limit(limit),
+                )
+                .await?,
+            );
+            let quote_ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+            out.extend(
+                self.query(
+                    Filter::new()
+                        .kinds([Kind::TextNote, Kind::Custom(1111)])
+                        .custom_tags(SingleLetterTag::LOWERCASE_Q, quote_ids)
+                        .limit(limit),
+                )
+                .await?,
+            );
+        }
+        let drop_machines = machine_notes_hidden();
+        out.retain(|e| !(drop_machines && is_machine_note(e)));
+        Ok(out)
     }
 
     /// Latest kind-0 metadata for each of the given authors, from the cache.
@@ -416,14 +492,18 @@ impl Store {
                     if batch.is_empty() {
                         break;
                     }
-                    let mut deleted_here = 0usize;
-                    for ev in &batch {
-                        if protect.contains(&ev.id) {
-                            continue;
-                        }
-                        self.delete_event(ev.id).await?;
-                        deleted += 1;
-                        deleted_here += 1;
+                    // One delete per batch (D121 review): per-id deletes
+                    // were one write transaction and one disk sync EACH
+                    // (1,585 in one session on the maintainer's store).
+                    let ids: Vec<EventId> = batch
+                        .iter()
+                        .map(|ev| ev.id)
+                        .filter(|id| !protect.contains(id))
+                        .collect();
+                    let deleted_here = ids.len();
+                    if !ids.is_empty() {
+                        self.db.delete(Filter::new().ids(ids)).await?;
+                        deleted += deleted_here as u32;
                     }
                     if deleted_here == 0 || batch.len() < PRUNE_BATCH {
                         break;
@@ -450,9 +530,11 @@ impl Store {
                     }
                 }
             }
-            for id in stale {
-                self.delete_event(id).await?;
-                deleted += 1;
+            for chunk in stale.chunks(PRUNE_BATCH) {
+                self.db
+                    .delete(Filter::new().ids(chunk.iter().copied()))
+                    .await?;
+                deleted += chunk.len() as u32;
             }
         }
         Ok(deleted)
@@ -493,8 +575,144 @@ impl Store {
     }
 
     async fn query(&self, filter: Filter) -> NostrResult<BTreeSet<Event>> {
-        self.db.query(filter).await
+        // Slow-read probe (D124): during the boot minute, a store read
+        // over 150 ms is logged with its shape (kinds, counts, never
+        // content). Outside that window it costs nothing.
+        if !crate::diag::booting() {
+            return self.db.query(filter).await;
+        }
+        let summary = format!(
+            "kinds={:?} authors={} ids={} tags={:?} since={} limit={:?}",
+            filter
+                .kinds
+                .as_ref()
+                .map(|k| k.iter().map(|k| k.as_u16()).collect::<Vec<_>>()),
+            filter.authors.as_ref().map_or(0, |a| a.len()),
+            filter.ids.as_ref().map_or(0, |a| a.len()),
+            filter
+                .generic_tags
+                .iter()
+                .map(|(t, v)| format!("{t}:{}", v.len()))
+                .collect::<Vec<_>>(),
+            filter.since.is_some(),
+            filter.limit,
+        );
+        let t = std::time::Instant::now();
+        let out = self.db.query(filter).await;
+        let ms = t.elapsed().as_millis();
+        if ms >= 150 {
+            crate::boot_mark!(
+                "slow store query {ms}ms ({} rows): {summary}",
+                out.as_ref().map_or(0, |o| o.len())
+            );
+        }
+        out
     }
+}
+
+// --- No copy-on-write on btrfs (D119) ---------------------------------
+//
+// LMDB rewrites pages in place; on a copy-on-write filesystem every such
+// write lands somewhere new. The maintainer's 1.5 GB store was in
+// 357,813 extents, and a cold read while writes were committing stalled
+// on the extent churn: first feed page 3.0-9.8 s against 0.43-0.99 s
+// for the same store with NOCOW. The attribute only applies to files
+// created after it is set, so store directories get it at creation and
+// an existing copy-on-write store is rewritten once (the deferred
+// rebuild, triggered by the boot gate).
+
+/// statfs magic for btrfs.
+const BTRFS_MAGIC: i64 = 0x9123_683E;
+/// FS_NOCOW_FL (linux/fs.h).
+const NOCOW_FL: libc::c_int = 0x0080_0000;
+// _IOR('f', 1, long) / _IOW('f', 2, long) on 64-bit Linux.
+const FS_IOC_GETFLAGS: u64 = 0x8008_6601;
+const FS_IOC_SETFLAGS: u64 = 0x4008_6602;
+
+/// Is `path` on btrfs? (false when statfs fails.)
+fn on_btrfs(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: c is a valid NUL-terminated path, st a writable statfs.
+    let rc = unsafe { libc::statfs(c.as_ptr(), &mut st) };
+    rc == 0 && st.f_type as i64 == BTRFS_MAGIC
+}
+
+/// The ioctl numbers above are the asm-generic 64-bit encoding: right on
+/// the released architectures (x86_64, aarch64) and the other generic
+/// 64-bit ones. Elsewhere (32-bit, powerpc, mips, sparc encode
+/// differently) the NOCOW path is compiled out and stores stay as the
+/// filesystem makes them.
+const NOCOW_SUPPORTED: bool = cfg!(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "loongarch64"
+    )
+));
+
+/// The inode flags of `path` (file or directory), if readable.
+fn inode_flags(path: &std::path::Path) -> Option<libc::c_int> {
+    if !NOCOW_SUPPORTED {
+        return None;
+    }
+    use std::os::fd::AsRawFd as _;
+    let f = std::fs::File::open(path).ok()?;
+    let mut flags: libc::c_int = 0;
+    // SAFETY: FS_IOC_GETFLAGS writes one int through the pointer.
+    let rc = unsafe { libc::ioctl(f.as_raw_fd(), FS_IOC_GETFLAGS as libc::Ioctl, &mut flags) };
+    (rc == 0).then_some(flags)
+}
+
+/// Is `path` marked NOCOW?
+fn is_nocow(path: &std::path::Path) -> bool {
+    inode_flags(path).is_some_and(|f| f & NOCOW_FL != 0)
+}
+
+/// Best effort: mark `dir` NOCOW so files created in it inherit the
+/// flag. Silent no-op off btrfs or when the ioctl is refused.
+fn mark_nocow(dir: &std::path::Path) {
+    use std::os::fd::AsRawFd as _;
+    if !NOCOW_SUPPORTED || !on_btrfs(dir) {
+        return;
+    }
+    let Some(flags) = inode_flags(dir) else {
+        return;
+    };
+    if flags & NOCOW_FL != 0 {
+        return;
+    }
+    let Ok(f) = std::fs::File::open(dir) else {
+        return;
+    };
+    let new = flags | NOCOW_FL;
+    // SAFETY: FS_IOC_SETFLAGS reads one int through the pointer.
+    let _ = unsafe { libc::ioctl(f.as_raw_fd(), FS_IOC_SETFLAGS as libc::Ioctl, &new) };
+}
+
+/// Create a store directory (live or staging), NOCOW where it can be.
+fn make_store_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    mark_nocow(dir);
+    Ok(())
+}
+
+/// Does this store need the one-time NOCOW rewrite? On btrfs, the live
+/// file is copy-on-write, and the flag demonstrably sticks on its
+/// directory (so the rewrite will produce a NOCOW file: no loop where
+/// the flag can't be set).
+fn needs_nocow_rewrite(dir: &std::path::Path) -> bool {
+    let file = dir.join("data.mdb");
+    if !NOCOW_SUPPORTED || !on_btrfs(dir) || !file.exists() || is_nocow(&file) {
+        return false;
+    }
+    mark_nocow(dir);
+    is_nocow(dir)
 }
 
 // --- The vacuum (WS3, issue #23) --------------------------------------
@@ -639,7 +857,7 @@ async fn vacuum_at(dir: &std::path::Path) -> Result<(VacuumReport, Store), Strin
     // The explicit vacuum supersedes any deferred-walk bookkeeping: its
     // own run replaces the staging copy wholesale.
     let _ = std::fs::remove_file(dir.with_extension("vacuum.json"));
-    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    make_store_dir(&staging).map_err(|e| e.to_string())?;
 
     // Both envs open here — the caller's contract is that the app is
     // closed (the --vacuum flag runs instead of it), so nothing else
@@ -719,6 +937,7 @@ async fn vacuum_at(dir: &std::path::Path) -> Result<(VacuumReport, Store), Strin
 /// renames: atomic, no copy. The caller synced the directories first.
 fn swap_staged(dir: &std::path::Path, staging: &std::path::Path) -> Result<(), String> {
     let prev = dir.with_extension("prev");
+    retire_dir(&prev);
     if prev.exists() {
         std::fs::remove_dir_all(&prev).map_err(|e| e.to_string())?;
     }
@@ -730,28 +949,22 @@ fn swap_staged(dir: &std::path::Path, staging: &std::path::Path) -> Result<(), S
     Ok(())
 }
 
-// --- The deferred rebuild (D87) -----------------------------------------
+// --- The background copy (D121, replacing D87's walk) ------------------
 //
-// The boot gate no longer rebuilds inline (the owner, mid-rebuild:
-// "the store optimization shouldn't run at startup... it should run
-// after the app has started"). Three phases now:
+// Store optimization never runs at startup (the owner, D87). In-session,
+// a minute after the timeline is up, `background_compact` starts the
+// vendored nostr-lmdb's write log and takes LMDB's native compacting
+// copy into `events.vacuum/` (NOCOW on btrfs). The next launch's gate
+// replays the log into the copy, checks counts and swaps
+// (`adopt_journaled`); any doubt discards the copy and the live store
+// opens (D120). D87's created_at delta could not see old-dated events
+// arriving mid-session, so its adoption failed after real use.
 //
-//   1. GATE (boot, exclusive window): past the thresholds, it stages —
-//      creates the staging dir + the state file — and returns
-//      `Deferred`. The app opens immediately.
-//   2. WALK (beside the app, spawned at Pool::open): copies every
-//      surviving event into staging through the LIVE store's own
-//      handle, resuming from the state file's cursor; marks the state
-//      `complete` when the walk reaches the epoch.
-//   3. ADOPT (a later boot's gate): the delta since the copy's cutoff
-//      migrates into staging, both counts must agree, then the swap is
-//      two renames + a watermark. Bounded by one session's writes.
-//
-// The state file (`events.vacuum.json`) is the handoff: the gate, the
-// walk, and `Store::open`'s debris policy all read it.
+// The state file (`events.vacuum.json`, `{state}`: requested | copying |
+// complete) is the handoff between the session, the gate and
+// `Store::open`'s debris policy.
 
-/// The walk's created_at window (30 days, shared with the blocking
-/// vacuum — one constant so they cannot silently diverge; D89 audit).
+/// The blocking vacuum's created_at window (30 days; D89 audit).
 pub(crate) const VACUUM_WINDOW: u64 = 30 * 24 * 3600;
 
 fn vacuum_state_path(dir: &std::path::Path) -> std::path::PathBuf {
@@ -809,17 +1022,12 @@ pub fn schedule_rebuild() -> Result<(), String> {
     if !dir.join("data.mdb").exists() {
         return Err("no store yet".into());
     }
-    if read_vacuum_state(&dir)
-        .and_then(|v| v.get("state").and_then(|s| s.as_str()).map(str::to_string))
-        .is_some_and(|state| state == "copying" || state == "complete")
-    {
-        return Ok(());
+    if read_vacuum_state(&dir).is_some() {
+        return Ok(()); // already asked, copying, or waiting for the handoff
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    write_vacuum_state(&dir, "copying", now, now, 0);
+    // D121: the ask is picked up by the next session's background copy
+    // (compaction_due), the handoff at the launch after that.
+    write_vacuum_state(&dir, "requested", 0, 0, 0);
     Ok(())
 }
 
@@ -953,7 +1161,7 @@ async fn migrate_with(
     if staging.exists() {
         std::fs::remove_dir_all(&staging).map_err(|e| e.to_string())?;
     }
-    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    make_store_dir(&staging).map_err(|e| e.to_string())?;
     let source = NostrLmdb::open(dir).await.map_err(|e| e.to_string())?;
     let fresh = NostrLmdb::open(&staging).await.map_err(|e| e.to_string())?;
     let total = source
@@ -1017,6 +1225,10 @@ async fn migrate(dir: &std::path::Path) -> Result<(VacuumReport, Store), String>
     migrate_with(dir, from, MIGRATION_STEPS).await
 }
 
+/// How long the launch may spend replaying a background copy's write log
+/// before it gives up and opens the live store (D121).
+const HANDOFF_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// The gate's verdict. `Idle` is every ordinary boot; `Deferred` opens
 /// the app immediately with the walk running beside it; `Swapped`
 /// reports an adopted (or fallback-rebuilt) store; `Migrated` reports a
@@ -1036,13 +1248,153 @@ pub enum GateAction {
     Refused(u32),
 }
 
-/// Phase 3: adopt a completed staging copy. The delta (events saved
-/// since the copy's cutoff — their created_at window was already
-/// walked) migrates into staging, then the counts must agree EXACTLY
-/// before the swap: a shortfall means old-dated backfill landed in
-/// already-walked windows, and the caller falls back to the full
-/// blocking rebuild rather than swap a lossy store in.
-async fn adopt_staged(dir: &std::path::Path) -> Result<(VacuumReport, Store), String> {
+/// Where retired store directories wait for the background sweep (D122):
+/// beside them, so the move is a same-filesystem rename.
+fn trash_dir_for(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    path.parent().map(|p| p.join("satori-trash"))
+}
+
+/// Move a (possibly huge) directory out of the way in O(1) (D122). Never
+/// delete store-sized directories on the startup path: on btrfs a 1.9 GB
+/// file in 357k extents took 16.6 s to unlink, before the first paint.
+/// The rename is instant; [`sweep_trash`] deletes later, in the
+/// background. Falls back to a direct delete only if the rename fails.
+fn retire_dir(path: &std::path::Path) {
+    if !path.exists() {
+        return;
+    }
+    if let Some(trash) = trash_dir_for(path) {
+        let _ = std::fs::create_dir_all(&trash);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "dir".into());
+        if std::fs::rename(path, trash.join(format!("{name}-{nanos}"))).is_ok() {
+            return;
+        }
+    }
+    let _ = std::fs::remove_dir_all(path);
+}
+
+/// Delete everything retired so far (D122). Blocking: run it on a
+/// blocking thread, after the timeline is up.
+pub fn sweep_trash() {
+    if let Some(trash) = trash_dir_for(&config::events_dir()) {
+        let _ = std::fs::remove_dir_all(trash);
+    }
+}
+
+/// The write log beside the store (D121): `S <id>` / `D <filter>` / `W`
+/// lines appended by the vendored nostr-lmdb while a background copy
+/// is pending, replayed into the copy at the next launch.
+fn journal_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.with_extension("journal")
+}
+
+/// Drop every trace of a background copy: staging dir, state file,
+/// write log. Used when a copy is interrupted, superseded or refused.
+fn discard_staging(dir: &std::path::Path) {
+    retire_dir(&dir.with_extension("vacuum"));
+    let _ = std::fs::remove_file(vacuum_state_path(dir));
+    let _ = std::fs::remove_file(journal_path(dir));
+}
+
+/// Should this session make the background copy (D121)? Nothing pending
+/// already, and one of: the Settings "rebuild" ask, a copy-on-write
+/// store on btrfs (D119), or growth past the watermark (the size
+/// trigger the D87 walk used to own).
+pub fn compaction_due() -> bool {
+    let dir = config::events_dir();
+    let state = read_vacuum_state(&dir)
+        .and_then(|v| v.get("state").and_then(|s| s.as_str()).map(str::to_string));
+    match state.as_deref() {
+        Some("requested") => return true,
+        Some(_) => return false, // copying (this session) or complete (next launch)
+        None => {}
+    }
+    let now_bytes = std::fs::metadata(dir.join("data.mdb"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if now_bytes == 0 {
+        return false;
+    }
+    if needs_nocow_rewrite(&dir) {
+        return true;
+    }
+    let base = std::fs::read_to_string(watermark_path(&dir))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get("bytes").and_then(|b| b.as_u64()));
+    base.is_some_and(|base| {
+        now_bytes as f64 >= base as f64 * GATE_RATIO && now_bytes.saturating_sub(base) >= GATE_FLOOR
+    })
+}
+
+/// The background copy (D121), run while the app is in use: start the
+/// write log, then LMDB's native compacting copy (a consistent snapshot,
+/// free pages dropped) into a fresh staging dir, NOCOW on btrfs. The
+/// state file says `copying` until the snapshot is on disk, then
+/// `complete`; the next launch's gate replays the log and swaps.
+/// Nothing here touches the live file; any failure discards the copy.
+pub async fn background_compact(store: &Store) -> Result<u64, String> {
+    background_compact_at(store, &config::events_dir()).await
+}
+
+async fn background_compact_at(store: &Store, dir: &std::path::Path) -> Result<u64, String> {
+    let staging = dir.with_extension("vacuum");
+    discard_staging(dir);
+    make_store_dir(&staging).map_err(|e| e.to_string())?;
+    let now = Timestamp::now().as_secs();
+    write_vacuum_state(dir, "copying", now, now, 0);
+    let result = async {
+        // The log first, then the snapshot: a write committed before the
+        // snapshot is already in it, and replaying it again is a no-op.
+        store
+            .db
+            .start_journal(&journal_path(dir))
+            .map_err(|e| e.to_string())?;
+        store
+            .db
+            .copy_compact_to(staging.join("data.mdb"))
+            .await
+            .map_err(|e| e.to_string())?;
+        write_schema_version(&staging, CODE_SCHEMA);
+        for d in [&staging, &dir.parent().unwrap_or(dir).to_path_buf()] {
+            std::fs::File::open(d)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| e.to_string())?;
+        }
+        Ok::<u64, String>(
+            std::fs::metadata(staging.join("data.mdb"))
+                .map(|m| m.len())
+                .unwrap_or(0),
+        )
+    }
+    .await;
+    match result {
+        Ok(bytes) => {
+            write_vacuum_state(dir, "complete", now, now, 0);
+            Ok(bytes)
+        }
+        Err(e) => {
+            store.db.stop_journal();
+            discard_staging(dir);
+            Err(e)
+        }
+    }
+}
+
+/// The handoff at the next launch (D121), store closed: replay the write
+/// log into the snapshot in order (saves copied by id from the live
+/// store, deletes re-applied), require equal counts, then swap. A
+/// session's worth of writes; seconds at most. Any doubt (a wipe in the
+/// log, a torn line, a count mismatch) is an error and the caller
+/// discards the copy: the live store always opens.
+async fn adopt_journaled(dir: &std::path::Path) -> Result<(VacuumReport, Store), String> {
     let staging = dir.with_extension("vacuum");
     let bytes_of = |d: &std::path::Path| {
         std::fs::metadata(d.join("data.mdb"))
@@ -1050,26 +1402,89 @@ async fn adopt_staged(dir: &std::path::Path) -> Result<(VacuumReport, Store), St
             .unwrap_or(0)
     };
     let bytes_before = bytes_of(dir);
-    let cutoff = read_vacuum_state(dir)
-        .and_then(|v| v.get("cutoff").and_then(|c| c.as_u64()))
-        .ok_or_else(|| "staged adoption: no cutoff in the state file".to_string())?;
-
+    let log =
+        std::fs::read_to_string(journal_path(dir)).map_err(|e| format!("no write log: {e}"))?;
     let source = NostrLmdb::open(dir).await.map_err(|e| e.to_string())?;
     let fresh = NostrLmdb::open(&staging).await.map_err(|e| e.to_string())?;
 
-    let mut moved = 0usize;
-    copy_range(
-        &source,
-        &fresh,
-        cutoff,
-        Timestamp::now().as_secs(),
-        &|event| Some(event),
-        &mut moved,
-    )
-    .await?;
+    // Saves batch until the next delete (order is kept across deletes;
+    // within a batch the store's own rules, newest replaceable wins and
+    // kind-5 deletes cover their targets, make the order immaterial).
+    let mut saves: Vec<EventId> = Vec::new();
+    // Runs of id-only deletes merge into one delete (one transaction):
+    // deletes of distinct ids commute. Any other line ends the run.
+    let mut deletes: Vec<EventId> = Vec::new();
+    let mut replayed = 0usize;
+    let id_only = |f: &Filter| {
+        f.ids.is_some()
+            && f.authors.is_none()
+            && f.kinds.is_none()
+            && f.search.is_none()
+            && f.since.is_none()
+            && f.until.is_none()
+            && f.limit.is_none()
+            && f.generic_tags.is_empty()
+    };
+    async fn flush_deletes(fresh: &NostrLmdb, deletes: &mut Vec<EventId>) -> Result<(), String> {
+        for chunk in deletes.chunks(500) {
+            fresh
+                .delete(Filter::new().ids(chunk.iter().copied()))
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        deletes.clear();
+        Ok(())
+    }
+    async fn flush(
+        source: &NostrLmdb,
+        fresh: &NostrLmdb,
+        saves: &mut Vec<EventId>,
+        replayed: &mut usize,
+    ) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        saves.retain(|id| seen.insert(*id));
+        for chunk in saves.chunks(500) {
+            let events = source
+                .query(Filter::new().ids(chunk.iter().copied()))
+                .await
+                .map_err(|e| e.to_string())?;
+            // Concurrent submits: the ingester commits them as one batch.
+            let results =
+                futures_util::future::join_all(events.iter().map(|e| fresh.save_event(e))).await;
+            for r in results {
+                r.map_err(|e| e.to_string())?;
+            }
+            *replayed += events.len();
+        }
+        saves.clear();
+        Ok(())
+    }
+    for line in log.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        if line == "W" {
+            return Err("the write log saw a wipe".into());
+        }
+        if let Some(id) = line.strip_prefix("S ") {
+            flush_deletes(&fresh, &mut deletes).await?;
+            saves.push(EventId::from_hex(id).map_err(|e| format!("bad log line: {e}"))?);
+        } else if let Some(json) = line.strip_prefix("D ") {
+            flush(&source, &fresh, &mut saves, &mut replayed).await?;
+            let filter = Filter::from_json(json).map_err(|e| format!("bad log line: {e}"))?;
+            if id_only(&filter) {
+                deletes.extend(filter.ids.into_iter().flatten());
+            } else {
+                flush_deletes(&fresh, &mut deletes).await?;
+                fresh.delete(filter).await.map_err(|e| e.to_string())?;
+            }
+        } else {
+            return Err(format!("bad log line: {line:.40}"));
+        }
+    }
+    flush_deletes(&fresh, &mut deletes).await?;
+    flush(&source, &fresh, &mut saves, &mut replayed).await?;
 
-    // The honesty check, stricter than the blocking vacuum's: staging
-    // plus the delta must hold exactly what the live store holds.
     let fresh_count = fresh
         .count(Filter::new())
         .await
@@ -1080,33 +1495,30 @@ async fn adopt_staged(dir: &std::path::Path) -> Result<(VacuumReport, Store), St
         .map_err(|e| e.to_string())?;
     if fresh_count != source_count {
         return Err(format!(
-            "staged adoption aborted: staging holds {fresh_count} events, the live store {source_count} (delta was {moved})"
+            "the copy holds {fresh_count} events after replaying {replayed}, the live store {source_count}"
         ));
     }
-
-    for d in [&staging, dir, staging.parent().unwrap_or(&staging)] {
+    for d in [
+        &staging,
+        &dir.to_path_buf(),
+        &dir.parent().unwrap_or(dir).to_path_buf(),
+    ] {
         std::fs::File::open(d)
             .and_then(|f| f.sync_all())
             .map_err(|e| e.to_string())?;
     }
     swap_staged(dir, &staging)?;
-    // The stamp rides the swap (five-lens audit Nov 2026): the live dir
-    // must never sit unstamped — a pre-CODE_SCHEMA binary reading it
-    // bare would retroactively stamp it as its own and open it (the
-    // silent downgrade this machinery refuses everywhere else).
     write_schema_version(dir, CODE_SCHEMA);
-    // The adoption is the handoff's end: the state file goes with the
-    // staging dir it described.
     let _ = std::fs::remove_file(vacuum_state_path(dir));
-
+    let _ = std::fs::remove_file(journal_path(dir));
     record_watermark(dir, bytes_of(dir));
     let report = VacuumReport {
         events: fresh_count,
         bytes_before,
         bytes_after: bytes_of(dir),
     };
-    // The swapped-in env IS the store (the heed path-cache rule — see
-    // migrate_with): this session runs on it instead of reopening dir.
+    // The swapped-in env IS the store (the heed path-cache rule): the
+    // session runs on this handle instead of reopening the path.
     Ok((
         report,
         Store {
@@ -1115,105 +1527,10 @@ async fn adopt_staged(dir: &std::path::Path) -> Result<(VacuumReport, Store), St
     ))
 }
 
-/// Phase 2's spawn point: `Pool::open` calls this with the session's
-/// store handle. The walk no-ops unless the state file says a copy is
-/// pending, so unconditional spawning is safe.
-pub fn spawn_deferred_vacuum(store: Store) {
-    tokio::spawn(async move {
-        if let Err(err) = deferred_vacuum_walk(&store).await {
-            eprintln!("[core] deferred vacuum failed ({err}); the walk retries at the next launch");
-        }
-    });
-}
-
-/// The walk: copy every surviving event into the staging env, in
-/// created_at windows walked backwards from the state file's cursor
-/// (resume is free — saves are idempotent by id and the cursor only
-/// advances past whole completed windows). Reads go through the LIVE
-/// store's own handle; the staging env is a different LMDB file, so
-/// the two-envs-one-process hazard never crosses the same file.
-async fn deferred_vacuum_walk(store: &Store) -> Result<(), String> {
-    let dir = config::events_dir();
-    let staging = dir.with_extension("vacuum");
-    let state = read_vacuum_state(&dir);
-    let (cutoff, cursor, mut copied) = match state {
-        Some(v) if v.get("state").and_then(|s| s.as_str()) == Some("copying") => (
-            v.get("cutoff").and_then(|c| c.as_u64()).unwrap_or(0),
-            v.get("cursor").and_then(|c| c.as_u64()).unwrap_or(0),
-            v.get("copied").and_then(|c| c.as_u64()).unwrap_or(0) as usize,
-        ),
-        _ => return Ok(()), // stale spawn: nothing pending
-    };
-    let mut start_over = false;
-    if !staging.exists() {
-        // The debris policy kept this only if the state file said
-        // copying; a walk that outlived its staging starts the dir over
-        // — and recopies from the TOP (D89 audit): the cursor only
-        // covers windows already staged, so resuming there into a fresh
-        // env is a structurally short copy that always falls back to
-        // the blocking rebuild at adoption.
-        std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
-        start_over = true;
-    }
-    let fresh = NostrLmdb::open(&staging).await.map_err(|e| e.to_string())?;
-
-    let now = Timestamp::now().as_secs();
-    let mut hi = if start_over { now } else { cursor.min(now) };
-    loop {
-        let lo = hi.saturating_sub(VACUUM_WINDOW - 1);
-        copy_range(
-            store.database().as_ref(),
-            &fresh,
-            lo,
-            hi,
-            &|event| Some(event),
-            &mut copied,
-        )
-        .await?;
-        write_vacuum_state(&dir, "copying", cutoff, lo, copied);
-        if lo == 0 {
-            break;
-        }
-        hi = lo - 1;
-    }
-
-    // The tail catch (future-dated events, same as the blocking
-    // vacuum): idempotent on resume.
-    copy_range(
-        store.database().as_ref(),
-        &fresh,
-        now + 1,
-        now + 10 * 365 * 24 * 3600,
-        &|event| Some(event),
-        &mut copied,
-    )
-    .await?;
-
-    write_vacuum_state(&dir, "complete", cutoff, 0, copied);
-    eprintln!(
-        "[core] deferred vacuum: copy complete ({copied} events staged); the slimmer store applies at the next launch"
-    );
-    Ok(())
-}
-
-// --- The boot gate (WS3, issue #4; deferred in D87) ---------------------
-//
-// The threshold-gated rebuild the 0.5.0 comments waited for. Shape: a
-// watermark beside the store records the extent at the last rebuild (or
-// first observation); at boot, BEFORE the store opens (the same
-// exclusive window --vacuum uses), the gate compares the current extent
-// against it. Growth past BOTH thresholds now STAGES the rebuild
-// instead of running it: the app opens immediately, the copy walks in
-// the background (spawned at Pool::open), and a later boot adopts the
-// finished staging copy (delta + count check + two renames). A failed
-// adoption falls back to the blocking rebuild; a crashed walk resumes
-// from its cursor.
-
-/// The walk's memory cap (D89 audit): a copy chunk materializes its
+/// The copy's memory cap (D89 audit): a copy chunk materializes its
 /// events as decoded `Event` structs, and the decoded set is 1.5-2x its
-/// serialized size — the whole 30-day window on the 1.3 GB store that
-/// triggered D87 ran beside the live UI. Ranges are split until each
-/// query holds at most this many events.
+/// serialized size. Ranges are split until each query holds at most
+/// this many events.
 const COPY_PAGE: u64 = 20_000;
 /// Save batches: awaited one event at a time, nostr-lmdb's ingester
 /// commits (and fsyncs) per event; a concurrent batch drains as one
@@ -1355,19 +1672,34 @@ async fn boot_gate_at(dir: &std::path::Path, ratio: f64, floor: u64) -> Result<G
         return Ok(GateAction::Idle);
     }
 
-    // Pending-work checks come before the thresholds: a staged copy is
-    // work regardless of what the extent says this boot (the extent
-    // only moves at an adoption).
+    let gate_started = std::time::Instant::now();
+    // The background copy's handoff (D121). `complete`: the snapshot is
+    // whole; replay the write log and swap. Anything else left behind
+    // (an interrupted copy, a D87-era staging dir) is discarded. Never a
+    // blocking rebuild here (D120): the live store always opens.
     match read_vacuum_state(dir)
         .and_then(|v| v.get("state").and_then(|s| s.as_str()).map(str::to_string))
+        .as_deref()
     {
-        Some(state) if state == "complete" => {
-            // Phase 3: adopt. Any hard failure falls back to the full
-            // blocking rebuild — a shortfall in staging never swaps.
-            match adopt_staged(dir).await {
+        // The handoff has a hard budget (D121 review): it runs before the
+        // window exists, and the first real one took 44 s (1,585 per-id
+        // deletes replayed one transaction each). Past the budget the
+        // copy is dropped and the live store opens. The swap itself is
+        // synchronous after the last await, so the timeout can only cut
+        // the replay, never a half-done rename.
+        Some("complete") if journal_path(dir).exists() => {
+            match tokio::time::timeout(HANDOFF_BUDGET, adopt_journaled(dir))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(format!(
+                        "the handoff passed its {}s budget",
+                        HANDOFF_BUDGET.as_secs()
+                    ))
+                }) {
                 Ok((report, store)) => {
-                    println!(
-                        "boot gate: staged store adopted, {} events, data.mdb {:.1} MB -> {:.1} MB",
+                    crate::dlog!(
+                        "boot gate: background copy adopted in {} ms, {} events, data.mdb {:.1} MB -> {:.1} MB",
+                        gate_started.elapsed().as_millis(),
                         report.events,
                         report.bytes_before as f64 / 1048576.0,
                         report.bytes_after as f64 / 1048576.0
@@ -1375,75 +1707,45 @@ async fn boot_gate_at(dir: &std::path::Path, ratio: f64, floor: u64) -> Result<G
                     return Ok(GateAction::Swapped(report, store));
                 }
                 Err(err) => {
-                    eprintln!(
-                        "boot gate: staged adoption failed ({err}); running the full rebuild"
-                    );
-                    // A failed adoption can be a FAILED SWAP: the live
-                    // dir was renamed to prev and staging's rename in
-                    // failed, so the restore below ran against a store
-                    // that then existed. Restore again before the
-                    // rebuild — rebuilding the empty dir and opening it
-                    // would delete prev, the only recoverable copy
-                    // (D89 audit).
+                    crate::dlog!("boot gate: background copy refused ({err}); discarding it");
+                    // A failed swap leaves the live dir at prev: restore it
+                    // before anything opens (D89 audit).
                     if std::fs::metadata(dir.join("data.mdb"))
                         .map(|m| m.len())
                         .unwrap_or(0)
                         == 0
                         && dir.with_extension("prev").join("data.mdb").exists()
                     {
+                        let _ = std::fs::remove_dir_all(dir);
                         let _ = std::fs::rename(dir.with_extension("prev"), dir);
                     }
-                    notify_rebuild("Optimizing the local store — this launch may take a moment.");
-                    return vacuum_at(dir)
-                        .await
-                        .map(|(r, store)| GateAction::Swapped(r, store));
+                    discard_staging(dir);
+                    record_watermark(dir, now_bytes);
+                    return Ok(GateAction::Idle);
                 }
             }
         }
-        Some(state) if state == "copying" => {
-            // Phase 2 resumes in the background (Pool::open spawns the
-            // walk); this boot stays instant.
-            return Ok(GateAction::Deferred);
+        // The Settings ask waits for this session's copy.
+        Some("requested") => return Ok(GateAction::Idle),
+        Some(other) => {
+            crate::dlog!("boot gate: discarding an unfinished store copy (state {other})");
+            discard_staging(dir);
         }
-        _ => {}
+        None => {
+            // Debris without a state file (a crashed --vacuum).
+            if dir.with_extension("vacuum").exists() || journal_path(dir).exists() {
+                discard_staging(dir);
+            }
+        }
     }
 
-    let base = std::fs::read_to_string(watermark_path(dir))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .and_then(|v| v.get("bytes").and_then(|b| b.as_u64()));
-    let Some(base) = base else {
+    // First observation: the size trigger's baseline (compaction_due
+    // reads it during the session).
+    if !watermark_path(dir).exists() {
         record_watermark(dir, now_bytes);
-        return Ok(GateAction::Idle);
-    };
-    let grown = now_bytes as f64 >= base as f64 * ratio;
-    let real = now_bytes.saturating_sub(base) >= floor;
-    if !grown || !real {
-        return Ok(GateAction::Idle);
     }
-
-    // Phase 1: stage the copy and defer. Staging debris without a
-    // state file (a crashed --vacuum) is cleared; the state file's
-    // cutoff is this copy's delta anchor.
-    let staging = dir.with_extension("vacuum");
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging).map_err(|e| e.to_string())?;
-    }
-    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    write_vacuum_state(dir, "copying", now, now, 0);
-    notify_rebuild(
-        "Satori is slimming its local store in the background; the slimmer store applies at your next launch.",
-    );
-    println!(
-        "boot gate: store {:.1} MB is {:.0}% past its watermark; the rebuild runs in the background and adopts at a later launch",
-        now_bytes as f64 / 1048576.0,
-        (now_bytes as f64 / base as f64 - 1.0) * 100.0
-    );
-    Ok(GateAction::Deferred)
+    let _ = (ratio, floor);
+    Ok(GateAction::Idle)
 }
 
 /// Machine notes (filters.ts:104-109): a kind:1 whose ENTIRE content is a
@@ -1489,6 +1791,27 @@ pub fn parse_key(hex: &str) -> Option<PublicKey> {
 
 #[cfg(test)]
 mod tests {
+    /// D119: the NOCOW helpers are best effort. Off btrfs (CI tmpfs,
+    /// ext4) nothing is marked and no rewrite is ever due; on btrfs a
+    /// fresh store dir carries the flag and a file made in it inherits.
+    #[test]
+    fn nocow_dirs_are_best_effort() {
+        let base = std::env::temp_dir().join(format!("satori-nocow-{}", std::process::id()));
+        let dir = base.join("events");
+        let _ = std::fs::remove_dir_all(&base);
+        make_store_dir(&dir).unwrap();
+        std::fs::write(dir.join("data.mdb"), b"x").unwrap();
+        if NOCOW_SUPPORTED && on_btrfs(&dir) {
+            assert!(is_nocow(&dir));
+            assert!(is_nocow(&dir.join("data.mdb")));
+        } else {
+            assert!(!is_nocow(&dir.join("data.mdb")));
+        }
+        // A NOCOW file (or a non-btrfs one) never asks for the rewrite.
+        assert!(!needs_nocow_rewrite(&dir));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     use super::*;
     use crate::test_env::EnvGuard;
 
@@ -1515,7 +1838,7 @@ mod tests {
             .build()
             .unwrap();
         let store_dir = config::events_dir();
-        std::fs::create_dir_all(&store_dir).unwrap();
+        make_store_dir(&store_dir).unwrap();
 
         let db = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
         let keys = Keys::generate();
@@ -1581,7 +1904,7 @@ mod tests {
             .build()
             .unwrap();
         let store_dir = config::events_dir();
-        std::fs::create_dir_all(&store_dir).unwrap();
+        make_store_dir(&store_dir).unwrap();
         let keys = Keys::generate();
         let old = Timestamp::now().as_secs() - 400 * 24 * 3600;
         let ancient = note(&keys, "bookmarked elder", old);
@@ -1615,7 +1938,7 @@ mod tests {
             .build()
             .unwrap();
         let store_dir = config::events_dir();
-        std::fs::create_dir_all(&store_dir).unwrap();
+        make_store_dir(&store_dir).unwrap();
         let db = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
         let keys = Keys::generate();
         let events = vec![note(&keys, "one", 1000), note(&keys, "two", 2000)];
@@ -1651,117 +1974,95 @@ mod tests {
         let _ = events;
     }
 
-    /// The D87 regression: a trigger past the thresholds must NOT block
-    /// the boot. The gate stages (staging dir + state file, instant),
-    /// the walk runs beside the app through the live handle, and the
-    /// NEXT boot adopts the copy: delta migrated, counts verified, swap
-    /// done, watermark moved.
+    /// D121: the background copy plus its write log. After the snapshot
+    /// the session keeps writing, including an OLD-dated event (the case
+    /// D87's created_at delta missed: profiles, back-scroll, replies to
+    /// old threads) and a delete. The next launch replays the log into
+    /// the copy, the counts agree, and the swapped-in store holds
+    /// exactly what the live one held.
     #[test]
-    fn gate_defers_the_rebuild_and_adopts_at_next_boot() {
-        let env = EnvGuard::new("gate-defer");
+    fn background_copy_replays_session_writes_and_adopts() {
+        let env = EnvGuard::new("bg-copy");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let (store_dir, events) = planted_store("gate-defer");
+        let (store_dir, events) = planted_store("bg-copy");
 
-        // Plant a tiny pre-growth watermark: the real extent is far
-        // past both thresholds, so the gate triggers.
-        std::fs::write(
-            store_dir.with_extension("watermark.json"),
-            r#"{"bytes": 100, "at": 0}"#,
-        )
-        .unwrap();
-
-        // Boot 1: staged, not run. The live store opens untouched.
-        let action = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
-        assert!(matches!(action, GateAction::Deferred));
-        assert!(store_dir.with_extension("vacuum").exists());
-        assert!(store_dir.with_extension("vacuum.json").exists());
-        let opened = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
-        assert_eq!(rt.block_on(opened.count(Filter::new())).unwrap(), 2);
-        drop(opened);
-
-        // Phase 2: the walk, through the app's own handle. Store::open
-        // must KEEP an in-progress staging copy (the resume contract —
-        // a session shorter than the copy would never converge).
         let store = rt.block_on(Store::open()).unwrap();
-        assert!(
-            store_dir.with_extension("vacuum").exists(),
-            "an in-progress staging copy must survive Store::open"
-        );
-        rt.block_on(deferred_vacuum_walk(&store)).unwrap();
-        drop(store);
+        rt.block_on(background_compact_at(&store, &store_dir))
+            .unwrap();
         let state: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(store_dir.with_extension("vacuum.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(state.get("state").unwrap().as_str().unwrap(), "complete");
-        assert_eq!(state.get("copied").unwrap().as_u64().unwrap(), 2);
 
-        // Boot 2: adoption. The delta is empty (nothing new was saved),
-        // so the whole boot is the count check + two renames.
+        // The session goes on writing after the snapshot.
+        let keys = Keys::generate();
+        let old = note(&keys, "an old note fetched late", 500);
+        let new = note(&keys, "a new note", 3000);
+        rt.block_on(store.db.save_event(&old)).unwrap();
+        rt.block_on(store.db.save_event(&new)).unwrap();
+        rt.block_on(store.db.delete(Filter::new().id(events[0].id)))
+            .unwrap();
+        drop(store);
+
         let action = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
         let GateAction::Swapped(report, store) = action else {
-            panic!("a completed staging copy adopts at the next boot, got {action:?}")
+            panic!("a complete copy with its write log adopts, got {action:?}")
         };
-        assert_eq!(report.events, 2);
+        assert_eq!(report.events, 3);
         assert!(!store_dir.with_extension("vacuum").exists());
         assert!(!store_dir.with_extension("vacuum.json").exists());
-
-        // Every event survived into the ADOPTED STORE — the handle the
-        // gate hands through (a reopen of the swapped path would read
-        // the stale heed-cached env; the hand-through is the contract).
-        assert_eq!(rt.block_on(store.event_count()).unwrap(), 2);
-        let watermark =
-            std::fs::read_to_string(store_dir.with_extension("watermark.json")).unwrap();
-        let base: serde_json::Value = serde_json::from_str(&watermark).unwrap();
-        assert_eq!(
-            base.get("bytes").unwrap().as_u64().unwrap(),
-            std::fs::metadata(store_dir.join("data.mdb")).unwrap().len()
-        );
+        assert!(!store_dir.with_extension("journal").exists());
+        let held = |id: EventId| rt.block_on(store.db.event_by_id(&id)).unwrap().is_some();
+        assert!(held(old.id), "the old-dated late arrival made it across");
+        assert!(held(new.id));
+        assert!(held(events[1].id));
+        assert!(!held(events[0].id), "the session's delete was replayed");
         drop(store);
-        let _ = &events;
         drop(env);
     }
 
-    /// The adoption's honesty check: if staging falls short of the live
-    /// store (old-dated backfill landing in already-walked windows),
-    /// the gate must fall back to the full rebuild instead of swapping
-    /// a lossy store in.
+    /// D120/D121: a copy that can't be trusted is discarded and the live
+    /// store opens, never a blocking rebuild. A wipe in the log refuses
+    /// the handoff; an interrupted copy (still `copying`) is debris.
     #[test]
-    fn gate_falls_back_when_staging_is_short() {
-        let env = EnvGuard::new("gate-fallback");
+    fn gate_discards_untrusted_copies_without_blocking() {
+        let env = EnvGuard::new("gate-discard");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let (store_dir, events) = planted_store("gate-fallback");
+        let (store_dir, events) = planted_store("gate-discard");
 
-        // Stage a copy that holds only ONE of the two events, marked
-        // complete: an honest-looking handoff with a hole in it.
-        std::fs::create_dir_all(store_dir.with_extension("vacuum")).unwrap();
+        // A complete-looking copy whose log saw a wipe.
+        make_store_dir(&store_dir.with_extension("vacuum")).unwrap();
         let db = rt
             .block_on(NostrLmdb::open(store_dir.with_extension("vacuum")))
             .unwrap();
         rt.block_on(db.save_event(&events[0])).unwrap();
         drop(db);
-        std::fs::write(
-            store_dir.with_extension("vacuum.json"),
-            r#"{"state": "complete", "cutoff": 0, "cursor": 0, "copied": 1}"#,
-        )
-        .unwrap();
-
+        write_vacuum_state(&store_dir, "complete", 0, 0, 0);
+        std::fs::write(store_dir.with_extension("journal"), "W\n").unwrap();
         let action = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
-        let GateAction::Swapped(report, store) = action else {
-            panic!("the fallback runs a full rebuild, got {action:?}")
-        };
-        // The fallback rebuilt from the LIVE store: both events, and
-        // the state file is gone with its superseded staging.
-        assert_eq!(report.events, 2);
+        assert!(matches!(action, GateAction::Idle));
+        assert!(!store_dir.with_extension("vacuum").exists());
         assert!(!store_dir.with_extension("vacuum.json").exists());
-        assert_eq!(rt.block_on(store.event_count()).unwrap(), 2);
-        drop(store);
+        assert!(!store_dir.with_extension("journal").exists());
+
+        // An interrupted copy.
+        make_store_dir(&store_dir.with_extension("vacuum")).unwrap();
+        write_vacuum_state(&store_dir, "copying", 0, 0, 0);
+        let action = rt.block_on(boot_gate_at(&store_dir, 1.5, 1024)).unwrap();
+        assert!(matches!(action, GateAction::Idle));
+        assert!(!store_dir.with_extension("vacuum").exists());
+
+        // The live store is whole.
+        let live = rt.block_on(NostrLmdb::open(&store_dir)).unwrap();
+        assert_eq!(rt.block_on(live.count(Filter::new())).unwrap(), 2);
+        drop(live);
         drop(env);
     }
 

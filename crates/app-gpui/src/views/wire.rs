@@ -82,6 +82,7 @@ impl EventEmitter<Nav> for WireView {}
 impl WireView {
     pub fn new(core: Arc<Core>, relay: String, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
+        crate::theme::watch_list(cx, |v: &Self| &v.list);
         crate::timefmt::watch(cx); // repaint on mode/height change
         crate::video::watch(cx); // repaint on player open/toggle/close
         let engagement = engagement::Engagement::new(&core);
@@ -381,7 +382,7 @@ fn wire_card(
                     })
                     .child(
                         div()
-                            .font_family(theme::SERIF)
+                            .font_family(theme::serif())
                             .text_size(px(theme::T_UI + 3.0))
                             .text_color(rgb(theme::ink()))
                             .child(title),
@@ -453,7 +454,7 @@ impl Render for WireView {
             .overflow_hidden()
             .bg(rgb(theme::washi()))
             .text_color(rgb(theme::ink()))
-            .font_family(theme::SANS)
+            .font_family(theme::sans())
             .flex()
             .flex_col()
             .child(

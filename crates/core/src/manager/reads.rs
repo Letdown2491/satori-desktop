@@ -34,6 +34,10 @@ impl Core {
                     .into_iter()
                     .collect();
                 // (no explicit save: the SDK persists what it receives)
+                // Mutes and deletions gate search like every feed page
+                // (search never applied them; D110).
+                results
+                    .retain(|e| !crate::filter::is_muted(&e.pubkey) && !deletions::is_deleted(e));
                 results.sort_by_key(|e| std::cmp::Reverse(e.created_at.as_secs()));
                 let profiles = Self::profiles_for(active, &results).await;
                 Ok(FeedEvent::Search(results, profiles))
@@ -416,9 +420,11 @@ impl Core {
         Ok(replies)
     }
 
-    /// Drop the deleted, dedupe by id, oldest first.
+    /// Drop the deleted and the muted, dedupe by id, oldest first. (Muted
+    /// authors' replies used to render in threads: every feed page
+    /// dropped them, the thread read never did. D110.)
     fn thread_tidy(replies: &mut Vec<Event>) {
-        replies.retain(|e| !deletions::is_deleted(e));
+        replies.retain(|e| !deletions::is_deleted(e) && !crate::filter::is_muted(&e.pubkey));
         let mut seen: HashSet<EventId> = HashSet::new();
         replies.retain(|e| seen.insert(e.id));
         replies.sort_by_key(|e| e.created_at.as_secs());

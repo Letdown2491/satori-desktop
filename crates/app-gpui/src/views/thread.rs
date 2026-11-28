@@ -179,6 +179,7 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) -> Self {
         crate::theme::watch(cx); // repaint on theme change
+        crate::theme::watch_list(cx, |v: &Self| &v.list);
         crate::timefmt::watch(cx); // repaint on mode/height change
         crate::video::watch(cx); // repaint on player open/toggle/close
         let engagement = engagement::Engagement::new(&core);
@@ -321,7 +322,12 @@ impl ThreadView {
                     self.want_media(note, cx);
                     self.want_quotes(note, cx);
                 }
-                self.replies = nest_replies(&replies);
+                // Held replies (spam veils, out-of-network collapses)
+                // sink below the conversation (D114).
+                let collapse_on = satori_core::filter::thread_collapse_on();
+                self.replies = nest_replies(&replies, &|ev: &Event| {
+                    satori_core::filter::reply_held(ev, collapse_on)
+                });
                 for p in profiles {
                     self.profiles.insert(p.pubkey, p);
                 }
@@ -738,7 +744,12 @@ fn direct_parent_id(ev: &Event) -> Option<EventId> {
 }
 
 /// The NIP-10 tree, flattened pre-order with depths (thread.rs nest_replies).
-fn nest_replies(replies: &[Event]) -> Vec<(Event, usize)> {
+/// Siblings keep their order, except that `held` replies (D114: the spam
+/// veils and out-of-network collapses) sink below the visible ones at
+/// every level, so the conversation reads first and the folded rows
+/// gather at the bottom instead of interrupting it. A held reply's own
+/// subtree travels with it.
+fn nest_replies(replies: &[Event], held: &dyn Fn(&Event) -> bool) -> Vec<(Event, usize)> {
     let ids: HashSet<EventId> = replies.iter().map(|r| r.id).collect();
     let mut children: HashMap<EventId, Vec<Event>> = HashMap::new();
     let mut roots: Vec<Event> = Vec::new();
@@ -769,6 +780,12 @@ fn nest_replies(replies: &[Event]) -> Vec<(Event, usize)> {
                 walk(kid, children, depth + 1, out);
             }
         }
+    }
+    // Stable partition, visible first (sort_by_key is stable).
+    let sink = |list: &mut Vec<Event>| list.sort_by_cached_key(|e| held(e));
+    sink(&mut roots);
+    for kids in children.values_mut() {
+        sink(kids);
     }
     let mut out = Vec::new();
     for root in &roots {
@@ -1268,6 +1285,40 @@ impl Render for ThreadView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D114: held replies sink below visible siblings, subtrees intact.
+    #[test]
+    fn held_replies_sink_to_the_bottom() {
+        let k = Keys::generate();
+        let root = EventId::from_byte_array([9u8; 32]);
+        let mk = |text: &str, parent: EventId, at: u64| {
+            let mut tags = Tags::new();
+            tags.push(Tag::event(parent));
+            k.sign_event(UnsignedEvent::new(
+                k.public_key(),
+                Timestamp::from_secs(at),
+                Kind::TextNote,
+                tags,
+                text.to_string(),
+            ))
+            .unwrap()
+        };
+        let spam = mk("spam", root, 1);
+        let good = mk("good", root, 2);
+        let under_spam = mk("under spam", spam.id, 3);
+        let replies = vec![spam.clone(), good.clone(), under_spam.clone()];
+        let held = |e: &Event| e.content == "spam";
+        let order: Vec<String> = nest_replies(&replies, &held)
+            .into_iter()
+            .map(|(e, _)| e.content)
+            .collect();
+        assert_eq!(order, ["good", "spam", "under spam"]);
+        let plain: Vec<String> = nest_replies(&replies, &|_| false)
+            .into_iter()
+            .map(|(e, _)| e.content)
+            .collect();
+        assert_eq!(plain, ["spam", "under spam", "good"]);
+    }
 
     fn keys() -> Keys {
         Keys::generate()

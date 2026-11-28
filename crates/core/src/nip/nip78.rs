@@ -29,6 +29,10 @@ pub const SYNCED_KEYS: &[&str] = &[
     "content_hidden",
     "reactionNotifs",
     "machine_notes_hidden",
+    // Content filters (D110): regex patterns have no NIP-51 slot, and the
+    // spam-signal switch should follow the user across devices.
+    "filter_regex",
+    "spam_signals",
 ];
 
 /// Is `key` one of the slots Satori syncs?

@@ -223,6 +223,8 @@ enum Row {
 
 pub struct NotificationsView {
     core: Arc<Core>,
+    /// The newest notifications gather (reload's stale-emit guard).
+    pump_gen: u64,
     rows: Vec<Row>,
     /// The chip the reader tapped (tap again to clear): the strip
     /// filters the rows client-side. Counts are client-side too —
@@ -275,12 +277,13 @@ impl NotificationsView {
     /// pre-visit high-water splits the page into New / Earlier.
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
+        crate::theme::watch_list(cx, |v: &Self| &v.list);
         crate::timefmt::watch(cx); // repaint on mode/height change
         crate::video::watch(cx); // repaint on player open/toggle/close
         let prev = satori_core::read_state::load().notif;
         core.mark_notifications_seen();
         let engagement = engagement::Engagement::new(&core);
-        let view = Self {
+        let mut view = Self {
             core,
             rows: vec![],
             class_filter: None,
@@ -302,6 +305,7 @@ impl NotificationsView {
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             first_visible_start: 0,
             last_visible_end: 0,
+            pump_gen: 0,
         };
         view.pump_at(prev, cx);
         // Deep-scroll whisper: same threshold and emission shape as the
@@ -341,11 +345,42 @@ impl NotificationsView {
         });
     }
 
-    fn pump_at(&self, prev_high_water: u64, cx: &mut Context<Self>) {
+    /// Re-gather in place (D113): the bell clicked while this pane is
+    /// already showing. Same as a fresh open (advance the read state,
+    /// re-pump from the old high-water so the new rows read as new),
+    /// minus the rebuild: the union emits replace the rows, the list
+    /// returns to the top where the news lands.
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        let prev = satori_core::read_state::load().notif;
+        self.core.mark_notifications_seen();
+        self.prev = prev;
+        self.scroll_top();
+        self.pump_at(prev, cx);
+        cx.notify();
+    }
+
+    fn pump_at(&mut self, prev_high_water: u64, cx: &mut Context<Self>) {
+        // Generation guard (review): a reload while an earlier gather is
+        // still in flight would let the older task's emits land after the
+        // newer ones (a cached paint replacing a fresh union: the list
+        // shrinks). Only the newest pump's events apply.
+        self.pump_gen += 1;
+        let generation = self.pump_gen;
         let mut rx = self.core.notifications();
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.recv().await {
-                let _ = this.update(cx, |this, cx| this.on_event(ev, prev_high_water, cx));
+                let live = this
+                    .update(cx, |this, cx| {
+                        if this.pump_gen != generation {
+                            return false;
+                        }
+                        this.on_event(ev, prev_high_water, cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !live {
+                    break;
+                }
             }
         })
         .detach();
@@ -768,7 +803,7 @@ impl quotes::Host for NotificationsView {
 /// about. A mention answers you directly (no parent); a reply points at
 /// the note it replies to (nip10.rs reply_parent), a comment at its
 /// lowercase-e parent, a zap at the zapped note (profile zaps have no
-/// e tag), a poll vote at the poll.
+/// e tag), a poll vote at the poll, a reaction at the reacted note.
 fn notif_parent_id(ev: &Event) -> Option<String> {
     match u16::from(ev.kind) {
         1 => nip10::reply_parent(ev)
@@ -785,6 +820,16 @@ fn notif_parent_id(ev: &Event) -> Option<String> {
         9735 | 1018 | 16 => ev
             .tags
             .iter()
+            .find(|t| t.as_slice().first().map(String::as_str) == Some("e"))
+            .and_then(|t| t.as_slice().get(1).cloned()),
+        // A reaction's subject (D113): NIP-25 puts the reacted note in
+        // the LAST e tag (earlier ones may carry the thread). Without
+        // this arm a reaction row read "name reacted" with no hint of
+        // what to; now it wears the repost row's whisper.
+        7 => ev
+            .tags
+            .iter()
+            .rev()
             .find(|t| t.as_slice().first().map(String::as_str) == Some("e"))
             .and_then(|t| t.as_slice().get(1).cloned()),
         // A kind-6 repost's subject: the e tag when the reposter's client
@@ -902,7 +947,7 @@ fn notif_whisper<V: EventEmitter<Nav> + 'static>(
                         // serif at body size, not a faded aside — the
                         // whisper IS the subject of the row.
                         div()
-                            .font_family(theme::SERIF)
+                            .font_family(theme::serif())
                             .text_size(px(theme::T_UI + 2.0))
                             .text_color(rgb(theme::ink()))
                             .child(snippet)
@@ -1060,7 +1105,7 @@ fn notif_card(
         // somewhere to go) — both arms stay one type.
         let body_child = if t == NotifType::Zap {
             div()
-                .text_size(px(theme::T_BODY))
+                .text_size(px(theme::t_body()))
                 .text_color(rgb(theme::ink()))
                 .child(zap_msg)
                 .into_any_element()
@@ -1258,7 +1303,7 @@ impl Render for NotificationsView {
             .overflow_hidden()
             .bg(rgb(theme::washi()))
             .text_color(rgb(theme::ink()))
-            .font_family(theme::SANS)
+            .font_family(theme::sans())
             .flex()
             .flex_col()
             // The NIP-45 tally chips: their own strip ABOVE the list (a
@@ -1317,7 +1362,7 @@ impl Render for NotificationsView {
                                     .px_4()
                                     .pt_3()
                                     .text_size(px(theme::T_SMALL))
-                                    .font_family(theme::SERIF)
+                                    .font_family(theme::serif())
                                     .text_color(rgb(theme::muted()))
                                     .child(text.to_string())
                                     .into_any_element(),
@@ -1493,6 +1538,23 @@ mod tests {
         let mut tags = Tags::new();
         tags.push(Tag::custom(kind, [id.to_string()]));
         tags
+    }
+
+    /// D113: a reaction row resolves what was reacted to, the LAST e tag
+    /// (NIP-25), so it can wear the "on your note" whisper.
+    #[test]
+    fn reaction_targets_last_e_tag() {
+        let root = EventId::from_byte_array([1u8; 32]);
+        let mine = EventId::from_byte_array([2u8; 32]);
+        let mut tags = Tags::new();
+        tags.push(Tag::event(root));
+        tags.push(Tag::event(mine));
+        let r = note(Kind::Reaction, tags, "🔥");
+        assert_eq!(notif_parent_id(&r), Some(mine.to_string()));
+        assert_eq!(
+            notif_parent_id(&note(Kind::Reaction, Tags::new(), "+")),
+            None
+        );
     }
 
     #[test]

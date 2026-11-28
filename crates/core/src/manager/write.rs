@@ -1709,6 +1709,94 @@ impl Core {
         })
     }
 
+    /// Add or remove a muted word or hashtag (NIP-51 kind:10000 `word` /
+    /// `t` entries, D110): the same store-RMW as [`Self::set_muted`] (the
+    /// newest known list's decrypted entries, foreign entries riding
+    /// through verbatim, the content re-encrypted whole). New entries are
+    /// private; a public entry of the removed value goes with it. The
+    /// filter's rules update optimistically so the change shows at once,
+    /// and settle on the published set.
+    pub fn set_mute_rule(self: &Arc<Self>, rule: MuteRule, value: String, add: bool) -> PublishRx {
+        let (letter, value) = match rule {
+            MuteRule::Word => ("word", crate::filter::normalize_word(&value)),
+            MuteRule::Hashtag => ("t", crate::filter::normalize_hashtag(&value)),
+        };
+        // Optimistic: the rule bites (or lets go) before the publish lands;
+        // a failed publish puts the previous set back.
+        let (mut words, mut tags) = (crate::filter::words(), crate::filter::hashtags());
+        let prev = (words.clone(), tags.clone());
+        let list = if letter == "word" {
+            &mut words
+        } else {
+            &mut tags
+        };
+        if add {
+            if !list.contains(&value) {
+                list.push(value.clone());
+            }
+        } else {
+            list.retain(|v| v != &value);
+        }
+        crate::filter::set_list_rules(words, tags);
+        self.publish_task(move |active, tx| {
+            Box::pin(async move {
+                if value.is_empty() {
+                    return Ok(());
+                }
+                let res: Result<()> = async {
+                let me = active.me();
+                let stored = Self::latest_list_event(active, me, Kind::Custom(10000), None).await;
+                let mut tags: Vec<Tag> = stored
+                    .as_ref()
+                    .map(|ev| ev.tags.clone().to_vec())
+                    .unwrap_or_default();
+                let mut entries: Vec<Vec<String>> = Vec::new();
+                if let Some(ev) = &stored
+                    && !ev.content.is_empty()
+                {
+                    match active
+                        .signer
+                        .nip44_decrypt_self(&me, ev.content.as_str())
+                        .await
+                    {
+                        Ok(plain) => entries = parse_list_entries(&plain),
+                        Err(e) => {
+                            // Publishing over an unreadable list would
+                            // drop every private entry it holds.
+                            return Err(LoginError::Other(format!(
+                                "your mute list could not be decrypted ({e}); not overwriting it"
+                            )));
+                        }
+                    }
+                }
+                let mirror: Vec<String> = if letter == "word" {
+                    crate::filter::words()
+                } else {
+                    crate::filter::hashtags()
+                };
+                let entries = list_rmw(entries, letter, mirror, &value, add);
+                if !add {
+                    tags.retain(|t| !(t.kind() == letter && t.content() == Some(value.as_str())));
+                }
+                let plain = list_json(&entries);
+                let content = active.signer.nip44_encrypt_self(&me, &plain).await?;
+                let unsigned =
+                    UnsignedEvent::new(me, Timestamp::now(), Kind::Custom(10000), tags, content);
+                let signed = active.sign_report(unsigned).await?;
+                Self::commit(active, &signed, tx).await?;
+                let (words, hashtags) = mute_list_rules(&entries, &signed);
+                crate::filter::set_list_rules(words, hashtags);
+                Ok(())
+                }
+                .await;
+                if res.is_err() {
+                    crate::filter::set_list_rules(prev.0, prev.1);
+                }
+                res
+            })
+        })
+    }
+
     /// The own kind:0 content string, RAW (D38: the edit form prefills
     /// from it — the parsed Profile drops display_name/website, and a form
     /// save writes every displayed field, so a missing prefill would

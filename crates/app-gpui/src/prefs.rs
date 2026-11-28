@@ -245,6 +245,42 @@ pub fn set_retention_days(days: Option<u64>) {
     }
 }
 
+/// The reading face and size (D123; Settings, General, Text). Local
+/// only: fonts are per machine, so these never ride the NIP-78 sync.
+pub fn text_font() -> Option<String> {
+    read_value(config::files::PREFS)
+        .get("text_font")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+pub fn text_scale() -> u32 {
+    read_value(config::files::PREFS)
+        .get("text_scale")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .unwrap_or(100)
+}
+
+/// Load the text prefs into the theme (startup, before the first frame).
+pub fn apply_text_prefs() {
+    crate::theme::set_text_font(text_font());
+    crate::theme::set_text_scale(text_scale());
+}
+
+/// Set a top-level pref to any JSON value (the filter patterns array,
+/// D110). Local write only; callers that sync follow with [`sync`].
+pub fn set_value(key: &str, val: serde_json::Value) {
+    let mut value = read_value(config::files::PREFS);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(key.into(), val);
+    }
+    if let Ok(body) = serde_json::to_string_pretty(&value) {
+        write_state(config::files::PREFS, &body);
+    }
+}
+
 /// Set a top-level string pref (same shape as set_bool; the media
 /// servers pane's local edits).
 pub fn set_string(key: &str, val: &str) {

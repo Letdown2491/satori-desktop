@@ -46,6 +46,7 @@ impl EventEmitter<Nav> for ArticleView {}
 impl ArticleView {
     pub fn new(core: Arc<Core>, ev: Event, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
+        crate::theme::watch_list(cx, |v: &Self| &v.list);
         crate::timefmt::watch(cx); // repaint on mode/height change
         let data = article::parse(&ev).unwrap_or_else(|| article::ArticleData {
             title: "Untitled".into(),
@@ -202,7 +203,7 @@ pub(crate) fn render_block<V: EventEmitter<Nav> + 'static>(
 ) -> AnyElement {
     match block {
         markdown::Block::Para(text) => block_item(
-            md_flow(&text, theme::T_READER, false, ctx, handle),
+            md_flow(&text, theme::t_reader(), false, ctx, handle),
             theme::S4,
         )
         .into_any_element(),
@@ -215,10 +216,10 @@ pub(crate) fn render_block<V: EventEmitter<Nav> + 'static>(
             let size = [
                 18.0,
                 16.0,
-                theme::T_READER,
-                theme::T_READER,
-                theme::T_BODY,
-                theme::T_BODY,
+                theme::t_reader(),
+                theme::t_reader(),
+                theme::t_body(),
+                theme::t_body(),
             ][(level - 1).clamp(0, 5)];
             let top = [
                 theme::S3,
@@ -231,7 +232,7 @@ pub(crate) fn render_block<V: EventEmitter<Nav> + 'static>(
             let head = div()
                 .w_full()
                 .pt(px(top))
-                .font_family(theme::SERIF)
+                .font_family(theme::serif())
                 .text_size(px(size))
                 .line_height(relative(1.2))
                 .font_weight(FontWeight::SEMIBOLD)
@@ -246,7 +247,7 @@ pub(crate) fn render_block<V: EventEmitter<Nav> + 'static>(
                 .py_1()
                 .border_l_2()
                 .border_color(rgb(theme::hairline()))
-                .child(md_flow(&text, theme::T_BODY, true, ctx, handle));
+                .child(md_flow(&text, theme::t_body(), true, ctx, handle));
             block_item(q, theme::S4).into_any_element()
         }
         markdown::Block::List { items, ordered } => {
@@ -275,18 +276,18 @@ pub(crate) fn render_block<V: EventEmitter<Nav> + 'static>(
                     )
                 } else if ordered {
                     div()
-                        .font_family(theme::SERIF)
-                        .text_size(px(theme::T_READER))
+                        .font_family(theme::serif())
+                        .text_size(px(theme::t_reader()))
                         .text_color(rgb(theme::muted()))
                         .child(format!("{}.", n + 1))
                 } else {
                     div()
-                        .font_family(theme::SERIF)
-                        .text_size(px(theme::T_READER))
+                        .font_family(theme::serif())
+                        .text_size(px(theme::t_reader()))
                         .text_color(rgb(theme::muted()))
                         .child("·")
                 };
-                let body = md_flow(&li.text, theme::T_READER, false, ctx, handle);
+                let body = md_flow(&li.text, theme::t_reader(), false, ctx, handle);
                 let body = if li.task == Some(true) {
                     // A checked task reads quiet — it's done.
                     div().opacity(0.65).child(body)
@@ -419,7 +420,11 @@ pub(crate) fn md_flow<V: EventEmitter<Nav> + 'static>(
         let label = span.text.clone();
         let styled = |text: String| {
             div()
-                .font_family(if span.code { theme::MONO } else { theme::SERIF })
+                .font_family(if span.code {
+                    gpui::SharedString::new_static(theme::MONO)
+                } else {
+                    theme::serif()
+                })
                 .text_size(px(if span.code { size * 0.88 } else { size }))
                 .line_height(relative(1.35))
                 .text_color(rgb(if quiet || is_link {
@@ -669,7 +674,7 @@ impl Render for ArticleView {
                             0 => block_item(
                                 div()
                                     .w_full()
-                                    .font_family(theme::SERIF)
+                                    .font_family(theme::serif())
                                     // Display serif for the h1 (spec
                                     // §1.3: 17–20; top of the ladder).
                                     .text_size(px(20.0))

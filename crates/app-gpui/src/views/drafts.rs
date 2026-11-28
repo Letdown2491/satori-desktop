@@ -224,7 +224,7 @@ fn placeholder(title: &'static str, note: &'static str) -> AnyElement {
         .gap_2()
         .child(
             div()
-                .text_size(px(theme::T_BODY))
+                .text_size(px(theme::t_body()))
                 .text_color(rgb(theme::ink()))
                 .child(title),
         )

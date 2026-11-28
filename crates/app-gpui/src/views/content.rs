@@ -695,8 +695,8 @@ fn word(text: String) -> Div {
         return word_flow_glyph(core.to_string(), Some(punct.to_string()));
     }
     div()
-        .font_family(theme::SERIF)
-        .text_size(px(theme::T_READER))
+        .font_family(theme::serif())
+        .text_size(px(theme::t_reader()))
         // P052's own line box is huge (URW vertical metrics); pin the pitch
         // or every wrapped line reads double-spaced.
         .line_height(relative(1.2))
@@ -710,7 +710,7 @@ fn word_flow_glyph(core: String, punct: Option<String>) -> Div {
     let flow = div().flex().items_baseline().child(
         div()
             .font_family(theme::EMOJI)
-            .text_size(px(theme::T_READER))
+            .text_size(px(theme::t_reader()))
             .line_height(relative(1.2))
             .text_color(rgb(theme::ink()))
             .child(core),
@@ -718,8 +718,8 @@ fn word_flow_glyph(core: String, punct: Option<String>) -> Div {
     match punct {
         Some(p) => flow.child(
             div()
-                .font_family(theme::SERIF)
-                .text_size(px(theme::T_READER))
+                .font_family(theme::serif())
+                .text_size(px(theme::t_reader()))
                 .line_height(relative(1.2))
                 .text_color(rgb(theme::ink()))
                 .child(p),
@@ -753,8 +753,8 @@ pub(crate) fn token_el<V: EventEmitter<Nav> + 'static>(
         div()
             .id(id)
             .cursor_pointer()
-            .font_family(theme::SERIF)
-            .text_size(px(theme::T_READER))
+            .font_family(theme::serif())
+            .text_size(px(theme::t_reader()))
             .line_height(relative(1.2))
             .text_color(rgb(theme::muted()))
             .underline()
@@ -1241,6 +1241,12 @@ pub fn body_with<V: EventEmitter<Nav> + 'static>(
     handle: Entity<V>,
     skip_title_line: bool,
 ) -> Div {
+    // D110: every surface that renders a note's text (threads,
+    // notifications, embeds, the reader's comments) wears the filter's
+    // veil, not only the feed rows (cards::row_body checks first there).
+    if let Some(reason) = super::cards::filter_reason(ev) {
+        return super::cards::filter_veil(ev, &reason, handle);
+    }
     let mut body = div().w_full().flex().flex_col().gap_4();
 
     let parsed = body_parse_cached(ev);
@@ -1308,7 +1314,7 @@ pub fn body_with<V: EventEmitter<Nav> + 'static>(
                 let el = div()
                     .id(seg_id("mention", trimmed))
                     .cursor_pointer()
-                    .text_size(px(theme::T_BODY))
+                    .text_size(px(theme::t_body()))
                     .text_color(rgb(theme::muted()))
                     .hover(|s| s.text_color(rgb(theme::vermilion())))
                     .on_click(move |_, _, cx| {
@@ -1414,7 +1420,7 @@ pub(crate) fn link_row(url: &str) -> AnyElement {
     div()
         .id(seg_id("link", url))
         .cursor_pointer()
-        .text_size(px(theme::T_BODY))
+        .text_size(px(theme::t_body()))
         .text_color(rgb(theme::muted()))
         .underline()
         .hover(|s| s.text_color(rgb(theme::vermilion())))
@@ -2379,8 +2385,8 @@ fn embed_card<V: EventEmitter<Nav> + 'static>(
             // The quoted note's words in ink: they are content, not
             // chrome (muted read as disabled; owner, Nov 27 2026).
             div()
-                .font_family(theme::SERIF)
-                .text_size(px(theme::T_BODY))
+                .font_family(theme::serif())
+                .text_size(px(theme::t_body()))
                 .text_color(rgb(theme::ink()))
                 .child(text),
         )

@@ -79,6 +79,9 @@ fn consume_and_filter(events: impl IntoIterator<Item = Event>, relay: &str) -> B
         if u16::from(e.kind) == 3 {
             crate::wot::observe(e);
         }
+        // Template ledger (D110): the same message from many outside
+        // authors (the key-farm shape dedup's per-author count misses).
+        crate::filter::observe(e);
     }
     all.into_iter()
         .filter(|e| {
@@ -292,10 +295,6 @@ impl Pool {
             Some(store) => store,
             None => Store::open().await?,
         };
-        // D87: if the boot gate deferred the store rebuild, the walk
-        // runs here — beside the app, reading through this very handle.
-        // No-ops (cheap stat) unless the state file says a copy is due.
-        crate::store::spawn_deferred_vacuum(store.clone());
         // No keys live in the client: NIP-42 AUTH challenges are answered
         // with the session identity (set_identity, below) — the owner's
         // key, the only one strict relays honor for kinds 78/30078
@@ -376,6 +375,12 @@ impl Pool {
     }
 
     /// Connect the read set. Write relays join at publish time.
+    /// No read relays joined yet: the process's first bootstrap (D117's
+    /// early dial runs only then; later surfaces find the pool live).
+    pub fn reads_empty(&self) -> bool {
+        self.reads.lock().is_empty()
+    }
+
     pub async fn connect_reads(&self, read_relays: Vec<String>) -> Result<(), SdkError> {
         self.set_reads(&read_relays).await;
         self.client.connect().await;

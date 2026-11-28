@@ -662,8 +662,12 @@ impl Core {
             if crate::dedup::observe(&event, relay_url.as_str()) {
                 continue;
             }
+            crate::filter::observe(&event);
+            // The bell wears the notification tier (D109): what the page
+            // would move to the receipts strip must not light the dot
+            // first. The page re-judges on open; this only keeps quiet.
             let sig = if event.tags.clone().public_keys().any(|pk| pk == me) {
-                Some(Live::Mention)
+                (!super::bell_holds(&event)).then_some(Live::Mention)
             } else {
                 Some(Live::Post)
             };

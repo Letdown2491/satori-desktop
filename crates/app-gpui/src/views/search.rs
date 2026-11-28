@@ -60,6 +60,7 @@ impl EventEmitter<Nav> for SearchView {}
 impl SearchView {
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
+        crate::theme::watch_list(cx, |v: &Self| &v.list);
         crate::timefmt::watch(cx); // repaint on mode/height change
         crate::video::watch(cx); // repaint on player open/toggle/close
         let input = cx.new(|cx| {
@@ -283,7 +284,7 @@ impl Render for SearchView {
             .overflow_hidden()
             .bg(rgb(theme::washi()))
             .text_color(rgb(theme::ink()))
-            .font_family(theme::SANS)
+            .font_family(theme::sans())
             .flex()
             .flex_col()
             .child(
@@ -409,8 +410,8 @@ impl Render for SearchView {
                     .gap_2()
                     .child(
                         div()
-                            .font_family(theme::SERIF)
-                            .text_size(px(theme::T_READER))
+                            .font_family(theme::serif())
+                            .text_size(px(theme::t_reader()))
                             .text_color(rgb(theme::muted()))
                             .child("Search the notes your relays hold."),
                     )
@@ -483,7 +484,7 @@ impl Render for SearchView {
                                     ))
                                     .child(
                                         div()
-                                            .text_size(px(theme::T_BODY))
+                                            .text_size(px(theme::t_body()))
                                             .text_color(rgb(theme::ink()))
                                             .child(if p.name.is_empty() {
                                                 content::short_bech32(&hex)
@@ -562,8 +563,8 @@ impl Render for SearchView {
                     .gap_2()
                     .child(
                         div()
-                            .font_family(theme::SERIF)
-                            .text_size(px(theme::T_READER))
+                            .font_family(theme::serif())
+                            .text_size(px(theme::t_reader()))
                             .text_color(rgb(theme::muted()))
                             .child(format!("Nothing found for “{}”.", self.query)),
                     )

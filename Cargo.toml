@@ -14,6 +14,15 @@ members = ["crates/core", "crates/app-gpui"]
 # unchanged upstream, so the clause is still needed).
 [patch.crates-io]
 gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
+# D118 (Nov 2026): nostr-lmdb 0.45.3 opens the env with OS readahead
+# on, and its builder can't change that. Every random page fault in the
+# 1.5 GB store pulled a large read: the cold first feed page took
+# 1.5-3.9 s, 0.18 s with NO_READ_AHEAD (one flag in
+# src/store/lmdb/mod.rs from_builder). D121 adds the background copy's
+# hooks: Lmdb::last_txn_id / copy_compact_to (heed's compacting copy) and
+# NostrLmdb's write log (start_journal/stop_journal; save_event, delete
+# and wipe append a line while it runs). Re-port when bumping nostr-lmdb.
+nostr-lmdb = { path = "vendor/nostr-lmdb" }
 # D72 (Nov 2026): gpui-video-player 0.1.3 rejects caps framerate 0/1 —
 # exactly what GIF-to-MP4 converters emit (nostr.build, 21media) — so
 # every gif-as-mp4 tap died at Video::new and degraded to the browser
@@ -72,6 +81,11 @@ url = "2"
 base64 = "0.22"
 bech32 = "0.12"
 chrono = "0.4"
+# Content filters (D110): linear-time user regex rules, and the script
+# classifier behind the lookalike-character spam signal.
+regex = "1"
+libc = "0.2"
+unicode-script = "0.5"
 
 # Daily-driver release: stripped (the 25GB debug tree is dev-only), thin
 # LTO and a single codegen unit for the render hot paths (D25).

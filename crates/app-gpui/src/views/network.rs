@@ -171,7 +171,7 @@ impl NetworkView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(theme::T_BODY))
+                    .text_size(px(theme::t_body()))
                     .text_color(rgb(theme::ink()))
                     .text_ellipsis()
                     .child(name),

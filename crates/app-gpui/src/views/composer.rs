@@ -919,6 +919,13 @@ impl Composer {
         }
 
         div()
+            // Scroll containment: gpui hands a wheel event to EVERY
+            // hovered scroll container (none stops it), so scrolling the
+            // results also scrolled the composer pane and whatever sat
+            // behind it. The grid inside scrolls first (it is painted
+            // above this root, so it hears the bubble first); the root
+            // then ends the event.
+            .on_scroll(|_, _, cx| cx.stop_propagation())
             .w_full()
             .flex()
             .flex_col()
@@ -2289,7 +2296,7 @@ impl Render for Composer {
             })
             .flex()
             .flex_col()
-            .font_family(theme::SANS)
+            .font_family(theme::sans())
             .text_color(rgb(theme::ink()))
             .gap_2()
             .p_4()
@@ -2692,7 +2699,7 @@ impl Render for Composer {
                                         div()
                                             .id(SharedString::from(format!("rm-opt-{i}")))
                                             .cursor_pointer()
-                                            .text_size(px(theme::T_BODY))
+                                            .text_size(px(theme::t_body()))
                                             .text_color(rgb(theme::muted()))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 if !this.posting && this.poll_options.len() > 2 {
@@ -3125,7 +3132,7 @@ impl Render for Composer {
                             .rounded(px(theme::R_EMBED))
                             // Filled: the one solid element in the pane.
                             .bg(rgb(theme::vermilion()))
-                            .text_size(px(theme::T_BODY))
+                            .text_size(px(theme::t_body()))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgb(theme::washi()))
                             .on_click(cx.listener(|this, _, _, cx| this.post(cx)))
@@ -3322,7 +3329,7 @@ impl Composer {
                     )
                     .child(block_item(
                         div()
-                            .font_family(theme::SERIF)
+                            .font_family(theme::serif())
                             .text_size(px(20.0))
                             .line_height(relative(1.25))
                             .font_weight(FontWeight::SEMIBOLD)
@@ -3357,9 +3364,9 @@ impl Composer {
                     .when(!summary.is_empty(), |d| {
                         d.child(block_item(
                             div()
-                                .font_family(theme::SERIF)
+                                .font_family(theme::serif())
                                 .italic()
-                                .text_size(px(theme::T_READER))
+                                .text_size(px(theme::t_reader()))
                                 .line_height(relative(1.35))
                                 .text_color(rgb(theme::muted()))
                                 .child(summary),
@@ -3369,7 +3376,7 @@ impl Composer {
                     .when(empty, |d| {
                         d.child(block_item(
                             div()
-                                .text_size(px(theme::T_READER))
+                                .text_size(px(theme::t_reader()))
                                 .text_color(rgb(theme::muted()))
                                 .child("(the body is empty — flip back and write)"),
                             theme::S4,
@@ -3500,7 +3507,7 @@ impl Composer {
             if !title.is_empty() {
                 card = card.child(
                     div()
-                        .text_size(px(theme::T_BODY))
+                        .text_size(px(theme::t_body()))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(theme::ink()))
                         .child(title),
@@ -3517,7 +3524,7 @@ impl Composer {
                     card = card.child(
                         div()
                             .w_full()
-                            .text_size(px(theme::T_BODY))
+                            .text_size(px(theme::t_body()))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(theme::ink()))
                             .child(question),
@@ -3543,7 +3550,7 @@ impl Composer {
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(theme::T_BODY))
+                                        .text_size(px(theme::t_body()))
                                         .text_color(rgb(theme::ink()))
                                         .child(label),
                                 ),

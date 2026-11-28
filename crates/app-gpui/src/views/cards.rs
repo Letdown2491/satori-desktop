@@ -68,6 +68,11 @@ pub fn is_feed_kind(kind: Kind) -> bool {
 /// The row body: a rich card for registry kinds, the normal text pipeline
 /// otherwise (cards.rs `card_for`'s `_ => note_card`).
 pub fn row_body(ev: &Event, ctx: &Body, feed: &Entity<Feed>, st: &CardState) -> Div {
+    // D110: a filtered note (the user's rules, a spam signal, a muted
+    // author) collapses to its reason first; the veil wraps every kind.
+    if let Some(reason) = filter_reason(ev) {
+        return filter_veil(ev, &reason, feed.clone());
+    }
     // NIP-36: a content warning never renders raw — the row collapses to
     // a quiet bar (the reason when the author gave one) until revealed.
     // The veil wraps EVERY kind: a warned picture leaks nothing either.
@@ -131,6 +136,22 @@ fn veil_card(ev: &Event, reason: &str, feed: &Entity<Feed>) -> Div {
     };
     let id = ev.id;
     let feed = feed.clone();
+    veil_bar(SharedString::from(format!("veil-{id}")), label, move |cx| {
+        feed.update(cx, |f, cx| {
+            f.reveal(id);
+            cx.notify();
+        });
+    })
+}
+
+/// The veil's bar: a bordered quiet row naming why, and a Show seal. The
+/// seal's click stops propagation so the row's open-thread handler
+/// doesn't fire underneath it.
+fn veil_bar(
+    seal_id: SharedString,
+    label: String,
+    on_show: impl Fn(&mut gpui::App) + 'static,
+) -> Div {
     div().w_full().flex().flex_col().gap_1().child(
         div()
             .w_full()
@@ -146,13 +167,16 @@ fn veil_card(ev: &Event, reason: &str, feed: &Entity<Feed>) -> Div {
             .gap_2()
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .text_size(px(theme::T_SMALL))
                     .text_color(rgb(theme::muted()))
                     .child(label),
             )
             .child(
                 div()
-                    .id(SharedString::from(format!("veil-{}", id)))
+                    .id(seal_id)
+                    .a11y_button("Show".to_string())
                     .cursor_pointer()
                     .px_2()
                     .py_0p5()
@@ -164,13 +188,41 @@ fn veil_card(ev: &Event, reason: &str, feed: &Entity<Feed>) -> Div {
                     .hover(|s| s.text_color(rgb(theme::ink())))
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
-                        feed.update(cx, |f, cx| {
-                            f.reveal(id);
-                            cx.notify();
-                        });
+                        on_show(cx);
                     })
                     .child("Show"),
             ),
+    )
+}
+
+/// Notes the reader chose to show despite a filter (D110). Session-wide
+/// and shared by every surface: a note revealed in the feed stays
+/// revealed when its thread opens.
+static FILTER_REVEALED: std::sync::LazyLock<parking_lot::Mutex<HashSet<EventId>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Why this note should render collapsed, if it should (core's
+/// `filter::judge`, minus what the reader already revealed).
+pub fn filter_reason(ev: &Event) -> Option<String> {
+    if FILTER_REVEALED.lock().contains(&ev.id) {
+        return None;
+    }
+    satori_core::filter::judge(ev).map(|r| r.label())
+}
+
+/// The filter's veil (D110): the NIP-36 bar's shape, naming the reason,
+/// with a Show seal that reveals the note everywhere for the session.
+/// Generic over the hosting view so feeds, threads, notifications and
+/// embeds share one spelling.
+pub fn filter_veil<V: 'static>(ev: &Event, reason: &str, handle: Entity<V>) -> Div {
+    let id = ev.id;
+    veil_bar(
+        SharedString::from(format!("fveil-{id}")),
+        format!("Hidden: {reason}"),
+        move |cx| {
+            FILTER_REVEALED.lock().insert(id);
+            handle.update(cx, |_, cx| cx.notify());
+        },
     )
 }
 
@@ -186,7 +238,7 @@ fn alt_card(ev: &Event, alt: &str) -> Div {
         .child(
             div()
                 .w_full()
-                .text_size(px(theme::T_BODY))
+                .text_size(px(theme::t_body()))
                 .text_color(rgb(theme::muted()))
                 .child(alt.to_string()),
         )
@@ -265,7 +317,7 @@ fn kicker(text: &str) -> Div {
 fn serif_title(text: &str, size: f32) -> Div {
     div()
         .w_full()
-        .font_family(theme::SERIF)
+        .font_family(theme::serif())
         .text_size(px(size))
         .text_color(rgb(theme::ink()))
         .child(text.to_string())
@@ -545,8 +597,8 @@ fn article_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) ->
         div()
             .id(SharedString::from(format!("read-{}", ev.id)))
             .cursor_pointer()
-            .font_family(theme::SERIF)
-            .text_size(px(theme::T_BODY))
+            .font_family(theme::serif())
+            .text_size(px(theme::t_body()))
             .text_color(rgb(theme::muted()))
             .underline()
             .on_click(move |_, _, cx| {
@@ -580,8 +632,8 @@ fn classified_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState)
     if let Some(price) = &data.price {
         card = card.child(
             div()
-                .font_family(theme::SERIF)
-                .text_size(px(theme::T_READER))
+                .font_family(theme::serif())
+                .text_size(px(theme::t_reader()))
                 .text_color(rgb(theme::vermilion()))
                 .child(price.clone()),
         );
@@ -709,8 +761,8 @@ fn wiki_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
             card = card.child(
                 div()
                     .w_full()
-                    .font_family(theme::SERIF)
-                    .text_size(px(theme::T_READER))
+                    .font_family(theme::serif())
+                    .text_size(px(theme::t_reader()))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(theme::ink()))
                     .child(h.to_string()),
@@ -724,8 +776,8 @@ fn wiki_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>) -> Div {
             }
             row = row.child(
                 div()
-                    .font_family(theme::SERIF)
-                    .text_size(px(theme::T_BODY))
+                    .font_family(theme::serif())
+                    .text_size(px(theme::t_body()))
                     .line_height(relative(1.2))
                     .text_color(rgb(theme::ink()))
                     .when(span.bold, |d| d.font_weight(FontWeight::SEMIBOLD))
@@ -849,8 +901,8 @@ fn highlight_card(ev: &Event, ctx: &Body, feed: &Entity<Feed>, _st: &CardState) 
             .border_l_2()
             .border_color(rgb(theme::vermilion()))
             .pl_3()
-            .font_family(theme::SERIF)
-            .text_size(px(theme::T_BODY))
+            .font_family(theme::serif())
+            .text_size(px(theme::t_body()))
             .text_color(rgb(theme::ink()))
             .child(text)
     };

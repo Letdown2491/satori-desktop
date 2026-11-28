@@ -27,6 +27,9 @@ sha2 = { workspace = true }
 url = { workspace = true }
 base64 = { workspace = true }
 bech32 = { workspace = true }
+regex = { workspace = true }
+libc = { workspace = true }
+unicode-script = { workspace = true }
 # Secret round-trips wipe on drop (#31 hardening): the nsec/bunker/NWC
 # Strings that ride through load() don't linger in freed heap.
 zeroize = "1"

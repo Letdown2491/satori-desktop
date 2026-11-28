@@ -42,6 +42,9 @@ pub(crate) enum FeedMode {
 /// `parents`/`parents_asked` maps used to grow for the process lifetime.
 /// 512 tracked parents is far past one sitting's scrolling.
 const PARENTS_CAP: usize = 512;
+/// How long the placeholder rows wait quietly before the band admits the
+/// relays are slow (D115).
+const FIRST_LOAD_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Dry rounds before the end-cap seal is believed: the relays genuinely
 /// remember nothing older (five straight pages deepened nothing). Impl
@@ -118,6 +121,11 @@ pub struct Feed {
     /// NIP-75 zap goals' raised totals in msat (goal id → sum).
     goal_msat: HashMap<EventId, u64>,
     status: String,
+    /// The first page hasn't landed yet (D115): the column shows
+    /// placeholder rows instead of a status line.
+    first_load: bool,
+    /// The first page is overdue (FIRST_LOAD_PATIENCE): the band speaks.
+    first_load_slow: bool,
     /// §4.3: the pane's kinded error — the strip replaces the old raw
     /// `format!("… {e}")` status-line dump (deficiency 8).
     error: Option<states::PaneError>,
@@ -211,6 +219,7 @@ impl EventEmitter<Nav> for Feed {}
 impl Feed {
     pub fn new(core: Arc<Core>, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
+        crate::theme::watch_list(cx, |v: &Self| &v.list);
         crate::timefmt::watch(cx); // repaint on mode/height change
         crate::video::watch(cx); // repaint on player open/toggle/close
         Self::with_mode(core, FeedMode::Timeline, cx)
@@ -270,7 +279,9 @@ impl Feed {
             rsvped: HashMap::new(),
             revealed: HashSet::new(),
             goal_msat: HashMap::new(),
-            status: "connecting to the relays…".into(),
+            status: String::new(),
+            first_load: true,
+            first_load_slow: false,
             error: None,
             has_more: true,
             paging: false,
@@ -392,6 +403,17 @@ impl Feed {
             _ => feed.core.bootstrap(feed.mode.kinds()),
         };
         feed.pump(boot, cx);
+        // D115: past FIRST_LOAD_PATIENCE with no page, the band says so.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FIRST_LOAD_PATIENCE).await;
+            let _ = this.update(cx, |f, cx| {
+                if f.first_load {
+                    f.first_load_slow = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         feed
     }
 
@@ -595,6 +617,8 @@ impl Feed {
                 self.want_parents(cx);
                 self.want_counts(cx);
                 self.status.clear();
+                self.first_load = false;
+                self.first_load_slow = false;
                 self.error = None;
                 // The badge click's promise is kept: the notes are in place.
                 self.loading_new = false;
@@ -681,6 +705,9 @@ impl Feed {
                 // §4.3: the kinded strip, not a raw "… {e}" status dump —
                 // the leading ellipsis collided with the loading convention.
                 self.error = Some(states::PaneError::transient("The feed", &e));
+                // The error strip owns the moment; the placeholders yield.
+                self.first_load = false;
+                self.first_load_slow = false;
                 // A failed round trip must not wedge the end cap.
                 self.paging = false;
                 // ...nor the pill's loading state.
@@ -1344,7 +1371,15 @@ fn note_card(
 impl Render for Feed {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let handle = cx.entity();
-        let status = self.status.clone();
+        // The band's line: a whisper when there is one, else (D115) the
+        // overdue-first-load admission. The connecting state itself is
+        // the placeholder rows below, never words.
+        let status = if self.status.is_empty() && self.first_load_slow {
+            "Still reaching your relays…".to_string()
+        } else {
+            self.status.clone()
+        };
+        let first_load = self.first_load;
         // Rebuild the render snapshot only when the DATA changed (any
         // mutation sets snap_dirty). Media is NOT in the snapshot: render
         // takes the memoized cache snapshot fresh each frame (same epoch =
@@ -1404,7 +1439,7 @@ impl Render for Feed {
             // every page wears the same padding.)
             .bg(rgb(theme::washi()))
             .text_color(rgb(theme::ink()))
-            .font_family(theme::SANS)
+            .font_family(theme::sans())
             .flex()
             .flex_col()
             // Relay status line — the shell header carries the title now, so
@@ -1509,8 +1544,11 @@ impl Render for Feed {
                         // a persistently empty feed — it never resolves. Split:
                         // first load pending → the loading line; loaded, zero
                         // events → the honest quiet.
-                        if !status.is_empty() {
-                            states::empty(&status, None)
+                        // D115: before the first page, placeholder rows (the
+                        // band above carries any words, once); after it, an
+                        // empty column is the honest quiet.
+                        if first_load {
+                            states::skeleton_rows(4)
                         } else {
                             states::empty(
                                 "Quiet here.",
@@ -1830,7 +1868,7 @@ fn reply_whisper(
                         // words were hard to read); the serif italic
                         // still sets the quoted voice apart.
                         div()
-                            .font_family(theme::SERIF)
+                            .font_family(theme::serif())
                             .italic()
                             .text_size(px(theme::T_UI))
                             .text_color(rgb(theme::ink()))
@@ -1873,7 +1911,7 @@ fn end_cap(paging: bool, more: bool) -> Div {
             )
             .child(
                 div()
-                    .font_family(theme::SERIF)
+                    .font_family(theme::serif())
                     .text_size(px(theme::T_UI))
                     .line_height(relative(1.2))
                     .text_color(rgb(theme::muted()))

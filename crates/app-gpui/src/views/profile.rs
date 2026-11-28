@@ -109,6 +109,7 @@ impl EventEmitter<Nav> for ProfileView {}
 impl ProfileView {
     pub fn new(core: Arc<Core>, who: PublicKey, is_me: bool, cx: &mut Context<Self>) -> Self {
         crate::theme::watch(cx); // repaint on theme change
+        crate::theme::watch_list(cx, |v: &Self| &v.list);
         crate::timefmt::watch(cx); // repaint on mode/height change
         crate::video::watch(cx); // repaint on player open/toggle/close
         let notes_feed = cx.new(|cx| Feed::author(core.clone(), who, cx));

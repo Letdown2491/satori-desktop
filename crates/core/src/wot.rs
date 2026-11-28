@@ -12,12 +12,13 @@
 //! - [`Verdict::Follow`] — in your kind-3 contact list.
 //! - [`Verdict::Trusted`] — qualified by the two-hop graph.
 //! - [`Verdict::NotInNetwork`] — the graph KNOWS the author and places
-//!   them outside (they appear in a fresh follow's contact list with a
-//!   sub-threshold shared-follow count). A judgment.
-//! - [`Verdict::Unknown`] — the graph doesn't know YET (no identity, no
-//!   fresh data, feature off over the follows cap). NOT a judgment —
-//!   "unknown" must never read as "outside" (the issue posture:
-//!   feature-off is a first-class state, never a silent one).
+//!   them outside: a sub-threshold shared-follow count, or (D109) zero
+//!   shared follows once the graph is decisive (enough of your follows'
+//!   lists applied that absence is evidence). A judgment.
+//! - [`Verdict::Unknown`] — the graph doesn't know YET (no identity, too
+//!   few lists applied, feature off over the follows cap). NOT a
+//!   judgment: "unknown" must never read as "outside" (the issue
+//!   posture: feature-off is a first-class state, never a silent one).
 //!
 //! **Qualified set** — port of Dark Wisp's
 //! `repo/ExtendedNetworkRepository.kt` (barrydeen/dark-wisp-android):
@@ -114,12 +115,13 @@ pub enum Verdict {
     /// Qualified by the two-hop graph: ≥ [`QUALIFICATION_THRESHOLD`]
     /// of the user's follows follow them (dark-wisp qualified network).
     Trusted,
-    /// Known and outside: seen in a fresh follow's contact list with a
-    /// sub-threshold shared-follow count (Amethyst `NOT_IN_NETWORK`).
+    /// Known and outside: a sub-threshold shared-follow count, or (D109)
+    /// zero shared follows on a decisive graph (Amethyst `NOT_IN_NETWORK`).
     NotInNetwork,
-    /// The graph cannot say — no identity, over the follows cap, or no
-    /// fresh data seen yet. NOT a judgment (Amethyst's `NO_NETWORK`
-    /// honesty: feature-off is a state, never silently "outside").
+    /// The graph cannot say: no identity, over the follows cap, or too
+    /// few follow lists applied yet to be decisive (D109). NOT a judgment
+    /// (Amethyst's `NO_NETWORK` honesty: feature-off is a state, never
+    /// silently "outside").
     Unknown,
 }
 
@@ -168,6 +170,17 @@ struct Graph {
     /// Last full rebuild from the store (unix secs) — the settings
     /// surface's staleness line.
     rebuilt: Option<u64>,
+    /// A target with a qualifying score was evicted at the
+    /// MAX_TRACKED_TARGETS ceiling (D109): the graph has lost a Trusted
+    /// answer, so a missing score no longer proves "outside" and the
+    /// graph stops being decisive for the rest of the session.
+    lossy: bool,
+    /// Memo of how many follows have an applied source (the decisive
+    /// test's coverage). `verdict` runs per rendered row and per network
+    /// event, so recounting `sources` there was O(follows) under the
+    /// graph lock. None = recount on next read; every write to
+    /// `sources` or `follows` resets it.
+    applied: Option<usize>,
 }
 
 static GRAPH: LazyLock<Mutex<Graph>> = LazyLock::new(|| {
@@ -182,6 +195,8 @@ static GRAPH: LazyLock<Mutex<Graph>> = LazyLock::new(|| {
         muted: HashSet::new(),
         cover: Vec::new(),
         rebuilt: None,
+        lossy: false,
+        applied: None,
     })
 });
 
@@ -328,6 +343,7 @@ pub fn apply_persisted(pk: &str, created_at: u64, follows: &[PublicKey]) {
     if !g.follows.contains(pk) {
         return;
     }
+    g.applied = None;
     g.sources.insert(
         pk.to_string(),
         Source {
@@ -347,6 +363,7 @@ pub fn set_identity(me: PublicKey, follows: &[PublicKey]) {
     let mut g = graph();
     g.me = Some(me);
     g.follows = follows.iter().map(|p| p.to_string()).collect();
+    g.applied = None;
     g.over_cap = follows.len() > MAX_FOLLOWS;
     if g.over_cap {
         // Shutoff (Amethyst WoTService ~line 203): drop everything, not
@@ -357,6 +374,7 @@ pub fn set_identity(me: PublicKey, follows: &[PublicKey]) {
         g.in_order.clear();
         g.cover.clear();
     }
+    g.lossy = false;
 }
 
 /// Disarm (sign-out): the graph answers Unknown until the next login.
@@ -373,6 +391,8 @@ pub fn clear_identity() {
         muted: HashSet::new(),
         cover: Vec::new(),
         rebuilt: None,
+        lossy: false,
+        applied: None,
     };
 }
 
@@ -392,15 +412,34 @@ fn insert_target(g: &mut Graph, target: &str, follower: &str, cap: usize) {
         return;
     }
     if !g.scores.contains_key(target) && g.scores.len() >= cap {
-        // D24 ceiling: evict the oldest-inserted still-live target.
+        // D24 ceiling: evict the oldest-inserted still-live target that
+        // does NOT qualify (D109). Under the decisive graph a missing
+        // score reads "outside", which is what a sub-threshold score
+        // read anyway, so evicting those loses nothing. A qualified
+        // target rotates to the back instead; only when a full rotation
+        // finds nothing else does one go, and the graph turns lossy.
+        let mut budget = g.target_order.len();
         let evicted = loop {
-            match g.target_order.pop_front() {
-                None => break false,
-                Some(old) => {
-                    if g.scores.remove(&old).is_some() {
-                        g.in_order.remove(&old);
-                        break true;
+            let Some(old) = g.target_order.pop_front() else {
+                break false;
+            };
+            let score = g.scores.get(&old).map(HashSet::len);
+            match score {
+                // Stale order entry (diffed out earlier): drop it.
+                None => {
+                    g.in_order.remove(&old);
+                }
+                Some(n) if n >= QUALIFICATION_THRESHOLD && budget > 0 => {
+                    budget -= 1;
+                    g.target_order.push_back(old);
+                }
+                Some(n) => {
+                    if n >= QUALIFICATION_THRESHOLD {
+                        g.lossy = true;
                     }
+                    g.scores.remove(&old);
+                    g.in_order.remove(&old);
+                    break true;
                 }
             }
         };
@@ -463,6 +502,7 @@ pub fn observe(ev: &Event) {
         }
     }
 
+    g.applied = None;
     g.sources.insert(
         follower.clone(),
         Source {
@@ -513,7 +553,7 @@ pub fn fetch_targets(
 /// The verdict for an author (the badge, the notification tier, the
 /// thread-collapse rule — every consumer asks the same question).
 pub fn verdict(pk: &PublicKey) -> Verdict {
-    let g = graph();
+    let mut g = graph();
     let Some(me) = g.me else {
         return Verdict::Unknown;
     };
@@ -532,8 +572,50 @@ pub fn verdict(pk: &PublicKey) -> Verdict {
     match g.scores.get(&key).map(|s| s.len()) {
         Some(n) if n >= QUALIFICATION_THRESHOLD => Verdict::Trusted,
         Some(_) => Verdict::NotInNetwork,
+        // D109: on a decisive graph, nobody you follow following them IS
+        // knowledge (zero shared follows), not the graph declining to
+        // answer. A fresh throwaway key appears in no contact list, so
+        // without this every bot read Unknown forever.
+        None if decisive(&mut g) => Verdict::NotInNetwork,
         None => Verdict::Unknown,
     }
+}
+
+/// Minimum applied follow lists before a missing score means "outside"
+/// (D109). Below the qualification threshold nobody could ever qualify,
+/// so a tiny graph must keep answering Unknown.
+pub const DECISIVE_MIN_SOURCES: usize = QUALIFICATION_THRESHOLD;
+
+/// Is the graph complete enough that "no score" proves "outside"? (D109)
+/// Signed in, under the follows cap, no qualified target lost to the
+/// eviction ceiling, and contact lists applied for at least half the
+/// follows (and at least [`DECISIVE_MIN_SOURCES`]). Follows who never
+/// published a list count against coverage, which is the honest side:
+/// a sparse graph keeps saying Unknown.
+fn decisive(g: &mut Graph) -> bool {
+    if g.me.is_none() || g.over_cap || g.lossy {
+        return false;
+    }
+    let applied = applied_follows(g);
+    applied >= DECISIVE_MIN_SOURCES && applied * 2 >= g.follows.len()
+}
+
+/// Follows with an applied source, memoized (see `Graph::applied`).
+fn applied_follows(g: &mut Graph) -> usize {
+    if let Some(n) = g.applied {
+        return n;
+    }
+    let n = g.sources.keys().filter(|k| g.follows.contains(*k)).count();
+    g.applied = Some(n);
+    n
+}
+
+/// Graph coverage for the settings status line: (follow lists applied,
+/// follows, decisive). Pure read.
+pub fn coverage() -> (usize, usize, bool) {
+    let mut g = graph();
+    let applied = applied_follows(&mut g);
+    (applied, g.follows.len(), decisive(&mut g))
 }
 
 /// Shared-follows count for the badge ("N shared follows") — the
@@ -784,9 +866,77 @@ mod tests {
         observe(&kind3(&follows[10], &[&lone], now()));
         assert_eq!(verdict(&lone.public_key()), Verdict::NotInNetwork);
         assert!(!is_qualified(&lone.public_key()));
-        // Seen by nobody we've heard from → Unknown (not a judgment).
+        // Seen by nobody, on a decisive graph (all 11 follows' lists
+        // applied) → outside with zero shared follows (D109).
         let unseen = Keys::generate();
+        assert_eq!(coverage(), (11, 11, true));
+        assert_eq!(verdict(&unseen.public_key()), Verdict::NotInNetwork);
+        assert_eq!(shared_follows(&unseen.public_key()), 0);
+    }
+
+    /// D109's honesty side: a sparse graph keeps answering Unknown for
+    /// the unseen. Fewer than DECISIVE_MIN_SOURCES lists, or under half
+    /// the follows covered, is not evidence of anything.
+    #[test]
+    fn unseen_stays_unknown_until_decisive() {
+        let follows = ids(30);
+        let _s = Session::new(&follows);
+        let unseen = Keys::generate();
+        let filler = Keys::generate();
+        // 9 lists: under the minimum.
+        for f in &follows[..9] {
+            observe(&kind3(f, &[&filler], now()));
+        }
         assert_eq!(verdict(&unseen.public_key()), Verdict::Unknown);
+        // 14 of 30: over the minimum, under half coverage.
+        for f in &follows[9..14] {
+            observe(&kind3(f, &[&filler], now()));
+        }
+        assert_eq!(coverage(), (14, 30, false));
+        assert_eq!(verdict(&unseen.public_key()), Verdict::Unknown);
+        // 15 of 30: decisive.
+        observe(&kind3(&follows[14], &[&filler], now()));
+        assert_eq!(coverage(), (15, 30, true));
+        assert_eq!(verdict(&unseen.public_key()), Verdict::NotInNetwork);
+        // A tiny account (under the minimum even fully covered) never
+        // turns decisive: nobody could ever qualify there.
+    }
+
+    /// D109's eviction rule: at the ceiling, a qualified target rotates
+    /// to the back and a sub-threshold one goes instead; the graph turns
+    /// lossy only when nothing but qualified targets remain.
+    #[test]
+    fn eviction_spares_qualified_targets() {
+        let mut g = Graph {
+            me: None,
+            follows: HashSet::new(),
+            over_cap: false,
+            sources: HashMap::new(),
+            scores: HashMap::new(),
+            target_order: VecDeque::new(),
+            in_order: HashSet::new(),
+            muted: HashSet::new(),
+            cover: Vec::new(),
+            rebuilt: None,
+            lossy: false,
+            applied: None,
+        };
+        // "q" (oldest) qualifies, "w" doesn't.
+        for i in 0..QUALIFICATION_THRESHOLD {
+            insert_target(&mut g, "q", &format!("f{i}"), 2);
+        }
+        insert_target(&mut g, "w", "f0", 2);
+        insert_target(&mut g, "n", "f1", 2);
+        assert!(g.scores.contains_key("q"), "qualified target kept");
+        assert!(!g.scores.contains_key("w"), "sub-threshold target evicted");
+        assert!(!g.lossy);
+        // Only qualified targets left: one goes, and the graph says so.
+        for i in 0..QUALIFICATION_THRESHOLD {
+            insert_target(&mut g, "n", &format!("f{i}"), 2);
+        }
+        insert_target(&mut g, "z", "f0", 2);
+        assert!(g.lossy);
+        assert_eq!(g.scores.len(), 2);
     }
 
     /// Shared-follow counting: the badge number is exactly the set of
@@ -1046,6 +1196,8 @@ mod tests {
             muted: HashSet::new(),
             cover: Vec::new(),
             rebuilt: None,
+            lossy: false,
+            applied: None,
         };
         insert_target(&mut g, "a", "f1", 2);
         insert_target(&mut g, "b", "f1", 2);

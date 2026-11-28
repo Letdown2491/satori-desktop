@@ -152,6 +152,69 @@ pub const T_SMALL: f32 = 12.0; // whispers, glyph labels, badges
 #[allow(dead_code)]
 pub const T_READER: f32 = 15.0; // reader/article body ONLY (spec rollout step 5)
 
+// §text — the text face and size are user prefs (D123: Settings,
+// General, Text). A chosen face applies everywhere (`serif()` and
+// `sans()`). The size applies to the reading text only: note bodies,
+// replies, articles, the composer (T_BODY, T_READER). UI chrome sizes
+// (T_UI, T_SMALL) stay fixed, so the layout's fixed-height rows never
+// clip.
+static TEXT_FONT: std::sync::RwLock<Option<gpui::SharedString>> = std::sync::RwLock::new(None);
+static TEXT_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(100);
+
+/// The text size choices, in percent of the default (the pill row's order).
+pub const TEXT_SCALES: [u32; 5] = [90, 100, 110, 125, 150];
+
+/// Set the reading face (`None` = the default serif, [`SERIF`]).
+pub fn set_text_font(family: Option<String>) {
+    if let Ok(mut g) = TEXT_FONT.write() {
+        *g = family.filter(|f| !f.trim().is_empty()).map(Into::into);
+    }
+}
+
+/// Set the reading text scale in percent (clamped to the offered range).
+pub fn set_text_scale(percent: u32) {
+    TEXT_SCALE.store(percent.clamp(80, 200), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn text_scale() -> u32 {
+    TEXT_SCALE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The reading face: the user's choice, else the default serif.
+pub fn serif() -> gpui::SharedString {
+    TEXT_FONT
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or(gpui::SharedString::new_static(SERIF))
+}
+
+/// The interface face: the user's chosen font, else the default sans.
+/// The default is a pairing (C059 to read, Adwaita Sans around it); a
+/// chosen font replaces both (D123).
+pub fn sans() -> gpui::SharedString {
+    text_font().unwrap_or(gpui::SharedString::new_static(SANS))
+}
+
+/// The user's reading face, if they chose one.
+pub fn text_font() -> Option<gpui::SharedString> {
+    TEXT_FONT.read().ok().and_then(|g| g.clone())
+}
+
+fn scaled(base: f32) -> f32 {
+    (base * text_scale() as f32 / 100.0).round()
+}
+
+/// Note body size, after the user's text scale.
+pub fn t_body() -> f32 {
+    scaled(T_BODY)
+}
+
+/// Article body size, after the user's text scale.
+pub fn t_reader() -> f32 {
+    scaled(T_READER)
+}
+
 // §1.4 — the radii ladder (DESIGN.md §5.1, reconciled for the no-card-box
 // feed: the boxed things are embeds, pills, media, inputs). Anything under
 // 4px is a mistake at hairline borders — the px(3.) chips read as accidental.
@@ -167,6 +230,23 @@ pub const R_MEDIA: f32 = 10.0; // images, video tiles, lightbox thumbs
 pub struct ThemeSignal;
 
 impl gpui::Global for ThemeSignal {}
+
+/// The wake-up for a reading face/size change (D123). Separate from
+/// [`ThemeSignal`]: a palette switch keeps every row's height, a text
+/// change does not, so list views re-measure on this one.
+pub struct TextSignal;
+
+impl gpui::Global for TextSignal {}
+
+/// Register a list view to re-measure its rows on a text change (the
+/// list caches each row's height; a stale one overlaps or gaps).
+pub fn watch_list<V: 'static>(cx: &mut gpui::Context<V>, list: fn(&V) -> &gpui::ListState) {
+    cx.observe_global::<TextSignal>(move |view, cx| {
+        list(view).remeasure();
+        cx.notify();
+    })
+    .detach();
+}
 
 /// Register a view for theme-change wake-ups (call from the constructor).
 pub fn watch<V: 'static>(cx: &mut gpui::Context<V>) {

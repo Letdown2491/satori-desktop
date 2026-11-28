@@ -3760,8 +3760,6 @@ dependencies = [
 [[package]]
 name = "nostr-lmdb"
 version = "0.45.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79727470014fb64cd1e03bf52f82bc46b69cc7ac0a9298a517498a0e84239f2a"
 dependencies = [
  "async-utility",
  "flatbuffers",
@@ -5275,6 +5273,7 @@ dependencies = [
  "futures-util",
  "image",
  "keyring",
+ "libc",
  "nostr",
  "nostr-connect",
  "nostr-database",
@@ -5283,6 +5282,7 @@ dependencies = [
  "nwc",
  "parking_lot 0.12.5",
  "rand 0.8.8",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -5290,6 +5290,7 @@ dependencies = [
  "tokio",
  "tokio-socks",
  "tokio-tungstenite",
+ "unicode-script",
  "url",
  "zeroize",
 ]

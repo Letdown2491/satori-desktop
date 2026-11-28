@@ -356,16 +356,6 @@ pub async fn fetch_image(url: &str) -> Result<DecodedImage, MediaError> {
     }
 }
 
-/// The pre-polish cache dir could hold poisoned files (bytes hit disk before
-/// decode validated them); the versioned dir starts clean and this drops the
-/// legacy one. Best-effort, once per process start (manager init).
-pub fn purge_legacy_cache() {
-    let legacy = config::data_dir().join("media-cache");
-    if legacy.exists() {
-        let _ = std::fs::remove_dir_all(legacy);
-    }
-}
-
 /// The whole poster job (D32, D72's fourth rung): cache read-through, the
 /// capped guarded head fetch + injected byte sniffer, and — when the head
 /// can't decode (the moov atom at the file's END makes the head useless to

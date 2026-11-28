@@ -703,6 +703,16 @@ impl Shell {
     /// the read-state advance); the dot goes quiet at once and the next poll
     /// confirms.
     fn open_notifications(&mut self, cx: &mut Context<Self>) {
+        // Already showing (D113): the bell re-gathers in place instead of
+        // stacking a second pane (the keyboard path used to) or doing
+        // nothing (the rail path did, so new rows needed a leave-and-
+        // return).
+        if let Some(Pane::Notifications(view)) = self.stack.last() {
+            view.update(cx, |n, cx| n.reload(cx));
+            self.notif_unread = false;
+            cx.notify();
+            return;
+        }
         let view = cx.new(|cx| NotificationsView::new(self.core.clone(), cx));
         self.subscribe_nav(&view, cx);
         self.notif_unread = false;
@@ -983,11 +993,27 @@ impl Shell {
     /// column's kind scrolls it back to the top (the re-click affordance).
     fn ensure_column(&mut self, kind: ColumnKind, cx: &mut Context<Self>) {
         match self.columns.iter().position(|c| c.kind == kind) {
-            Some(i) if i == self.focused_col => self.column_to_top(i, cx),
+            Some(i) if i == self.focused_col => {
+                // The notifications column re-gathers on a re-click
+                // (D113); the other streams just return to the top.
+                if let Some(Pane::Notifications(v)) = self.columns.get(i).map(|c| &c.pane) {
+                    v.update(cx, |n, cx| n.reload(cx));
+                    self.notif_unread = false;
+                    cx.notify();
+                } else {
+                    self.column_to_top(i, cx);
+                }
+            }
             Some(i) => {
                 self.focused_col = i;
                 self.scroll_col_into_view(i);
                 if kind == ColumnKind::Notifications {
+                    // Focusing it while the dot is lit: gather the news.
+                    if self.notif_unread
+                        && let Some(Pane::Notifications(v)) = self.columns.get(i).map(|c| &c.pane)
+                    {
+                        v.update(cx, |n, cx| n.reload(cx));
+                    }
                     self.notif_unread = false;
                 }
                 cx.notify();
@@ -1559,7 +1585,7 @@ impl Render for Tip {
             .bg(rgb(theme::ink()))
             .text_color(rgb(theme::washi()))
             .text_size(px(theme::T_SMALL))
-            .font_family(theme::SANS)
+            .font_family(theme::sans())
             .child(self.label)
     }
 }
@@ -1825,7 +1851,7 @@ impl Shell {
                         cx.listener(move |shell, _, _, cx| {
                             if shell.columns_on {
                                 shell.ensure_column(ColumnKind::Notifications, cx);
-                            } else if shell.active_spot(cx) != Some(Spot::Notif) {
+                            } else {
                                 shell.open_notifications(cx);
                             }
                         }),
@@ -2201,7 +2227,7 @@ impl Render for Shell {
             .size_full()
             .bg(rgb(theme::washi()))
             .text_color(rgb(theme::ink()))
-            .font_family(theme::SANS)
+            .font_family(theme::sans())
             // The rail + content row. The pair is centered as a group —
             // the rail stands to the left of the reading column, not glued
             // to the window edge. The rail sits outside every pane's
@@ -2921,6 +2947,10 @@ fn card_overlay<V: gpui::Render>(
         .id(SharedString::from(format!("{id}-overlay")))
         .absolute()
         .inset_0()
+        // A modal: nothing behind the scrim hears the mouse. Without it
+        // the timeline under the reply card scrolled along with the
+        // card's own scrollers (the gif results), and hovered too.
+        .occlude()
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|shell, _, _, cx| {
@@ -2974,7 +3004,7 @@ fn lightbox_overlay(urls: &[String], idx: usize, cx: &mut Context<Shell>) -> imp
         .opacity(0.94)
         .flex()
         .flex_col()
-        .font_family(theme::SANS)
+        .font_family(theme::sans())
         // Top bar: index + close.
         .child(
             div()
@@ -3091,7 +3121,7 @@ fn video_overlay(url: &str, cx: &mut Context<Shell>) -> impl IntoElement {
         .opacity(0.94)
         .flex()
         .flex_col()
-        .font_family(theme::SANS)
+        .font_family(theme::sans())
         // Top bar: the mark + close.
         .child(
             div()
@@ -3154,7 +3184,7 @@ fn video_overlay(url: &str, cx: &mut Context<Shell>) -> impl IntoElement {
                             div()
                                 .id("vid-toggle")
                                 .cursor_pointer()
-                                .text_size(px(theme::T_BODY))
+                                .text_size(px(theme::t_body()))
                                 .text_color(rgb(0xb8b2a6))
                                 .on_click(|_, _, cx| {
                                     cx.stop_propagation();
@@ -3166,7 +3196,7 @@ fn video_overlay(url: &str, cx: &mut Context<Shell>) -> impl IntoElement {
                             div()
                                 .id("vid-browser")
                                 .cursor_pointer()
-                                .text_size(px(theme::T_BODY))
+                                .text_size(px(theme::t_body()))
                                 .text_color(rgb(0xb8b2a6))
                                 .on_click(move |_, _, cx| {
                                     cx.stop_propagation();

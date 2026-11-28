@@ -509,6 +509,7 @@ impl Core {
             None => self.build_signer(session).await?,
         };
         let pool = self.pool().await?;
+        crate::boot_mark!("store and pool open");
         // The pool's NIP-42 authenticator now answers challenges AS this
         // account (pool.rs): strict relays serve kinds 78/30078 only to
         // the authenticated owner (NIP-78, Sep 2026).

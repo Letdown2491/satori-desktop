@@ -279,7 +279,7 @@ impl Render for LoginView {
             .overflow_hidden()
             .bg(rgb(theme::washi()))
             .text_color(rgb(theme::ink()))
-            .font_family(theme::SANS)
+            .font_family(theme::sans())
             .flex()
             .justify_center()
             .items_center()
@@ -342,7 +342,7 @@ impl Render for LoginView {
                                     .into_any_element()
                             },
                             div()
-                                .font_family(theme::SERIF)
+                                .font_family(theme::serif())
                                 .text_size(px(16.0))
                                 .child(status)
                                 .into_any_element(),
@@ -406,7 +406,7 @@ impl Render for LoginView {
                         // The form: two doors (login.rs form page).
                         vec![
                             div()
-                                .font_family(theme::SERIF)
+                                .font_family(theme::serif())
                                 .text_size(px(28.0))
                                 .child("Satori")
                                 .into_any_element(),
@@ -518,8 +518,8 @@ impl Render for LoginView {
                                 .gap_2()
                                 .child(
                                     div()
-                                        .font_family(theme::SERIF)
-                                        .text_size(px(theme::T_READER))
+                                        .font_family(theme::serif())
+                                        .text_size(px(theme::t_reader()))
                                         .child("Scan with your signer"),
                                 )
                                 .child(

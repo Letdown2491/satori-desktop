@@ -44,10 +44,37 @@ impl Core {
             .unwrap_or(None)
             .map(|ev| ev.tags.public_keys().collect())
             .unwrap_or_default();
+        // D117: the relays start dialing WHILE the store paints. The
+        // session phase below used to be the first connect, and it waited
+        // for the paint (a cold-cache store page is seconds). The early
+        // dial uses the store's copy of the own kind:10002; it is joined
+        // (not spawned) so it lands before the phase sets the fresh list
+        // (connect_reads replaces the read set; a late stale call would
+        // retire the fresh relays).
+        let early_pool = Arc::clone(&active.pool);
+        let early_connect = async move {
+            if early_pool.reads_empty() {
+                let read: Vec<String> = early_pool
+                    .store
+                    .latest_by_kind(me, Kind::RelayList)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|ev| outbox::parse_relay_list(&ev).read.into_iter().collect())
+                    .unwrap_or_default();
+                early_pool.connect_reads(read).await.ok();
+                crate::boot_mark!("relays dialing");
+            }
+        };
         if !cached_follows.is_empty() {
             active.set_follows(cached_follows.clone());
-            let page = self.page_from_store(&active, None, &kinds).await?;
+            let (page, ()) =
+                tokio::join!(self.page_from_store(&active, None, &kinds), early_connect);
+            let page = page?;
+            crate::boot_mark!("store paint sent ({} notes)", page.notes.len());
             let _ = tx.send(FeedEvent::Loaded(page));
+        } else {
+            early_connect.await;
         }
         let _ = tx.send(FeedEvent::BootstrapDone);
 
@@ -78,6 +105,7 @@ impl Core {
                     read.len(),
                     write.len()
                 );
+                crate::boot_mark!("relay lists fetched ({} read)", read.len());
                 active.read_relays = read.clone();
                 active.write_relays = write.clone();
                 if let Some(a) = self.active.lock().as_mut() {
@@ -210,6 +238,7 @@ impl Core {
         self.push_wot_mutes();
         crate::dedup::set_exemptions(me, &follows);
         self.rebuild_wot_graph(&active, &follows).await;
+        crate::boot_mark!("graph rebuilt ({} follows)", follows.len());
         self.start_live(kinds.clone()).await;
 
         // Profiles + engagement + deep fetch: parallel, none block paint.
@@ -309,7 +338,55 @@ impl Core {
         }
         let page = self.page_from_store(&active, None, &kinds).await?;
         eprintln!("[core] bootstrap page: {} notes", page.notes.len());
+        crate::boot_mark!("fresh page sent ({} notes)", page.notes.len());
+        // D121: the store's background copy (btrfs NOCOW rewrite, size
+        // trigger, or the Settings ask) runs once per process, 15 s after
+        // the fresh timeline is up (after the first paint, early enough
+        // that a short session still finishes the copy; 60 s lost the
+        // maintainer's first attempt). The handoff is the next launch.
+        {
+            static ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !ARMED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let store = active.pool.store.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                    // D122: retired store dirs (an old generation, a
+                    // dropped copy) are deleted here, never at startup.
+                    let _ = tokio::task::spawn_blocking(crate::store::sweep_trash).await;
+                    if !crate::store::compaction_due() {
+                        return;
+                    }
+                    crate::dlog!("store: background copy started");
+                    let t = std::time::Instant::now();
+                    match crate::store::background_compact(&store).await {
+                        Ok(bytes) => crate::dlog!(
+                            "store: background copy done in {:.0}s ({:.1} MB); it takes over at the next launch",
+                            t.elapsed().as_secs_f64(),
+                            bytes as f64 / 1048576.0
+                        ),
+                        Err(e) => crate::dlog!(
+                            "store: background copy failed ({e}); the live store is untouched"
+                        ),
+                    }
+                });
+            }
+        }
+        let shown: Vec<PublicKey> = page.notes.iter().map(|e| e.pubkey).collect();
         let _ = tx.send(FeedEvent::Loaded(page));
+        // D116: the signer round trips come AFTER the page. If the mute
+        // list turned out to cover an author on the page just sent,
+        // re-project once so they drop (the veil covers them meanwhile:
+        // filter::judge reads Muted).
+        self.load_private_lists(&active).await;
+        crate::boot_mark!("private lists loaded");
+        let now_muted = {
+            let m = self.muted.lock();
+            shown.iter().any(|pk| m.contains(pk))
+        };
+        if now_muted {
+            let page = self.page_from_store(&active, None, &kinds).await?;
+            let _ = tx.send(FeedEvent::Loaded(page));
+        }
         Ok(())
     }
 
@@ -334,7 +411,17 @@ impl Core {
                 }
             }
         }
+    }
 
+    /// The signer-bound half of the own sets (D116): fetch the private
+    /// lists fresh and decrypt them (bookmarks 10003, mutes 10000 with
+    /// its words and hashtags, the public bookmarks list, the retired
+    /// NIP-37 draft wraps, the synced drafts). Every decrypt is a signer
+    /// round trip, and with a remote (NIP-46) signer each one waits on
+    /// the user's phone, up to the signer timeout; bootstrap used to run
+    /// all of this BEFORE sending the fresh page. It now runs after.
+    pub(super) async fn load_private_lists(&self, active: &Active) {
+        let me = active.me();
         // Private lists (NIP-51, content = nip44-encrypted tag JSON — the web
         // app's private-by-default semantics): bookmarks 10003, mutes 10000.
         // FRESH FROM RELAYS first (the follows/nip65 pattern): the reads
@@ -543,6 +630,12 @@ impl Core {
             // The WoT graph consults mutes at qualification time
             // (dark-wisp filters muted/blocked out) — push the set.
             self.push_wot_mutes();
+            // The list's muted words and hashtags (NIP-51 `word` / `t`,
+            // private or public; any client's) drive the content filter
+            // (D110). They were parsed and carried through the RMW, but
+            // never acted on.
+            let (words, hashtags) = mute_list_rules(&decrypted, &ev);
+            crate::filter::set_list_rules(words, hashtags);
         }
     }
 

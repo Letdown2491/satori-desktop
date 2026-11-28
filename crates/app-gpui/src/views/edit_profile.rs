@@ -375,7 +375,7 @@ impl Render for EditProfileView {
                     .border_color(rgb(theme::hairline()))
                     .child(
                         div()
-                            .text_size(px(theme::T_READER))
+                            .text_size(px(theme::t_reader()))
                             .font_weight(FontWeight::MEDIUM)
                             .child("Edit profile"),
                     )

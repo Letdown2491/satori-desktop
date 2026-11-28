@@ -138,7 +138,7 @@ impl ListsView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(theme::T_BODY))
+                    .text_size(px(theme::t_body()))
                     .text_color(rgb(theme::ink()))
                     .text_ellipsis()
                     .child(l.display()),
@@ -202,7 +202,7 @@ impl ListsView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(theme::T_BODY))
+                    .text_size(px(theme::t_body()))
                     .text_color(rgb(theme::ink()))
                     .text_ellipsis()
                     .child(name),
@@ -312,7 +312,7 @@ impl ListsView {
                     .gap_2()
                     .child(
                         div()
-                            .text_size(px(theme::T_BODY))
+                            .text_size(px(theme::t_body()))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(theme::ink()))
                             .child(name),
@@ -360,7 +360,7 @@ fn placeholder(title: &'static str, note: &'static str) -> AnyElement {
         .gap_2()
         .child(
             div()
-                .text_size(px(theme::T_BODY))
+                .text_size(px(theme::t_body()))
                 .text_color(rgb(theme::ink()))
                 .child(title),
         )

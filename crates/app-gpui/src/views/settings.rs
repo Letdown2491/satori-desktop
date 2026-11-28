@@ -15,7 +15,7 @@ use gpui::{
     SharedString, Stateful, Window, div, prelude::*, px, rgb,
 };
 use nostr::prelude::*;
-use satori_core::manager::{Core, FeedEvent, PublishEvent};
+use satori_core::manager::{Core, FeedEvent, MuteRule, PublishEvent};
 use satori_core::wallet::{self, Status};
 
 use std::str::FromStr;
@@ -70,6 +70,15 @@ pub struct SettingsView {
     // collapsed by default — flagged rows render inline, the full table hides.
     show_all_relays: bool,
     show_spam: bool,
+    // Filters (D110): snapshots of core's rules, refreshed after every
+    // edit (words/hashtags publish to the mute list; patterns are a
+    // synced pref), and the three add fields.
+    filter_words: Vec<String>,
+    filter_tags: Vec<String>,
+    filter_patterns: Vec<String>,
+    add_word: Entity<Input>,
+    add_tag: Entity<Input>,
+    add_pattern: Entity<Input>,
     // Storage (D99): the store's (bytes, event count) and the media
     // cache's bytes, fetched once at open (the pane is not a live meter);
     // the rebuild scheduling is sticky for the pane's life.
@@ -79,6 +88,14 @@ pub struct SettingsView {
     // The retention lever's snapshot (None = forever): the pills write
     // the pref AND this field, so no render re-reads the file.
     retention: Option<u64>,
+    // The Text group (D123): the installed families (read once when the
+    // pane opens), the picker's open state and filter.
+    font_names: Vec<String>,
+    font_picker_open: bool,
+    font_query: Entity<Input>,
+    // A font clicked in the picker, shown in the sample only until
+    // "Use this font" applies it app-wide (Some(None) = the default).
+    font_preview: Option<Option<String>>,
     // Toast equivalent (the pane has no header seal to hang one on).
     status: String,
     status_err: bool,
@@ -87,28 +104,33 @@ pub struct SettingsView {
     tab: SettingsTab,
 }
 
-/// The six settings tabs (issue #2's approved IA), in row order.
+/// The settings tabs (issue #2's IA as amended by D102 and D111), in row
+/// order: General, then what you see (Content, Filters, Trust,
+/// Notifications, each narrowing the last), what you write (Composing),
+/// and the plumbing you set once (Relays, Wallet).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SettingsTab {
     General,
     Content,
-    Composing,
-    Relays,
+    Filters,
     Trust,
     Notifications,
+    Composing,
+    Relays,
     Wallet,
 }
 
 impl SettingsTab {
     /// Row order (issue #2's IA as amended by D102: the read side's
     /// Content tab joins after General, the write side follows).
-    const ALL: [SettingsTab; 7] = [
+    const ALL: [SettingsTab; 8] = [
         SettingsTab::General,
         SettingsTab::Content,
-        SettingsTab::Composing,
-        SettingsTab::Relays,
+        SettingsTab::Filters,
         SettingsTab::Trust,
         SettingsTab::Notifications,
+        SettingsTab::Composing,
+        SettingsTab::Relays,
         SettingsTab::Wallet,
     ];
 
@@ -119,6 +141,7 @@ impl SettingsTab {
             SettingsTab::Composing => "Composing",
             SettingsTab::Relays => "Relays",
             SettingsTab::Trust => "Trust",
+            SettingsTab::Filters => "Filters",
             SettingsTab::Notifications => "Notifications",
             SettingsTab::Wallet => "Wallet",
         }
@@ -149,6 +172,8 @@ impl SettingsView {
             i.content = undo_secs_val.to_string();
             i.placeholder("")
         });
+        let font_query = cx.new(|cx| Input::single_line("filter fonts", cx));
+        cx.observe(&font_query, |_, _, cx| cx.notify()).detach();
         let view = Self {
             core: core.clone(),
             focus: cx.focus_handle(),
@@ -182,10 +207,25 @@ impl SettingsView {
             status_err: false,
             show_all_relays: false,
             show_spam: false,
+            filter_words: satori_core::filter::words(),
+            filter_tags: satori_core::filter::hashtags(),
+            filter_patterns: satori_core::filter::patterns(),
+            add_word: cx.new(|cx| Input::single_line("word or phrase", cx)),
+            add_tag: cx.new(|cx| Input::single_line("#hashtag", cx)),
+            add_pattern: cx.new(|cx| Input::single_line("regular expression", cx)),
             storage: None,
             media_bytes: None,
             rebuild_scheduled: false,
             retention: prefs::retention_days(),
+            font_names: cx
+                .text_system()
+                .all_font_names()
+                .into_iter()
+                .filter(|n| is_text_face(n))
+                .collect(),
+            font_picker_open: false,
+            font_preview: None,
+            font_query: font_query.clone(),
             tab: SettingsTab::General,
         };
         view.pump_feed(core.fetch_media_servers(), cx);
@@ -334,6 +374,134 @@ impl SettingsView {
             }
         })
         .detach();
+        cx.notify();
+    }
+
+    // --- filters (D110) -------------------------------------------------------
+
+    /// Re-snapshot core's rules (after an edit lands or fails).
+    fn refresh_filters(&mut self) {
+        self.filter_words = satori_core::filter::words();
+        self.filter_tags = satori_core::filter::hashtags();
+        self.filter_patterns = satori_core::filter::patterns();
+    }
+
+    /// A word/hashtag edit: publish the mute list, then re-snapshot
+    /// (core applied the change optimistically and reverts on failure).
+    fn pump_rule(&mut self, mut rx: satori_core::manager::PublishRx, cx: &mut Context<Self>) {
+        self.refresh_filters();
+        cx.spawn(async move |this, cx| {
+            while let Some(ev) = rx.recv().await {
+                let stop = this
+                    .update(cx, |this, cx| {
+                        let stop = match ev {
+                            PublishEvent::Committed { .. } => {
+                                this.set_status("Mute list saved".to_string(), false);
+                                true
+                            }
+                            PublishEvent::Failed { error, .. } => {
+                                this.set_status(format!("Publish failed: {error}"), true);
+                                true
+                            }
+                            _ => false,
+                        };
+                        if stop {
+                            this.refresh_filters();
+                            cx.notify();
+                        }
+                        stop
+                    })
+                    .unwrap_or(true);
+                if stop {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn add_mute_rule(&mut self, rule: MuteRule, cx: &mut Context<Self>) {
+        let input = match rule {
+            MuteRule::Word => &self.add_word,
+            MuteRule::Hashtag => &self.add_tag,
+        };
+        let raw = input.read(cx).content.trim().to_string();
+        let value = match rule {
+            MuteRule::Word => satori_core::filter::normalize_word(&raw),
+            MuteRule::Hashtag => satori_core::filter::normalize_hashtag(&raw),
+        };
+        if value.is_empty() {
+            return;
+        }
+        if rule == MuteRule::Hashtag && value.contains(char::is_whitespace) {
+            self.set_status("A hashtag is a single word".into(), true);
+            cx.notify();
+            return;
+        }
+        input.clone().update(cx, Input::clear);
+        let rx = self.core.set_mute_rule(rule, value, true);
+        self.pump_rule(rx, cx);
+    }
+
+    fn remove_mute_rule(&mut self, rule: MuteRule, value: String, cx: &mut Context<Self>) {
+        let rx = self.core.set_mute_rule(rule, value, false);
+        self.pump_rule(rx, cx);
+    }
+
+    /// Patterns are a synced pref (`filter_regex`, NIP-78): validate,
+    /// write locally, publish forward. Core re-reads the pref within
+    /// half a second.
+    fn save_patterns(&mut self, patterns: Vec<String>, cx: &mut Context<Self>) {
+        let value = serde_json::json!(patterns);
+        prefs::set_value("filter_regex", value.clone());
+        prefs::sync(&self.core, "filter_regex", value);
+        self.filter_patterns = patterns;
+        cx.notify();
+    }
+
+    fn add_pattern(&mut self, cx: &mut Context<Self>) {
+        let raw = self.add_pattern.read(cx).content.trim().to_string();
+        if raw.is_empty() {
+            return;
+        }
+        if let Err(e) = satori_core::filter::validate_pattern(&raw) {
+            self.set_status(e, true);
+            cx.notify();
+            return;
+        }
+        if self.filter_patterns.len() >= satori_core::filter::MAX_PATTERNS {
+            self.set_status(
+                format!("At most {} patterns", satori_core::filter::MAX_PATTERNS),
+                true,
+            );
+            cx.notify();
+            return;
+        }
+        if self.filter_patterns.contains(&raw) {
+            return;
+        }
+        let mut next = self.filter_patterns.clone();
+        next.push(raw);
+        self.add_pattern.update(cx, Input::clear);
+        self.set_status(String::new(), false);
+        self.save_patterns(next, cx);
+    }
+
+    fn remove_pattern(&mut self, pattern: &str, cx: &mut Context<Self>) {
+        let next: Vec<String> = self
+            .filter_patterns
+            .iter()
+            .filter(|p| *p != pattern)
+            .cloned()
+            .collect();
+        self.save_patterns(next, cx);
+    }
+
+    fn toggle_spam_signals(&mut self, cx: &mut Context<Self>) {
+        let on = !prefs::get_bool_or("spam_signals", true);
+        prefs::set_bool("spam_signals", on);
+        prefs::sync(&self.core, "spam_signals", serde_json::json!(on));
         cx.notify();
     }
 
@@ -600,7 +768,6 @@ impl SettingsView {
         let tier_on = prefs::get_bool_or("notif_wot_tier", true);
         let collapse_on = prefs::get_bool_or("thread_collapse", true);
         let badge_on = prefs::get_bool_or("profile_badge", true);
-        let dedup_on = prefs::get_bool_or("dedup_enabled", true);
         let status_line = match self.core.wot_status() {
             WotStatus::SignedOut => "Signed out, every verdict reads unknown.".to_string(),
             WotStatus::OverCap => format!(
@@ -609,6 +776,17 @@ impl SettingsView {
             ),
             WotStatus::Live(follows, qualified, rebuilt) => {
                 let mut line = format!("{follows} follows · {qualified} qualified");
+                // D109's switch, shown: whether "nobody you follow follows
+                // them" is evidence yet.
+                let (applied, _, decisive) = wot::coverage();
+                line.push_str(&format!(
+                    " · {applied} contact lists loaded · {}",
+                    if decisive {
+                        "strangers count as outside"
+                    } else {
+                        "strangers read as unknown for now"
+                    }
+                ));
                 match rebuilt {
                     Some(at) => {
                         line.push_str(&format!(" · rebuilt {}", ago(at)));
@@ -627,9 +805,10 @@ impl SettingsView {
         };
         group(
             "Trust (web of trust)",
-            "Who the graph knows: ten or more of your follows following someone \
-         qualifies them. Unknown is never treated as outside — and the feed \
-         is never filtered, only annotated.",
+            "Ten or more of your follows following someone puts them in your \
+         network. Once enough of your follows' contact lists are loaded, \
+         someone none of your follows follow counts as outside your network. \
+         Until then they read as unknown, which is never treated as outside.",
         )
         .child(
             div()
@@ -640,10 +819,10 @@ impl SettingsView {
         .child(
             wot_row(
                 "notif-tier",
-                "Gate out-of-network reactions in notifications",
-                "Reactions and reposts from authors outside your network stay out of \
-             the bell — listed as receipts at the bottom of the pane. Replies, \
-             mentions and zaps always come through.",
+                "Gate out-of-network notifications",
+                "Replies, mentions, reactions and reposts from people outside your \
+             network stay out of the bell, listed under the hidden count at the \
+             bottom of the pane with a Show anyway. Zaps always come through.",
                 tier_on,
             )
             .on_click(cx.listener(|this, _, _, cx| this.toggle_wot_pref("notif_wot_tier", cx))),
@@ -667,16 +846,6 @@ impl SettingsView {
                 badge_on,
             )
             .on_click(cx.listener(|this, _, _, cx| this.toggle_wot_pref("profile_badge", cx))),
-        )
-        .child(
-            wot_row(
-                "dedup",
-                "Duplicate-content filter",
-                "Identical content re-delivered five times stops being stored, per \
-             relay-attributed receipts below. Objective and bounded.",
-                dedup_on,
-            )
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_wot_pref("dedup_enabled", cx))),
         )
     }
 
@@ -866,6 +1035,7 @@ impl SettingsView {
             SettingsTab::Composing => self.composing_tab(cx),
             SettingsTab::Relays => self.relays_tab(cx),
             SettingsTab::Trust => self.trust_tab(cx),
+            SettingsTab::Filters => self.filters_tab(cx),
             SettingsTab::Notifications => self.notifications_tab(cx),
             SettingsTab::Wallet => self.wallet_tab(cx),
         }
@@ -938,6 +1108,205 @@ impl SettingsView {
             )
     }
 
+    /// Apply a reading face/size change: persist, set, wake every view.
+    fn set_text_style(
+        &mut self,
+        font: Option<Option<String>>,
+        scale: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(font) = font {
+            prefs::set_value(
+                "text_font",
+                serde_json::Value::String(font.clone().unwrap_or_default()),
+            );
+            theme::set_text_font(font);
+            self.font_picker_open = false;
+            self.font_preview = None;
+        }
+        if let Some(scale) = scale {
+            prefs::set_value("text_scale", serde_json::Value::from(scale));
+            theme::set_text_scale(scale);
+        }
+        cx.set_global(theme::TextSignal);
+        cx.set_global(theme::ThemeSignal);
+        cx.notify();
+    }
+
+    /// The Text group (D123): face (a filterable list of the installed
+    /// families), size (pills), and a live sample.
+    fn text_group(&self, cx: &mut Context<Self>) -> Div {
+        let current = theme::text_font();
+        let scale = theme::text_scale();
+        let label = current
+            .as_ref()
+            .map(|f| f.to_string())
+            .unwrap_or_else(|| format!("Default ({})", theme::SERIF));
+        let mut g = group(
+            "Text",
+            "The font is used across the app. The size applies to notes, replies and articles; menus and labels keep theirs.",
+        )
+        .child(
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_2()
+                .py_1()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(theme::T_UI))
+                        .text_color(rgb(theme::ink()))
+                        .child("Font"),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::T_UI))
+                        .text_color(rgb(theme::muted()))
+                        .child(label),
+                )
+                .child(
+                    seal(
+                        "text-font-change",
+                        if self.font_picker_open { "Close" } else { "Change…" },
+                        theme::muted(),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.font_picker_open = !this.font_picker_open;
+                        this.font_preview = None;
+                        cx.notify();
+                    })),
+                ),
+        );
+        // What the sample shows: the previewed face while browsing, else
+        // the applied one.
+        let shown: Option<String> = match &self.font_preview {
+            Some(p) => p.clone(),
+            None => current.as_ref().map(|f| f.to_string()),
+        };
+        if self.font_picker_open {
+            let query = self.font_query.read(cx).content.trim().to_lowercase();
+            let matches: Vec<String> = self
+                .font_names
+                .iter()
+                .filter(|n| query.is_empty() || n.to_lowercase().contains(&query))
+                .take(200)
+                .cloned()
+                .collect();
+            let row = |id: SharedString, text: String, on: bool| {
+                div()
+                    .id(id)
+                    .cursor_pointer()
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(theme::R_EMBED))
+                    .text_size(px(theme::T_UI))
+                    .text_color(rgb(if on { theme::ink() } else { theme::muted() }))
+                    .when(on, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
+                    .hover(|d| d.bg(theme::hover_wash()))
+                    .child(text)
+            };
+            g = g
+                .child(
+                    div()
+                        .flex()
+                        .py_1()
+                        .child(field(self.font_query.clone(), "text-font-query")),
+                )
+                .child(
+                    div()
+                        .id("text-font-list")
+                        .max_h(px(220.))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            row(
+                                "text-font-default".into(),
+                                format!("Default ({})", theme::SERIF),
+                                shown.is_none(),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.font_preview = Some(None);
+                                cx.notify();
+                            })),
+                        )
+                        .children(matches.into_iter().enumerate().map(|(i, name)| {
+                            let on = shown.as_deref() == Some(name.as_str());
+                            let pick = name.clone();
+                            row(SharedString::from(format!("text-font-{i}")), name, on).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.font_preview = Some(Some(pick.clone()));
+                                    cx.notify();
+                                }),
+                            )
+                        })),
+                );
+        }
+        g.child(
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_2()
+                .py_1()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(theme::T_UI))
+                        .text_color(rgb(theme::ink()))
+                        .child("Size"),
+                )
+                .children(theme::TEXT_SCALES.iter().map(|&pct| {
+                    let on = scale == pct;
+                    div()
+                        .id(SharedString::from(format!("text-scale-{pct}")))
+                        .cursor_pointer()
+                        .px_2()
+                        .py_0p5()
+                        .rounded(px(theme::R_EMBED))
+                        .border_1()
+                        .border_color(rgb(if on { theme::ink() } else { theme::hairline() }))
+                        .text_size(px(theme::T_SMALL))
+                        .text_color(rgb(if on { theme::ink() } else { theme::muted() }))
+                        .when(on, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
+                        .child(format!("{pct}%"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_text_style(None, Some(pct), cx);
+                        }))
+                })),
+        )
+        .child(
+            div()
+                .pt_1()
+                .font_family(
+                    shown
+                        .clone()
+                        .map(SharedString::from)
+                        .unwrap_or(SharedString::new_static(theme::SERIF)),
+                )
+                .text_size(px(theme::t_body()))
+                .line_height(gpui::relative(1.35))
+                .text_color(rgb(theme::ink()))
+                .child("A quiet place to read. The quick brown fox jumps over the lazy dog."),
+        )
+        .when(
+            self.font_preview.is_some()
+                && self.font_preview.clone().flatten() != current.as_ref().map(|f| f.to_string()),
+            |d| {
+                d.child(div().flex().justify_end().py_1().child(
+                    seal("text-font-apply", "Use this font", theme::vermilion()).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            let pick = this.font_preview.clone().flatten();
+                            this.set_text_style(Some(pick), None, cx);
+                        }),
+                    ),
+                ))
+            },
+        )
+    }
+
     fn general_tab(&self, cx: &mut Context<Self>) -> Div {
         let dark = self.dark.unwrap_or(true); // None = night (today's default)
         div()
@@ -987,6 +1356,8 @@ impl SettingsView {
                         ),
                 ),
             )
+            // --- Text (D123): the reading face and size --------------------
+            .child(self.text_group(cx))
             // --- List backup: the signed list events ------------------------
             .child(
                 group(
@@ -1508,11 +1879,160 @@ impl SettingsView {
         div()
             .flex()
             .flex_col()
-            // --- Trust (web of trust) + spam receipts (WS4) -----------------
+            // --- Trust (web of trust, WS4): the network only (D111) -------
             .child(self.wot_settings_group(cx))
+    }
+
+    /// The Filters tab (D110): the spam-signal switch, then the user's
+    /// own rules. Every match collapses with its reason (feeds, threads)
+    /// or moves to the notification receipts; nothing is deleted.
+    fn filters_tab(&self, cx: &mut Context<Self>) -> Div {
+        let spam_on = prefs::get_bool_or("spam_signals", true);
+        let dedup_on = prefs::get_bool_or("dedup_enabled", true);
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                group(
+                    "Spam signals",
+                    "Checks that need no word lists. Lookalike and copy-paste spam only \
+                     counts for people outside your follows and your network; the \
+                     duplicate filter spares you and your follows.",
+                )
+                .child(
+                    wot_row(
+                        "spam-signals",
+                        "Hide lookalike and copy-paste spam",
+                        "Notes that disguise words with lookalike letters (Cyrillic, Greek \
+                         or Cherokee letters posing as Latin ones), or the same message sent \
+                         by several accounts, collapse with the reason. Notifications move \
+                         them to the hidden list.",
+                        spam_on,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_spam_signals(cx))),
+                )
+                // The duplicate filter moved here from Trust (D111): it
+                // judges content, not the graph.
+                .child(
+                    wot_row(
+                        "dedup",
+                        "Duplicate-content filter",
+                        "An account that sends identical content five times stops \
+                         showing. Caught accounts are listed below with the relays \
+                         that delivered them, each with an un-hide.",
+                        dedup_on,
+                    )
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.toggle_wot_pref("dedup_enabled", cx)),
+                    ),
+                ),
+            )
             // The receipts ledger is independent of the dedup switch:
             // switching the filter off stops the catching, not the ledger.
             .child(self.spam_group(cx))
+            .child(self.rule_group(
+                "Muted words",
+                "Notes containing these collapse with the reason, from anyone but you. \
+                 A single word matches whole words only; a phrase matches anywhere. \
+                 Lookalike letters are seen through. Saved privately in your mute list, \
+                 so other clients can use it too.",
+                "word",
+                self.filter_words.clone(),
+                self.add_word.clone(),
+                |s| s.to_string(),
+                |this, v, cx| this.remove_mute_rule(MuteRule::Word, v, cx),
+                |this, cx| this.add_mute_rule(MuteRule::Word, cx),
+                cx,
+            ))
+            .child(self.rule_group(
+                "Muted hashtags",
+                "Notes tagged with these collapse with the reason. Saved privately in \
+                 your mute list.",
+                "tag",
+                self.filter_tags.clone(),
+                self.add_tag.clone(),
+                |s| format!("#{s}"),
+                |this, v, cx| this.remove_mute_rule(MuteRule::Hashtag, v, cx),
+                |this, cx| this.add_mute_rule(MuteRule::Hashtag, cx),
+                cx,
+            ))
+            .child(self.rule_group(
+                "Patterns",
+                "Regular expressions, case-insensitive, matched against the note text \
+                 (for example air\\s*drop). Synced to your other Satori installs as \
+                 encrypted app data; other clients don't read these.",
+                "pattern",
+                self.filter_patterns.clone(),
+                self.add_pattern.clone(),
+                |s| s.to_string(),
+                |this, v, cx| this.remove_pattern(&v, cx),
+                |this, cx| this.add_pattern(cx),
+                cx,
+            ))
+    }
+
+    /// One rule list: the entries with a remove ×, then the add field.
+    #[allow(clippy::too_many_arguments)]
+    fn rule_group(
+        &self,
+        title: &str,
+        description: &str,
+        id: &'static str,
+        items: Vec<String>,
+        input: Entity<Input>,
+        show: fn(&str) -> String,
+        remove: fn(&mut Self, String, &mut Context<Self>),
+        add: fn(&mut Self, &mut Context<Self>),
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let empty = items.is_empty();
+        group(title, description)
+            .child(div().w_full().flex().flex_col().gap_0p5().children(
+                items.into_iter().enumerate().map(|(i, item)| {
+                    let label = show(&item);
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .py_0p5()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::ink()))
+                                .child(label.clone()),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("rule-remove-{id}-{i}")))
+                                .a11y_button(format!("Remove {label}"))
+                                .cursor_pointer()
+                                .px_1()
+                                .text_size(px(theme::T_UI))
+                                .text_color(rgb(theme::muted()))
+                                .child("×")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    remove(this, item.clone(), cx);
+                                })),
+                        )
+                }),
+            ))
+            .when(empty, |d| d.child(muted("None yet.")))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pt_1()
+                    .child(field(input, &format!("add-{id}-field")))
+                    .child(
+                        seal(format!("add-{id}"), "Add", theme::vermilion())
+                            .on_click(cx.listener(move |this, _, _, cx| add(this, cx))),
+                    ),
+            )
     }
 
     fn notifications_tab(&self, cx: &mut Context<Self>) -> Div {
@@ -1680,7 +2200,7 @@ impl SettingsView {
             )
     }
 
-    /// The segmented tab row: six equal segments, a hairline under the row,
+    /// The segmented tab row: label-sized segments sharing the width, a hairline under the row,
     /// and the active marker is the seal's state-marking role (0.2 spec
     /// §1.1: vermilion marks active state) — a 2px vermilion underline laid
     /// over that hairline. Muted text for inactive tabs, ink for the active
@@ -1698,10 +2218,16 @@ impl SettingsView {
                 div()
                     .id(SharedString::from(format!("settings-tab-{}", tab.label())))
                     .cursor_pointer()
-                    .flex_1()
+                    // Sized to the label, the leftover width shared
+                    // equally: every label gets the same gap. Equal
+                    // cells (flex_1) crowded the long labels (Notifications
+                    // against Composing) and stranded the short ones.
+                    .flex_auto()
                     .flex()
                     .justify_center()
+                    .px_1()
                     .py_1()
+                    .whitespace_nowrap()
                     .relative()
                     .text_size(px(theme::T_UI))
                     .text_color(rgb(if active { theme::ink() } else { theme::muted() }))
@@ -1978,6 +2504,21 @@ const RETENTION_CHOICES: [(&str, Option<u64>); 5] = [
 ];
 
 /// Bytes as the readout shows them: MB below a thousand, GB past it.
+/// Whether a family belongs in the text font list (D123): hidden faces,
+/// emoji, symbol, dingbat and icon fonts are left out. They carry no
+/// letters, so every glyph of a note falls back through the system's
+/// fonts (slow on first use, and unreadable as a choice).
+fn is_text_face(name: &str) -> bool {
+    if name.starts_with('.') || name == theme::EMOJI {
+        return false;
+    }
+    let lower = name.to_lowercase();
+    const NOT_TEXT: [&str; 9] = [
+        "emoji", "symbol", "dingbat", "icon", "awesome", "d050000l", "wingding", "webding", "math",
+    ];
+    !NOT_TEXT.iter().any(|w| lower.contains(w))
+}
+
 fn format_bytes(bytes: u64) -> String {
     let mb = bytes as f64 / 1048576.0;
     if mb >= 1024.0 {
@@ -2149,6 +2690,17 @@ impl Render for SettingsView {
                         this.add_relay(cx);
                     } else if this.add_server.read(cx).focus_handle(cx).is_focused(window) {
                         this.add_server(cx);
+                    } else if this.add_word.read(cx).focus_handle(cx).is_focused(window) {
+                        this.add_mute_rule(MuteRule::Word, cx);
+                    } else if this.add_tag.read(cx).focus_handle(cx).is_focused(window) {
+                        this.add_mute_rule(MuteRule::Hashtag, cx);
+                    } else if this
+                        .add_pattern
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window)
+                    {
+                        this.add_pattern(cx);
                     } else if this.undo_secs.read(cx).focus_handle(cx).is_focused(window) {
                         this.apply_undo_secs(cx);
                     } else if this
@@ -2216,12 +2768,22 @@ mod tests {
 
     #[test]
     fn tab_order_is_the_approved_ia() {
-        // Issue #2's IA as amended by D102: seven tabs, General first,
-        // the read side's Content second, Wallet last.
-        assert_eq!(SettingsTab::ALL.len(), 7);
-        assert_eq!(SettingsTab::ALL[0], SettingsTab::General);
-        assert_eq!(SettingsTab::ALL[1], SettingsTab::Content);
-        assert_eq!(SettingsTab::ALL[6], SettingsTab::Wallet);
+        // Issue #2's IA as amended by D102 and D111: General first, then
+        // the read side (Content, Filters, Trust, Notifications), the
+        // write side (Composing), the plumbing (Relays, Wallet last).
+        assert_eq!(
+            SettingsTab::ALL,
+            [
+                SettingsTab::General,
+                SettingsTab::Content,
+                SettingsTab::Filters,
+                SettingsTab::Trust,
+                SettingsTab::Notifications,
+                SettingsTab::Composing,
+                SettingsTab::Relays,
+                SettingsTab::Wallet,
+            ]
+        );
         for tab in SettingsTab::ALL {
             assert!(!tab.label().is_empty());
         }

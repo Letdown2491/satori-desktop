@@ -19,6 +19,12 @@ Satori is built on three commitments:
   notifications only for what matters, and a restrained visual design:
   whitespace over boxes, one accent color used sparingly.
 
+## Screenshots
+
+![The home timeline, single column](docs/screenshots/satori-timeline.png)
+
+![Multi-column layout: Home, Articles and Notifications side by side](docs/screenshots/satori-multicolumn.png)
+
 ## Status
 
 Satori is a daily-driver desktop client, in active development.

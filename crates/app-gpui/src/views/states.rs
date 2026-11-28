@@ -36,10 +36,61 @@ pub fn empty(line: &str, whisper: Option<&str>) -> AnyElement {
         .child(div().text_size(px(theme::T_UI)).child(line.to_string()))
         .children(whisper.map(|w| {
             div()
-                .font_family(theme::SERIF)
+                .font_family(theme::serif())
                 .text_size(px(17.0))
                 .mt_2()
                 .child(w.to_string())
+        }))
+        .into_any_element()
+}
+
+/// Placeholder rows for a list's first load (D115): quiet hairline-tone
+/// shapes where the timeline will be (an avatar disc, a name bar, two
+/// body bars), no copy. Replaces the "connecting to the relays…" line
+/// that printed twice (the band and the empty state). Static, per §4.2:
+/// no shimmer, no motion.
+pub fn skeleton_rows(n: usize) -> AnyElement {
+    let bar = |w: f32| {
+        div()
+            .h(px(10.))
+            .w(gpui::relative(w))
+            .rounded(px(5.))
+            .bg(rgb(theme::hairline()))
+    };
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .children((0..n).map(|i| {
+            // Vary the widths a little so the column reads as text.
+            let body = [0.92, 0.78, 0.86, 0.7][i % 4];
+            div()
+                .w_full()
+                .flex()
+                .gap_3()
+                .px_4()
+                .py_4()
+                .border_b_1()
+                .border_color(rgb(theme::hairline()))
+                .child(
+                    div()
+                        .size(px(36.))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(rgb(theme::hairline())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .pt_1()
+                        .child(bar(0.3))
+                        .child(bar(body))
+                        .child(bar(body - 0.25)),
+                )
         }))
         .into_any_element()
 }

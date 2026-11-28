@@ -23,6 +23,11 @@ is commit `a4b09e8`: `git show a4b09e8:src/<file>`). The build spec is
   the per-frame NV12 stride repack (`Frame::tight_nv12`; padded rows sheared)
   and its gpui-pre pin moved in lockstep with the workspace's; same
   `[patch.crates-io]`.
+- `vendor/nostr-lmdb`: 0.45.3 with two patches: the LMDB env opens with
+  `NO_READ_AHEAD` (D118; readahead made cold feed queries seconds slow),
+  and the background copy's hooks (D121: compacting copy, txn id, and a
+  write log in `NostrLmdb`'s save/delete/wipe). Same `[patch.crates-io]`;
+  re-port both when bumping nostr-lmdb.
 - `packaging/`: `install-local.sh` ships the release (bin + wrapper + desktop
   file + hicolor icons into `~/.local`). `self/` +
   `.github/workflows/release.yml`: tag-driven deb/rpm/flatpak builds and

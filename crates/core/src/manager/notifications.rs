@@ -63,7 +63,24 @@ impl Core {
                         .await
                         .unwrap_or_default(),
                 );
+                cached.extend(
+                    active
+                        .pool
+                        .store
+                        .notif_extras(me, ids.clone(), 200)
+                        .await
+                        .unwrap_or_default(),
+                );
                 cached.retain(|ev| ev.pubkey != me);
+                // Dedup (the extras overlap replies: a reply p-tags me
+                // too) and the relay phase's @geek gate: a store row must
+                // be about me as much as a relay answer must.
+                {
+                    let mut seen_ids = HashSet::new();
+                    cached.retain(|ev| seen_ids.insert(ev.id));
+                }
+                let my_note_ids: HashSet<EventId> = ids.iter().copied().collect();
+                cached.retain(|ev| notif_about_me(ev, &me, &my_note_ids));
                 // The relay phase filters these too — the cached phase
                 // must wear the same gates (a cold start previously showed
                 // a stranger's thumbs-down the relay phase would have
@@ -84,8 +101,7 @@ impl Core {
                 // gates the relay phase wears (the phase-equality rule
                 // above). The final union re-splits; the receipts store
                 // holds the union.
-                let my_note_ids: HashSet<EventId> = ids.iter().copied().collect();
-                let (kept, mut cached_suppressed) = split_wot_tier(cached, &my_note_ids, false);
+                let (kept, mut cached_suppressed) = split_wot_tier(cached, false);
                 let cached = kept;
                 let profiles = Self::profiles_for(&active, &cached).await;
                 // A clone rides the instant paint; `cached` stays here
@@ -250,7 +266,7 @@ impl Core {
                 // reply must never count toward the flood verdict; the
                 // cached-phase pass above checked the gate without
                 // counting).
-                let (kept, mut suppressed) = split_wot_tier(notifs, &my_note_ids, true);
+                let (kept, mut suppressed) = split_wot_tier(notifs, true);
                 cached_suppressed.append(&mut suppressed);
                 let mut seen_sup = HashSet::new();
                 cached_suppressed.retain(|s| seen_sup.insert(s.event.id));
@@ -415,6 +431,14 @@ impl Core {
                     .await
                     .into_iter()
                     .flat_map(|r| r.unwrap_or_default())
+                    .collect();
+                // The bubble counts what the thread shows by default
+                // (D112): a spam reply the thread veils or collapses must
+                // not read as "1 reply".
+                let collapse_on = crate::filter::thread_collapse_on();
+                let rows: Vec<Event> = rows
+                    .into_iter()
+                    .filter(|r| !crate::filter::reply_held(r, collapse_on))
                     .collect();
                 Ok(FeedEvent::CommentCounts(
                     count_comment_targets(rows, &targets).into_iter().collect(),

@@ -358,22 +358,6 @@ fn notif_tier_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// Apply the tier to one page: reactions/reposts (kinds 6/7 — engagement
-/// noise, not speech) AND kind-1 replies to the user's own notes (D43's
-/// anti-bot amendment — bot replies are the cheapest notification attack)
-/// from authors the graph KNOWS are NotInNetwork are pulled out as
-/// receipts. Mentions/zaps pass; and the second D43 path: an Unknown
-/// author whose replies hit the reply-velocity verdict (rate.rs) is
-/// suppressed into the receipts too — 1–4 replies pass untouched, the
-/// counter is fed only by DELIVERED replies, and exempted authors pass
-/// everything (the exemption is a conscious per-session act).
-///
-/// `my_notes` is the user's recent note ids — what makes a kind-1 a REPLY
-/// (an `e` tag at one of them) rather than a mention. `count_velocity`
-/// feeds the rate counter: the final-union split sets it; the cached-phase
-/// split leaves it false so overlapping phases don't double-count (the
-/// cached phase still wears the flood GATE via `reply_flooded` — the
-/// phase-equality rule).
 /// Is this event actually ABOUT me? The "@geek" report: the page showed
 /// "mentioned you" rows with nothing to do with me — the mention query
 /// asks relays for #p=me, but the ANSWERS were trusted, so a relay
@@ -421,15 +405,28 @@ fn notif_about_me(ev: &Event, me: &PublicKey, my_notes: &HashSet<EventId>) -> bo
     false
 }
 
-fn split_wot_tier(
-    notifs: Vec<Event>,
-    my_notes: &HashSet<EventId>,
-    count_velocity: bool,
-) -> (Vec<Event>, Vec<SuppressedNotif>) {
+/// Apply the tier to one page. Pulled out as receipts, in order:
+/// dedup-hidden authors; the user's own filter rules and the spam
+/// signals (D110, every candidate but zaps); then, with the tier on,
+/// reactions/reposts (kinds 6/7, engagement noise) and speech addressed
+/// to me (kind-1/1111 replies AND mentions, D43 widened by D109) from
+/// authors the graph places NotInNetwork, including zero shared follows
+/// once the graph is decisive. An Unknown author whose speech hits the
+/// velocity verdict (rate.rs) is receipted too; 1–4 pass untouched, the
+/// counter is fed only by DELIVERED events. Zaps always pass, and
+/// exempted authors pass everything (the exemption is a conscious
+/// per-session act).
+///
+/// `count_velocity` feeds the rate counter: the final-union split sets
+/// it; the cached-phase split leaves it false so overlapping phases
+/// don't double-count (the cached phase still wears the flood GATE via
+/// `reply_flooded`, the phase-equality rule).
+fn split_wot_tier(notifs: Vec<Event>, count_velocity: bool) -> (Vec<Event>, Vec<SuppressedNotif>) {
     // Hoisted (audit fix): the pref read (one metadata syscall + Arc)
     // and the exempt-set lock were per EVENT — now per PAGE. The
     // receipted ledger snapshots too (D48): its ids re-suppress below.
     let tier_on = notif_tier_enabled();
+    let spam_on = crate::filter::spam_signals_on();
     let exempt_set: HashSet<String> = NOTIF_EXEMPT.lock().clone();
     let receipted: HashMap<String, String> = {
         let held = SUPPRESSED.lock();
@@ -442,8 +439,10 @@ fn split_wot_tier(
     for ev in notifs {
         let kind = u16::from(ev.kind);
         let engagement = matches!(kind, 6 | 7);
-        let reply =
-            matches!(kind, 1 | 1111) && ev.tags.event_ids().any(|id| my_notes.contains(&id));
+        // Speech addressed to me: a reply to one of my notes OR a bare
+        // mention (D109: a bot that drops the `e` tag must not walk
+        // around the tier). Zaps (9735) are paid and never gated.
+        let speech = matches!(kind, 1 | 1111);
         // Show-anyway first: the conscious per-session act outranks
         // every auto-gate — including the dedup store door below
         // (otherwise the receipts strip's button lied for
@@ -452,65 +451,97 @@ fn split_wot_tier(
             kept.push(ev);
             continue;
         }
-        // The store door: the chokepoint stops a hidden spammer's
-        // DELIVERIES, but the SDK already persisted their earlier
-        // events — the cached phase reads those straight back. The
-        // dedup ledger is the truth about who's hidden (D41's
-        // "unreachable through any read path" made true here too).
-        // Suppressed with a receipt, consistent with the tier.
-        if crate::dedup::is_hidden(&ev.pubkey.to_string()) {
-            suppressed.push(SuppressedNotif {
-                reason: "duplicate-content filter".to_string(),
-                event: ev,
-            });
-            continue;
-        }
-        if !(tier_on && (engagement || reply)) {
-            kept.push(ev);
-            continue;
-        }
         // Receipt durability (D48): a verdict that expired (the
-        // velocity window) while the event sat in the store must not
-        // resurrect old spam on the first frame of a launch — once
-        // receipted, still receipted. The show-anyway exemption above
-        // is the per-session override; the tier switch below (`tier_on`)
-        // is the feature-off state.
+        // velocity window, an in-memory template count) or a graph not
+        // yet decisive at boot must not resurrect old spam on the first
+        // frame — once receipted, still receipted, while the switch that
+        // made the call is on. The user's own rules are the exception
+        // (D110): they re-judge live, so deleting a rule brings its
+        // notes back.
         if let Some(reason) = receipted.get(&ev.id.to_string()) {
-            suppressed.push(SuppressedNotif {
-                reason: reason.clone(),
-                event: ev,
-            });
-            continue;
-        }
-        match crate::wot::verdict(&ev.pubkey) {
-            // Known and outside: gated regardless of kind or velocity.
-            crate::wot::Verdict::NotInNetwork => suppressed.push(SuppressedNotif {
-                reason: "outside your network".to_string(),
-                event: ev,
-            }),
-            // The D43 mule rule: Unknown + reply velocity. The check runs
-            // on both phases; only the delivering phase feeds the counter.
-            crate::wot::Verdict::Unknown if reply => {
-                if crate::rate::reply_flooded(&ev.pubkey, ev.created_at.as_secs())
-                    || (count_velocity
-                        && !crate::rate::admit_reply(
-                            &ev.pubkey,
-                            ev.created_at.as_secs(),
-                            &ev.id.to_string(),
-                        ))
-                {
-                    suppressed.push(SuppressedNotif {
-                        reason: crate::rate::flood_reason(),
-                        event: ev,
-                    });
-                } else {
-                    kept.push(ev);
-                }
+            let holds = if crate::filter::is_user_rule_label(reason) {
+                false
+            } else if crate::filter::is_spam_label(reason) {
+                spam_on
+            } else {
+                tier_on && (engagement || speech)
+            };
+            if holds {
+                suppressed.push(SuppressedNotif {
+                    reason: reason.clone(),
+                    event: ev,
+                });
+                continue;
             }
-            _ => kept.push(ev),
+        }
+        match gate_reason(&ev, tier_on, count_velocity) {
+            Some(reason) => suppressed.push(SuppressedNotif { reason, event: ev }),
+            None => kept.push(ev),
         }
     }
     (kept, suppressed)
+}
+
+/// The gates both the page and the bell apply (review: `bell_holds` had
+/// re-spelled them, one drift away from a dot that rings for what the
+/// page hides): the dedup door, the user's rules and spam signals
+/// (zaps excepted), then the tier (NotInNetwork engagement/speech, the
+/// velocity rule for Unknown speech). `count_velocity` lets the page's
+/// delivering split feed the counter; the bell and the cached phase only
+/// check the gate. Show-anyway and the receipts ledger stay with the
+/// callers (the bell has no ledger).
+fn gate_reason(ev: &Event, tier_on: bool, count_velocity: bool) -> Option<String> {
+    let kind = u16::from(ev.kind);
+    if crate::dedup::is_hidden(&ev.pubkey.to_string()) {
+        return Some("duplicate-content filter".to_string());
+    }
+    if kind != 9735
+        && let Some(reason) = crate::filter::judge(ev)
+    {
+        return Some(reason.label());
+    }
+    // Speech addressed to me: a reply to one of my notes OR a bare
+    // mention (D109: a bot that drops the `e` tag must not walk around
+    // the tier). Zaps (9735) are paid and never gated.
+    let engagement = matches!(kind, 6 | 7);
+    let speech = matches!(kind, 1 | 1111);
+    if !(tier_on && (engagement || speech)) {
+        return None;
+    }
+    match crate::wot::verdict(&ev.pubkey) {
+        // Known and outside (D109: including zero shared follows on a
+        // decisive graph): gated regardless of kind or velocity.
+        crate::wot::Verdict::NotInNetwork => Some("outside your network".to_string()),
+        // The D43 mule rule: Unknown + speech velocity.
+        crate::wot::Verdict::Unknown if speech => {
+            let at = ev.created_at.as_secs();
+            let flooded = crate::rate::reply_flooded(&ev.pubkey, at)
+                || (count_velocity
+                    && !crate::rate::admit_reply(&ev.pubkey, at, &ev.id.to_string()));
+            flooded.then(crate::rate::flood_reason)
+        }
+        _ => None,
+    }
+}
+
+/// Would the notification tier hold this bell event? (D109: the live
+/// bell lit the dot for every event tagging me, so a reply the page
+/// would receipt still rang.) Show-anyway, then [`gate_reason`] without
+/// feeding the velocity counter (the page's delivering split owns it).
+fn bell_holds(ev: &Event) -> bool {
+    if NOTIF_EXEMPT.lock().contains(&ev.pubkey.to_string()) {
+        return false;
+    }
+    gate_reason(ev, notif_tier_enabled(), false).is_some()
+}
+
+/// Which NIP-51 mute-list entry a content rule is (D110).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MuteRule {
+    /// A `word` entry: a word or phrase.
+    Word,
+    /// A `t` entry: a hashtag.
+    Hashtag,
 }
 
 /// What the write path reports back.
@@ -1033,11 +1064,23 @@ impl Core {
             .enable_all()
             .build()
             .expect("tokio runtime");
-        // One-time media-cache migration: the pre-polish cache could hold
-        // poisoned files (bytes written before decode validated them); the
-        // versioned dir starts clean, the legacy dir goes (media.rs).
+        // (D122: the "legacy" media-cache purge that ran here deleted the
+        // LIVE cache: both paths were data_dir/media-cache, so every launch
+        // wiped every avatar and image. Removed.)
+        // Boot stall watchdog (D116): for the first minute, a 100 ms tick
+        // that logs whenever it wakes late. A late wake means both worker
+        // threads were busy with blocking work, which delays every task
+        // queued behind it (the timeline included).
         rt.spawn(async {
-            crate::media::purge_legacy_cache();
+            let start = std::time::Instant::now();
+            while start.elapsed() < std::time::Duration::from_secs(60) {
+                let t = std::time::Instant::now();
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let late = t.elapsed().as_millis().saturating_sub(100);
+                if late >= 300 {
+                    crate::boot_mark!("core runtime stalled {late}ms");
+                }
+            }
         });
         let blocktime = Arc::new(Blocktime::new(rt.handle().clone()));
         // The viewport channel: the receiver half rides the viewport task
@@ -1308,6 +1351,8 @@ impl Core {
         // The bell's receipts + one-session exemptions go with them.
         crate::wot::clear_identity();
         crate::dedup::clear();
+        // The filter's list rules + mute mirror are session identity too.
+        crate::filter::clear();
         // The reply-velocity counter is per-session identity state too
         // (D43): a different account never inherits a mule verdict.
         crate::rate::clear();
@@ -1361,6 +1406,7 @@ impl Core {
         };
         match self.rt.block_on(self.build_active(&session, None)) {
             Ok(active) => {
+                crate::boot_mark!("session resumed");
                 *self.active.lock() = Some(active);
                 self.resume_wallet();
                 (Some(session), None)
@@ -1595,6 +1641,9 @@ impl Core {
     /// Hand the mute set to the WoT graph (it keys on hex).
     pub(super) fn push_wot_mutes(&self) {
         crate::wot::set_muted(self.muted.lock().iter().map(PublicKey::to_hex).collect());
+        // The content filter's mirror (D110): a muted author's note that
+        // reaches any surface renders veiled instead of raw.
+        crate::filter::set_muted(self.muted.lock().iter().copied().collect());
     }
 
     /// The own mute set (NIP-51 kind:10000, decrypted at session start).
@@ -1843,6 +1892,23 @@ fn parse_list_entries(plain: &str) -> Vec<Vec<String>> {
             (entry.len() >= 2).then_some(entry)
         })
         .collect()
+}
+
+/// A kind:10000's muted words and hashtags: the private (decrypted)
+/// entries plus the public tags, in that order (D110).
+fn mute_list_rules(private: &[Vec<String>], ev: &Event) -> (Vec<String>, Vec<String>) {
+    let public = |letter: &str| -> Vec<String> {
+        ev.tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(String::as_str) == Some(letter))
+            .filter_map(|t| t.as_slice().get(1).cloned())
+            .collect()
+    };
+    let mut words: Vec<String> = list_values(private, "word").map(str::to_string).collect();
+    words.extend(public("word"));
+    let mut hashtags: Vec<String> = list_values(private, "t").map(str::to_string).collect();
+    hashtags.extend(public("t"));
+    (words, hashtags)
 }
 
 /// The values of one entry kind (`"p"` keys, `"e"` ids).
@@ -2736,40 +2802,131 @@ mod tests {
         let _serial = crate::wot::test_serial();
         let _env = TierEnv::new("tier-nin");
         let (my_note, _me, _f, outsider) = tier_session();
-        let my_notes: HashSet<EventId> = [my_note].into();
         let at = 1000;
         // Replies: the amendment's target — gated.
-        let (kept, sup) = split_wot_tier(vec![reply(&outsider, my_note, at)], &my_notes, false);
+        let (kept, sup) = split_wot_tier(vec![reply(&outsider, my_note, at)], false);
         assert!(kept.is_empty());
         assert_eq!(sup.len(), 1);
         assert_eq!(sup[0].reason, "outside your network");
         // Reactions were already gated (D41).
         let mut tags = Tags::new();
         tags.push(Tag::event(my_note));
-        let (kept, sup) = split_wot_tier(
-            vec![note(&outsider, Kind::Reaction, tags, "+", at)],
-            &my_notes,
-            false,
-        );
+        let (kept, sup) =
+            split_wot_tier(vec![note(&outsider, Kind::Reaction, tags, "+", at)], false);
         assert!(kept.is_empty() && sup.len() == 1 && sup[0].reason == "outside your network");
-        // Mentions and zaps stay passing — direct attention that is NOT a
-        // reply to your note.
+        // Mentions are gated too (D109: dropping the `e` tag must not
+        // walk around the tier); zaps stay passing (paid attention).
         let mut mention = Tags::new();
         mention.push(Tag::public_key(_me.public_key()));
         let (kept, sup) = split_wot_tier(
             vec![note(&outsider, Kind::TextNote, mention, "hi", at)],
-            &my_notes,
             false,
         );
-        assert_eq!(kept.len(), 1, "mention passes");
-        assert!(sup.is_empty());
+        assert!(kept.is_empty(), "mention from outside is gated");
+        assert_eq!(sup.len(), 1);
         let (kept, sup) = split_wot_tier(
             vec![note(&outsider, Kind::Custom(9735), Tags::new(), "", at)],
-            &my_notes,
             false,
         );
         assert_eq!(kept.len(), 1, "zap passes");
         assert!(sup.is_empty());
+        crate::wot::clear_identity();
+        crate::rate::clear();
+    }
+
+    /// D109 end to end: on a decisive graph a brand-new key (in nobody's
+    /// contact list) replying to me is receipted as outside, and the
+    /// bell stays quiet for it; a lookalike-character note from an
+    /// Unknown author is receipted by the spam signal (D110), and so
+    /// held by the bell too. Zaps never.
+    #[test]
+    fn decisive_graph_gates_fresh_keys_and_bell_matches() {
+        let _serial = crate::wot::test_serial();
+        let _env = TierEnv::new("tier-decisive");
+        crate::wot::clear_identity();
+        crate::rate::clear();
+        let me = Keys::generate();
+        let follows: Vec<Keys> = (0..12).map(|_| Keys::generate()).collect();
+        crate::wot::set_identity(
+            me.public_key(),
+            &follows.iter().map(|k| k.public_key()).collect::<Vec<_>>(),
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let filler = Keys::generate();
+        for f in &follows {
+            let mut tags = Tags::new();
+            tags.push(Tag::public_key(filler.public_key()));
+            crate::wot::observe(&note(f, Kind::ContactList, tags, "", now));
+        }
+        let bot = Keys::generate();
+        let my_note = EventId::from_byte_array([9u8; 32]);
+        let mut tags = Tags::new();
+        tags.push(Tag::event(my_note));
+        tags.push(Tag::public_key(me.public_key()));
+        let spam = note(&bot, Kind::TextNote, tags, "free sol, click", now);
+        assert!(bell_holds(&spam), "bell quiet for a fresh outside key");
+        let (kept, sup) = split_wot_tier(vec![spam], false);
+        assert!(kept.is_empty());
+        assert_eq!(sup[0].reason, "outside your network");
+        // A follow's plain reply rings and passes.
+        let mut tags = Tags::new();
+        tags.push(Tag::event(my_note));
+        tags.push(Tag::public_key(me.public_key()));
+        let friendly = note(&follows[0], Kind::TextNote, tags, "nice post", now);
+        assert!(!bell_holds(&friendly));
+        assert_eq!(split_wot_tier(vec![friendly], false).0.len(), 1);
+        // Zaps pass even from outside.
+        let zap = note(&bot, Kind::Custom(9735), Tags::new(), "", now);
+        assert!(!bell_holds(&zap));
+        // The spam signal reaches Unknown authors too (identity cleared:
+        // the tier lets one Unknown note through, the content filter
+        // holds it).
+        crate::wot::clear_identity();
+        let mut tags = Tags::new();
+        tags.push(Tag::public_key(me.public_key()));
+        let lookalike = note(
+            &bot,
+            Kind::TextNote,
+            tags,
+            "ClaiᎷ yՕur frЕe SΟL now, Ꮯlick the link",
+            now,
+        );
+        assert!(bell_holds(&lookalike));
+        let (kept, sup) = split_wot_tier(vec![lookalike], false);
+        assert!(kept.is_empty());
+        assert_eq!(sup[0].reason, "Lookalike characters");
+        crate::wot::clear_identity();
+        crate::rate::clear();
+    }
+
+    /// D112: the reply bubble skips what the thread hides by default.
+    #[test]
+    fn reply_count_skips_hidden_replies() {
+        let _serial = crate::wot::test_serial();
+        let _env = TierEnv::new("reply-count");
+        let (_note, me, follow, outsider) = tier_session();
+        let unseen = Keys::generate();
+        let plain = |k: &Keys, text: &str| note(k, Kind::TextNote, Tags::new(), text, 1000);
+        let held = |ev: &Event| crate::filter::reply_held(ev, true);
+        assert!(!held(&plain(&me, "mine")));
+        assert!(!held(&plain(&follow, "a friend")));
+        // Unknown (sparse graph) and plain text: shown, counted.
+        assert!(!held(&plain(&unseen, "hello there")));
+        // Known outside: the thread starts it collapsed (unless the
+        // collapse pref is off).
+        assert!(held(&plain(&outsider, "hello there")));
+        assert!(!crate::filter::reply_held(
+            &plain(&outsider, "hello there"),
+            false
+        ));
+        // Spam signal: veiled, even from an Unknown author.
+        assert!(held(&plain(
+            &unseen,
+            "ClaiᎷ yՕur frЕe SΟL now, Ꮯlick the link"
+        )));
         crate::wot::clear_identity();
         crate::rate::clear();
     }
@@ -2779,11 +2936,10 @@ mod tests {
         let _serial = crate::wot::test_serial();
         let _env = TierEnv::new("tier-unknown");
         let (my_note, _me, _f, _outsider) = tier_session();
-        let my_notes: HashSet<EventId> = [my_note].into();
         // `unseen` was observed by nobody → Unknown. One reply: passes,
         // and the delivering pass feeds the counter (1 in window).
         let unseen = Keys::generate();
-        let (kept, sup) = split_wot_tier(vec![reply(&unseen, my_note, 1000)], &my_notes, true);
+        let (kept, sup) = split_wot_tier(vec![reply(&unseen, my_note, 1000)], true);
         assert_eq!(kept.len(), 1, "Unknown ≠ outside; one reply passes");
         assert!(sup.is_empty());
         assert!(!crate::rate::reply_flooded(&unseen.public_key(), 1000));
@@ -2796,11 +2952,10 @@ mod tests {
         let _serial = crate::wot::test_serial();
         let _env = TierEnv::new("tier-velocity");
         let (my_note, _me, _f, _outsider) = tier_session();
-        let my_notes: HashSet<EventId> = [my_note].into();
         let mule = Keys::generate();
         let at = 1000;
         let notifs: Vec<Event> = (0..7u64).map(|i| reply(&mule, my_note, at + i)).collect();
-        let (kept, sup) = split_wot_tier(notifs, &my_notes, true);
+        let (kept, sup) = split_wot_tier(notifs, true);
         // 4 pass untouched; the 5th is the trip and every later reply in
         // the window joins it — each with the named reason.
         assert_eq!(kept.len(), 4);
@@ -2826,10 +2981,9 @@ mod tests {
         let _serial = crate::wot::test_serial();
         let _env = TierEnv::new("tier-clear");
         let (my_note, _me, _f, _outsider) = tier_session();
-        let my_notes: HashSet<EventId> = [my_note].into();
         let mule = Keys::generate();
         for i in 0..4u64 {
-            split_wot_tier(vec![reply(&mule, my_note, 1000 + i)], &my_notes, true);
+            split_wot_tier(vec![reply(&mule, my_note, 1000 + i)], true);
         }
         // teardown_session's rule: the counter is per-session identity
         // state (rate::clear(); the graph clear is asserted in wot.rs).
